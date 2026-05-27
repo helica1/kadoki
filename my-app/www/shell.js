@@ -196,17 +196,25 @@
       }
     }
 
-    // Close whatever is currently visible.
+    // Show the new view BEFORE we hide the old one — eliminates the brief
+    // card-mode-underlay flash between hiding audiobookModeView and
+    // readingModeView becoming visible (the old order's await window).
+    if (mode === 'read') {
+      const rv = document.getElementById('readingModeView');
+      if (rv) rv.style.display = 'flex';
+    } else if (mode === 'audio') {
+      const av = document.getElementById('audiobookModeView');
+      if (av) av.style.display = 'flex';
+    }
+    // Now close whatever was previously visible.
     if (currentMode === 'audio' && typeof window.closeAudiobookMode === 'function') {
       await window.closeAudiobookMode();
     } else if (currentMode === 'read' && typeof window.closeReadingMode === 'function') {
       await window.closeReadingMode();
     }
 
-    // Open new mode.
+    // Open new mode (async setup; view is already visible).
     if (mode === 'audio' && typeof window.openAudiobookMode === 'function') {
-      // Entering audio from card/read: seek to whatever chunk is currently
-      // active so the audiobook resumes at the same story position.
       const fromOther = currentMode === 'card' || currentMode === 'read';
       await window.openAudiobookMode({ seekToCurrentPosition: fromOther });
     } else if (mode === 'read' && typeof window.openReadingMode === 'function') {
