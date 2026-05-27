@@ -117,7 +117,7 @@
       slider.value = String(Math.round(px));
       slider.style.flex = '1';
       const label = document.createElement('span');
-      label.style.cssText = 'min-width:48px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;';
+      label.style.cssText = 'min-width:48px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;padding-right:4px;';
       label.textContent = px.toFixed(0) + 'px';
       slider.addEventListener('input', () => {
         const rem = (parseFloat(slider.value) / 16).toFixed(3) + 'rem';
@@ -137,7 +137,7 @@
       slider.value = String(getCurrent());
       slider.style.flex = '1';
       const label = document.createElement('span');
-      label.style.cssText = 'min-width:36px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;';
+      label.style.cssText = 'min-width:36px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;padding-right:4px;';
       label.textContent = Math.round(getCurrent() * 100) + '%';
       slider.addEventListener('input', () => {
         const v = parseFloat(slider.value);

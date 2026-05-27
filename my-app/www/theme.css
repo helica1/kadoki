@@ -672,7 +672,9 @@ body.chrome-hidden #progressBar {
 .appearance-mode {
   border: 1px solid var(--border, #2a2a2a);
   border-radius: 8px;
-  padding: 8px 12px;
+  /* Asymmetric right padding so the slider-value labels (29px, 100%,
+     etc.) breathe a bit before the right border on narrow screens. */
+  padding: 8px 14px 8px 12px;
   margin-bottom: 10px;
   background: var(--panel, #161616);
 }
