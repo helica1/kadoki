@@ -2435,9 +2435,10 @@
     const title = document.getElementById('readingModeTitle');
     if (content) {
       content.innerHTML = `
-        <div style="text-align:center;margin-top:25vh;color:#888;line-height:1.6;">
-          <div style="font-size:1.05rem;margin-bottom:14px;">${message}</div>
-          <div style="font-size:0.9rem;color:#666;">Open <b>MORE → Pick EPUB</b> to choose one.</div>
+        <div style="max-width:340px;margin:25vh auto 0 auto;text-align:center;font-family:var(--font-sans);padding:0 24px;">
+          <div style="font-size:.7rem;letter-spacing:.18em;text-transform:uppercase;color:var(--accent-read,#4caf50);font-weight:700;margin-bottom:10px;">Reader</div>
+          <div style="font-size:1rem;color:var(--text,#e8e8e8);line-height:1.5;margin-bottom:18px;">${message}</div>
+          <div style="font-size:.85rem;color:var(--text-muted,#888);line-height:1.5;">Tap the <span style="color:var(--text,#e8e8e8);font-weight:600;">≡ menu</span> → <span style="color:var(--text,#e8e8e8);font-weight:600;">Open EPUB</span>.</div>
         </div>`;
     }
     if (title) title.textContent = 'No EPUB loaded';

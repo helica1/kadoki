@@ -248,6 +248,39 @@
     select.value = value || '';
   }
 
+  // iOS uses AnkiMobile via URL scheme, which can't enumerate decks /
+  // models / fields. Swap the Anki <select> dropdowns for free-text
+  // <input> fields on iOS so the user can type the exact names that
+  // exist in their AnkiMobile setup. The savePreferences flow reads
+  // .value on the same id — works the same for both element types.
+  function swapAnkiSelectsToInputsIfIOS() {
+    const platform = window.Capacitor?.getPlatform?.() || '';
+    if (platform !== 'ios') return;
+    const ids = [
+      'ankiSwipeDeck', 'ankiSwipeModel',
+      'ankiSwipeFieldExpression', 'ankiSwipeFieldImage', 'ankiSwipeFieldAudio',
+      'ankiDictDeck', 'ankiDictModel',
+      'ankiDictFieldTerm', 'ankiDictFieldReading', 'ankiDictFieldSentence',
+      'ankiDictFieldMeaning', 'ankiDictFieldImage',
+      'ankiDictFieldSentenceAudio', 'ankiDictFieldTermAudio',
+    ];
+    for (const id of ids) {
+      const sel = document.getElementById(id);
+      if (!sel || sel.tagName !== 'SELECT') continue;
+      const value = sel.value || '';
+      const input = document.createElement('input');
+      input.id = id;
+      input.type = 'text';
+      input.value = value;
+      input.placeholder = id.includes('Deck')  ? 'Deck name (in AnkiMobile)'
+                         : id.includes('Model') ? 'Note type (in AnkiMobile)'
+                         : 'Field name (in AnkiMobile)';
+      input.style.cssText = sel.style.cssText;
+      input.className = sel.className;
+      sel.parentNode.replaceChild(input, sel);
+    }
+  }
+
   window.openPreferences = async function() {
     const modal = document.getElementById('preferencesModal');
     if (!modal) return;
@@ -260,6 +293,7 @@
     buildAppearanceSection();
     buildDictionarySection();
     await wireAnkiSection();
+    swapAnkiSelectsToInputsIfIOS();
 
     // Playback
     const timeoutInput = document.getElementById('timeoutInput');

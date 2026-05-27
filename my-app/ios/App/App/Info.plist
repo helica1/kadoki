@@ -59,5 +59,13 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<!-- AnkiBridge plugin uses anki://x-callback-url/ to send cards to
+	     AnkiMobile. iOS 9+ requires us to declare schemes we'll probe via
+	     canOpenURL — without this, isAvailable() returns false even
+	     when AnkiMobile is installed. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>anki</string>
+	</array>
 </dict>
 </plist>
