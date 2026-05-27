@@ -30,7 +30,10 @@
     card:  { fontSize: '1.8rem', align: 'center', fontFamily: 'serif',
              imageDisplay: 'block', imageOpacity: 1, imageAlign: 'flex-start' },
     read:  { fontSize: '1rem',   align: 'left',   fontFamily: 'serif',
-             imageDisplay: 'none',  imageOpacity: 1, imageAlign: 'flex-start' },
+             imageDisplay: 'none',  imageOpacity: 1, imageAlign: 'flex-start',
+             // 'bg' = current behavior (translucent fill + underline);
+             // 'text' = recolor the cue text only (less artifact-prone).
+             highlightStyle: 'text' },
     audio: { fontSize: '1.6rem', align: 'center', fontFamily: 'serif',
              imageDisplay: 'block', imageOpacity: 0.6, imageAlign: 'center' }
   };
@@ -73,6 +76,12 @@
       root.style.setProperty(`--image-${mode}-opacity`,  s.imageOpacity ?? DEFAULTS[mode].imageOpacity);
       root.style.setProperty(`--image-${mode}-align`,    s.imageAlign   || DEFAULTS[mode].imageAlign);
     }
+    // Reading-mode highlight style: 'bg' (translucent fill + underline)
+    // vs 'text' (recolor the cue text). Toggled via a body class so
+    // CSS in theme.css can swap the visual.
+    const hs = (state.read && state.read.highlightStyle) || DEFAULTS.read.highlightStyle;
+    document.body.classList.toggle('highlight-text', hs === 'text');
+    document.body.classList.toggle('highlight-bg',   hs !== 'text');
   }
 
   const current = load();

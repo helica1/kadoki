@@ -196,6 +196,15 @@
           () => get().align)));
       }
 
+      // Read-mode only: choose how the currently-playing SRT cue is
+      // marked. Text-recoloring avoids the overlap artefacts a translucent
+      // bg can produce on tight line spacing.
+      if (mode === 'read') {
+        block.appendChild(row('Cue highlight', SEG(mode, 'highlightStyle',
+          [['Text color','text'], ['Background','bg']],
+          () => get().highlightStyle || 'text')));
+      }
+
       if (hasImage) {
         block.appendChild(row('Image', SEG(mode, 'imageDisplay',
           [['Show','block'], ['Hide','none']],
