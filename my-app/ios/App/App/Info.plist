@@ -44,6 +44,12 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+	<!-- Hide the iOS status bar to match the Android immersive mode the rest
+	     of the app expects. The header still respects env(safe-area-inset-top)
+	     so the Dynamic Island cutout on iPhone 14/15/16/17 Pro doesn't clip
+	     the TIMER pill. -->
+	<key>UIStatusBarHidden</key>
 	<true/>
 </dict>
 </plist>

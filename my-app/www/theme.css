@@ -263,7 +263,12 @@ body.mode-audio #audiobookCardImage {
 #appHeader {
   position: fixed;
   top: 0; left: 0; right: 0;
-  height: 48px;
+  /* Respect the iOS notch / Dynamic Island via env(safe-area-inset-top).
+     On Android the immersive mode hides system bars so the env value is
+     0 there; on iOS this pushes the header below the status bar so the
+     TIMER / mode tabs / hamburger aren't clipped by the time indicator. */
+  height: calc(48px + env(safe-area-inset-top, 0px));
+  padding-top: env(safe-area-inset-top, 0px);
   background: rgba(13, 13, 13, 0.94);
   /* No backdrop-filter: that creates a stacking context which has caused
      subtle hit-testing issues on some Android WebViews. The solid bg above
@@ -271,7 +276,8 @@ body.mode-audio #audiobookCardImage {
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
-  padding: 0 var(--sp-3);
+  padding-left: var(--sp-3);
+  padding-right: var(--sp-3);
   gap: var(--sp-2);
   transition: transform 0.22s ease, opacity 0.18s ease;
   /* Above all mode views (#readingModeView 2700, #audiobookModeView 2750). */
@@ -528,8 +534,9 @@ body.chrome-hidden #progressBar {
 
 /* Inside each view, the scrollable content area gets top+bottom padding so
    the first/last lines aren't hidden under the bars when chrome is shown.
-   When chrome hides, the padding stays (no reflow) — bars just disappear. */
-#readingModeContent { padding-top: 56px; padding-bottom: 36px; }
+   When chrome hides, the padding stays (no reflow) — bars just disappear.
+   safe-area-inset-top adds the iOS notch height; 0 on Android (immersive). */
+#readingModeContent { padding-top: calc(56px + env(safe-area-inset-top, 0px)); padding-bottom: 36px; }
 
 /* Card container fills the viewport; image/text are centered visually
    regardless of bar state. The bars overlay the top + bottom edges.
@@ -538,7 +545,7 @@ body.chrome-hidden #progressBar {
   height: 100% !important;
   margin-top: 0 !important;
   margin-bottom: 0 !important;
-  padding-top: 48px;
+  padding-top: calc(48px + env(safe-area-inset-top, 0px));
   padding-bottom: 28px;
   box-sizing: border-box;
   overflow-y: auto;
@@ -706,8 +713,11 @@ body.prefs-open { overflow: hidden !important; touch-action: none; }
 body.prefs-open #appHeader,
 body.prefs-open #progressBar { pointer-events: none; }
 
-/* Narrow-device header layout. */
-@media (max-width: 380px) {
+/* Narrow-device header layout. Raised from 380 → 430 so iPhones (393pt
+   logical width on standard / 430pt on Pro Max) also get the tight layout
+   that originally kicked in only for the Fold-7-folded. The header had
+   no room for the hamburger on iPhone 17 until this. */
+@media (max-width: 430px) {
   #appHeader { padding: 0 4px; gap: 3px; }
   #appHeader .shell-text-btn {
     padding: 6px 6px;
