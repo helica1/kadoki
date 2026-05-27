@@ -2847,7 +2847,9 @@ function _currentCardIsSrtCard() {
 }
 
 window.isReadingPlaying = function () {
-  // SRT-card mode delegates to BackgroundAudio plugin state.
+  // Reader mode (now routing through bg for the audiobook) — and SRT-card
+  // mode both delegate to BackgroundAudio plugin state.
+  if (document.body.classList.contains('mode-read')) return !!window._bgPlaying;
   if (_currentCardIsSrtCard()) return !!window._bgPlaying;
   return !!(currentAudio && !currentAudio.paused && !currentAudio.ended);
 };
