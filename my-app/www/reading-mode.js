@@ -2701,7 +2701,22 @@
         if (target) chunkIdx = findContainsFrom(target, 0);
       }
     }
-    if (chunkIdx >= 0) lastMatchedIdx = chunkIdx;
+    if (chunkIdx >= 0) {
+      lastMatchedIdx = chunkIdx;
+      // Mirror current position to localStorage so the library card
+      // progress % updates as the user swipes through cards — same
+      // metric setActive() writes when scrolling the reader.
+      try {
+        const el = chunks[chunkIdx];
+        const deck = currentDeckName();
+        if (el && deck && currentEpubName) {
+          const off = parseInt(el.dataset.charOffset) || 0;
+          const len = parseInt(el.dataset.charLen) || 0;
+          localStorage.setItem('READING_POS_' + deck + '_' + currentEpubName,
+                               String(off + len));
+        }
+      } catch (e) {}
+    }
   };
 
   window.closeReadingMode = async function () {
