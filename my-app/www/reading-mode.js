@@ -1806,6 +1806,54 @@
     return true;
   }
 
+  // Render an audiobook cue with per-char dict-frag spans so each character
+  // is individually tappable for dictionary lookup. Only re-tokenizes when
+  // the cue actually changes (gated by the idx === abCurrentCueIdx check
+  // in the caller), so the cost is paid once every 2–10 s, not every poll.
+  function renderAudiobookCueTokens(host, text, cueIdx) {
+    host.innerHTML = '';
+    host.dataset.cueIdx = String(cueIdx);
+    for (const ch of text) {
+      if (ch === '\n') { host.appendChild(document.createElement('br')); continue; }
+      const sp = document.createElement('span');
+      sp.className = 'dict-frag';
+      sp.textContent = ch;
+      host.appendChild(sp);
+    }
+  }
+  // Tap handler for the audiobook subtitle: on dict-frag tap, set up
+  // lookupContext with the tapped cue's audio range so a subsequent
+  // "Add to Anki" pulls the right sentence/audio.
+  function installAudiobookCueTapHandler() {
+    const cueEl = document.getElementById('audiobookCueText');
+    if (!cueEl || cueEl.dataset.dictBound === '1') return;
+    cueEl.dataset.dictBound = '1';
+    cueEl.style.cursor = 'pointer';
+    cueEl.addEventListener('click', async (e) => {
+      const target = e.target;
+      if (!target || !target.classList || !target.classList.contains('dict-frag')) return;
+      if (typeof window.performDictLookup !== 'function') return;
+      const spans = Array.from(cueEl.querySelectorAll('.dict-frag'));
+      const idx = spans.indexOf(target);
+      if (idx < 0) return;
+      const cueIdx = parseInt(cueEl.dataset.cueIdx);
+      const cue = Number.isFinite(cueIdx) ? abCues[cueIdx] : null;
+      window.lookupContext = {
+        source: 'audiobook',
+        card: null,
+        cardIdx: -1,
+        sentence: cue ? cue.text : '',
+        cueAudioPath: abAudioPath,
+        cueStartMs: cue ? cue.startMs : null,
+        cueEndMs:   cue ? cue.endMs   : null,
+        cueIndex:   Number.isFinite(cueIdx) ? cueIdx : -1,
+        cues:       abCues
+      };
+      try { await window.performDictLookup(spans, idx); }
+      catch (err) { rlog('Audiobook dict error: ' + (err?.message || err)); }
+    });
+  }
+
   // Synchronous path: cue idx → text, chunk highlight, cue-precise paint.
   // Runs every position event. Nothing here can await — that was the bug
   // where a hung await on titleStore.list() (Preferences plugin slowness)
@@ -1819,7 +1867,13 @@
     if (idx === abCurrentCueIdx) return;
     abCurrentCueIdx = idx;
     const cueEl = document.getElementById('audiobookCueText');
-    if (cueEl) cueEl.textContent = idx >= 0 ? abCues[idx].text : '…';
+    if (cueEl) {
+      if (idx >= 0) {
+        renderAudiobookCueTokens(cueEl, abCues[idx].text, idx);
+      } else {
+        cueEl.textContent = '…';
+      }
+    }
     console.log('[abUpdate] cue=' + idx + ' pos=' + positionMs +
       ' mapsReady=' + !!abCueToChunk + ' chunks=' + chunks.length);
 
@@ -1960,6 +2014,7 @@
     if (titleEl) titleEl.textContent = abAudioName || 'Audiobook';
     abAttachListenersOnce();
     abAttachScrubControl();
+    installAudiobookCueTapHandler();
     window.audiobookActive = true;
     if (typeof window.stopCardAudio === 'function') window.stopCardAudio();
     const cueEl = document.getElementById('audiobookCueText');
@@ -2292,16 +2347,17 @@
     view.style.display = 'flex';
     const content = document.getElementById('readingModeContent');
 
-    // Warm path: just snap + show. The expensive prefs are already
-    // applied; their values haven't changed since they were last read.
+    // Warm path: snap + show synchronously. No awaits in the open path —
+    // the prefs have already been applied, hooks attached, EPUB rendered.
+    // setPref + startTimer are fire-and-forget, and syncReader runs on
+    // the next frame so the view paints immediately.
     if (readerWarmed) {
       if (content) content.style.opacity = '1';
       setPref(KEYS.MODE_OPEN, 'true');
       startTimer();
-      // Sync still needs to run — playhead may have moved while in
-      // another mode. syncReader is fast (~5 ms of array walks + a
-      // scrollIntoView), so just await it; no opacity fade needed.
-      await syncReaderToCurrentPosition();
+      requestAnimationFrame(() => {
+        try { syncReaderToCurrentPosition(); } catch (e) {}
+      });
       return;
     }
 
@@ -2443,6 +2499,13 @@
       if (chunkIdx < 0 || !chunks[chunkIdx]) {
         rlog(`syncReader → NO MATCH (chunks=${chunks?.length} cues=${abCues?.length} cardIdx=${window.currentCardIndex})`);
         return;
+      }
+      // Always try to derive cueIdx from the chunk if the path didn't set
+      // one (path 5 in particular). Cue text gives a much more precise
+      // Range search than card.expression, so the CSS Custom Highlight
+      // lands reliably on warm reopens.
+      if (cueIdx < 0 && abChunkToCue && abChunkToCue[chunkIdx] >= 0) {
+        cueIdx = abChunkToCue[chunkIdx];
       }
       rlog(`syncReader → chunk ${chunkIdx} (cue ${cueIdx}) via ${how}`);
 

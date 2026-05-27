@@ -844,101 +844,84 @@
     
     function renderPopupContent(results, currentIndex = 0) {
         if (!results || results.length === 0) {
-            return `<div style="font-size:1.1em;font-weight:700;color:#ccc;">No dictionary entries found</div>
-                    <div style="color:#666;font-size:0.8em;margin-top:8px">Tap anywhere to close</div>`;
+            return `<div class="manatan-empty">No dictionary entries found
+                <div class="manatan-hint">Tap anywhere to close</div></div>`;
         }
-        
         const result = results[currentIndex];
-        
-        // Header with word, navigation, and Anki button
+        const isJmdict = result.type === 'jmdict';
+        const reading = isJmdict
+            ? (result.entry.kana || []).map(k => k.text).join('・')
+            : (result.entry[1] && result.entry[1] !== result.term ? result.entry[1] : '');
+        const dictTag = result.dictionary || (isJmdict ? 'JMdict' : '');
+
         let content = `
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
-                <!-- Left: Word and reading -->
-                <div style="flex:1; min-width:200px;">
-                    <div style="font-size:1.2em;font-weight:700">${result.term}</div>
-                    ${result.type === 'jmdict' ? 
-                        ((result.entry.kana || []).map(k => k.text).join('・') ? 
-                            `<div style="color:#ffa726;margin:4px 0">【${(result.entry.kana || []).map(k => k.text).join('・')}】</div>` : '') :
-                        (result.entry[1] && result.entry[1] !== result.term ? 
-                            `<div style="color:#ffa726;margin:4px 0">【${result.entry[1]}】</div>` : '')
-                    }
-                    <div style="color:#4caf50;font-size:0.9em;margin:2px 0;font-weight:600">[${result.dictionary}]</div>
+            <div class="manatan-header">
+                <div class="manatan-title-block">
+                    ${reading ? `<div class="manatan-reading">${reading}</div>` : ''}
+                    <div class="manatan-term">${result.term}</div>
                 </div>
-                
-                <!-- Right: Navigation and Anki button -->
-                <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
-                    <!-- Navigation buttons (only if multiple results) -->
-                    ${results.length > 1 ? `
-                        <div style="display:flex; align-items:center; gap:8px;">
-                            <button id="prevResult" style="background:#2196f3; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:12px; cursor:pointer;" ${currentIndex === 0 ? 'disabled' : ''}>
-                                ← Prev
-                            </button>
-                            <span style="color:#ccc; font-size:12px; min-width:40px; text-align:center;">
-                                ${currentIndex + 1}/${results.length}
-                            </span>
-                            <button id="nextResult" style="background:#2196f3; color:white; border:none; padding:6px 10px; border-radius:4px; font-size:12px; cursor:pointer;" ${currentIndex === results.length - 1 ? 'disabled' : ''}>
-                                Next →
-                            </button>
-                        </div>
-                    ` : ''}
-                    
-                    <!-- Audio + Anki buttons -->
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <button id="audioBtn" type="button"
-                                title="Play audio"
-                                style="background:#333;color:#fff;border:1px solid #555;padding:8px 12px;border-radius:6px;font-size:16px;cursor:pointer;min-width:44px;">🔊</button>
-                        <button id="ankiBtn" class="anki-button"
-                                  data-dictionary="${result.dictionary}"
-                                  data-term="${result.term}"
-                                  data-type="${result.type}"
-                                  style="background:#4caf50; color:white; border:none; padding:8px 16px; border-radius:6px; font-size:14px; cursor:pointer; white-space:nowrap;">
-                              ➕ Add to Anki
-                        </button>
-                    </div>
+                <div class="manatan-header-icons">
+                    <button id="audioBtn" type="button" title="Play audio" class="manatan-icon-btn">🔊</button>
+                    <button id="ankiBtn" class="manatan-anki-btn"
+                            data-dictionary="${result.dictionary}"
+                            data-term="${result.term}"
+                            data-type="${result.type}">+ Anki</button>
                 </div>
             </div>
-            
-            <!-- Separator line -->
-            <div style="border-bottom:1px solid #444; margin-bottom:12px;"></div>
         `;
-        
-        // Dictionary content
-        if (result.type === 'jmdict') {
-            const glosses = (result.entry.sense || [])
-                .flatMap(s => (s.gloss || []).map(g => g.text))
-                .slice(0, 5)
-                .map(g => `<li>${g}</li>`)
-                .join('');
-            content += `<ul style="margin:8px 0 0 1.2em;padding:0;line-height:1.3">${glosses}</ul>`;
+        if (results.length > 1) {
+            content += `
+                <div class="manatan-nav">
+                    <button id="prevResult" class="manatan-nav-btn" ${currentIndex === 0 ? 'disabled' : ''}>← Prev</button>
+                    <span class="manatan-nav-count">${currentIndex + 1} / ${results.length}</span>
+                    <button id="nextResult" class="manatan-nav-btn" ${currentIndex === results.length - 1 ? 'disabled' : ''}>Next →</button>
+                </div>
+            `;
+        }
+
+        if (isJmdict) {
+            const senses = (result.entry.sense || []);
+            senses.forEach((s, i) => {
+                const pos = (s.partOfSpeech || []).slice(0, 2).join(', ');
+                const glosses = (s.gloss || []).map(g => `<li>${g.text}</li>`).join('');
+                if (!glosses) return;
+                content += `
+                    <div class="manatan-sense">
+                        <div class="manatan-sense-head">
+                            <span class="manatan-sense-num">${i + 1}.</span>
+                            ${pos ? `<span class="manatan-pill manatan-pill-pos">${pos}</span>` : ''}
+                            <span class="manatan-pill manatan-pill-dict">${dictTag}</span>
+                        </div>
+                        <ul class="manatan-glosses">${glosses}</ul>
+                    </div>
+                `;
+            });
         } else {
-            // Yomitan entry format
-            const definitions = result.entry[5] || [];
-            
-            if (definitions && definitions.length > 0) {
-                content += `<div style="margin:8px 0;line-height:1.4">`;
-                
-                let definitionCount = 0;
-                for (const def of definitions) {
-                    if (definitionCount >= 3) break;
-                    
-                    if (def.type === 'structured-content') {
-                        const simpleText = extractSimpleTextFromStructured(def.content);
-                        if (simpleText && simpleText.length > 10) {
-                            content += `<div style="margin:4px 0;padding:4px 0;border-bottom:1px solid #333;">• ${simpleText}</div>`;
-                            definitionCount++;
-                        }
-                    } else if (typeof def === 'string' && def.length > 0) {
-                        content += `<div style="margin:4px 0;padding:4px 0;border-bottom:1px solid #333;">• ${def}</div>`;
-                        definitionCount++;
-                    }
+            const defs = result.entry[5] || [];
+            let count = 0;
+            for (const def of defs) {
+                if (count >= 5) break;
+                let text = '';
+                if (def?.type === 'structured-content') {
+                    text = extractSimpleTextFromStructured(def.content);
+                } else if (typeof def === 'string') {
+                    text = def;
                 }
-                
-                content += `</div>`;
+                if (!text || text.length < 2) continue;
+                count++;
+                content += `
+                    <div class="manatan-sense">
+                        <div class="manatan-sense-head">
+                            <span class="manatan-sense-num">${count}.</span>
+                            <span class="manatan-pill manatan-pill-dict">${dictTag}</span>
+                        </div>
+                        <ul class="manatan-glosses"><li>${text}</li></ul>
+                    </div>
+                `;
             }
         }
-        
-        content += `<div style="color:#666;font-size:0.8em;margin-top:12px;text-align:center;">Tap anywhere to close</div>`;
-        
+
+        content += `<div class="manatan-hint">Tap anywhere to close</div>`;
         return content;
     }
 
@@ -1019,19 +1002,16 @@
                 maxWidth: '90%',
                 maxHeight: '80%',
                 width: '90%',
-                background: 'rgba(17, 17, 17, 0.85)', // More transparent - changed from 0.95 to 0.85
+                background: '#0a0a0a',
                 color: '#fff',
-                borderRadius: '12px',
-                padding: '20px',
-                fontSize: '20px', // Increased from 18px
+                borderRadius: '14px',
+                padding: '18px 20px',
+                fontSize: '16px',
                 zIndex: 9999,
                 display: 'none',
-                boxShadow: '0 8px 32px rgba(0,0,0,.9)',
-                border: '2px solid #4caf50',
-                overflow: 'auto', // Keep this for scrolling
-                backdropFilter: 'blur(8px)', // Reduced blur - was 10px
-                WebkitBackdropFilter: 'blur(8px)', // Reduced blur
-                // Allow internal scrolling but prevent passthrough
+                boxShadow: '0 12px 40px rgba(0,0,0,.85)',
+                border: '1px solid #1a1a1a',
+                overflow: 'auto',
                 overscrollBehavior: 'contain'
             });
             
@@ -1061,6 +1041,40 @@
         return popup;
     }
 
+    // Track whether we paused playback specifically because of a lookup,
+    // so we know whether to auto-resume on dismiss. Set in showPopup, read
+    // (and cleared) in hidePopup.
+    let _lookupPausedPlayback = false;
+
+    function isLookupModeAutoPause() {
+        const body = document.body;
+        const inReadOrAudio = body.classList.contains('mode-read') ||
+                              body.classList.contains('mode-audio');
+        if (!inReadOrAudio) return false;
+        // Preference defaults to true; user can disable via Preferences.
+        const v = localStorage.getItem('DICT_PAUSE_ON_LOOKUP');
+        return v === null || v === 'true';
+    }
+    async function maybePauseForLookup() {
+        if (!isLookupModeAutoPause()) return;
+        const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+        if (!bg) return;
+        try {
+            const s = await bg.getState();
+            if (s?.playing) {
+                _lookupPausedPlayback = true;
+                bg.pause();
+            }
+        } catch (e) {}
+    }
+    function maybeResumeAfterLookup() {
+        if (!_lookupPausedPlayback) return;
+        _lookupPausedPlayback = false;
+        const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+        try { bg?.resume?.(); } catch (e) {}
+    }
+    window.maybePauseForLookup = maybePauseForLookup;
+
     function hidePopup() {
         console.log('🚪 Hiding popup...');
         const popup = document.getElementById('dictPopup');
@@ -1069,6 +1083,7 @@
             popup.innerHTML = '';
         }
         clearHighlight();
+        maybeResumeAfterLookup();
     }
 
     function clearHighlight() {
@@ -1158,7 +1173,8 @@
                     </div>
                 `;
                 popup.style.display = 'block';
-                
+                maybePauseForLookup();
+
                 // Animate loading bar
                 const loadingBar = document.getElementById('loadingBar');
                 if (loadingBar) {
@@ -1212,7 +1228,8 @@
                 const popup = getOrCreatePopup();
                 popup.innerHTML = renderPopupContent(results, currentResultIndex);
                 popup.style.display = 'block';
-                
+                maybePauseForLookup();
+
                 // Setup navigation handlers
                 setupNavigationHandlers();
                 setupAnkiHandler(results);
@@ -1818,53 +1835,98 @@
         
         #dictPopup {
             -webkit-overflow-scrolling: touch !important;
-            /* Enhanced scroll behavior - allow internal scrolling */
             overscroll-behavior: contain;
             overflow-y: auto !important;
             overflow-x: hidden;
         }
-        
-        /* Increase dictionary content font sizes */
-        #dictPopup .dict-content {
-            font-size: 1.1em;
+        /* Manatan-style dictionary card. Compact, dark, type-forward.
+           Reading sits above the term, source pill in mode color, sense
+           cards with a numbered head row. */
+        #dictPopup {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+        }
+        .manatan-header {
+            display: flex; justify-content: space-between; align-items: flex-start;
+            gap: 12px; margin-bottom: 12px;
+        }
+        .manatan-title-block { flex: 1; min-width: 0; }
+        .manatan-reading {
+            color: #b0b0b0; font-size: 0.75em; letter-spacing: 0.04em;
+            margin-bottom: 2px; font-weight: 400;
+        }
+        .manatan-term {
+            font-size: 2em; font-weight: 700; color: #fff;
+            line-height: 1.1; letter-spacing: -0.01em;
+        }
+        .manatan-header-icons {
+            display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+            flex-shrink: 0;
+        }
+        .manatan-icon-btn {
+            background: transparent; color: var(--accent-cyan, #00ffcc);
+            border: 1px solid transparent;
+            font-size: 18px; padding: 4px 8px; cursor: pointer;
+            border-radius: 6px;
+        }
+        .manatan-icon-btn:active { background: rgba(255,255,255,0.06); }
+        .manatan-anki-btn {
+            background: var(--accent-read, #4caf50); color: #000;
+            border: none; padding: 6px 12px; border-radius: 999px;
+            font-size: 0.78em; font-weight: 700; letter-spacing: 0.06em;
+            cursor: pointer; text-transform: uppercase;
+        }
+        .manatan-anki-btn:disabled { opacity: 0.4; cursor: default; }
+        .manatan-nav {
+            display: flex; align-items: center; justify-content: center;
+            gap: 12px; padding: 6px 0 12px 0;
+            border-bottom: 1px solid #1f1f1f; margin-bottom: 12px;
+        }
+        .manatan-nav-btn {
+            background: transparent; color: #aaa;
+            border: 1px solid #333; padding: 4px 10px; border-radius: 999px;
+            font-size: 0.75em; letter-spacing: 0.05em; cursor: pointer;
+        }
+        .manatan-nav-btn:disabled { color: #444; border-color: #1f1f1f; cursor: default; }
+        .manatan-nav-count {
+            color: #888; font-size: 0.8em; font-variant-numeric: tabular-nums;
+            letter-spacing: 0.05em;
+        }
+        .manatan-sense {
+            margin-bottom: 16px;
+        }
+        .manatan-sense-head {
+            display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+            margin-bottom: 6px;
+        }
+        .manatan-sense-num {
+            font-size: 1.05em; font-weight: 700; color: #fff;
+            margin-right: 4px;
+        }
+        .manatan-pill {
+            display: inline-block; padding: 2px 8px; border-radius: 4px;
+            font-size: 0.7em; font-weight: 600; letter-spacing: 0.03em;
             line-height: 1.5;
         }
-        
-        #dictPopup ul li {
-            font-size: 1.1em !important;
-            line-height: 1.4 !important;
-            margin-bottom: 4px;
+        .manatan-pill-pos {
+            background: #2a2a2a; color: #d0d0d0;
         }
-        
-        #dictPopup div[style*="margin:4px 0"] {
-            font-size: 1.1em !important;
+        .manatan-pill-dict {
+            background: #6b4ea3; color: #fff;
         }
-        
-        #dictPopup button:disabled {
-            background: #666 !important;
-            cursor: not-allowed;
-            opacity: 0.5;
+        .manatan-glosses {
+            margin: 0; padding-left: 22px; list-style: disc;
+            color: #ddd; line-height: 1.45;
         }
-        
-        .anki-button {
-            background: #4caf50;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
-            font-size: 14px;
-            cursor: pointer;
-            margin-top: 8px;
-            transition: background 0.2s;
+        .manatan-glosses li {
+            font-size: 0.95em; margin-bottom: 2px;
         }
-        
-        .anki-button:hover {
-            background: #45a049;
+        .manatan-empty {
+            font-size: 1em; color: #ccc; text-align: center; padding: 8px 0;
         }
-        
-        .anki-button:disabled {
-            background: #666;
-            cursor: not-allowed;
+        .manatan-hint {
+            color: #555; font-size: 0.72em; text-align: center;
+            margin-top: 14px; padding-top: 8px; border-top: 1px solid #1f1f1f;
+            letter-spacing: 0.04em;
         }
     `;
     document.head.appendChild(style);

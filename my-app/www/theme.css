@@ -137,6 +137,18 @@ body.mode-audio #audiobookCueText {
   text-align: var(--align-audio) !important;
   font-family: var(--font-family-audio) !important;
 }
+/* Per-char dict-frag spans in the audiobook subtitle should be invisible
+   as such — they only exist for tap targeting. Keep the text rendering
+   identical to the plain-textContent path. */
+#audiobookCueText .dict-frag {
+  background: transparent !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+}
+#audiobookCueText .dict-frag.highlight {
+  background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.22)) !important;
+  border-radius: 2px !important;
+}
 body.mode-audio #audiobookCardImage {
   display: var(--image-audio-display);
   opacity: var(--image-audio-opacity);
@@ -339,6 +351,12 @@ body.chrome-hidden #appHeader {
   min-width: 64px;
   text-align: center;
 }
+/* Running timer takes the active mode's accent, so the three timers read
+   as visually distinct at a glance. Stopped state is always red so the
+   "no progress is being tracked" signal stays unambiguous. */
+body.mode-card  #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-card)  !important; }
+body.mode-read  #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-read)  !important; }
+body.mode-audio #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-audio) !important; }
 #appHeader #shellTimerLabel::before {
   content: "TIMER";
   position: absolute;

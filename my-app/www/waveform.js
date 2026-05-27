@@ -31,8 +31,21 @@
     }
     const rate = window.audioPlaybackRate || 1;
     const dt = performance.now() - (state.playheadLastTs || 0);
-    state.playheadInterpMs = state.playheadMs + dt * rate;
+    // Stale-event guard: when dt is huge (paused tab, slow first event),
+    // don't extrapolate ahead — wait for a fresh position event.
+    if (dt > 300) {
+      state.playheadInterpMs = state.playheadMs;
+    } else {
+      state.playheadInterpMs = state.playheadMs + dt * rate;
+    }
     render();
+    // Stop the loop once playback has passed the selection end. The line
+    // is already invisible (render() clips to [startMs, endMs]); no need
+    // to keep burning rAF frames.
+    if (state.playheadInterpMs >= state.endMs) {
+      playheadRAF = null;
+      return;
+    }
     playheadRAF = requestAnimationFrame(tickPlayhead);
   }
   function startPlayheadAnim() {
@@ -218,16 +231,18 @@
     ctx.fillRect(x0, wfTop, x1 - x0, wfHeight);
 
     // ---- playhead (driven by bg position events, smoothed via rAF) ----
-    // Use the interpolated value when available — that's what the rAF
-    // animation loop sets between actual position-event arrivals so the
-    // line glides like a DAW instead of stepping every 150 ms.
+    // Only paint within the SELECTED region (startMs..endMs). Audio that
+    // continues playing past the selection end — common when the user
+    // opens the editor mid-playback in audiobook mode — would otherwise
+    // drag the line through the whole context window, which is visually
+    // wrong: the line represents progress through the cue, not the file.
     const phMs = Number.isFinite(state.playheadInterpMs)
       ? state.playheadInterpMs : state.playheadMs;
-    if (Number.isFinite(phMs) && phMs >= wfStartMs && phMs <= wfEndMs) {
-      const px = ((phMs - wfStartMs) / wfRange) * cssW;
+    if (Number.isFinite(phMs) && phMs >= state.startMs && phMs <= state.endMs) {
+      const px = Math.round(((phMs - wfStartMs) / wfRange) * cssW) + 0.5;
       ctx.strokeStyle = '#ffffff';
-      ctx.globalAlpha = 0.85;
-      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.9;
+      ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(px, wfTop);
       ctx.lineTo(px, wfBottom);
@@ -514,10 +529,23 @@
       if (bg) {
         bg.addListener('position', (d) => {
           if (!state) return;
-          state.playheadMs = d.positionMs;
+          // Reject stale position events that report positions BEHIND what
+          // we already extrapolated to within a small tolerance. The native
+          // poll occasionally double-fires the same position or briefly
+          // reports an older one right when playback starts, which made the
+          // line snap backward and forward — the visible "jitter at the
+          // beginning". A real seek would jump by hundreds of ms; we only
+          // reject small backward steps.
+          const prevInterp = state.playheadInterpMs;
+          const isMinorBackstep = Number.isFinite(prevInterp) &&
+                                  d.positionMs < prevInterp &&
+                                  prevInterp - d.positionMs < 250;
+          if (!isMinorBackstep) {
+            state.playheadMs = d.positionMs;
+            state.playheadInterpMs = d.positionMs;
+          }
           state.playheadLastTs = performance.now();
           state.playheadPlaying = !!d.playing;
-          state.playheadInterpMs = d.positionMs;
           if (d.playing) startPlayheadAnim();
           else { stopPlayheadAnim(); render(); }
         }).then(h => { if (state) state.playheadHandle = h; }).catch(() => {});
@@ -631,6 +659,14 @@
           display:flex; align-items:center; justify-content:center;
           z-index:12000; touch-action:none;
         `;
+        // Block touch passthrough to the reader/audiobook UIs behind the
+        // modal. Without this, swipes on the cue chip row would propagate
+        // to the reader and scroll/page it underneath.
+        const stop = (e) => e.stopPropagation();
+        overlay.addEventListener('touchstart', stop, { passive: true });
+        overlay.addEventListener('touchmove',  stop, { passive: true });
+        overlay.addEventListener('touchend',   stop, { passive: true });
+        overlay.addEventListener('wheel',      stop, { passive: true });
         const panel = document.createElement('div');
         panel.style.cssText = `
           background:var(--bg,#0c0c0c); border:1px solid var(--border,#2a2a2a);
@@ -649,7 +685,9 @@
             </div>
             <div data-role="cues-row" style="
               flex:1; display:flex; gap:4px; align-items:stretch;
-              min-height:3em;"></div>
+              min-height:3em; overflow-x:auto; overflow-y:hidden;
+              -webkit-overflow-scrolling:touch; touch-action:pan-x;
+              scrollbar-width:thin;"></div>
             <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 28px;">
               <button data-role="right-plus" class="tr-btn">+</button>
               <button data-role="right-minus" class="tr-btn">−</button>
@@ -677,7 +715,8 @@
             #waveformEditorOverlay .cue-chip {
               padding:8px 10px; border-radius:6px; font-size:.85rem;
               font-family:var(--font-family-card,serif); line-height:1.35;
-              max-height:5em; overflow-y:auto; flex:1; min-width:0;
+              max-height:5em; overflow-y:auto;
+              flex:0 0 auto; min-width:120px; max-width:240px;
               transition: transform .16s cubic-bezier(0.34, 1.56, 0.64, 1),
                           background .12s ease, border-color .12s ease;
             }

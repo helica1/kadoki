@@ -275,6 +275,11 @@
       subtitleOffsetSlider.value = savedOffset;
       if (subtitleOffsetLabel) subtitleOffsetLabel.textContent = savedOffset + 'px';
     }
+    const pauseToggle = document.getElementById('pauseOnLookupToggle');
+    if (pauseToggle) {
+      const v = localStorage.getItem('DICT_PAUSE_ON_LOOKUP');
+      pauseToggle.checked = v === null || v === 'true';
+    }
     if (typeof window.syncModeColorPickers === 'function') window.syncModeColorPickers();
   };
 
@@ -325,6 +330,10 @@
     }
     if (window.stopwatchTimeout !== undefined) {
       window.stopwatchTimeout = parseInt(timeoutInput.value) || 20;
+    }
+    const pauseToggle = document.getElementById('pauseOnLookupToggle');
+    if (pauseToggle) {
+      localStorage.setItem('DICT_PAUSE_ON_LOOKUP', pauseToggle.checked ? 'true' : 'false');
     }
     window.closePreferences();
     if (typeof showToast === 'function') showToast('Preferences saved', 2000);

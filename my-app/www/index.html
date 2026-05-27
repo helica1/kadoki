@@ -875,6 +875,12 @@ body.dimmed .card-image {
             <label>Stopwatch inactivity timeout (s)</label>
             <input id="timeoutInput" type="number" min="5" max="600">
           </div>
+          <div class="prefs-row">
+            <label>Pause audio on dictionary lookup
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">Auto-resumes when popup closes (reader + audiobook only)</span>
+            </label>
+            <input id="pauseOnLookupToggle" type="checkbox" checked>
+          </div>
           <!-- Keep #deckSelect alive for legacy code paths that still reference it. Hidden mirror of ankiSwipeDeck. -->
           <select id="deckSelect" style="display:none;"></select>
         </details>
