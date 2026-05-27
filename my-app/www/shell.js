@@ -284,25 +284,15 @@
 
     const state = pullTimerState();
     const running = state && state.running;
-
-    menu.appendChild(mkItem(running ? '⏸  Pause timer' : '▶  Start timer', () => {
+    // Trimmed: removed Hide/Show timer (no way to recover once hidden was
+    // confusing) and Reset timer (moved into the Stats popup so it can't
+    // be tapped by mistake).
+    menu.appendChild(mkItem(running ? 'Pause timer' : 'Start timer', () => {
       if (typeof window.toggleReadingTimer === 'function') window.toggleReadingTimer();
       refreshTimerLabel();
     }));
-    menu.appendChild(mkItem('🔄  Reset timer', () => {
-      if (typeof window.resetReadingTimer === 'function') window.resetReadingTimer();
-      refreshTimerLabel();
-    }));
-    menu.appendChild(mkItem('📊  Stats…', () => {
+    menu.appendChild(mkItem('Stats…', () => {
       if (typeof window.openReadingStats === 'function') window.openReadingStats();
-    }));
-    const divider = document.createElement('div');
-    divider.className = 'menu-divider';
-    menu.appendChild(divider);
-    menu.appendChild(mkItem(timerHidden ? 'Show timer' : 'Hide timer', () => {
-      timerHidden = !timerHidden;
-      const lbl = el('shellTimerLabel');
-      if (lbl) lbl.classList.toggle('hidden', timerHidden);
     }));
 
     document.body.appendChild(menu);

@@ -87,7 +87,10 @@ public class BackgroundAudioPlugin extends Plugin {
                     return;
                 }
                 emitPosition(s.getPositionMs(), s.getDurationMs());
-                mainHandler.postDelayed(this, 500);
+                // Tight cue tracking: 150 ms granularity feels instant for
+                // sentence-level highlighting. Trade-off is bridge traffic,
+                // which is negligible for ~6 events/sec of two small ints.
+                mainHandler.postDelayed(this, 150);
             }
         };
         mainHandler.post(positionPoll);

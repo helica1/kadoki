@@ -1396,13 +1396,14 @@
     } catch (e) {}
   }
 
-  function setActive(idx) {
+  function setActive(idx, opts) {
     clearActiveHighlight();
     lastMatchedIdx = idx;
     publishChunkCueRange(idx);
     const el = chunks[idx];
     if (!el) return;
     el.classList.add('active');
+    if (opts && opts.instantScroll) el.dataset._instantScroll = '1';
     if (!el.dataset.counted) {
       const len = textWithoutRuby(el).length;
       if (len > 0) {
@@ -1441,11 +1442,13 @@
 
     // inline:'start' is the writing-mode-aware start of the inline axis,
     // which matches what we want in both vertical-rl and horizontal.
-    // block:'start' aligns the block-axis start (top in horizontal,
-    // left-or-right-flow-start in vertical writing modes — vertical-rl uses
-    // the right edge for inline, top for block).
+    // Reading-mode-open path tags the chunk with _instantScroll so the
+    // first paint doesn't animate (avoids the cascading scrolls the
+    // user sees on tab switch).
+    const behavior = el.dataset._instantScroll ? 'instant' : 'smooth';
+    delete el.dataset._instantScroll;
     try {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'start' });
+      el.scrollIntoView({ behavior, block: 'start', inline: 'start' });
     } catch (e) {
       el.scrollIntoView(true);
     }
@@ -2212,7 +2215,25 @@
     if (pairedName !== currentEpubName) {
       await restoreLastEpub();
     }
-    if (lastMatchedIdx >= 0) setActive(lastMatchedIdx);
+    // Jump (instantly, no animation) to whichever chunk should be active.
+    // Prefer the cue currently being played; if that's unknown, fall back
+    // to the last-matched chunk. Instant scroll avoids the cascading
+    // smooth-scrolls the user noticed on tab switch.
+    let targetChunkIdx = lastMatchedIdx;
+    if (abCues?.length && Number.isFinite(abPositionRef?.ms)) {
+      const curCueIdx = window.srtParser.findCueAtTime(abCues, abPositionRef.ms);
+      if (curCueIdx >= 0 && abCueToChunk && abCueToChunk[curCueIdx] >= 0) {
+        targetChunkIdx = abCueToChunk[curCueIdx];
+      }
+    }
+    if (targetChunkIdx >= 0 && chunks[targetChunkIdx]) {
+      setActive(targetChunkIdx, { instantScroll: true });
+      // Trigger an immediate cue-precise highlight too if we know the cue.
+      if (abCues?.length && Number.isFinite(abPositionRef?.ms)) {
+        const cIdx = window.srtParser.findCueAtTime(abCues, abPositionRef.ms);
+        if (cIdx >= 0 && abCues[cIdx]) setCueHighlight(targetChunkIdx, abCues[cIdx].text);
+      }
+    }
   };
 
   window.closeReadingMode = async function () {
