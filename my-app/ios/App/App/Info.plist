@@ -67,5 +67,20 @@
 	<array>
 		<string>anki</string>
 	</array>
+	<!-- Register our own URL scheme so AnkiMobile's x-callback-url can
+	     bring focus back to us after a card is added (Manatan-style
+	     "flash to Anki, then back" UX). The scheme is otherwise unused;
+	     incoming URLs are accepted but no payload is parsed. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.example.app</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ankideckreader</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

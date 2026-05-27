@@ -279,6 +279,81 @@
       input.className = sel.className;
       sel.parentNode.replaceChild(input, sel);
     }
+    // Add the iOS-only "Link AnkiMobile media folder" affordance below
+    // the dictionary Anki section. Lets the user grant our app a
+    // security-scoped bookmark to AnkiMobile's collection.media folder
+    // so audio/image bytes deliver silently via direct file write.
+    injectIOSMediaFolderLinker();
+  }
+
+  function injectIOSMediaFolderLinker() {
+    const ab = window.Capacitor?.Plugins?.AnkiBridge;
+    if (!ab || typeof ab.linkMediaFolder !== 'function') return;
+    // Find the Anki dictionary section to append to.
+    const sections = document.querySelectorAll('.prefs-section');
+    let target = null;
+    sections.forEach(s => {
+      if (s.textContent.includes('Anki: dictionary add-word')) target = s;
+    });
+    if (!target) return;
+    if (target.querySelector('[data-role="anki-media-link"]')) return; // dedupe
+
+    const row = document.createElement('div');
+    row.className = 'prefs-row';
+    row.setAttribute('data-role', 'anki-media-link');
+    row.style.alignItems = 'flex-start';
+    row.innerHTML = `
+      <label style="flex:0 0 45%;line-height:1.35;">Media folder
+        <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
+          Files → On My iPhone → AnkiMobile → <i>collection.media</i>
+        </span>
+      </label>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px;">
+        <div data-role="status" style="font-size:.78rem;color:var(--text-muted,#888);">Checking…</div>
+        <div style="display:flex;gap:6px;">
+          <button data-role="link" class="btn" style="flex:1;background:transparent;color:var(--accent-cyan,#00ffcc);border:1px solid var(--accent-cyan,#00ffcc);padding:6px 10px;border-radius:6px;font-size:.78rem;">Link folder</button>
+          <button data-role="unlink" class="btn" style="background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#2a2a2a);padding:6px 10px;border-radius:6px;font-size:.78rem;display:none;">Unlink</button>
+        </div>
+      </div>
+    `;
+    target.appendChild(row);
+
+    const status = row.querySelector('[data-role="status"]');
+    const linkBtn = row.querySelector('[data-role="link"]');
+    const unlinkBtn = row.querySelector('[data-role="unlink"]');
+
+    async function refresh() {
+      try {
+        const r = await ab.getMediaFolderStatus();
+        if (r?.linked) {
+          status.textContent = '✓ Linked: ' + (r.name || 'collection.media');
+          status.style.color = 'var(--accent-read,#4caf50)';
+          linkBtn.textContent = 'Re-link';
+          unlinkBtn.style.display = 'inline-block';
+        } else {
+          status.textContent = 'Not linked — audio/image won\'t deliver to AnkiMobile';
+          status.style.color = 'var(--accent-warn,#ffd54a)';
+          linkBtn.textContent = 'Link folder';
+          unlinkBtn.style.display = 'none';
+        }
+      } catch (e) {
+        status.textContent = 'Status check failed';
+      }
+    }
+    refresh();
+
+    linkBtn.addEventListener('click', async () => {
+      try {
+        await ab.linkMediaFolder();
+      } catch (e) {
+        alert('Could not link folder: ' + (e?.message || e));
+      }
+      refresh();
+    });
+    unlinkBtn.addEventListener('click', async () => {
+      await ab.unlinkMediaFolder();
+      refresh();
+    });
   }
 
   window.openPreferences = async function() {
