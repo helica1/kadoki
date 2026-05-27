@@ -57,12 +57,25 @@
     return 'card';
   }
 
+  // Only one timer at a time: starting one stops the others.
   function startMode(mode) {
     const t = timers[mode];
     if (t.runningSince) return;
+    for (const other of ['card', 'read', 'audio']) {
+      if (other !== mode && timers[other].runningSince) stopMode(other);
+    }
     t.runningSince = Date.now();
     if ('lastInteraction' in t) t.lastInteraction = Date.now();
     console.log('[stats] start ' + mode);
+  }
+
+  // Stop whichever timer is currently running. Used by openReadingStats
+  // so opening the stats popup doesn't continue ticking time the user
+  // obviously isn't using.
+  function stopAll() {
+    for (const m of ['card', 'read', 'audio']) {
+      if (timers[m].runningSince) stopMode(m);
+    }
   }
 
   function stopMode(mode, opts) {
@@ -82,14 +95,30 @@
     }
   }
 
-  // touch — call from any user interaction. Starts the current mode's
-  // timer if it wasn't running; refreshes lastInteraction.
+  // touch — call from any user interaction. For CARD mode this starts
+  // the timer on any tap. For READ mode, casual taps shouldn't tick
+  // reading time — only an explicit signal (scroll, dict lookup,
+  // playback) starts it via bumpRead(). Touches in read mode here only
+  // refresh lastInteraction if the timer is already running.
   function touch(mode) {
     if (!mode) mode = currentMode();
-    if (mode === 'audio') return; // audio is bg-state-driven
+    if (mode === 'audio') return;
     const t = timers[mode];
+    if (mode === 'read') {
+      if (t.runningSince) t.lastInteraction = Date.now();
+      return;
+    }
     t.lastInteraction = Date.now();
     if (!t.runningSince) startMode(mode);
+  }
+
+  // Explicit read-mode activity signal — called from the read-mode scroll
+  // handler, dict popup open, and playback start. Always starts (or
+  // keeps alive) the read timer.
+  function bumpRead() {
+    const t = timers.read;
+    t.lastInteraction = Date.now();
+    if (!t.runningSince) startMode('read');
   }
 
   // Mode switch — stop the prior, queue new (it'll start on first touch).
@@ -147,8 +176,12 @@
     try {
       bg.addListener('state', (d) => {
         const inAudioMode = document.body.classList.contains('mode-audio');
+        const inReadMode  = document.body.classList.contains('mode-read');
         if (d.playing && inAudioMode) startMode('audio');
         else stopMode('audio');
+        // Starting playback while in read mode counts as active reading
+        // (the user is following along).
+        if (d.playing && inReadMode) bumpRead();
       });
     } catch (e) {}
   }
@@ -195,5 +228,7 @@
     getCardCount: () => timers.card.cards,
     incrementCardCount,
     touch, resetAll, resetMode, persist,
+    stopAll,
+    startMode,
   };
 })();

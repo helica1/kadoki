@@ -1056,16 +1056,16 @@
   window.openReadingStats = async function () {
     const modal = document.getElementById('readingStatsModal');
     if (!modal) return;
-    // Auto-pause playback when stats opens.
+    // Auto-pause playback when stats opens — user is reviewing stats,
+    // not using the app actively.
     if (typeof window.isReadingPlaying === 'function' && window.isReadingPlaying() &&
         typeof window.toggleReadingPlayback === 'function') {
       window.toggleReadingPlayback();
       refreshPlayPauseButton();
     }
-    // Stop the reading timer so the user can inspect stats without it ticking.
-    if (timerStart !== null) {
-      await stopTimer();
-    }
+    if (timerStart !== null) await stopTimer();
+    // Per-mode timers (stats.js): stop whichever is running.
+    if (window.stats?.stopAll) window.stats.stopAll();
     modal.style.display = 'flex';
     refreshTimerUI();
     refreshStatsModal();
@@ -2181,11 +2181,27 @@
     }
   }
 
+  // Wire a one-time scroll listener on the content area: any non-trivial
+  // scroll counts as "actively reading" and starts/refreshes the read
+  // timer. Casual background taps are intentionally NOT enough.
+  function installReadActivityHooks() {
+    const content = document.getElementById('readingModeContent');
+    if (!content || content.dataset.statsHooked === '1') return;
+    content.dataset.statsHooked = '1';
+    let lastScrollTop = content.scrollTop;
+    content.addEventListener('scroll', () => {
+      if (Math.abs(content.scrollTop - lastScrollTop) < 8) return;
+      lastScrollTop = content.scrollTop;
+      if (window.stats?.bumpRead) window.stats.bumpRead();
+    }, { passive: true });
+  }
+
   window.openReadingMode = async function () {
     rlog('Opening reading mode');
     await applyFontPrefs();
     const view = document.getElementById('readingModeView');
     view.style.display = 'flex';
+    installReadActivityHooks();
     setPref(KEYS.MODE_OPEN, 'true');
     installContentTapHandler();
     startInactivityWatcher();

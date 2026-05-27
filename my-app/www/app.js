@@ -2853,6 +2853,35 @@ window.isReadingPlaying = function () {
 };
 
 window.toggleReadingPlayback = function () {
+  const inReader = document.body.classList.contains('mode-read');
+
+  // Reader mode with an audiobook paired (deck OR SRT-card title): PLAY
+  // operates on the audiobook playhead via BackgroundAudio so the cue
+  // highlight follows. Otherwise reader-mode PLAY would start the deck
+  // card's per-mp3 audio, which the highlight code can't track.
+  if (inReader) {
+    const audiobookPath = window._currentReadingAudiobookPath ||
+                          (window.allNotes?.[window.currentCardIndex]?.audiobookPath);
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (audiobookPath && bg) {
+      const startCueMs = Number.isFinite(window._currentReadingCueStartMs)
+        ? window._currentReadingCueStartMs
+        : (window.allNotes?.[window.currentCardIndex]?.audiobookStartMs || 0);
+      const startMs = Math.max(0, Math.round(startCueMs) - (window.AUDIO_START_OFFSET_MS || 0));
+      const url = audiobookPath.startsWith('file://') ? audiobookPath : 'file://' + audiobookPath;
+      bg.getState().then(s => {
+        if (s.playing) {
+          bg.pause();
+        } else if (s.ready) {
+          bg.resume();
+        } else {
+          bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
+        }
+      }).catch(() => {});
+      return true;
+    }
+  }
+
   // SRT-card mode: PLAY → always (re)start the current card from its
   // startMs (don't merely resume). PAUSE → pause.
   if (_currentCardIsSrtCard()) {

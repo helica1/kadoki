@@ -229,22 +229,35 @@
       justify-content: space-between;
       align-items: center;
       margin-bottom: 20px;
-      border-bottom: 2px solid #00ffcc;
-      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border, #2a2a2a);
+      padding-bottom: 12px;
     }
 
     .library-header h2 {
-      color: #00ffcc;
+      color: var(--text, #e8e8e8);
       margin: 0;
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
     }
 
     .close-library {
-      background: #f44336;
-      color: white;
-      border: none;
-      padding: 8px 16px;
-      border-radius: 4px;
+      background: transparent;
+      color: var(--text-muted, #888);
+      border: 1px solid var(--border, #2a2a2a);
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-size: .75rem;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      font-weight: 600;
       cursor: pointer;
+      transition: color .15s, border-color .15s;
+    }
+    .close-library:hover {
+      color: var(--text, #e8e8e8);
+      border-color: var(--border-strong, #3a3a3a);
     }
 
     .deck-list {
@@ -692,7 +705,7 @@ body.dimmed .card-image {
       <h2>Library</h2>
       <div style="display:flex;gap:8px;">
         <button onclick="createNewTitle()" style="background:#00ffcc;color:#0a0a0a;border:none;padding:8px 14px;border-radius:4px;font-weight:700;">+ New title</button>
-        <button class="close-library" onclick="closeLibrary()">✕ Close</button>
+        <button class="close-library" onclick="closeLibrary()">Close</button>
       </div>
     </div>
     <div id="deckList" class="deck-list">
@@ -933,7 +946,7 @@ body.dimmed .card-image {
       <span id="readingModeTitle" style="color:#ccc;font-size:16px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No EPUB loaded</span>
       <span id="readingTimerLabel" onclick="window.openReadingStats && window.openReadingStats()" style="color:#00ffcc;font-size:18px;font-variant-numeric:tabular-nums;cursor:pointer;user-select:none;padding:8px 6px;">0:00</span>
     </div>
-    <div id="readingModeContent" style="flex:1;overflow:auto;padding:24px;color:#e8e8e8;background:#1a1a1a;font-family:var(--reader-font,serif);font-size:var(--reader-font-size,1.1rem);line-height:1.7;">
+    <div id="readingModeContent" style="flex:1;overflow:auto;padding:24px;color:#e8e8e8;background:#000000;font-family:var(--reader-font,serif);font-size:var(--reader-font-size,1.1rem);line-height:1.7;">
       <p style="color:#888;text-align:center;margin-top:40vh;">Tap 📂 Open EPUB to begin.</p>
     </div>
     <div id="readingProgressBar" style="position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;gap:12px;padding:8px 12px;background:rgba(17,17,17,0.92);border-top:1px solid #333;z-index:3;transform:translateY(110%);transition:transform 0.22s ease;">

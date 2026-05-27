@@ -74,38 +74,34 @@
 /* Cue-precise highlight via CSS Custom Highlight API. Drawn ON TOP of
    any chunk-level .active background so the user sees the exact SRT cue
    text being read, not just "this sentence is current". */
-/* Two highlight styles for reading mode, toggled by appearance.js:
-   - body.highlight-bg   → translucent fill + underline (the original)
-   - body.highlight-text → recolor the cue characters only (cleaner on
-                           dark backgrounds, no overlap artefacts).
-   Both react to the user's chosen read-mode accent.
-   The "text" mode uses a brightened version of the accent so the cue
-   text stays readable against a pure-black reader page. */
+/* Default: TEXT-COLOR highlight (cleaner on pure-black bg, no overlap
+   artifacts). body.highlight-bg overrides to the translucent-fill style.
+   Defaulting here means there's no flash of "wrong style" before
+   appearance.js has a chance to apply the body class. */
+::highlight(cue-active) {
+  background: transparent;
+  text-decoration: none;
+  color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
+}
+::highlight(cue-pending) {
+  background: transparent;
+  text-decoration: underline dashed
+    color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%) 2px;
+  text-underline-offset: 4px;
+  color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
+}
+/* User can opt in to translucent-fill style via Preferences → Read. */
 body.highlight-bg ::highlight(cue-active) {
   background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.4));
   text-decoration: underline solid var(--accent-read, #4caf50) 2px;
   text-underline-offset: 4px;
   color: inherit;
 }
-body.highlight-text ::highlight(cue-active) {
-  background: transparent;
-  text-decoration: none;
-  color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
-}
-
-/* Pending up-swipe selection: dashed underline on the matched cue (not
-   the whole chunk). Different visual in each mode so it's still
-   distinguishable from the active-playback highlight. */
 body.highlight-bg ::highlight(cue-pending) {
+  background: transparent;
   text-decoration: underline dashed var(--accent-read, #4caf50) 2px;
   text-underline-offset: 4px;
-}
-body.highlight-text ::highlight(cue-pending) {
-  background: transparent;
-  text-decoration: underline dashed
-    color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%) 2px;
-  text-underline-offset: 4px;
-  color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
+  color: inherit;
 }
 /* When a precise cue highlight is set, the active chunk's chrome stays
    completely invisible — the cue's coloured characters carry all the

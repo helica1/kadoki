@@ -1126,7 +1126,11 @@
     
     async function performLookup(spans, index) {
         console.log(`🚀 Performing multi-dictionary lookup for span ${index}...`);
-        
+        // Read-mode active-reading signal: looking up a word is a clear
+        // sign of active reading, so start the read timer.
+        if (document.body.classList.contains('mode-read') && window.stats?.bumpRead) {
+          window.stats.bumpRead();
+        }
         try {
             hidePopup();
             
