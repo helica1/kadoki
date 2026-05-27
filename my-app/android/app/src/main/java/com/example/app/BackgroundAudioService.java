@@ -187,7 +187,20 @@ public class BackgroundAudioService extends Service {
 
     // ----- Public API for direct calls from BackgroundAudioPlugin -----
 
-    public void setListener(OnStateChangeListener l) { this.listener = l; }
+    public void setListener(OnStateChangeListener l) {
+        this.listener = l;
+        // Catch-up: if MediaPlayer is already prepared when a listener attaches
+        // late (race between play() startService and ensureListener), replay
+        // the current state so the plugin starts its position poll. Without
+        // this, prepared-before-listener loses the state event forever.
+        if (l != null && prepared && player != null) {
+            try {
+                boolean playing = player.isPlaying();
+                l.onPlayingStateChanged(playing);
+                l.onPositionUpdate(player.getCurrentPosition(), player.getDuration());
+            } catch (Exception ignored) {}
+        }
+    }
 
     public boolean isReady() { return prepared && player != null; }
 

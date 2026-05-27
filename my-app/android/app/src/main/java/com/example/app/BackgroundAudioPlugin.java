@@ -67,6 +67,26 @@ public class BackgroundAudioPlugin extends Plugin {
         if (s != null) s.setListener(stateListener);
     }
 
+    // Retry-attach: service can come up on any tick after startService(); a
+    // single postDelayed(..., 100) used to lose the prepared event for cached
+    // MP3s that finished preparing inside those 100 ms. Tight retry until the
+    // service instance exists (capped so we never spin forever).
+    private void scheduleEnsureListener() {
+        final int[] tries = { 0 };
+        final Runnable r = new Runnable() {
+            @Override public void run() {
+                BackgroundAudioService s = BackgroundAudioService.getInstance();
+                if (s != null) {
+                    s.setListener(stateListener);
+                    return;
+                }
+                tries[0]++;
+                if (tries[0] < 40) mainHandler.postDelayed(this, 50);
+            }
+        };
+        mainHandler.post(r);
+    }
+
     private void emitPosition(int positionMs, int durationMs) {
         BackgroundAudioService s = BackgroundAudioService.getInstance();
         JSObject d = new JSObject();
@@ -119,8 +139,10 @@ public class BackgroundAudioPlugin extends Plugin {
         i.putExtra(BackgroundAudioService.EXTRA_START_MS, startMs);
         i.putExtra(BackgroundAudioService.EXTRA_RATE, rate);
         startServiceCompat(i);
-        // Service.onCreate sets the instance; attach listener after a tick.
-        mainHandler.postDelayed(this::ensureListener, 100);
+        // Service.onCreate sets the instance; tight retry-attach because cached
+        // MP3s prepare in <100 ms and would otherwise drop the playing-state
+        // event before the listener attached.
+        scheduleEnsureListener();
         call.resolve();
     }
 
