@@ -1736,56 +1736,20 @@
     return true;
   }
 
-  async function abUpdateCueDisplay(positionMs) {
-    if (!abCues.length) {
-      console.log('[abUpdate] no cues loaded; pos=' + positionMs);
-      return;
-    }
+  // Synchronous path: cue idx → text, chunk highlight, cue-precise paint.
+  // Runs every position event. Nothing here can await — that was the bug
+  // where a hung await on titleStore.list() (Preferences plugin slowness)
+  // would block the highlight sync forever after the first cue painted.
+  function abUpdateCueDisplay(positionMs) {
+    if (!abCues.length) return;
     const idx = window.srtParser.findCueAtTime(abCues, positionMs);
     if (idx === abCurrentCueIdx) return;
     abCurrentCueIdx = idx;
     const cueEl = document.getElementById('audiobookCueText');
     if (cueEl) cueEl.textContent = idx >= 0 ? abCues[idx].text : '…';
-    // Image priority for the audio view:
-    //   1. Title cover (manual pick or auto-extracted)
-    //   2. Matched chunk's deck-card image (when reading mode is loaded)
-    const imgEl = document.getElementById('audiobookCardImage');
-    if (imgEl) {
-      let src = '';
-      // Title cover — looked up via _activeTitleId.
-      try {
-        if (window._activeTitleId && window.titleStore?.get) {
-          // titleStore exposes list() not get(); we cached the title earlier
-          // in abLoadContextForCurrentDeck via window.titleStore.findByName.
-          // Simpler: re-fetch by id from the list.
-          const titles = await window.titleStore.list();
-          const tit = titles.find(t => t.id === window._activeTitleId);
-          if (tit?.attachments?.cover?.dataUri) src = tit.attachments.cover.dataUri;
-        }
-      } catch (e) {}
-      if (!src && abCueToChunk && idx >= 0) {
-        const chunkIdx = abCueToChunk[idx];
-        if (chunkIdx >= 0 && Array.isArray(window.allNotes)) {
-          const card = window.allNotes[chunkIdx];
-          const m = card?.imageHtml?.match(/src="([^"]+)"/);
-          if (m) src = m[1];
-        }
-      }
-      if (src && imgEl.src !== src) imgEl.src = src;
-      // Display gate is owned by --image-audio-display; only force hide if
-      // no source resolves.
-      imgEl.style.display = src ? '' : 'none';
-    }
-    console.log('[abUpdate] cue idx=' + idx + ' pos=' + positionMs + (idx >= 0 ? ' text="' + abCues[idx].text.slice(0, 40) + '"' : ' (before first cue)'));
-    // Push to lock screen.
-    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
-    if (bg && idx >= 0) {
-      bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: abCues[idx].text }).catch(() => {});
-    }
-    // Reading-mode highlight sync. Direct cue→chunk match preferred; if the
-    // current cue has no match (common when EPUB paragraph boundaries don't
-    // line up with SRT cue boundaries), interpolate between nearest matched
-    // neighbors so the highlight still advances roughly with the audio.
+
+    // Reading-mode highlight sync: chunk active class + cue-precise CSS
+    // highlight. Done FIRST (synchronously) so it stays reliable.
     if (abCueToChunk && idx >= 0) {
       let chunkIdx = abCueToChunk[idx];
       if (chunkIdx < 0) {
@@ -1807,15 +1771,45 @@
         setActive(chunkIdx);
         if (typeof window.currentCardIndex === 'number') tagChunkWithCard(chunkIdx, window.currentCardIndex);
       }
-      // Cue-precise highlight: even when the chunk hasn't changed, the cue
-      // text shifts each tick. setCueHighlight matches the cue text within
-      // the chunk and uses CSS.highlights to colour only those characters.
       if (chunkIdx >= 0 && idx >= 0 && abCues[idx]) {
         setCueHighlight(chunkIdx, abCues[idx].text);
       } else {
         clearCueHighlight();
       }
     }
+
+    // Lock screen + audio view image — fire-and-forget. Any latency on
+    // the Preferences plugin (titleStore.list) is isolated from the
+    // highlight path above.
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (bg && idx >= 0) {
+      bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: abCues[idx].text }).catch(() => {});
+    }
+    updateAudiobookCardImage(idx);
+  }
+
+  // Image-resolution side-effect — runs async, isolated from cue sync.
+  async function updateAudiobookCardImage(idx) {
+    const imgEl = document.getElementById('audiobookCardImage');
+    if (!imgEl) return;
+    let src = '';
+    try {
+      if (window._activeTitleId && window.titleStore?.list) {
+        const titles = await window.titleStore.list();
+        const tit = titles.find(t => t.id === window._activeTitleId);
+        if (tit?.attachments?.cover?.dataUri) src = tit.attachments.cover.dataUri;
+      }
+    } catch (e) {}
+    if (!src && abCueToChunk && idx >= 0) {
+      const chunkIdx = abCueToChunk[idx];
+      if (chunkIdx >= 0 && Array.isArray(window.allNotes)) {
+        const card = window.allNotes[chunkIdx];
+        const m = card?.imageHtml?.match(/src="([^"]+)"/);
+        if (m) src = m[1];
+      }
+    }
+    if (src && imgEl.src !== src) imgEl.src = src;
+    imgEl.style.display = src ? '' : 'none';
   }
 
   function abAttachListenersOnce() {
