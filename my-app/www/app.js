@@ -2860,15 +2860,26 @@ window.toggleReadingPlayback = function () {
   // highlight follows. Otherwise reader-mode PLAY would start the deck
   // card's per-mp3 audio, which the highlight code can't track.
   if (inReader) {
+    // Fallback chain for audiobook source:
+    //   1. The chunk-active cue's audiobook path (publishChunkCueRange)
+    //   2. The global audiobook context path (set when ensureCueContext
+    //      / setAudiobookContextForSrtCards loads abAudioPath)
+    //   3. SRT-card title's per-note audiobookPath
     const audiobookPath = window._currentReadingAudiobookPath ||
+                          window._audiobookSrcPath ||
                           (window.allNotes?.[window.currentCardIndex]?.audiobookPath);
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (audiobookPath && bg) {
+      // Start point fallback:
+      //   1. Current chunk's cue startMs
+      //   2. SRT-card's audiobookStartMs
+      //   3. 0 (the position listener will then drive the highlight)
       const startCueMs = Number.isFinite(window._currentReadingCueStartMs)
         ? window._currentReadingCueStartMs
-        : (window.allNotes?.[window.currentCardIndex]?.audiobookStartMs || 0);
+        : (window.allNotes?.[window.currentCardIndex]?.audiobookStartMs ?? 0);
       const startMs = Math.max(0, Math.round(startCueMs) - (window.AUDIO_START_OFFSET_MS || 0));
       const url = audiobookPath.startsWith('file://') ? audiobookPath : 'file://' + audiobookPath;
+      console.log('[reader-play] audiobookPath=' + audiobookPath + ' startMs=' + startMs);
       bg.getState().then(s => {
         if (s.playing) {
           bg.pause();

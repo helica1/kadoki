@@ -1044,10 +1044,17 @@
   };
 
   window.toggleReadingTimer = function () {
-    if (timerStart !== null) {
-      stopTimer();
+    // Toggle the CURRENT mode's stats timer — which is what the shell
+    // pill + timer menu read from. Legacy `timerStart` is kept in sync
+    // (used by some refresh helpers + the legacy stats fields).
+    const s = window.stats;
+    const mode = s ? s.currentMode() : 'card';
+    if (s && s.isRunning(mode)) {
+      s.stopMode(mode);
+      if (timerStart !== null) stopTimer();
     } else {
-      startTimer();
+      if (s) s.startMode(mode);
+      if (timerStart === null && mode === 'read') startTimer();
     }
     refreshTimerUI();
     refreshStatsModal();
@@ -1653,6 +1660,10 @@
     abAudioPath = audioPath;
     abAudioName = audioName || 'Audiobook';
     abCues = cues;
+    // Expose path globally so reader-mode PLAY can route through bg even
+    // when no chunk-cue is bound yet (publishChunkCueRange only fires
+    // after a setActive call).
+    window._audiobookSrcPath = audioPath;
     abAttachListenersOnce();
   };
 
@@ -1669,6 +1680,7 @@
     if (!audio || !srt) return false;
     abAudioPath = audio.path;
     abAudioName = audio.name;
+    window._audiobookSrcPath = audio.path;
     try {
       const url = window.Capacitor?.convertFileSrc
         ? window.Capacitor.convertFileSrc(srt.path) : 'file://' + srt.path;
@@ -1704,6 +1716,7 @@
     }
     abAudioPath = audio.path;
     abAudioName = audio.name;
+    window._audiobookSrcPath = audio.path;
     // Read + parse SRT from cache file. Use convertFileSrc so the WebView's
     // local server serves the file via its allowed origin (raw file:// won't
     // work for arbitrary paths inside the WebView fetch sandbox).

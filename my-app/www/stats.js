@@ -227,8 +227,8 @@
     getAudioSec: () => liveTotal('audio'),
     getCardCount: () => timers.card.cards,
     incrementCardCount,
-    touch, resetAll, resetMode, persist,
-    stopAll,
-    startMode,
+    touch, bumpRead, resetAll, resetMode, persist,
+    stopAll, startMode, stopMode,
+    currentMode,
   };
 })();
