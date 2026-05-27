@@ -1710,16 +1710,55 @@
   function renderInlineAudiobookPicker(missingAudio, missingSrt) {
     const cueEl = document.getElementById('audiobookCueText');
     if (!cueEl) return;
-    const deck = currentDeckName() || 'this deck';
+    const deck = currentDeckName() || 'this title';
+    const missingList = [missingAudio ? 'audiobook' : null, missingSrt ? 'subtitles' : null]
+      .filter(Boolean).join(' and ');
+    // Pigments-styled card matching the rest of the app: dark panel, thin
+    // border, uppercase mode-color heading, outlined buttons that go
+    // accent-color when an action is needed and muted-grey when satisfied.
     cueEl.innerHTML = `
-      <div style="max-width:420px;margin:0 auto;text-align:left;font-size:1rem;line-height:1.6;">
-        <div style="font-size:1.2rem;color:#00ffcc;margin-bottom:14px;font-weight:600;">Audiobook not paired</div>
-        <div style="color:#aaa;margin-bottom:18px;">No ${[missingAudio ? 'audiobook' : null, missingSrt ? 'SRT' : null].filter(Boolean).join(' or ')} is paired with <b>${deck}</b>. Pick one of each, then tap AUDIO again to start.</div>
-        <div style="display:flex;flex-direction:column;gap:10px;">
-          <button onclick="window.pickAudiobookFile && window.pickAudiobookFile()" style="padding:14px;background:${missingAudio ? '#2196f3' : '#333'};color:#fff;border:none;border-radius:6px;font-size:15px;cursor:pointer;">${missingAudio ? '🎧 Pick audiobook (.mp3/.m4b)' : '🎧 Audiobook ✓ (re-pick)'}</button>
-          <button onclick="window.pickSrtFile && window.pickSrtFile()" style="padding:14px;background:${missingSrt ? '#2196f3' : '#333'};color:#fff;border:none;border-radius:6px;font-size:15px;cursor:pointer;">${missingSrt ? '📄 Pick SRT (.srt)' : '📄 SRT ✓ (re-pick)'}</button>
+      <div style="max-width:420px;margin:32px auto;text-align:left;
+                  font-family:var(--font-sans);font-size:.9rem;line-height:1.55;
+                  background:var(--panel,#161616);
+                  border:1px solid var(--border,#2a2a2a);
+                  border-radius:12px;
+                  padding:22px 22px 18px 22px;">
+        <div style="font-size:.7rem;letter-spacing:.18em;text-transform:uppercase;
+                    color:var(--accent-audio,#b794f6);font-weight:700;
+                    margin-bottom:10px;">Audiobook not paired</div>
+        <div style="color:var(--text,#e8e8e8);margin-bottom:18px;">
+          Missing ${missingList} for <span style="color:var(--accent-audio,#b794f6);font-weight:600;">${deck}</span>. Pick the file${missingAudio && missingSrt ? 's' : ''} below, then tap AUDIO again.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${pickerButtonHtml('window.pickAudiobookFile', 'Audiobook',  '.mp3 · .m4b · .m4a', missingAudio)}
+          ${pickerButtonHtml('window.pickSrtFile',       'Subtitles',  '.srt',                missingSrt)}
         </div>
       </div>
+    `;
+  }
+
+  // Single picker button — outlined when the file is missing (accent
+  // border + accent text), filled+muted when already paired.
+  function pickerButtonHtml(handlerExpr, label, hint, missing) {
+    const stateStyles = missing
+      ? 'background:transparent;color:var(--accent-audio,#b794f6);' +
+        'border:1px solid var(--accent-audio,#b794f6);'
+      : 'background:var(--panel-elev,#1f1f1f);color:var(--text-muted,#888);' +
+        'border:1px solid var(--border,#2a2a2a);';
+    const check = missing ? '' :
+      '<span style="color:var(--accent-read,#4caf50);font-weight:700;margin-left:6px;">✓</span>';
+    return `
+      <button onclick="${handlerExpr} && ${handlerExpr}()"
+              style="${stateStyles}padding:12px 14px;border-radius:8px;
+                     font-family:var(--font-sans);font-size:.85rem;font-weight:600;
+                     letter-spacing:.04em;cursor:pointer;
+                     display:flex;align-items:center;justify-content:space-between;
+                     transition:background .15s ease;">
+        <span>${label}${check}</span>
+        <span style="font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;
+                     color:${missing ? 'var(--text-muted,#888)' : 'var(--text-faint,#555)'};
+                     font-weight:500;">${missing ? hint : 'Re-pick'}</span>
+      </button>
     `;
   }
 
