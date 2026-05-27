@@ -1775,12 +1775,17 @@
   // where a hung await on titleStore.list() (Preferences plugin slowness)
   // would block the highlight sync forever after the first cue painted.
   function abUpdateCueDisplay(positionMs) {
-    if (!abCues.length) return;
+    if (!abCues.length) {
+      console.log('[abUpdate] abCues empty; pos=' + positionMs);
+      return;
+    }
     const idx = window.srtParser.findCueAtTime(abCues, positionMs);
     if (idx === abCurrentCueIdx) return;
     abCurrentCueIdx = idx;
     const cueEl = document.getElementById('audiobookCueText');
     if (cueEl) cueEl.textContent = idx >= 0 ? abCues[idx].text : '…';
+    console.log('[abUpdate] cue=' + idx + ' pos=' + positionMs +
+      ' mapsReady=' + !!abCueToChunk + ' chunks=' + chunks.length);
 
     // Reading-mode highlight sync: chunk active class + cue-precise CSS
     // highlight. Done FIRST (synchronously) so it stays reliable.

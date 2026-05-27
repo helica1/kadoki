@@ -2881,14 +2881,20 @@ window.toggleReadingPlayback = function () {
       const url = audiobookPath.startsWith('file://') ? audiobookPath : 'file://' + audiobookPath;
       console.log('[reader-play] audiobookPath=' + audiobookPath + ' startMs=' + startMs);
       bg.getState().then(s => {
+        console.log('[reader-play] state.playing=' + s.playing + ' state.ready=' + s.ready);
         if (s.playing) {
           bg.pause();
         } else if (s.ready) {
           bg.resume();
         } else {
-          bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
+          // Pause any deck-mode card audio first so we don't get a
+          // cacophony of two sources.
+          try { if (currentAudio && !currentAudio.paused) currentAudio.pause(); } catch (e) {}
+          bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 })
+            .then(() => console.log('[reader-play] bg.play resolved'))
+            .catch(err => console.warn('[reader-play] bg.play err: ' + err?.message));
         }
-      }).catch(() => {});
+      }).catch((err) => { console.warn('[reader-play] getState err:', err); });
       return true;
     }
   }
