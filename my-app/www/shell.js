@@ -182,23 +182,22 @@
     return 'card';
   }
 
-  window.setShellMode = async function (mode) {
-    // Resync internal state from the DOM in case overlays were opened/closed
-    // outside the shell tabs.
+  // True while a mode-switch is in flight. Tab taps that arrive during
+  // this window are ignored so a double-tap can't race the first call
+  // (which used to produce the "tap twice to switch" UX).
+  let _switchInFlight = false;
+
+  window.setShellMode = function (mode) {
+    if (_switchInFlight) return;
     currentMode = inferActiveMode();
     if (mode === currentMode) return;
+    _switchInFlight = true;
 
-    // Leaving audio → other: if the audiobook has drifted from the reading
-    // cursor, ask the user what to do before tearing down audio.
-    if (currentMode === 'audio' && (mode === 'card' || mode === 'read')) {
-      if (typeof window.maybeShowAudioReentryDialog === 'function') {
-        try { await window.maybeShowAudioReentryDialog(); } catch (e) {}
-      }
-    }
-
-    // Show the new view BEFORE we hide the old one — eliminates the brief
-    // card-mode-underlay flash between hiding audiobookModeView and
-    // readingModeView becoming visible (the old order's await window).
+    // === SYNCHRONOUS visibility flip ===
+    // Flip views + tab UI THIS frame, before any await. That makes tab
+    // taps feel instant: the user sees the new tab go active and the
+    // new view appear immediately, even if mode-open setup hasn't
+    // finished yet. The async setup runs in the background.
     if (mode === 'read') {
       const rv = document.getElementById('readingModeView');
       if (rv) rv.style.display = 'flex';
@@ -206,28 +205,43 @@
       const av = document.getElementById('audiobookModeView');
       if (av) av.style.display = 'flex';
     }
-    // Now close whatever was previously visible.
-    if (currentMode === 'audio' && typeof window.closeAudiobookMode === 'function') {
-      await window.closeAudiobookMode();
-    } else if (currentMode === 'read' && typeof window.closeReadingMode === 'function') {
-      await window.closeReadingMode();
+    if (currentMode === 'audio') {
+      const av = document.getElementById('audiobookModeView');
+      if (av && mode !== 'audio') av.style.display = 'none';
+    } else if (currentMode === 'read') {
+      const rv = document.getElementById('readingModeView');
+      if (rv && mode !== 'read') rv.style.display = 'none';
     }
-
-    // Open new mode (async setup; view is already visible).
-    if (mode === 'audio' && typeof window.openAudiobookMode === 'function') {
-      const fromOther = currentMode === 'card' || currentMode === 'read';
-      await window.openAudiobookMode({ seekToCurrentPosition: fromOther });
-    } else if (mode === 'read' && typeof window.openReadingMode === 'function') {
-      await window.openReadingMode();
-    } else if (mode === 'card' && currentMode !== 'card') {
-      // Card mode is the default underlay (nothing to "open"), but if audio
-      // is playing while we enter card mode the card index needs to jump to
-      // the currently-playing cue so the rest of card-mode behavior (auto-
-      // advance, replay) keys off the audio playhead.
-      if (typeof window.syncCardToCurrentCue === 'function') window.syncCardToCurrentCue();
-    }
+    const prevMode = currentMode;
     currentMode = mode;
     updateTabsUI(mode);
+
+    // === ASYNCHRONOUS setup (background) ===
+    // Run open/close + position sync without blocking the switch. Errors
+    // here only affect mode-specific behavior, not the visible state.
+    (async () => {
+      try {
+        if (prevMode === 'audio' && (mode === 'card' || mode === 'read')) {
+          if (typeof window.maybeShowAudioReentryDialog === 'function') {
+            try { await window.maybeShowAudioReentryDialog(); } catch (e) {}
+          }
+        }
+        if (prevMode === 'audio' && typeof window.closeAudiobookMode === 'function') {
+          await window.closeAudiobookMode();
+        } else if (prevMode === 'read' && typeof window.closeReadingMode === 'function') {
+          await window.closeReadingMode();
+        }
+        if (mode === 'audio' && typeof window.openAudiobookMode === 'function') {
+          await window.openAudiobookMode({ seekToCurrentPosition: prevMode === 'card' || prevMode === 'read' });
+        } else if (mode === 'read' && typeof window.openReadingMode === 'function') {
+          await window.openReadingMode();
+        } else if (mode === 'card' && prevMode !== 'card') {
+          if (typeof window.syncCardToCurrentCue === 'function') window.syncCardToCurrentCue();
+        }
+      } finally {
+        _switchInFlight = false;
+      }
+    })();
   };
 
   // --------- Timer (reads state from reading-mode.js via window.getReadingTimerState) ----------

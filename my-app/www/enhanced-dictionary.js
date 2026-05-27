@@ -861,7 +861,13 @@
                     <div class="manatan-term">${result.term}</div>
                 </div>
                 <div class="manatan-header-icons">
-                    <button id="audioBtn" type="button" title="Play audio" class="manatan-icon-btn">🔊</button>
+                    <button id="audioBtn" type="button" title="Play audio" class="manatan-icon-btn" aria-label="Play audio">
+                      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M11 5L6 9H3v6h3l5 4V5z"/>
+                        <path d="M15.5 8.5a5 5 0 0 1 0 7"/>
+                        <path d="M18.5 5.5a9 9 0 0 1 0 13"/>
+                      </svg>
+                    </button>
                     <button id="ankiBtn" class="manatan-anki-btn"
                             data-dictionary="${result.dictionary}"
                             data-term="${result.term}"
@@ -1859,16 +1865,18 @@
             line-height: 1.1; letter-spacing: -0.01em;
         }
         .manatan-header-icons {
-            display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+            display: flex; flex-direction: row; align-items: center; gap: 8px;
             flex-shrink: 0;
         }
         .manatan-icon-btn {
-            background: transparent; color: var(--accent-cyan, #00ffcc);
+            background: transparent; color: #d0d0d0;
             border: 1px solid transparent;
-            font-size: 18px; padding: 4px 8px; cursor: pointer;
+            padding: 4px 6px; cursor: pointer;
             border-radius: 6px;
+            display: inline-flex; align-items: center; justify-content: center;
         }
         .manatan-icon-btn:active { background: rgba(255,255,255,0.06); }
+        .manatan-icon-btn svg { display: block; }
         .manatan-anki-btn {
             background: var(--accent-read, #4caf50); color: #000;
             border: none; padding: 6px 12px; border-radius: 999px;

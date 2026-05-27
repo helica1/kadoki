@@ -2347,17 +2347,21 @@
     view.style.display = 'flex';
     const content = document.getElementById('readingModeContent');
 
-    // Warm path: snap + show synchronously. No awaits in the open path —
-    // the prefs have already been applied, hooks attached, EPUB rendered.
-    // setPref + startTimer are fire-and-forget, and syncReader runs on
-    // the next frame so the view paints immediately.
+    // Warm path: snap to the right chunk BEFORE showing content. Keeps
+    // opacity:0 just long enough for setActive to scroll, then reveals.
+    // Without the gate the user briefly saw whatever scroll position the
+    // reader was left at (e.g. 96% from a stray progress-bar tap).
     if (readerWarmed) {
-      if (content) content.style.opacity = '1';
+      if (content) {
+        content.style.opacity = '0';
+        content.style.transition = 'opacity 0.08s ease';
+      }
       setPref(KEYS.MODE_OPEN, 'true');
       startTimer();
-      requestAnimationFrame(() => {
-        try { syncReaderToCurrentPosition(); } catch (e) {}
-      });
+      // Sync is synchronous (no awaits beyond a defunct outer signature),
+      // so the scroll commits this microtask. Reveal on the next frame.
+      try { syncReaderToCurrentPosition(); } catch (e) {}
+      requestAnimationFrame(() => { if (content) content.style.opacity = '1'; });
       return;
     }
 
@@ -2523,6 +2527,37 @@
     }
   }
   window.syncReaderToCurrentPosition = syncReaderToCurrentPosition;
+
+  // Hook from app.js whenever the user moves through cards. We keep
+  // lastMatchedIdx in sync with the new card so the reader is always
+  // ready to display the right chunk on a tab switch — even if audio
+  // isn't playing and the syncReader heuristics can't otherwise nail
+  // down the right chunk.
+  window.notifyCardIndexChanged = function (cardIdx) {
+    if (!chunks?.length || !Number.isFinite(cardIdx)) return;
+    let chunkIdx = -1;
+    // SRT-cards: card index IS cue index. Walk neighbors if unmapped.
+    if (Array.isArray(window.allNotes) && window.allNotes[0]?.isSrtCard && abCueToChunk) {
+      if (cardIdx >= 0 && cardIdx < abCueToChunk.length) {
+        chunkIdx = abCueToChunk[cardIdx];
+        if (chunkIdx < 0) {
+          for (let i = cardIdx - 1; i >= 0; i--) if (abCueToChunk[i] >= 0) { chunkIdx = abCueToChunk[i]; break; }
+          if (chunkIdx < 0) {
+            for (let i = cardIdx + 1; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) { chunkIdx = abCueToChunk[i]; break; }
+          }
+        }
+      }
+    }
+    // Deck-based card: search by card text.
+    if (chunkIdx < 0 && Array.isArray(window.allNotes)) {
+      const card = window.allNotes[cardIdx];
+      if (card?.expression) {
+        const target = normalizeText(textWithoutRubyFromHtml(card.expression));
+        if (target) chunkIdx = findContainsFrom(target, 0);
+      }
+    }
+    if (chunkIdx >= 0) lastMatchedIdx = chunkIdx;
+  };
 
   window.closeReadingMode = async function () {
     rlog('Closing reading mode');

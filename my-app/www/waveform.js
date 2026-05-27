@@ -529,14 +529,11 @@
       if (bg) {
         bg.addListener('position', (d) => {
           if (!state) return;
-          // Reject stale position events that report positions BEHIND what
-          // we already extrapolated to within a small tolerance. The native
-          // poll occasionally double-fires the same position or briefly
-          // reports an older one right when playback starts, which made the
-          // line snap backward and forward — the visible "jitter at the
-          // beginning". A real seek would jump by hundreds of ms; we only
-          // reject small backward steps.
+          const prevPos = state.playheadMs;
           const prevInterp = state.playheadInterpMs;
+          // Reject minor backward steps (the native poll occasionally
+          // reports an older position right after play starts — caused
+          // visible jitter at the beginning of a preview).
           const isMinorBackstep = Number.isFinite(prevInterp) &&
                                   d.positionMs < prevInterp &&
                                   prevInterp - d.positionMs < 250;
@@ -546,16 +543,31 @@
           }
           state.playheadLastTs = performance.now();
           state.playheadPlaying = !!d.playing;
-          if (d.playing) startPlayheadAnim();
-          else { stopPlayheadAnim(); render(); }
+          // Warmup gate: don't start the rAF interpolation until we've
+          // seen the position actually MOVE between two events. During
+          // MediaPlayer prepare the position can be reported as 0 several
+          // times before real playback begins; extrapolating from those
+          // produces the start-of-preview jitter. Once movement is
+          // confirmed, the line streams smoothly.
+          if (Number.isFinite(prevPos) && d.positionMs > prevPos + 5) {
+            state.playheadWarmed = true;
+          }
+          if (d.playing && state.playheadWarmed) startPlayheadAnim();
+          else if (!d.playing) { stopPlayheadAnim(); render(); }
+          else render();
         }).then(h => { if (state) state.playheadHandle = h; }).catch(() => {});
         // Also listen for state changes — pause should freeze the playhead
         // immediately rather than waiting for the next stale position event.
+        // A fresh play (e.g. tapping Preview again) resets the warmup gate
+        // so the next prepare cycle doesn't visibly jitter.
         bg.addListener('state', (d) => {
           if (!state) return;
           state.playheadPlaying = !!d.playing;
           if (!d.playing) { stopPlayheadAnim(); render(); }
-          else { state.playheadLastTs = performance.now(); startPlayheadAnim(); }
+          else {
+            state.playheadWarmed = false;
+            state.playheadLastTs = performance.now();
+          }
         }).then(h => { if (state) state.stateHandle = h; }).catch(() => {});
       }
     },

@@ -881,6 +881,13 @@ function updateCardIndex(newIndex) {
     debugLog(`Updating card index from ${currentCardIndex} to ${newIndex}`);
     currentCardIndex = newIndex;
     window.currentCardIndex = currentCardIndex;
+    // Tell the reader so its cached cursor stays in sync. Otherwise a
+    // later tab switch into READ could land on the prior reader position
+    // (e.g., 96% from a previous progress-bar tap) instead of the chunk
+    // matching the new card.
+    if (typeof window.notifyCardIndexChanged === 'function') {
+      try { window.notifyCardIndexChanged(newIndex); } catch (e) {}
+    }
 
     // Save state whenever card changes
     saveDeckState();
