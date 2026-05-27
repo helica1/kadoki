@@ -2026,7 +2026,32 @@
       const isPreWarmed = abContextLoadedForDeck === deck && abCues?.length;
       if (!isPreWarmed) {
         const cueEl = document.getElementById('audiobookCueText');
-        if (cueEl) cueEl.textContent = 'Loading audiobook…';
+        if (cueEl) {
+          // Three-dot pulsing spinner. Replaces the bare "Loading audiobook…"
+          // text the user found dated. Self-contained CSS keyframes so we
+          // don't pollute theme.css.
+          cueEl.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:center;gap:8px;padding:24px 0;">
+              <span class="ab-loading-dot"></span>
+              <span class="ab-loading-dot"></span>
+              <span class="ab-loading-dot"></span>
+            </div>
+            <style>
+              .ab-loading-dot {
+                width: 10px; height: 10px; border-radius: 50%;
+                background: var(--accent-audio, #b794f6);
+                opacity: 0.35;
+                animation: ab-loading-pulse 1.1s ease-in-out infinite;
+              }
+              .ab-loading-dot:nth-child(2) { animation-delay: 0.15s; }
+              .ab-loading-dot:nth-child(3) { animation-delay: 0.3s; }
+              @keyframes ab-loading-pulse {
+                0%, 80%, 100% { opacity: 0.25; transform: scale(0.85); }
+                40%           { opacity: 1;    transform: scale(1.1);  }
+              }
+            </style>
+          `;
+        }
       }
     }
     const ok = await abLoadContextForCurrentDeck();

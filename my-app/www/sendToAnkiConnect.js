@@ -241,10 +241,17 @@ async function sendToAnki({ expression, imageData, audioData }) {
       }
       const r = await ab.addNote(params);
       console.log('AnkiBridge.addNote ->', r);
+      if (typeof window.showToast === 'function') {
+        window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+      }
       return;
     } catch (err) {
       console.error('AnkiBridge.addNote error:', err);
-      alert('Failed to add note to AnkiDroid: ' + (err?.message || err));
+      if (typeof window.showToast === 'function') {
+        window.showToast(`✗ Anki: ${err?.message || err}`, 4000);
+      } else {
+        alert('Failed to add note to AnkiDroid: ' + (err?.message || err));
+      }
       return;
     }
   }

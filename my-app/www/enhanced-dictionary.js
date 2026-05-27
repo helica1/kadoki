@@ -935,19 +935,38 @@
     
     function positionDictPopup(popup) {
         if (!popup) return;
-        // Card mode: keep popup BELOW the subtitle text. The old code
-        // centered the popup vertically over the image — which on many
-        // layouts covered the bottom of the subtitle, hiding the word
-        // being looked up.
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const margin = 12;
+
+        // Audiobook mode: anchor BELOW the cue text and keep popup small.
+        // The audiobook view's subtitle takes the center band of the screen
+        // and the user reported the dict was eating it. Cap height at 40 %
+        // of viewport so the cue text + the word being looked up stays
+        // visible.
+        const audiobookView = document.getElementById('audiobookModeView');
+        const audiobookCue  = document.getElementById('audiobookCueText');
+        const inAudiobook   = audiobookView && audiobookView.style.display !== 'none' &&
+                              audiobookCue && audiobookCue.offsetParent !== null;
+        if (inAudiobook) {
+            const cueRect = audiobookCue.getBoundingClientRect();
+            const top  = Math.max(margin, cueRect.bottom + margin);
+            const maxH = Math.min(vh * 0.42, 380);
+            const h    = Math.min(maxH, Math.max(180, vh - top - margin * 2));
+            const w    = Math.min(vw * 0.92, 500);
+            popup.style.width  = `${w}px`;
+            popup.style.height = `${h}px`;
+            popup.style.left   = `${(vw - w) / 2}px`;
+            popup.style.top    = `${top}px`;
+            return;
+        }
+
+        // Card mode: anchor below the subtitle text.
         const subtitleEl = document.querySelector('.subtitle-text');
         const subtitleVisible = subtitleEl && subtitleEl.offsetParent !== null;
         const imageElement = document.querySelector('.card-image');
         const imageVisible = imageElement && imageElement.offsetParent !== null;
         if (imageVisible && subtitleVisible) {
-            const vw = window.innerWidth, vh = window.innerHeight;
             const subRect = subtitleEl.getBoundingClientRect();
-            const margin = 12;
-            // Anchor immediately below the subtitle, fill to bottom edge.
             const top = Math.max(margin, subRect.bottom + margin);
             const maxH = Math.min(vh * 0.72, 520);
             const h = Math.min(maxH, Math.max(180, vh - top - margin * 2));
@@ -1189,6 +1208,10 @@
                         <div style="color:#666;font-size:0.8em;margin-top:12px;">This may take 1-2 minutes for the first lookup...</div>
                     </div>
                 `;
+                // Position BEFORE making visible so the popup never paints at
+                // its default (full-viewport) bounds — that was producing the
+                // "whole line briefly flashes" report.
+                positionDictPopup(popup);
                 popup.style.display = 'block';
                 maybePauseForLookup();
 
@@ -1244,15 +1267,14 @@
                 // For subsequent lookups, show results immediately (no loading bar)
                 const popup = getOrCreatePopup();
                 popup.innerHTML = renderPopupContent(results, currentResultIndex);
+                // Position BEFORE display:block so no flash at default bounds.
+                positionDictPopup(popup);
                 popup.style.display = 'block';
                 maybePauseForLookup();
 
-                // Setup navigation handlers
                 setupNavigationHandlers();
                 setupAnkiHandler(results);
                 setupAudioHandler(results);
-
-                positionDictPopup(popup);
             }
             
             console.log(`✅ Multi-dictionary lookup complete for "${best.match}" -> "${best.base}"`);
@@ -1592,9 +1614,15 @@
                 }
                 const r = await ab.addNote(params);
                 console.log('✅ AnkiBridge.addNote ->', r);
+                if (typeof window.showToast === 'function') {
+                    window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+                }
                 return r;
             } catch (err) {
                 console.error('❌ AnkiBridge.addNote error:', err);
+                if (typeof window.showToast === 'function') {
+                    window.showToast(`✗ Anki: ${err?.message || err}`, 4000);
+                }
                 throw new Error(err?.message || String(err));
             }
         }
@@ -1900,9 +1928,21 @@
             display: inline;
         }
         
+        /* Dictionary highlight is mode-tinted. Each mode's accent gets
+           color-mixed with transparent so the highlight reads as a
+           soft tint of the mode color rather than a fixed cyan. */
         .dict-frag.highlight {
-            background: rgba(152, 245, 249, 0.4) !important;
-            border-radius: 2px;
+            background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 32%, transparent) !important;
+            border-radius: 3px;
+        }
+        body.mode-card  .dict-frag.highlight {
+            background: color-mix(in srgb, var(--accent-card, #ff9550) 32%, transparent) !important;
+        }
+        body.mode-read  .dict-frag.highlight {
+            background: color-mix(in srgb, var(--accent-read, #4caf50) 32%, transparent) !important;
+        }
+        body.mode-audio .dict-frag.highlight {
+            background: color-mix(in srgb, var(--accent-audio, #b794f6) 32%, transparent) !important;
         }
         
         .subtitle-text {

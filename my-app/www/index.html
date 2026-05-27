@@ -1694,6 +1694,12 @@ body.dimmed .card-image {
           available: true,
           lastAccessed: title.lastOpenedAt
         });
+        // Always switch to card mode when opening a deck-based title.
+        // Otherwise opening a deck-only title from audio mode left the
+        // user staring at the previous title's audiobook view.
+        if (typeof window.setShellMode === 'function') {
+          try { window.setShellMode('card'); } catch (e) {}
+        }
         // Kick a tab refresh once the deckName has been painted so we don't
         // have to wait up to 3 s for the next interval tick.
         setTimeout(() => { if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability(); }, 50);
