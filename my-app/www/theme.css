@@ -262,13 +262,16 @@ body.mode-audio #audiobookCardImage {
 
 #appHeader {
   position: fixed;
-  top: 0; left: 0; right: 0;
-  /* Respect the iOS notch / Dynamic Island via env(safe-area-inset-top).
-     On Android the immersive mode hides system bars so the env value is
-     0 there; on iOS this pushes the header below the status bar so the
-     TIMER / mode tabs / hamburger aren't clipped by the time indicator. */
-  height: calc(48px + env(safe-area-inset-top, 0px));
-  padding-top: env(safe-area-inset-top, 0px);
+  /* On iOS we want the entire header BELOW the Dynamic Island, not just
+     "padded down" — vertical centering inside a taller box was leaving
+     the buttons at the same y as the Island. Top-offset by the safe
+     area inset puts the whole 48 px row below the cutout. The strip
+     above (between screen top and the header) is the WebView background
+     filling the Island region — visually clean. Android immersive
+     returns 0 for the inset so this is a no-op there. */
+  top: env(safe-area-inset-top, 0px);
+  left: 0; right: 0;
+  height: 48px;
   background: rgba(13, 13, 13, 0.94);
   /* No backdrop-filter: that creates a stacking context which has caused
      subtle hit-testing issues on some Android WebViews. The solid bg above
@@ -685,22 +688,41 @@ body.chrome-hidden #progressBar {
 .appearance-mode .mode-label[data-mode="read"]  { color: var(--accent-read); }
 .appearance-mode .mode-label[data-mode="audio"] { color: var(--accent-audio); }
 .appearance-mode .seg {
-  display: inline-flex;
+  /* Was inline-flex with overflow:hidden — on narrow screens the last
+     option (RIGHT / BOTTOM / BACKGROUND) got clipped instead of
+     letting the segmented control shrink. Flex with min-width:0 lets
+     buttons compress; whitespace:nowrap on each button keeps each
+     label intact, and the row scrolls horizontally if absolutely
+     necessary. */
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
   background: var(--bg, #0c0c0c);
   border: 1px solid var(--border, #2a2a2a);
   border-radius: 6px;
-  overflow: hidden;
 }
 .appearance-mode .seg button {
   background: transparent;
   color: var(--text-muted, #888);
   border: none;
-  padding: 5px 10px;
+  padding: 5px 8px;
   font-size: .72rem;
   letter-spacing: .08em;
   text-transform: uppercase;
   cursor: pointer;
   font-weight: 600;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+}
+/* Narrow screens: shrink label font and tighten padding so RIGHT,
+   BOTTOM, BACKGROUND fit. */
+@media (max-width: 430px) {
+  .appearance-mode .seg button {
+    font-size: .65rem;
+    letter-spacing: .04em;
+    padding: 5px 4px;
+  }
 }
 .appearance-mode .seg button[data-on="1"] {
   background: var(--accent-cyan, #00ffcc);
