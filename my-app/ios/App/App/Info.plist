@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-        <string>AnkiDeckReader</string>
+	<string>AnkiDeckReader</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -18,10 +18,29 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.example.app</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ankideckreader</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>anki</string>
+	</array>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
@@ -30,6 +49,8 @@
 	<array>
 		<string>armv7</string>
 	</array>
+	<key>UIStatusBarHidden</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -45,42 +66,5 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
-	<!-- Hide the iOS status bar to match the Android immersive mode the rest
-	     of the app expects. The header still respects env(safe-area-inset-top)
-	     so the Dynamic Island cutout on iPhone 14/15/16/17 Pro doesn't clip
-	     the TIMER pill. -->
-	<key>UIStatusBarHidden</key>
-	<true/>
-	<!-- Background audio: allows our BackgroundAudio plugin's AVAudioPlayer
-	     to keep producing sound when the app is backgrounded or the screen
-	     is locked. The audio category set in code (.playback) plus this
-	     UIBackgroundModes entry are both required by iOS. -->
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>audio</string>
-	</array>
-	<!-- AnkiBridge plugin uses anki://x-callback-url/ to send cards to
-	     AnkiMobile. iOS 9+ requires us to declare schemes we'll probe via
-	     canOpenURL — without this, isAvailable() returns false even
-	     when AnkiMobile is installed. -->
-	<key>LSApplicationQueriesSchemes</key>
-	<array>
-		<string>anki</string>
-	</array>
-	<!-- Register our own URL scheme so AnkiMobile's x-callback-url can
-	     bring focus back to us after a card is added (Manatan-style
-	     "flash to Anki, then back" UX). The scheme is otherwise unused;
-	     incoming URLs are accepted but no payload is parsed. -->
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleURLName</key>
-			<string>com.example.app</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>ankideckreader</string>
-			</array>
-		</dict>
-	</array>
 </dict>
 </plist>

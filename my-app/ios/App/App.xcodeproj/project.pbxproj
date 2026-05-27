@@ -18,6 +18,7 @@
 		A084ECDBA7D38E1E42DFC39D /* Pods_App.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */; };
 		A8BFD7E4B17BF44E40C7FC5D /* BackgroundAudioPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */; };
 		C5C183F988E421195EE65059 /* AnkiBridgePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */; };
+		EF8A04896EEFB1F1528F779D /* FileAccessPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +35,7 @@
 		88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSlicerPlugin.swift; sourceTree = "<group>"; };
 		AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_App.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		AF51FD2D460BCFE21FA515B2 /* Pods-App.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.release.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.release.xcconfig"; sourceTree = "<group>"; };
+		BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileAccessPlugin.swift; sourceTree = "<group>"; };
 		EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BackgroundAudioPlugin.swift; sourceTree = "<group>"; };
 		FC68EB0AF532CFC21C3344DD /* Pods-App.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.debug.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.debug.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -90,6 +92,7 @@
 				EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */,
 				88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */,
 				7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */,
+				BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -220,6 +223,7 @@
 				A8BFD7E4B17BF44E40C7FC5D /* BackgroundAudioPlugin.swift in Sources */,
 				763A6A097EB909AC131545C6 /* AudioSlicerPlugin.swift in Sources */,
 				C5C183F988E421195EE65059 /* AnkiBridgePlugin.swift in Sources */,
+				EF8A04896EEFB1F1528F779D /* FileAccessPlugin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -359,12 +363,13 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
 				OTHER_SWIFT_FLAGS = "$(inherited) \"-D\" \"COCOAPODS\" \"-DDEBUG\"";
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_VERSION = 5.0;
@@ -379,11 +384,12 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				INFOPLIST_FILE = App/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
 				SWIFT_VERSION = 5.0;
