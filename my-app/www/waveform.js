@@ -17,6 +17,32 @@
   let state = null;
   let previewHandle = null;
   let previewTimer = null;
+  let playheadRAF = null;
+
+  // rAF loop: extrapolate playhead between bg position events. The native
+  // position poll fires at 150 ms; without this, the white line steps
+  // visibly every poll. Extrapolating at rAF (~60 Hz) using the last
+  // known position + timestamp + playback rate makes it glide smoothly,
+  // and gets corrected to ground-truth on the next bg event.
+  function tickPlayhead() {
+    if (!state || !state.playheadPlaying || !Number.isFinite(state.playheadMs)) {
+      playheadRAF = null;
+      return;
+    }
+    const rate = window.audioPlaybackRate || 1;
+    const dt = performance.now() - (state.playheadLastTs || 0);
+    state.playheadInterpMs = state.playheadMs + dt * rate;
+    render();
+    playheadRAF = requestAnimationFrame(tickPlayhead);
+  }
+  function startPlayheadAnim() {
+    if (playheadRAF || !state) return;
+    playheadRAF = requestAnimationFrame(tickPlayhead);
+  }
+  function stopPlayheadAnim() {
+    if (playheadRAF) cancelAnimationFrame(playheadRAF);
+    playheadRAF = null;
+  }
 
   // When the shell switches modes, the accent color the waveform pulls
   // from CSS changes. Force a render so handles + fill repaint right
@@ -191,10 +217,14 @@
     ctx.fillStyle = rgba(accent, 0.06);
     ctx.fillRect(x0, wfTop, x1 - x0, wfHeight);
 
-    // ---- playhead (driven by bg position events) ----
-    if (Number.isFinite(state.playheadMs) &&
-        state.playheadMs >= wfStartMs && state.playheadMs <= wfEndMs) {
-      const px = ((state.playheadMs - wfStartMs) / wfRange) * cssW;
+    // ---- playhead (driven by bg position events, smoothed via rAF) ----
+    // Use the interpolated value when available — that's what the rAF
+    // animation loop sets between actual position-event arrivals so the
+    // line glides like a DAW instead of stepping every 150 ms.
+    const phMs = Number.isFinite(state.playheadInterpMs)
+      ? state.playheadInterpMs : state.playheadMs;
+    if (Number.isFinite(phMs) && phMs >= wfStartMs && phMs <= wfEndMs) {
+      const px = ((phMs - wfStartMs) / wfRange) * cssW;
       ctx.strokeStyle = '#ffffff';
       ctx.globalAlpha = 0.85;
       ctx.lineWidth = 1.5;
@@ -478,21 +508,38 @@
         render();
       });
       // Playhead: subscribe to bg position so the white tick line tracks
-      // playback in real time (preview + the user's normal audio output).
+      // playback in real time. The rAF loop interpolates between position
+      // events so the line glides at 60 Hz instead of stepping at 150 ms.
       const bg = window.Capacitor?.Plugins?.BackgroundAudio;
       if (bg) {
         bg.addListener('position', (d) => {
           if (!state) return;
           state.playheadMs = d.positionMs;
-          render();
+          state.playheadLastTs = performance.now();
+          state.playheadPlaying = !!d.playing;
+          state.playheadInterpMs = d.positionMs;
+          if (d.playing) startPlayheadAnim();
+          else { stopPlayheadAnim(); render(); }
         }).then(h => { if (state) state.playheadHandle = h; }).catch(() => {});
+        // Also listen for state changes — pause should freeze the playhead
+        // immediately rather than waiting for the next stale position event.
+        bg.addListener('state', (d) => {
+          if (!state) return;
+          state.playheadPlaying = !!d.playing;
+          if (!d.playing) { stopPlayheadAnim(); render(); }
+          else { state.playheadLastTs = performance.now(); startPlayheadAnim(); }
+        }).then(h => { if (state) state.stateHandle = h; }).catch(() => {});
       }
     },
 
     hide() {
       cancelPreview();
+      stopPlayheadAnim();
       if (state?.playheadHandle) {
         try { state.playheadHandle.remove(); } catch (e) {}
+      }
+      if (state?.stateHandle) {
+        try { state.stateHandle.remove(); } catch (e) {}
       }
       state = null;
     },
@@ -575,7 +622,8 @@
       return new Promise((resolve) => {
         const useTextHandles = Array.isArray(cues) && Number.isFinite(cueIndex) &&
                                cueIndex >= 0 && cueIndex < cues.length;
-        // Overlay
+        const modeColor = getModeColor();
+
         const overlay = document.createElement('div');
         overlay.id = 'waveformEditorOverlay';
         overlay.style.cssText = `
@@ -586,32 +634,26 @@
         const panel = document.createElement('div');
         panel.style.cssText = `
           background:var(--bg,#0c0c0c); border:1px solid var(--border,#2a2a2a);
-          border-radius:12px; width:min(560px,94vw); padding:16px;
+          border-radius:12px; width:min(640px,94vw); padding:16px;
         `;
-        // Build the text-range row. If we have cues, the title text sits
-        // inside a "bouncing box" framed by two grab handles — drag a
-        // handle horizontally to include or drop neighboring cues. Without
-        // cues, fall back to the read-only title block.
+        // Text picker: three cues across (prev, current, next). The middle
+        // chunk is "selected" by default and rendered in mode color, the
+        // others are dimmed context. ± buttons on each end expand or
+        // contract the selection one cue at a time; whenever the selection
+        // changes, the audio bounds snap to the matching cue boundaries.
         const textRowHtml = useTextHandles ? `
           <div data-role="text-row" style="display:flex;align-items:stretch;gap:6px;margin-bottom:10px;">
-            <div data-role="left-handle" class="text-range-handle" style="
-              flex:0 0 18px; display:flex; align-items:center; justify-content:center;
-              background:var(--accent-cyan,#00ffcc); color:#000; cursor:ew-resize;
-              border-radius:4px; font-weight:700; font-size:.8rem; user-select:none;
-              touch-action:none;">‹</div>
-            <div data-role="text-box" style="
-              flex:1; padding:8px 10px; background:#141414; border:1px solid #1f1f1f;
-              border-radius:6px; font-size:.85rem; color:var(--text,#e8e8e8);
-              font-family:var(--font-family-card,serif); line-height:1.4;
-              max-height:5em; overflow-y:auto;
-              transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);">
-              <span data-role="text-content"></span>
+            <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 28px;">
+              <button data-role="left-plus" class="tr-btn">+</button>
+              <button data-role="left-minus" class="tr-btn">−</button>
             </div>
-            <div data-role="right-handle" class="text-range-handle" style="
-              flex:0 0 18px; display:flex; align-items:center; justify-content:center;
-              background:var(--accent-cyan,#00ffcc); color:#000; cursor:ew-resize;
-              border-radius:4px; font-weight:700; font-size:.8rem; user-select:none;
-              touch-action:none;">›</div>
+            <div data-role="cues-row" style="
+              flex:1; display:flex; gap:4px; align-items:stretch;
+              min-height:3em;"></div>
+            <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 28px;">
+              <button data-role="right-plus" class="tr-btn">+</button>
+              <button data-role="right-minus" class="tr-btn">−</button>
+            </div>
           </div>
         ` : `
           <div style="font-size:.85rem;color:var(--text,#e8e8e8);margin-bottom:10px;
@@ -621,64 +663,107 @@
           </div>
         `;
         panel.innerHTML = `
+          <style>
+            #waveformEditorOverlay .tr-btn {
+              flex:1; padding:0; background:#1a1a1a; color:${modeColor};
+              border:1px solid ${rgba(modeColor, 0.5)}; border-radius:6px;
+              font-size:1rem; font-weight:700; cursor:pointer; touch-action:manipulation;
+              transition: transform .12s ease, background .12s ease;
+            }
+            #waveformEditorOverlay .tr-btn:active { transform: scale(0.92); }
+            #waveformEditorOverlay .tr-btn:disabled {
+              color:#444; border-color:#1f1f1f; cursor:default;
+            }
+            #waveformEditorOverlay .cue-chip {
+              padding:8px 10px; border-radius:6px; font-size:.85rem;
+              font-family:var(--font-family-card,serif); line-height:1.35;
+              max-height:5em; overflow-y:auto; flex:1; min-width:0;
+              transition: transform .16s cubic-bezier(0.34, 1.56, 0.64, 1),
+                          background .12s ease, border-color .12s ease;
+            }
+            #waveformEditorOverlay .cue-chip.selected {
+              background:${rgba(modeColor, 0.13)};
+              border:1px solid ${rgba(modeColor, 0.7)};
+              color:var(--text,#e8e8e8);
+              box-shadow: 0 0 0 1px ${rgba(modeColor, 0.25)} inset;
+            }
+            #waveformEditorOverlay .cue-chip.context {
+              background:#0f0f0f; border:1px dashed #1f1f1f; color:#666;
+            }
+            #waveformEditorOverlay .bounce { transform: scale(1.05); }
+            #waveformEditorOverlay .btn-send-mode {
+              background:${modeColor} !important; color:#000 !important;
+              border:none !important; font-weight:700;
+            }
+          </style>
           ${textRowHtml}
           <div data-role="wf-host"></div>
           <div style="font-size:.7rem;color:#666;text-align:center;margin-top:6px;">
             ${useTextHandles
-              ? 'Drag text handles to expand or trim · drag waveform handles for fine bounds'
+              ? 'Use + and − to grow or trim the selection · drag waveform handles for fine audio bounds'
               : 'Drag vertically to zoom · drag horizontally to pan · drag handles to set bounds'}
           </div>
           <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;">
             <button data-role="cancel" class="btn">Cancel</button>
-            <button data-role="send" class="btn btn-primary">Send to Anki</button>
+            <button data-role="send" class="btn btn-send-mode">Send to Anki</button>
           </div>
         `;
         overlay.appendChild(panel);
         document.body.appendChild(overlay);
-        document.body.classList.add('prefs-open'); // reuse scroll lock
+        document.body.classList.add('prefs-open');
 
-        // Mount the waveform widget in our host div.
         const host = panel.querySelector('[data-role="wf-host"]');
         this.show({ container: host, srcPath, startMs, endMs });
 
-        // Text-range state + drag bindings. leftIdx/rightIdx point into cues;
-        // text shown is the concatenation of cues[leftIdx..rightIdx]. The
-        // audio selection (and waveform viewport) snap to the matching cue
-        // boundaries whenever the range changes.
         const textRangeState = useTextHandles ? {
           leftIdx: cueIndex,
           rightIdx: cueIndex
         } : null;
 
-        function renderTextContent(bounce) {
+        function renderCueChips(bounceIdx) {
           if (!textRangeState) return;
-          const span = panel.querySelector('[data-role="text-content"]');
-          if (!span) return;
-          let text = '';
-          for (let i = textRangeState.leftIdx; i <= textRangeState.rightIdx; i++) {
-            if (i > textRangeState.leftIdx) text += ' ';
-            text += cues[i].text;
+          const row = panel.querySelector('[data-role="cues-row"]');
+          if (!row) return;
+          // Always show at least one cue of context on each side when available,
+          // so the user sees what they're about to absorb. Selection cues use
+          // mode color; context cues are dimmed and dashed.
+          const lo = Math.max(0, textRangeState.leftIdx - 1);
+          const hi = Math.min(cues.length - 1, textRangeState.rightIdx + 1);
+          row.innerHTML = '';
+          for (let i = lo; i <= hi; i++) {
+            const selected = i >= textRangeState.leftIdx && i <= textRangeState.rightIdx;
+            const div = document.createElement('div');
+            div.className = 'cue-chip ' + (selected ? 'selected' : 'context');
+            div.textContent = cues[i].text;
+            div.dataset.cueIdx = i;
+            row.appendChild(div);
           }
-          span.textContent = text;
-          if (bounce) {
-            const box = panel.querySelector('[data-role="text-box"]');
-            if (box) {
-              box.style.transform = 'scale(1.05)';
-              setTimeout(() => { box.style.transform = 'scale(1)'; }, 160);
+          // Bounce the chip that just changed selection state.
+          if (Number.isFinite(bounceIdx)) {
+            const target = row.querySelector(`[data-cue-idx="${bounceIdx}"]`);
+            if (target) {
+              target.classList.add('bounce');
+              setTimeout(() => target.classList.remove('bounce'), 160);
             }
           }
+          // Button enable/disable state.
+          const leftPlus  = panel.querySelector('[data-role="left-plus"]');
+          const leftMinus = panel.querySelector('[data-role="left-minus"]');
+          const rightPlus = panel.querySelector('[data-role="right-plus"]');
+          const rightMinus= panel.querySelector('[data-role="right-minus"]');
+          if (leftPlus)  leftPlus.disabled  = textRangeState.leftIdx <= 0;
+          if (leftMinus) leftMinus.disabled = textRangeState.leftIdx >= textRangeState.rightIdx;
+          if (rightPlus) rightPlus.disabled = textRangeState.rightIdx >= cues.length - 1;
+          if (rightMinus)rightMinus.disabled= textRangeState.rightIdx <= textRangeState.leftIdx;
         }
-        function applyTextRange(bounce) {
+        function applyTextRange(bounceIdx) {
           if (!textRangeState) return;
-          renderTextContent(bounce);
-          // Snap the audio selection to the cue boundaries of the new range.
+          renderCueChips(bounceIdx);
           const newStart = cues[textRangeState.leftIdx].startMs;
           const newEnd   = cues[textRangeState.rightIdx].endMs;
           if (state) {
             state.startMs = newStart;
             state.endMs   = newEnd;
-            // Expand viewport if the new selection extends beyond it; this
-            // also triggers a re-decode at the wider range.
             let viewportChanged = false;
             if (newStart < state.wfStartMs) {
               state.wfStartMs = Math.max(0, newStart - VIEWPORT_PAD_MS);
@@ -703,73 +788,31 @@
           }
         }
         if (useTextHandles) {
-          renderTextContent(false);
-          // Drag binding: each handle absorbs/ejects one cue per ~50 px of
-          // horizontal travel. Left handle drag-left expands (prepend prev
-          // cue), drag-right contracts (drop first included cue). Right
-          // handle is the mirror.
-          const STEP_PX = 50;
-          const bindHandle = (el, role) => {
-            let startX = 0;
-            let activeIdx = 0;     // leftIdx or rightIdx at gesture start
-            let dragging = false;
-            const onStart = (clientX) => {
-              startX = clientX;
-              activeIdx = role === 'left' ? textRangeState.leftIdx : textRangeState.rightIdx;
-              dragging = true;
-            };
-            const onMove = (clientX) => {
-              if (!dragging) return;
-              const dx = clientX - startX;
-              // signed steps: drag-left → negative, drag-right → positive.
-              const steps = Math.round(dx / STEP_PX);
-              if (role === 'left') {
-                // Left handle: drag LEFT (dx<0, steps<0) → decrease leftIdx
-                // = include the previous cue. Drag RIGHT → trim from start.
-                let want = activeIdx + steps;
-                if (want < 0) want = 0;
-                if (want > textRangeState.rightIdx) want = textRangeState.rightIdx;
-                if (want !== textRangeState.leftIdx) {
-                  textRangeState.leftIdx = want;
-                  applyTextRange(true);
-                }
-              } else {
-                // Right handle: drag RIGHT → include next cue, LEFT → trim.
-                let want = activeIdx + steps;
-                if (want >= cues.length) want = cues.length - 1;
-                if (want < textRangeState.leftIdx) want = textRangeState.leftIdx;
-                if (want !== textRangeState.rightIdx) {
-                  textRangeState.rightIdx = want;
-                  applyTextRange(true);
-                }
-              }
-            };
-            const onEnd = () => { dragging = false; };
-            el.addEventListener('touchstart', (e) => {
-              if (!e.touches?.[0]) return;
-              onStart(e.touches[0].clientX);
-              e.preventDefault(); e.stopPropagation();
-            }, { passive: false });
-            el.addEventListener('touchmove', (e) => {
-              if (!e.touches?.[0]) return;
-              onMove(e.touches[0].clientX);
-              e.preventDefault(); e.stopPropagation();
-            }, { passive: false });
-            el.addEventListener('touchend', onEnd);
-            el.addEventListener('mousedown', (e) => {
-              onStart(e.clientX);
-              const move = (ev) => onMove(ev.clientX);
-              const up = () => {
-                onEnd();
-                window.removeEventListener('mousemove', move);
-                window.removeEventListener('mouseup', up);
-              };
-              window.addEventListener('mousemove', move);
-              window.addEventListener('mouseup', up);
-            });
-          };
-          bindHandle(panel.querySelector('[data-role="left-handle"]'), 'left');
-          bindHandle(panel.querySelector('[data-role="right-handle"]'), 'right');
+          renderCueChips();
+          // Wire the four ± buttons. Each click changes the selection by one
+          // cue and bounces the newly-affected cue chip.
+          panel.querySelector('[data-role="left-plus"]').addEventListener('click', () => {
+            if (textRangeState.leftIdx <= 0) return;
+            textRangeState.leftIdx--;
+            applyTextRange(textRangeState.leftIdx);
+          });
+          panel.querySelector('[data-role="left-minus"]').addEventListener('click', () => {
+            if (textRangeState.leftIdx >= textRangeState.rightIdx) return;
+            const dropped = textRangeState.leftIdx;
+            textRangeState.leftIdx++;
+            applyTextRange(dropped);
+          });
+          panel.querySelector('[data-role="right-plus"]').addEventListener('click', () => {
+            if (textRangeState.rightIdx >= cues.length - 1) return;
+            textRangeState.rightIdx++;
+            applyTextRange(textRangeState.rightIdx);
+          });
+          panel.querySelector('[data-role="right-minus"]').addEventListener('click', () => {
+            if (textRangeState.rightIdx <= textRangeState.leftIdx) return;
+            const dropped = textRangeState.rightIdx;
+            textRangeState.rightIdx--;
+            applyTextRange(dropped);
+          });
         }
 
         const close = (result) => {
@@ -783,9 +826,6 @@
         panel.querySelector('[data-role="send"]').addEventListener('click', () => {
           const cur = this.current();
           if (!cur) return close(null);
-          // When the text-range handles were used, hand back the expanded text
-          // so the caller can use it as the Anki expression. Otherwise the
-          // caller keeps whatever expression it already had.
           let text = null;
           if (textRangeState) {
             text = '';

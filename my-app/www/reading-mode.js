@@ -256,16 +256,21 @@
 
   async function applyFontPrefs() {
     ensureFontOverrideStyle();
-    const font = (await getPref(KEYS.FONT)) || 'serif';
-    const size = (await getPref(KEYS.FONT_SIZE)) || '1.1';
-    document.documentElement.style.setProperty('--reader-font', font);
-    document.documentElement.style.setProperty('--reader-font-size', size + 'rem');
-    const vertical = (await getPref(KEYS.VERTICAL)) === 'true';
-    applyVertical(vertical);
-    const hi = (await getPref(KEYS.HIGHLIGHT)) || DEFAULT_HIGHLIGHT;
-    applyHighlightColor(hi);
-    // Auto-advance default ON; only OFF if explicitly stored as 'false'.
-    const auto = await getPref(KEYS.AUTO_ADVANCE);
+    // Parallelize the 5 prefs reads. Capacitor's Preferences plugin does a
+    // JNI hop per call (~50–100 ms on Android), so sequencing 5 of them
+    // was eating 250–500 ms on every reader open. Promise.all collapses
+    // that to roughly the cost of the slowest single call.
+    const [font, size, vertical, hi, auto] = await Promise.all([
+      getPref(KEYS.FONT),
+      getPref(KEYS.FONT_SIZE),
+      getPref(KEYS.VERTICAL),
+      getPref(KEYS.HIGHLIGHT),
+      getPref(KEYS.AUTO_ADVANCE)
+    ]);
+    document.documentElement.style.setProperty('--reader-font', font || 'serif');
+    document.documentElement.style.setProperty('--reader-font-size', (size || '1.1') + 'rem');
+    applyVertical(vertical === 'true');
+    applyHighlightColor(hi || DEFAULT_HIGHLIGHT);
     window.readingAutoAdvance = auto !== 'false';
   }
 
@@ -2273,52 +2278,77 @@
     }, { passive: true });
   }
 
+  // Session-level "warm" flag. The first openReadingMode does the heavy
+  // setup (font prefs, hooks, prefs reads). Subsequent calls within the
+  // session skip all of it — chunks + DOM are already in memory, hooks
+  // are already attached, prefs values are still valid. This keeps tab
+  // switches into READ snappy (sub-100 ms) instead of paying ~500 ms of
+  // sequential Capacitor Preferences round-trips every time.
+  let readerWarmed = false;
+
   window.openReadingMode = async function () {
     rlog('Opening reading mode');
-    // Show the reader view IMMEDIATELY (before any awaits) so there's
-    // no brief flash of the card-mode underlay when switching from
-    // audiobook mode. Content stays at opacity 0 until syncReader paints
-    // + scrolls — that hides the "scroll-from-top then jump" flash.
     const view = document.getElementById('readingModeView');
     view.style.display = 'flex';
     const content = document.getElementById('readingModeContent');
+
+    // Warm path: just snap + show. The expensive prefs are already
+    // applied; their values haven't changed since they were last read.
+    if (readerWarmed) {
+      if (content) content.style.opacity = '1';
+      setPref(KEYS.MODE_OPEN, 'true');
+      startTimer();
+      // Sync still needs to run — playhead may have moved while in
+      // another mode. syncReader is fast (~5 ms of array walks + a
+      // scrollIntoView), so just await it; no opacity fade needed.
+      await syncReaderToCurrentPosition();
+      return;
+    }
+
+    // Cold path: do the expensive setup once. Keep content invisible
+    // while everything wires up so the user doesn't see a flash of
+    // unstyled content / scroll-to-top.
     if (content) {
       content.style.opacity = '0';
       content.style.transition = 'opacity 0.15s ease';
     }
-    await applyFontPrefs();
-    installReadActivityHooks();
-    setPref(KEYS.MODE_OPEN, 'true');
-    installContentTapHandler();
-    startInactivityWatcher();
-    refreshPlayPauseButton();
-    startPlayStatePoll();
-    const stored = await getPref(KEYS.TIME_SEC);
-    cumulativeSec = parseInt(stored) || 0;
-    const storedChars = await getPref(KEYS.CHARS);
+    // Run every awaitable piece concurrently. Each Capacitor Preferences
+    // call hops the bridge; running them sequentially burned ~500 ms.
+    const deck = currentDeckName();
+    const [, storedSec, storedChars, storedMode, pairedName] = await Promise.all([
+      applyFontPrefs(),
+      getPref(KEYS.TIME_SEC),
+      getPref(KEYS.CHARS),
+      getPref(KEYS.PROGRESS_MODE),
+      deck ? getPairedEpub(deck) : Promise.resolve(null)
+    ]);
+    cumulativeSec = parseInt(storedSec) || 0;
     cumulativeChars = parseInt(storedChars) || 0;
-    const storedMode = await getPref(KEYS.PROGRESS_MODE);
     const m = parseInt(storedMode);
     if (Number.isFinite(m) && m >= 0 && m < 3) progressMode = m;
     const label = document.getElementById('readingTimerLabel');
     if (label) label.textContent = formatSec(cumulativeSec);
+
+    installReadActivityHooks();
+    installContentTapHandler();
+    startInactivityWatcher();
+    refreshPlayPauseButton();
+    startPlayStatePoll();
+    setPref(KEYS.MODE_OPEN, 'true');
     startTimer();
-    // Always check if the currently-loaded EPUB matches the current deck's
-    // pairing. If they differ (e.g., user switched decks while the previous
-    // book was loaded), reload the right one or clear to empty state.
-    const deck = currentDeckName();
-    const pairedName = deck ? await getPairedEpub(deck) : null;
     if (pairedName !== currentEpubName) {
       await restoreLastEpub();
     }
-    // Snap the reader to the current playhead. Centered + instant so
-    // the user lands directly on the right line.
     await syncReaderToCurrentPosition();
-    // Reveal content only after sync — no visible scroll-from-top flash.
     if (content) {
       requestAnimationFrame(() => { content.style.opacity = '1'; });
     }
+    readerWarmed = true;
   };
+
+  // Title swap invalidates the warm flag — new title may have different
+  // font/highlight prefs, and EPUB pairing has to be re-resolved.
+  window.addEventListener('shell:title-change', () => { readerWarmed = false; });
 
   // Open-reader and tab-switch sync: locate the chunk that matches the
   // current playhead (audio cue → mapped chunk, else the current card's

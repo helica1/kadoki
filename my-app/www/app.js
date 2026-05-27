@@ -2791,8 +2791,9 @@ window.loadTitleAsSrtCards = async function (title) {
   currentCardIndex = restoreIdx;
   window.currentCardIndex = restoreIdx;
   window._activeTitleId = title.id;
-  // Title swap invalidates the audiobook pre-warm cache.
+  // Title swap invalidates the audiobook pre-warm cache + reader warm flag.
   if (typeof window.invalidateAbContext === 'function') window.invalidateAbContext();
+  window.dispatchEvent(new CustomEvent('shell:title-change'));
 
   // Show the title as the "deck name" so the rest of the app (which reads
   // currentDeckName from #deckName) uses the title for pref namespacing.
