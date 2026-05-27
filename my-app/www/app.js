@@ -2515,6 +2515,11 @@ function setupSwipe() {
                 if (card.isSrtCard && card.audiobookPath && window.Capacitor?.Plugins?.AudioSlicer) {
                   let finalStart = Math.round(card.audiobookStartMs);
                   let finalEnd   = Math.round(card.audiobookEndMs);
+                  console.log('[card-anki] currentCardIndex=' + currentCardIndex +
+                    ' expression="' + (expression || '').slice(0, 40) + '"' +
+                    ' audiobookStartMs=' + card.audiobookStartMs +
+                    ' audiobookEndMs=' + card.audiobookEndMs +
+                    ' path=' + card.audiobookPath);
                   if (window.waveform?.edit) {
                     // SRT-card index IS cue index. Pass the cue list so the
                     // editor's text-range handles can expand/contract.
@@ -2544,6 +2549,9 @@ function setupSwipe() {
                   }
                   try {
                     const slicer = window.Capacitor.Plugins.AudioSlicer;
+                    console.log('[card-anki] slicing srcPath=' + card.audiobookPath +
+                      ' finalStart=' + finalStart + ' finalEnd=' + finalEnd +
+                      ' duration=' + (finalEnd - finalStart) + 'ms');
                     const slice = await slicer.slice({
                       srcPath: card.audiobookPath,
                       startMs: finalStart,

@@ -621,7 +621,27 @@
     const chunkIdxLocal = chunks.indexOf(chunk);
     let cueAudioPath = null, cueStartMs = null, cueEndMs = null, cueText = '', cueIdxOut = -1;
     if (abChunkToCue && chunkIdxLocal >= 0) {
-      const cueIdx = abChunkToCue[chunkIdxLocal];
+      let cueIdx = abChunkToCue[chunkIdxLocal];
+      // Fallback when this chunk has no directly mapped cue: walk neighbor
+      // chunks outward looking for one with a cue. Without this, dict
+      // lookups in unmapped sentences fell back to the currently-playing
+      // cue's audio — which sent the wrong sentence to Anki (user's bug
+      // report: "if a word is looked up in a sentence that is NOT
+      // selected it should use the SRT including the looked up word").
+      if (cueIdx < 0) {
+        for (let i = 1; i < 8 && (chunkIdxLocal - i >= 0 || chunkIdxLocal + i < chunks.length); i++) {
+          if (chunkIdxLocal - i >= 0 && abChunkToCue[chunkIdxLocal - i] >= 0) {
+            cueIdx = abChunkToCue[chunkIdxLocal - i];
+            rlog(`lookupAtPoint: chunk ${chunkIdxLocal} unmapped, using prev cue from chunk ${chunkIdxLocal - i}`);
+            break;
+          }
+          if (chunkIdxLocal + i < chunks.length && abChunkToCue[chunkIdxLocal + i] >= 0) {
+            cueIdx = abChunkToCue[chunkIdxLocal + i];
+            rlog(`lookupAtPoint: chunk ${chunkIdxLocal} unmapped, using next cue from chunk ${chunkIdxLocal + i}`);
+            break;
+          }
+        }
+      }
       if (cueIdx >= 0 && abCues[cueIdx]) {
         cueAudioPath = abAudioPath;
         cueStartMs = abCues[cueIdx].startMs;
