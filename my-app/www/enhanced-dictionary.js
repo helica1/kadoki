@@ -979,9 +979,7 @@
         }
         // Reading-mode fallback: keep the popup out of the active chunk so the
         // user can still see the highlighted word being looked up.
-        const vw = window.innerWidth, vh = window.innerHeight;
         const w = Math.min(vw * 0.92, 600);
-        const margin = 12;
 
         // Find the area to avoid. Prefer the highlighted dict-frag(s); fall
         // back to the active reading-chunk; else just the touch-most-recent
