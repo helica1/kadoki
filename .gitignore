@@ -74,3 +74,11 @@ megalog.txt
 *.swp
 *.swo
 Thumbs.db
+
+# iOS / Capacitor
+my-app/ios/App/Pods/
+my-app/ios/App/build/
+my-app/ios/DerivedData/
+my-app/ios/App/App.xcodeproj/xcuserdata/
+my-app/ios/App/App.xcworkspace/xcuserdata/
+*.xcuserstate

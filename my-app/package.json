@@ -17,6 +17,7 @@
     "@capacitor/camera": "latest",
     "@capacitor/core": "latest",
     "@capacitor/filesystem": "^7.1.1",
+    "@capacitor/ios": "^7.6.5",
     "@capacitor/preferences": "^7.0.1",
     "@capacitor/splash-screen": "latest",
     "file-access": "file:../file-access"
