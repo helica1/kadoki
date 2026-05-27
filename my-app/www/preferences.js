@@ -116,6 +116,7 @@
       slider.step = '1';
       slider.value = String(Math.round(px));
       slider.style.flex = '1';
+      slider.style.minWidth = '0';
       const label = document.createElement('span');
       label.style.cssText = 'min-width:48px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;padding-right:4px;';
       label.textContent = px.toFixed(0) + 'px';
@@ -125,7 +126,7 @@
         apply(mode, { fontSize: rem });
       });
       const wrap = document.createElement('div');
-      wrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;';
+      wrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;min-width:0;';
       wrap.appendChild(slider); wrap.appendChild(label);
       return wrap;
     };
@@ -136,6 +137,7 @@
       slider.min = '0'; slider.max = '1'; slider.step = '0.05';
       slider.value = String(getCurrent());
       slider.style.flex = '1';
+      slider.style.minWidth = '0';
       const label = document.createElement('span');
       label.style.cssText = 'min-width:36px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;padding-right:4px;';
       label.textContent = Math.round(getCurrent() * 100) + '%';
@@ -145,7 +147,7 @@
         apply(mode, { imageOpacity: v });
       });
       const wrap = document.createElement('div');
-      wrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;';
+      wrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;min-width:0;';
       wrap.appendChild(slider); wrap.appendChild(label);
       return wrap;
     };

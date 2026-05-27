@@ -649,11 +649,19 @@ body.chrome-hidden #progressBar {
   padding: 6px 0;
   font-size: .82rem;
   color: var(--text-muted, #aaa);
+  /* min-width:0 on the row itself lets it shrink below its content's
+     intrinsic width when the parent panel narrows; otherwise on iOS
+     WebView the inner controls (especially the range input's default
+     129 px min-width) push the row past the panel's right border. */
+  min-width: 0;
 }
 .prefs-row label {
   flex: 0 0 45%;
   color: var(--text-muted, #aaa);
+  min-width: 0;
 }
+/* Direct children of a row should be allowed to shrink. */
+.prefs-row > * { min-width: 0; }
 .prefs-row input[type="text"],
 .prefs-row input[type="number"],
 .prefs-row select {
