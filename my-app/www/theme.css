@@ -136,6 +136,10 @@ body.mode-audio #audiobookCueText {
   font-size: var(--font-size-audio) !important;
   text-align: var(--align-audio) !important;
   font-family: var(--font-family-audio) !important;
+  /* Suppress the system's tap-highlight overlay that briefly tinted the
+     entire cue line on tap. We want only the tapped word's span to show
+     the highlight, not the whole element. */
+  -webkit-tap-highlight-color: transparent;
 }
 /* Per-char dict-frag spans in the audiobook subtitle should be invisible
    as such — they only exist for tap targeting. Keep the text rendering

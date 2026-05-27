@@ -1316,6 +1316,30 @@ body.dimmed .card-image {
         : `<span class="title-chip off">${label}</span>`;
     }
 
+    // Best-effort book progress for the library card. Reads the chunk
+    // cursor + cumulative chars saved by reading-mode.js (per deck, since
+    // that's the pref namespace used). Falls back to "Opened" if we have
+    // a chunk index but no char totals.
+    function bookProgressHtml(title) {
+      const deck = title.attachments?.deck?.name || title.name;
+      const epubName = title.attachments?.epub?.name;
+      if (!deck || !epubName) return '';
+      try {
+        const charsRaw  = localStorage.getItem('READING_CHARS_' + deck);
+        const totalRaw  = localStorage.getItem('READING_TOTAL_CHARS_' + deck + '_' + epubName);
+        const chars     = parseInt(charsRaw)  || 0;
+        const total     = parseInt(totalRaw)  || 0;
+        if (chars > 0 && total > 0) {
+          const pct = Math.min(100, Math.round((chars / total) * 100));
+          return `<span style="color:var(--accent-read);">📖 ${pct}%</span>`;
+        }
+        if (chars > 0) {
+          return `<span style="color:var(--accent-read);">📖 ${chars.toLocaleString()} chars</span>`;
+        }
+      } catch (e) {}
+      return '';
+    }
+
     async function populateLibrary() {
       debugLog('Populating library');
       const deckList = document.getElementById('deckList');
@@ -1362,7 +1386,8 @@ body.dimmed .card-image {
                 ${chipHtml('srt',   'SRT',   !!a.srt)}
               </div>
               <div class="deck-info" style="color:#888;font-size:0.85em;display:flex;gap:10px;flex-wrap:wrap;">
-                ${a.deck ? `<span>Card ${(a.deck.cardIndex || 0) + 1}${a.deck.totalCards ? ' / ' + a.deck.totalCards : ''}</span>` : ''}
+                ${a.deck ? `<span>Card ${(Number.isFinite(title.lastCardIndex) ? title.lastCardIndex : (a.deck.cardIndex || 0)) + 1}${a.deck.totalCards ? ' / ' + a.deck.totalCards : ''}</span>` : ''}
+                ${a.epub ? bookProgressHtml(title) : ''}
                 <span>${new Date(title.lastOpenedAt || title.createdAt).toLocaleDateString()}</span>
               </div>
             </div>
@@ -1685,10 +1710,17 @@ body.dimmed .card-image {
         // runs (covers the case where attachments were added before this
         // sync step existed, or under a different name).
         try { await syncTitleToLegacyPrefs(title); } catch (e) {}
+        // Prefer the LIVE lastCardIndex (updated on every card advance via
+        // titleStore.setCardIndex). The attachments.deck.cardIndex field is
+        // frozen at title-creation time and never updated, so reading from
+        // it caused titles to always reopen at their original position.
+        const resumeIdx = Number.isFinite(title.lastCardIndex)
+          ? title.lastCardIndex
+          : (a.deck.cardIndex || 0);
         loadDeckFromLibrary({
           fileName: a.deck.name,
           fileUri: a.deck.uri,
-          cardIndex: a.deck.cardIndex || 0,
+          cardIndex: resumeIdx,
           totalCards: a.deck.totalCards || 0,
           requiresManualSelection: !a.deck.uri,
           available: true,

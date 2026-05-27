@@ -1285,6 +1285,16 @@
       acc += len;
     });
     totalBookChars = acc;
+    // Persist for the library's progress display. Namespaced by deck +
+    // epub name so each (book,deck) pair tracks separately. Use plain
+    // localStorage so the sync library render can read it without a
+    // Capacitor Preferences round-trip.
+    try {
+      const deck = currentDeckName();
+      if (deck && currentEpubName) {
+        localStorage.setItem('READING_TOTAL_CHARS_' + deck + '_' + currentEpubName, String(acc));
+      }
+    } catch (e) {}
   }
 
   function progressForIdx(idx) {
@@ -1456,6 +1466,15 @@
         cumulativeChars += len;
         el.dataset.counted = '1';
         setPref(KEYS.CHARS, Math.floor(cumulativeChars));
+        // Mirror to localStorage so the library can show book progress
+        // without an async Preferences round-trip per title at render time.
+        try {
+          const deck = currentDeckName();
+          if (deck) {
+            localStorage.setItem('READING_CHARS_' + deck,
+                                 String(Math.floor(cumulativeChars)));
+          }
+        } catch (e) {}
       }
     }
     const view = document.getElementById('readingModeView');
@@ -1844,6 +1863,51 @@
       host.appendChild(sp);
     }
   }
+  // Swipe-down on the audiobook view toggles bg play/pause, matching
+  // the reader's behavior. Attached once. Skip swipes that originate
+  // inside the cue text (dict tap area) or on the transport / scrub
+  // controls so taps on those still fire normally.
+  function installAudiobookSwipeHandler() {
+    const view = document.getElementById('audiobookModeView');
+    if (!view || view.dataset.swipeWired === '1') return;
+    view.dataset.swipeWired = '1';
+    let startX = 0, startY = 0, startT = 0, started = false;
+    view.addEventListener('touchstart', (e) => {
+      if (!e.touches?.[0]) return;
+      // Bail if the touch is on an interactive control. The cue text
+      // owns dict-frag taps; the transport buttons + scrub bar own
+      // their own gestures.
+      const t = e.target;
+      if (t?.closest?.('#audiobookCueText, .transport-row, button, input, [data-role="scrub"]')) {
+        started = false;
+        return;
+      }
+      startX = e.touches[0].clientX;
+      startY = e.touches[0].clientY;
+      startT = Date.now();
+      started = true;
+    }, { passive: true });
+    view.addEventListener('touchend', (e) => {
+      if (!started) return;
+      started = false;
+      const dt = Date.now() - startT;
+      if (dt > 600) return; // not a quick swipe
+      const t = e.changedTouches?.[0];
+      if (!t) return;
+      const dx = t.clientX - startX;
+      const dy = t.clientY - startY;
+      // Down-swipe: > 50 px vertical, mostly vertical.
+      if (dy > 50 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+        const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+        if (!bg) return;
+        bg.getState().then(s => {
+          if (s?.playing) bg.pause();
+          else if (s?.ready) bg.resume();
+        }).catch(() => {});
+      }
+    }, { passive: true });
+  }
+
   // Tap handler for the audiobook subtitle: on dict-frag tap, set up
   // lookupContext with the tapped cue's audio range so a subsequent
   // "Add to Anki" pulls the right sentence/audio.
@@ -2063,6 +2127,7 @@
     abAttachListenersOnce();
     abAttachScrubControl();
     installAudiobookCueTapHandler();
+    installAudiobookSwipeHandler();
     window.audiobookActive = true;
     if (typeof window.stopCardAudio === 'function') window.stopCardAudio();
     const cueEl = document.getElementById('audiobookCueText');

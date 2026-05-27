@@ -948,11 +948,15 @@
         const inAudiobook   = audiobookView && audiobookView.style.display !== 'none' &&
                               audiobookCue && audiobookCue.offsetParent !== null;
         if (inAudiobook) {
+            // Anchor ABOVE the cue text so the popup fills the cover-art
+            // band (where there's plenty of vertical room) instead of the
+            // narrow strip below the cue (which is partially taken by the
+            // transport row).
             const cueRect = audiobookCue.getBoundingClientRect();
-            const top  = Math.max(margin, cueRect.bottom + margin);
-            const maxH = Math.min(vh * 0.42, 380);
-            const h    = Math.min(maxH, Math.max(180, vh - top - margin * 2));
-            const w    = Math.min(vw * 0.92, 500);
+            const w  = Math.min(vw * 0.92, 500);
+            const availAbove = cueRect.top - margin * 2;
+            const h  = Math.min(420, Math.max(220, availAbove));
+            const top = Math.max(margin, cueRect.top - margin - h);
             popup.style.width  = `${w}px`;
             popup.style.height = `${h}px`;
             popup.style.left   = `${(vw - w) / 2}px`;
