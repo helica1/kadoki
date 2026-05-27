@@ -1,3 +1,26 @@
+// ============================================================================
+// sendToAnkiConnect.js
+//
+// Anki integration. Two transports:
+//
+//   1) AnkiBridge (Capacitor plugin) — talks directly to AnkiDroid's
+//      ContentProvider (content://com.ichi2.anki.flashcards). No sideload
+//      app needed; no Google Play Protect interference. THIS IS THE
+//      DEFAULT on Android.
+//
+//   2) AnkiConnect over HTTP at http://127.0.0.1:8765 — used to require
+//      the AnkiConnect-for-Android sideload, which Play Protect kills
+//      periodically. KEPT AS A FALLBACK for desktop AnkiConnect testing
+//      or if AnkiBridge is unavailable. All old code is commented out
+//      below so we can revert by flipping the routing in `viaBridge()`.
+//
+// API surface (unchanged for callers):
+//   window.sendToAnki({ expression, imageData, audioData })
+//   window.fetchModelNames()
+//   window.fetchModelFieldNames(modelName)
+//   fetchDeckNames()  (also called by preferences.js via window.AnkiTransport)
+// ============================================================================
+
 async function isCap() {
   return typeof window.isCapacitorEnvironment === 'function' && window.isCapacitorEnvironment();
 }
@@ -26,7 +49,39 @@ async function setPref(key, value) {
   }
 }
 
+// Returns the AnkiBridge plugin instance if it's available AND AnkiDroid
+// is installed + reachable. Null otherwise → caller falls back to the
+// commented-out AnkiConnect HTTP path.
+let _bridgeAvailableCached = null;
+async function viaBridge() {
+  const ab = window.Capacitor?.Plugins?.AnkiBridge;
+  if (!ab) return null;
+  if (_bridgeAvailableCached !== null) return _bridgeAvailableCached ? ab : null;
+  try {
+    const r = await ab.isAvailable();
+    _bridgeAvailableCached = !!r?.available;
+    return _bridgeAvailableCached ? ab : null;
+  } catch (e) {
+    _bridgeAvailableCached = false;
+    return null;
+  }
+}
+
+// ----------------------------------------------------------------------------
+// fetchDeckNames
+// ----------------------------------------------------------------------------
 async function fetchDeckNames() {
+  const ab = await viaBridge();
+  if (ab) {
+    try {
+      const r = await ab.deckNames();
+      return Array.isArray(r?.decks) ? r.decks : [];
+    } catch (e) {
+      console.warn('AnkiBridge.deckNames failed:', e?.message || e);
+      return [];
+    }
+  }
+  /* ---- legacy AnkiConnect HTTP path (kept for fallback / desktop) ----
   try {
     const payload = { action: "deckNames", version: 6 };
     const res = await fetch("http://127.0.0.1:8765", {
@@ -41,11 +96,26 @@ async function fetchDeckNames() {
     console.error("Failed to fetch deck names:", e);
     return [];
   }
+  */
+  return [];
 }
+window.fetchDeckNames = fetchDeckNames;
 
-// Fetch all available Anki note type names via AnkiConnect's `modelNames`.
-// Returns [] on failure / offline.
+// ----------------------------------------------------------------------------
+// fetchModelNames
+// ----------------------------------------------------------------------------
 async function fetchModelNames() {
+  const ab = await viaBridge();
+  if (ab) {
+    try {
+      const r = await ab.modelNames();
+      return Array.isArray(r?.models) ? r.models : [];
+    } catch (e) {
+      console.warn('AnkiBridge.modelNames failed:', e?.message || e);
+      return [];
+    }
+  }
+  /* ---- legacy AnkiConnect HTTP path ----
   try {
     const res = await fetch("http://127.0.0.1:8765", {
       method: "POST",
@@ -59,13 +129,27 @@ async function fetchModelNames() {
     console.warn("modelNames unreachable:", e?.message || e);
     return [];
   }
+  */
+  return [];
 }
 window.fetchModelNames = fetchModelNames;
 
-// Fetch the field names of a given Anki note type via AnkiConnect's
-// `modelFieldNames`. Returns [] on failure / offline.
+// ----------------------------------------------------------------------------
+// fetchModelFieldNames
+// ----------------------------------------------------------------------------
 async function fetchModelFieldNames(modelName) {
   if (!modelName) return [];
+  const ab = await viaBridge();
+  if (ab) {
+    try {
+      const r = await ab.modelFieldNames({ modelName });
+      return Array.isArray(r?.fields) ? r.fields : [];
+    } catch (e) {
+      console.warn('AnkiBridge.modelFieldNames failed:', e?.message || e);
+      return [];
+    }
+  }
+  /* ---- legacy AnkiConnect HTTP path ----
   try {
     const res = await fetch("http://127.0.0.1:8765", {
       method: "POST",
@@ -82,12 +166,15 @@ async function fetchModelFieldNames(modelName) {
     console.warn("modelFieldNames unreachable:", e?.message || e);
     return [];
   }
+  */
+  return [];
 }
 window.fetchModelFieldNames = fetchModelFieldNames;
 
+// ----------------------------------------------------------------------------
+// sendToAnki — swipe-up flow (card mode)
+// ----------------------------------------------------------------------------
 async function sendToAnki({ expression, imageData, audioData }) {
-  // Read configured Anki settings (with defaults that match the previous
-  // hardcoded behavior). See preferences.js for shape + defaults.
   const cfg = (typeof window.getAnkiSettings === 'function')
     ? await window.getAnkiSettings('swipe')
     : { deck: (await getPref('SELECTED_DECK')) || 'Shadowing5',
@@ -108,6 +195,41 @@ async function sendToAnki({ expression, imageData, audioData }) {
   fields[cfg.fields.image]      = '';
   fields[cfg.fields.audio]      = '';
 
+  // --- AnkiBridge path (default on Android) ---
+  const ab = await viaBridge();
+  if (ab) {
+    try {
+      const params = {
+        deckName:  cfg.deck,
+        modelName: cfg.model,
+        fields,
+        tags:      ['android'],
+      };
+      if (audioData) {
+        params.audio = {
+          filename:   audioFilename,
+          dataBase64: audioData.split(',')[1],
+          field:      cfg.fields.audio
+        };
+      }
+      if (imageData) {
+        params.picture = {
+          filename:   imageFilename,
+          dataBase64: imageData.split(',')[1],
+          field:      cfg.fields.image
+        };
+      }
+      const r = await ab.addNote(params);
+      console.log('AnkiBridge.addNote ->', r);
+      return;
+    } catch (err) {
+      console.error('AnkiBridge.addNote error:', err);
+      alert('Failed to add note to AnkiDroid: ' + (err?.message || err));
+      return;
+    }
+  }
+
+  /* ---- legacy AnkiConnect HTTP path ----
   const payload = {
     action: "addNote",
     version: 6,
@@ -141,6 +263,8 @@ async function sendToAnki({ expression, imageData, audioData }) {
     console.error("AnkiConnect error:", err);
     alert("Failed to reach AnkiConnect.");
   }
+  */
+  alert('AnkiDroid not detected. Install AnkiDroid from the Play Store and grant permission on first send.');
 }
 
 window.sendToAnki = sendToAnki;

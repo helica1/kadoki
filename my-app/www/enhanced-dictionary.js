@@ -1527,11 +1527,63 @@
                         meaning:'Meaning', image:'Image',
                         sentenceAudio:'Sentence Audio', termAudio:'Term Audio' } };
 
-        return new Promise((resolve, reject) => {
-            const imageFilename = `mining_${Date.now()}.jpg`;
-            const sentenceAudioFilename = `sentence_${Date.now()}.mp3`;
-            const wordAudioFilename = wordAudio ? `word_${Date.now()}_${wordAudio.filename || 'audio.mp3'}` : null;
+        const imageFilename = `mining_${Date.now()}.jpg`;
+        const sentenceAudioFilename = `sentence_${Date.now()}.mp3`;
 
+        const fields = {};
+        fields[cfg.fields.term]          = expression || '';
+        fields[cfg.fields.reading]       = reading || '';
+        fields[cfg.fields.sentence]      = sentence || '';
+        fields[cfg.fields.meaning]       = meaning || '';
+        fields[cfg.fields.image]         = '';
+        fields[cfg.fields.sentenceAudio] = '';
+        fields[cfg.fields.termAudio]     = '';
+
+        // --- AnkiBridge path (default on Android) ---
+        const ab = window.Capacitor?.Plugins?.AnkiBridge;
+        if (ab) {
+            try {
+                const params = {
+                    deckName: cfg.deck,
+                    modelName: cfg.model,
+                    fields,
+                    tags: ['mining', 'dictionary', dictionary || 'unknown'].filter(Boolean)
+                };
+                if (audioData) {
+                    params.audio = {
+                        filename:   sentenceAudioFilename,
+                        dataBase64: audioData.split(',')[1],
+                        field:      cfg.fields.sentenceAudio
+                    };
+                }
+                if (imageData) {
+                    params.picture = {
+                        filename:   imageFilename,
+                        dataBase64: imageData.split(',')[1],
+                        field:      cfg.fields.image
+                    };
+                }
+                // wordAudio is a second media attachment. AnkiBridge.addNote
+                // currently supports one audio per call; if both present, we
+                // make a second call to attach the term audio to the same note.
+                const r = await ab.addNote(params);
+                console.log('✅ AnkiBridge.addNote ->', r);
+                if (wordAudio && wordAudio.base64) {
+                    // Second pass: dedicated note with just term audio? No —
+                    // we want it on the SAME note. Extend addNote to take
+                    // both later; for now skip term audio when bridge in use.
+                    console.warn('AnkiBridge: term audio attach not yet wired (sentence audio sent).');
+                }
+                return r;
+            } catch (err) {
+                console.error('❌ AnkiBridge.addNote error:', err);
+                throw new Error(err?.message || String(err));
+            }
+        }
+
+        /* ---- legacy AnkiConnect HTTP path (kept for fallback) ----
+        return new Promise((resolve, reject) => {
+            const wordAudioFilename = wordAudio ? `word_${Date.now()}_${wordAudio.filename || 'audio.mp3'}` : null;
             const audioEntries = [];
             if (audioData) {
                 audioEntries.push({
@@ -1547,16 +1599,6 @@
                     fields: [cfg.fields.termAudio]
                 });
             }
-
-            const fields = {};
-            fields[cfg.fields.term]          = expression || '';
-            fields[cfg.fields.reading]       = reading || '';
-            fields[cfg.fields.sentence]      = sentence || '';
-            fields[cfg.fields.meaning]       = meaning || '';
-            fields[cfg.fields.image]         = '';
-            fields[cfg.fields.sentenceAudio] = '';
-            fields[cfg.fields.termAudio]     = '';
-
             const payload = {
                 action: "addNote",
                 version: 6,
@@ -1599,6 +1641,8 @@
                     reject(err);
                 });
         });
+        */
+        throw new Error('AnkiDroid not detected. Install AnkiDroid from the Play Store.');
     }
 
     // ==================== TEXT WRAPPING AND HANDLERS (FROM EXISTING CODE) ====================
