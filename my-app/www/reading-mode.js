@@ -2289,8 +2289,29 @@
       }
     }
 
-    // 2) Current card's expression text → first chunk that contains it.
-    //    Works even when audio has never played in this session.
+    // 2) SRT-card titles: card index IS cue index. Use the cue↔chunk
+    //    map directly — and interpolate from nearest matched neighbors
+    //    if the exact cue didn't map. Works even when audio has never
+    //    played this session.
+    if (chunkIdx < 0 && Array.isArray(window.allNotes) &&
+        window.allNotes[0]?.isSrtCard && abCueToChunk) {
+      const ci = window.currentCardIndex;
+      if (Number.isFinite(ci) && ci >= 0 && ci < abCueToChunk.length) {
+        cueIdx = ci;
+        chunkIdx = abCueToChunk[ci];
+        if (chunkIdx < 0) {
+          // Walk to nearest matched neighbor in each direction.
+          let prev = -1, next = -1;
+          for (let i = ci - 1; i >= 0; i--) if (abCueToChunk[i] >= 0) { prev = abCueToChunk[i]; break; }
+          for (let i = ci + 1; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) { next = abCueToChunk[i]; break; }
+          if (prev >= 0 && next >= 0) chunkIdx = Math.round((prev + next) / 2);
+          else if (prev >= 0) chunkIdx = prev;
+          else if (next >= 0) chunkIdx = next;
+        }
+      }
+    }
+
+    // 3) Generic: current card's expression text → first chunk containing it.
     if (chunkIdx < 0 && Array.isArray(window.allNotes)) {
       const card = window.allNotes[window.currentCardIndex];
       if (card?.expression) {
@@ -2305,7 +2326,7 @@
       }
     }
 
-    // 3) Last-matched cursor.
+    // 4) Last-matched cursor.
     if (chunkIdx < 0 && lastMatchedIdx >= 0) chunkIdx = lastMatchedIdx;
 
     if (chunkIdx < 0 || !chunks[chunkIdx]) {
