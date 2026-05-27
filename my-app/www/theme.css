@@ -715,6 +715,11 @@ body.chrome-hidden #progressBar {
   min-width: 0;
   white-space: nowrap;
 }
+/* Divider between adjacent segmented buttons so a green (active)
+   button doesn't visually run into the gray button next to it. */
+.appearance-mode .seg button + button {
+  border-left: 1px solid var(--border, #2a2a2a);
+}
 /* Narrow screens: shrink label font and tighten padding so RIGHT,
    BOTTOM, BACKGROUND fit. */
 @media (max-width: 430px) {
