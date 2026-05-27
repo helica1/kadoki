@@ -935,16 +935,27 @@
     
     function positionDictPopup(popup) {
         if (!popup) return;
+        // Card mode: keep popup BELOW the subtitle text. The old code
+        // centered the popup vertically over the image — which on many
+        // layouts covered the bottom of the subtitle, hiding the word
+        // being looked up.
+        const subtitleEl = document.querySelector('.subtitle-text');
+        const subtitleVisible = subtitleEl && subtitleEl.offsetParent !== null;
         const imageElement = document.querySelector('.card-image');
-        const visible = imageElement && imageElement.offsetParent !== null;
-        if (visible) {
-            const imageRect = imageElement.getBoundingClientRect();
-            const popupWidth = Math.min(imageRect.width * 0.9, window.innerWidth * 0.9);
-            const popupHeight = Math.min(imageRect.height * 0.7, window.innerHeight * 0.8);
-            popup.style.width = `${popupWidth}px`;
-            popup.style.height = `${popupHeight}px`;
-            popup.style.left = `${Math.max(10, imageRect.left + (imageRect.width - popupWidth) / 2)}px`;
-            popup.style.top = `${Math.max(10, imageRect.top + (imageRect.height - popupHeight) / 2)}px`;
+        const imageVisible = imageElement && imageElement.offsetParent !== null;
+        if (imageVisible && subtitleVisible) {
+            const vw = window.innerWidth, vh = window.innerHeight;
+            const subRect = subtitleEl.getBoundingClientRect();
+            const margin = 12;
+            // Anchor immediately below the subtitle, fill to bottom edge.
+            const top = Math.max(margin, subRect.bottom + margin);
+            const maxH = Math.min(vh * 0.72, 520);
+            const h = Math.min(maxH, Math.max(180, vh - top - margin * 2));
+            const w = Math.min(vw * 0.92, 560);
+            popup.style.width = `${w}px`;
+            popup.style.height = `${h}px`;
+            popup.style.left = `${(vw - w) / 2}px`;
+            popup.style.top = `${top}px`;
             return;
         }
         // Reading-mode fallback: keep the popup out of the active chunk so the
@@ -1400,12 +1411,12 @@
 
                     let audioData = currentCard.audioSrc || "";
                     let imageData = currentCard.imageHtml?.match(/src="([^"]+)"/)?.[1] || "";
-                    // Pull cue range from the TAPPED-chunk's lookupContext
+                    // Pull cue range from the TAPPED-chunk/card lookupContext
                     // first; fall back to the playing cue's globals only if
-                    // the tap context didn't carry one. This prevents
-                    // sending the wrong sentence/audio when the user looks
-                    // up a word outside the currently-playing cue.
-                    const ctxCue = (ctx && ctx.source === 'reading') ? ctx : null;
+                    // the tap context didn't carry one. ANY source is OK as
+                    // long as it has the cue fields — covers 'reading',
+                    // 'card', and 'audiobook' equally.
+                    const ctxCue = (ctx && Number.isFinite(ctx.cueStartMs)) ? ctx : null;
                     const cueAudioPath = ctxCue?.cueAudioPath || window._currentReadingAudiobookPath || null;
                     const cueStartMs   = Number.isFinite(ctxCue?.cueStartMs) ? ctxCue.cueStartMs : window._currentReadingCueStartMs;
                     const cueEndMs     = Number.isFinite(ctxCue?.cueEndMs)   ? ctxCue.cueEndMs   : window._currentReadingCueEndMs;
@@ -1706,15 +1717,47 @@
             }
         });
 
+        // Helper: bind lookupContext to the CURRENTLY DISPLAYED card before
+        // each tap. Without this, the dict's Send falls back to the global
+        // _currentReadingCueStartMs which tracks the playing cue, not the
+        // visible card — produced the user's "audio is from the previous
+        // card" report.
+        function bindCardLookupContext() {
+            try {
+                const idx = window.currentCardIndex;
+                const card = Array.isArray(window.allNotes) ? window.allNotes[idx] : null;
+                if (!card) { window.lookupContext = null; return; }
+                if (card.isSrtCard && Number.isFinite(card.audiobookStartMs)) {
+                    window.lookupContext = {
+                        source: 'card',
+                        card,
+                        cardIdx: idx,
+                        sentence: (card.expression || '').replace(/<[^>]+>/g, '').trim(),
+                        cueAudioPath: card.audiobookPath,
+                        cueStartMs:   card.audiobookStartMs,
+                        cueEndMs:     card.audiobookEndMs,
+                        cueIndex:     idx,  // for SRT-cards, cardIdx === cueIdx
+                        cues:         null
+                    };
+                    console.log('[card-dict] lookupContext bound: cardIdx=' + idx +
+                        ' startMs=' + card.audiobookStartMs +
+                        ' text="' + (card.expression || '').slice(0, 30) + '"');
+                } else {
+                    window.lookupContext = null;
+                }
+            } catch (e) {}
+        }
+
         spans.forEach((span, index) => {
             // Visual debugging
             span.style.backgroundColor = 'rgba(255,0,0,0.1)';
-            
+
             // Touch handler for mobile
             span.addEventListener('touchstart', (e) => {
                 console.log(`👆 TOUCHSTART on span ${index}: "${span.textContent}"`);
                 e.preventDefault();
-                
+                bindCardLookupContext();
+
                 if (touchTimer) {
                     clearTimeout(touchTimer);
                     touchTimer = null;
@@ -1724,7 +1767,7 @@
                 const charIndex = spans.slice(0, index)
                     .reduce((sum, s) => sum + s.textContent.length, 0);
                 const best = greedyDeinflect(text, charIndex);
-                
+
                 highlightSpans(spans, index, best.length);
             });
 
@@ -1732,7 +1775,8 @@
                 console.log(`👆 TOUCHEND on span ${index} - triggering lookup immediately`);
                 e.preventDefault();
                 e.stopPropagation();
-                
+                bindCardLookupContext();
+
                 console.log(`👆 Touch lookup span ${index}: "${span.textContent}"`);
                 performLookup(spans, index);
             });
