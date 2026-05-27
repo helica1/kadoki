@@ -1540,40 +1540,47 @@
         fields[cfg.fields.termAudio]     = '';
 
         // --- AnkiBridge path (default on Android) ---
-        const ab = window.Capacitor?.Plugins?.AnkiBridge;
+        const ab = (typeof window.viaAnkiBridge === 'function')
+            ? await window.viaAnkiBridge()
+            : window.Capacitor?.Plugins?.AnkiBridge;
         if (ab) {
             try {
+                // Multi-attachment audio array — sentence audio AND term
+                // audio land on the same note. The native plugin splices
+                // [sound:...] tokens into the matching field for each.
+                const audioList = [];
+                if (audioData) {
+                    audioList.push({
+                        filename:   sentenceAudioFilename,
+                        dataBase64: audioData.split(',')[1],
+                        field:      cfg.fields.sentenceAudio
+                    });
+                }
+                if (wordAudio && wordAudio.base64) {
+                    const wordAudioFilename =
+                        `word_${Date.now()}_${wordAudio.filename || 'audio.mp3'}`;
+                    audioList.push({
+                        filename:   wordAudioFilename,
+                        dataBase64: wordAudio.base64,
+                        field:      cfg.fields.termAudio
+                    });
+                }
                 const params = {
-                    deckName: cfg.deck,
+                    deckName:  cfg.deck,
                     modelName: cfg.model,
                     fields,
                     tags: ['mining', 'dictionary', dictionary || 'unknown'].filter(Boolean)
                 };
-                if (audioData) {
-                    params.audio = {
-                        filename:   sentenceAudioFilename,
-                        dataBase64: audioData.split(',')[1],
-                        field:      cfg.fields.sentenceAudio
-                    };
-                }
+                if (audioList.length) params.audio = audioList;
                 if (imageData) {
-                    params.picture = {
+                    params.picture = [{
                         filename:   imageFilename,
                         dataBase64: imageData.split(',')[1],
                         field:      cfg.fields.image
-                    };
+                    }];
                 }
-                // wordAudio is a second media attachment. AnkiBridge.addNote
-                // currently supports one audio per call; if both present, we
-                // make a second call to attach the term audio to the same note.
                 const r = await ab.addNote(params);
                 console.log('✅ AnkiBridge.addNote ->', r);
-                if (wordAudio && wordAudio.base64) {
-                    // Second pass: dedicated note with just term audio? No —
-                    // we want it on the SAME note. Extend addNote to take
-                    // both later; for now skip term audio when bridge in use.
-                    console.warn('AnkiBridge: term audio attach not yet wired (sentence audio sent).');
-                }
                 return r;
             } catch (err) {
                 console.error('❌ AnkiBridge.addNote error:', err);

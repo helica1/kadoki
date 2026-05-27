@@ -49,23 +49,43 @@ async function setPref(key, value) {
   }
 }
 
-// Returns the AnkiBridge plugin instance if it's available AND AnkiDroid
-// is installed + reachable. Null otherwise → caller falls back to the
-// commented-out AnkiConnect HTTP path.
+// Returns the AnkiBridge plugin instance if AnkiDroid is reachable. If the
+// permission hasn't been granted yet, surfaces the system prompt and waits
+// for the user's decision before returning. Null = AnkiDroid not installed
+// or user denied permission.
 let _bridgeAvailableCached = null;
-async function viaBridge() {
+async function viaBridge(opts) {
   const ab = window.Capacitor?.Plugins?.AnkiBridge;
   if (!ab) return null;
-  if (_bridgeAvailableCached !== null) return _bridgeAvailableCached ? ab : null;
+  if (_bridgeAvailableCached === true) return ab;
   try {
     const r = await ab.isAvailable();
-    _bridgeAvailableCached = !!r?.available;
-    return _bridgeAvailableCached ? ab : null;
+    if (!r?.available) { _bridgeAvailableCached = false; return null; }
+    if (r.needsPermission) {
+      // Trigger the system "Allow this app to access AnkiDroid's data?"
+      // dialog. requestPermission resolves to { granted: bool }.
+      if (opts?.skipPermissionPrompt) return null;
+      try {
+        const grant = await ab.requestPermission();
+        if (!grant?.granted) {
+          alert('AnkiDroid permission denied. Enable it in Settings → Apps → Anki Deck Reader → Permissions to add cards.');
+          _bridgeAvailableCached = false;
+          return null;
+        }
+      } catch (e) {
+        console.warn('AnkiBridge.requestPermission threw:', e?.message || e);
+        _bridgeAvailableCached = false;
+        return null;
+      }
+    }
+    _bridgeAvailableCached = true;
+    return ab;
   } catch (e) {
     _bridgeAvailableCached = false;
     return null;
   }
 }
+window.viaAnkiBridge = viaBridge;
 
 // ----------------------------------------------------------------------------
 // fetchDeckNames
@@ -206,18 +226,18 @@ async function sendToAnki({ expression, imageData, audioData }) {
         tags:      ['android'],
       };
       if (audioData) {
-        params.audio = {
+        params.audio = [{
           filename:   audioFilename,
           dataBase64: audioData.split(',')[1],
           field:      cfg.fields.audio
-        };
+        }];
       }
       if (imageData) {
-        params.picture = {
+        params.picture = [{
           filename:   imageFilename,
           dataBase64: imageData.split(',')[1],
           field:      cfg.fields.image
-        };
+        }];
       }
       const r = await ab.addNote(params);
       console.log('AnkiBridge.addNote ->', r);

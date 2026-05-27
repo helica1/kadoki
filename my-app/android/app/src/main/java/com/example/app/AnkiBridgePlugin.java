@@ -2,24 +2,23 @@ package com.example.app;
 
 import android.content.ContentResolver;
 import android.content.ContentValues;
-import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
-import android.os.Build;
-import android.os.ParcelFileDescriptor;
 import android.util.Base64;
 import android.util.Log;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
+import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 
 import java.io.FileOutputStream;
-import java.io.OutputStream;
 
 /**
  * AnkiBridge — talks to AnkiDroid via its official ContentProvider API
@@ -27,42 +26,85 @@ import java.io.OutputStream;
  * path that depended on the unofficial AnkiConnect Android sideload (which
  * Google Play Protect periodically removes).
  *
- * Mirrors the verbs the JS layer was using against AnkiConnect:
- *   - getVersion           → echoes a fake "6" so the JS handshake passes
- *   - deckNames            → query Decks provider
- *   - modelNames           → query Models provider
- *   - modelFieldNames      → query Models provider, parse field_names CSV
- *   - addNote              → insert into Notes provider; for media, write to
- *                            the app cache + insert via Media provider
+ * Runtime permission flow:
+ *   - The permission "com.ichi2.anki.permission.READ_WRITE_DATABASE" is a
+ *     dangerous permission declared by AnkiDroid itself. Declaring it in
+ *     OUR manifest is necessary but NOT sufficient — Android requires an
+ *     explicit runtime request, otherwise queries throw SecurityException.
+ *   - JS calls `requestPermission()` first; this method triggers Capacitor's
+ *     standard requestPermissionForAlias flow which surfaces the system
+ *     dialog. After grant, all subsequent provider calls succeed silently.
  *
- * On first call the system shows a one-time "Allow this app to access
- * AnkiDroid's data?" dialog. After that it's invisible.
- *
- * See Manatan's AnkiBridge.java for a more comprehensive reference (it
- * implements full AnkiConnect emulation including an HTTP server; we only
- * need the verbs the app actually uses).
+ * addNote accepts an array of audio attachments so both sentence audio and
+ * term audio land on the same note in one insert.
  */
-@CapacitorPlugin(name = "AnkiBridge")
+@CapacitorPlugin(
+    name = "AnkiBridge",
+    permissions = {
+        @Permission(
+            alias = "ankidroid",
+            strings = { "com.ichi2.anki.permission.READ_WRITE_DATABASE" }
+        )
+    }
+)
 public class AnkiBridgePlugin extends Plugin {
 
     private static final String TAG = "AnkiBridge";
+    private static final String ANKI_PERM = "com.ichi2.anki.permission.READ_WRITE_DATABASE";
 
-    private static final String AUTHORITY     = "com.ichi2.anki.flashcards";
-    private static final Uri    BASE_URI      = Uri.parse("content://" + AUTHORITY);
-    private static final Uri    NOTES_URI     = Uri.withAppendedPath(BASE_URI, "notes");
-    private static final Uri    MODELS_URI    = Uri.withAppendedPath(BASE_URI, "models");
-    private static final Uri    DECKS_URI     = Uri.withAppendedPath(BASE_URI, "decks");
-    private static final Uri    MEDIA_URI     = Uri.withAppendedPath(BASE_URI, "media");
+    private static final String AUTHORITY = "com.ichi2.anki.flashcards";
+    private static final Uri    BASE_URI  = Uri.parse("content://" + AUTHORITY);
+    private static final Uri    NOTES_URI = Uri.withAppendedPath(BASE_URI, "notes");
+    private static final Uri    MODELS_URI = Uri.withAppendedPath(BASE_URI, "models");
+    private static final Uri    DECKS_URI  = Uri.withAppendedPath(BASE_URI, "decks");
+    private static final Uri    MEDIA_URI  = Uri.withAppendedPath(BASE_URI, "media");
 
-    // AnkiDroid uses 0x1F as the field separator on the wire.
+    // AnkiDroid uses 0x1F (Information Separator One) on the wire.
     private static final String FIELD_SEPARATOR = "\u001f";
 
-    // ---- isAvailable --------------------------------------------------------
+    // ---- permission --------------------------------------------------------
 
-    /** Returns whether AnkiDroid is installed and its provider responds. */
+    private boolean hasAnkiPermission() {
+        return getContext().checkSelfPermission(ANKI_PERM) ==
+                PackageManager.PERMISSION_GRANTED;
+    }
+
+    /**
+     * Explicit permission request. JS should call this once on startup (or
+     * before the first addNote). Surfaces the system "Allow this app to
+     * access AnkiDroid's data?" dialog.
+     */
+    @PluginMethod
+    public void requestPermission(PluginCall call) {
+        if (hasAnkiPermission()) {
+            JSObject ret = new JSObject();
+            ret.put("granted", true);
+            call.resolve(ret);
+            return;
+        }
+        requestPermissionForAlias("ankidroid", call, "ankiPermCallback");
+    }
+
+    @PermissionCallback
+    private void ankiPermCallback(PluginCall call) {
+        JSObject ret = new JSObject();
+        boolean granted = getPermissionState("ankidroid") == PermissionState.GRANTED;
+        ret.put("granted", granted);
+        if (!granted) ret.put("reason", "Permission denied");
+        call.resolve(ret);
+    }
+
+    // ---- isAvailable -------------------------------------------------------
+
     @PluginMethod
     public void isAvailable(PluginCall call) {
         JSObject ret = new JSObject();
+        if (!hasAnkiPermission()) {
+            ret.put("available", true);
+            ret.put("needsPermission", true);
+            call.resolve(ret);
+            return;
+        }
         try {
             Cursor c = getContext().getContentResolver().query(DECKS_URI,
                     null, null, null, null);
@@ -73,7 +115,6 @@ public class AnkiBridgePlugin extends Plugin {
                 ret.put("available", false);
             }
         } catch (SecurityException se) {
-            // Permission not granted yet — provider exists but locked.
             ret.put("available", true);
             ret.put("needsPermission", true);
         } catch (Exception e) {
@@ -83,13 +124,16 @@ public class AnkiBridgePlugin extends Plugin {
         call.resolve(ret);
     }
 
-    // ---- deckNames ----------------------------------------------------------
+    // ---- deckNames ---------------------------------------------------------
 
     @PluginMethod
     public void deckNames(PluginCall call) {
+        if (!hasAnkiPermission()) {
+            call.reject("AnkiDroid permission not granted. Call requestPermission() first.");
+            return;
+        }
         try {
-            ContentResolver cr = getContext().getContentResolver();
-            Cursor c = cr.query(DECKS_URI, null, null, null, null);
+            Cursor c = getContext().getContentResolver().query(DECKS_URI, null, null, null, null);
             if (c == null) { call.reject("Deck query returned null"); return; }
             JSArray arr = new JSArray();
             int nameCol = c.getColumnIndex("deck_name");
@@ -105,13 +149,16 @@ public class AnkiBridgePlugin extends Plugin {
         }
     }
 
-    // ---- modelNames ---------------------------------------------------------
+    // ---- modelNames --------------------------------------------------------
 
     @PluginMethod
     public void modelNames(PluginCall call) {
+        if (!hasAnkiPermission()) {
+            call.reject("AnkiDroid permission not granted. Call requestPermission() first.");
+            return;
+        }
         try {
-            ContentResolver cr = getContext().getContentResolver();
-            Cursor c = cr.query(MODELS_URI, null, null, null, null);
+            Cursor c = getContext().getContentResolver().query(MODELS_URI, null, null, null, null);
             if (c == null) { call.reject("Model query returned null"); return; }
             JSArray arr = new JSArray();
             int nameCol = c.getColumnIndex("name");
@@ -127,15 +174,18 @@ public class AnkiBridgePlugin extends Plugin {
         }
     }
 
-    // ---- modelFieldNames ----------------------------------------------------
+    // ---- modelFieldNames ---------------------------------------------------
 
     @PluginMethod
     public void modelFieldNames(PluginCall call) {
+        if (!hasAnkiPermission()) {
+            call.reject("AnkiDroid permission not granted. Call requestPermission() first.");
+            return;
+        }
         String modelName = call.getString("modelName");
         if (modelName == null) { call.reject("modelName required"); return; }
         try {
-            ContentResolver cr = getContext().getContentResolver();
-            Cursor c = cr.query(MODELS_URI, null, null, null, null);
+            Cursor c = getContext().getContentResolver().query(MODELS_URI, null, null, null, null);
             if (c == null) { call.reject("Model query returned null"); return; }
             int nameCol   = c.getColumnIndex("name");
             int fieldsCol = c.getColumnIndex("field_names");
@@ -145,9 +195,7 @@ public class AnkiBridgePlugin extends Plugin {
                     modelName.equals(c.getString(nameCol))) {
                     String csv = c.getString(fieldsCol);
                     if (csv != null) {
-                        for (String f : csv.split(FIELD_SEPARATOR)) {
-                            arr.put(f);
-                        }
+                        for (String f : csv.split(FIELD_SEPARATOR)) arr.put(f);
                     }
                     break;
                 }
@@ -161,61 +209,102 @@ public class AnkiBridgePlugin extends Plugin {
         }
     }
 
-    // ---- addNote ------------------------------------------------------------
+    // ---- addNote -----------------------------------------------------------
 
     /**
-     * Insert a new note. Expected JS shape:
+     * Insert a note. Accepts an array of audio attachments so sentence-audio
+     * + term-audio can land on the same note in a single insert.
+     *
+     * JS shape:
      *   {
      *     deckName: "...",
      *     modelName: "...",
      *     fields: { "Term": "...", "Image": "", "Sentence Audio": "" },
-     *     tags: ["android"],
-     *     audio: { filename: "...", dataBase64: "...", field: "Sentence Audio" } | null,
-     *     picture: { filename: "...", dataBase64: "...", field: "Image" } | null
+     *     tags: ["..."],
+     *     audio:   [{ filename, dataBase64, field }, ...] | null,
+     *     picture: [{ filename, dataBase64, field }, ...] | null
      *   }
      */
     @PluginMethod
     public void addNote(PluginCall call) {
+        if (!hasAnkiPermission()) {
+            call.reject("AnkiDroid permission not granted. Call requestPermission() first.");
+            return;
+        }
         String deckName  = call.getString("deckName");
         String modelName = call.getString("modelName");
         JSObject fields  = call.getObject("fields", new JSObject());
         JSArray tags     = call.getArray("tags", new JSArray());
-        JSObject audio   = call.getObject("audio");      // may be null
-        JSObject picture = call.getObject("picture");    // may be null
+
+        // Accept either an array OR a single object for backward compatibility.
+        JSArray audioArr   = call.getArray("audio");
+        JSArray pictureArr = call.getArray("picture");
+        if (audioArr == null) {
+            JSObject single = call.getObject("audio");
+            if (single != null) {
+                audioArr = new JSArray();
+                audioArr.put(single);
+            }
+        }
+        if (pictureArr == null) {
+            JSObject single = call.getObject("picture");
+            if (single != null) {
+                pictureArr = new JSArray();
+                pictureArr.put(single);
+            }
+        }
 
         if (deckName == null || modelName == null) {
             call.reject("deckName and modelName required");
             return;
         }
         try {
-            // Resolve deck + model IDs by name.
             long deckId  = lookupDeckId(deckName);
             long modelId = lookupModelId(modelName);
             if (deckId < 0)  { call.reject("Deck not found: " + deckName);   return; }
             if (modelId < 0) { call.reject("Model not found: " + modelName); return; }
 
-            // Field ordering: the provider's `flds` column is a 0x1F-separated
-            // string of values in MODEL ORDER. We need to look up the model's
-            // field list to map { name → index }.
             String[] fieldOrder = lookupModelFieldOrder(modelName);
             if (fieldOrder == null || fieldOrder.length == 0) {
                 call.reject("Could not determine field order for model " + modelName);
                 return;
             }
 
-            // First write any media files to AnkiDroid's collection.media via
-            // the Media provider. AnkiDroid returns the final filename it
-            // chose (collision-resolved); we substitute [sound:...] / <img>
-            // references into the matching field.
-            String audioRef   = null;
-            String pictureRef = null;
-            if (audio != null && audio.has("dataBase64")) {
-                audioRef = storeMediaBase64(audio.getString("filename"),
-                                            audio.getString("dataBase64"));
+            // Store each media attachment via the Media provider and remember
+            // (field name -> reference token) so we can splice into flds.
+            java.util.Map<String, StringBuilder> fieldAppends = new java.util.HashMap<>();
+            JSArray audioResultNames = new JSArray();
+            JSArray pictureResultNames = new JSArray();
+
+            if (audioArr != null) {
+                for (int i = 0; i < audioArr.length(); i++) {
+                    JSObject a = JSObject.fromJSONObject(audioArr.getJSONObject(i));
+                    String filename = a.getString("filename");
+                    String b64      = a.getString("dataBase64");
+                    String field    = a.getString("field");
+                    if (b64 == null || field == null) continue;
+                    String stored = storeMediaBase64(filename, b64);
+                    audioResultNames.put(stored);
+                    String token = "[sound:" + stored + "]";
+                    fieldAppends.computeIfAbsent(field, k -> new StringBuilder())
+                                .append(fieldAppends.get(field).length() > 0 ? " " : "")
+                                .append(token);
+                }
             }
-            if (picture != null && picture.has("dataBase64")) {
-                pictureRef = storeMediaBase64(picture.getString("filename"),
-                                              picture.getString("dataBase64"));
+            if (pictureArr != null) {
+                for (int i = 0; i < pictureArr.length(); i++) {
+                    JSObject p = JSObject.fromJSONObject(pictureArr.getJSONObject(i));
+                    String filename = p.getString("filename");
+                    String b64      = p.getString("dataBase64");
+                    String field    = p.getString("field");
+                    if (b64 == null || field == null) continue;
+                    String stored = storeMediaBase64(filename, b64);
+                    pictureResultNames.put(stored);
+                    String token = "<img src=\"" + stored + "\">";
+                    fieldAppends.computeIfAbsent(field, k -> new StringBuilder())
+                                .append(fieldAppends.get(field).length() > 0 ? " " : "")
+                                .append(token);
+                }
             }
 
             // Build the 0x1F-joined fields string in MODEL order.
@@ -224,22 +313,16 @@ public class AnkiBridgePlugin extends Plugin {
                 if (i > 0) flds.append(FIELD_SEPARATOR);
                 String fieldName = fieldOrder[i];
                 String value = fields.has(fieldName) ? fields.getString(fieldName) : "";
+                if (value == null) value = "";
 
-                // Append media refs to the user-targeted field.
-                if (audioRef != null && audio != null && fieldName.equals(audio.getString("field"))) {
-                    if (value == null) value = "";
+                StringBuilder appendTok = fieldAppends.get(fieldName);
+                if (appendTok != null && appendTok.length() > 0) {
                     if (!value.isEmpty()) value += " ";
-                    value += "[sound:" + audioRef + "]";
+                    value += appendTok.toString();
                 }
-                if (pictureRef != null && picture != null && fieldName.equals(picture.getString("field"))) {
-                    if (value == null) value = "";
-                    if (!value.isEmpty()) value += " ";
-                    value += "<img src=\"" + pictureRef + "\">";
-                }
-                flds.append(value == null ? "" : value);
+                flds.append(value);
             }
 
-            // Build tags string (space-separated per AnkiDroid spec).
             StringBuilder tagsBuf = new StringBuilder();
             for (int i = 0; i < tags.length(); i++) {
                 if (i > 0) tagsBuf.append(" ");
@@ -254,7 +337,7 @@ public class AnkiBridgePlugin extends Plugin {
 
             Uri inserted = getContext().getContentResolver().insert(NOTES_URI, values);
             if (inserted == null) {
-                call.reject("addNote: insert returned null (duplicate or permission denied?)");
+                call.reject("addNote: insert returned null (duplicate or denied)");
                 return;
             }
             long noteId = -1;
@@ -262,8 +345,8 @@ public class AnkiBridgePlugin extends Plugin {
 
             JSObject ret = new JSObject();
             ret.put("noteId", noteId);
-            if (audioRef   != null) ret.put("audioFilename",   audioRef);
-            if (pictureRef != null) ret.put("pictureFilename", pictureRef);
+            ret.put("audioFilenames", audioResultNames);
+            ret.put("pictureFilenames", pictureResultNames);
             call.resolve(ret);
         } catch (Exception e) {
             Log.e(TAG, "addNote failed", e);
@@ -271,21 +354,17 @@ public class AnkiBridgePlugin extends Plugin {
         }
     }
 
-    // ---- helpers ------------------------------------------------------------
+    // ---- helpers -----------------------------------------------------------
 
     private long lookupDeckId(String deckName) {
         try {
-            Cursor c = getContext().getContentResolver().query(DECKS_URI,
-                    null, null, null, null);
+            Cursor c = getContext().getContentResolver().query(DECKS_URI, null, null, null, null);
             if (c == null) return -1;
-            int idCol   = c.getColumnIndex("deck_id");
+            int idCol = c.getColumnIndex("deck_id");
             int nameCol = c.getColumnIndex("deck_name");
             while (c.moveToNext()) {
-                if (nameCol >= 0 && idCol >= 0 &&
-                    deckName.equals(c.getString(nameCol))) {
-                    long id = c.getLong(idCol);
-                    c.close();
-                    return id;
+                if (nameCol >= 0 && idCol >= 0 && deckName.equals(c.getString(nameCol))) {
+                    long id = c.getLong(idCol); c.close(); return id;
                 }
             }
             c.close();
@@ -295,17 +374,13 @@ public class AnkiBridgePlugin extends Plugin {
 
     private long lookupModelId(String modelName) {
         try {
-            Cursor c = getContext().getContentResolver().query(MODELS_URI,
-                    null, null, null, null);
+            Cursor c = getContext().getContentResolver().query(MODELS_URI, null, null, null, null);
             if (c == null) return -1;
-            int idCol   = c.getColumnIndex("_id");
+            int idCol = c.getColumnIndex("_id");
             int nameCol = c.getColumnIndex("name");
             while (c.moveToNext()) {
-                if (nameCol >= 0 && idCol >= 0 &&
-                    modelName.equals(c.getString(nameCol))) {
-                    long id = c.getLong(idCol);
-                    c.close();
-                    return id;
+                if (nameCol >= 0 && idCol >= 0 && modelName.equals(c.getString(nameCol))) {
+                    long id = c.getLong(idCol); c.close(); return id;
                 }
             }
             c.close();
@@ -315,16 +390,13 @@ public class AnkiBridgePlugin extends Plugin {
 
     private String[] lookupModelFieldOrder(String modelName) {
         try {
-            Cursor c = getContext().getContentResolver().query(MODELS_URI,
-                    null, null, null, null);
+            Cursor c = getContext().getContentResolver().query(MODELS_URI, null, null, null, null);
             if (c == null) return null;
-            int nameCol   = c.getColumnIndex("name");
+            int nameCol = c.getColumnIndex("name");
             int fieldsCol = c.getColumnIndex("field_names");
             while (c.moveToNext()) {
-                if (nameCol >= 0 && fieldsCol >= 0 &&
-                    modelName.equals(c.getString(nameCol))) {
-                    String csv = c.getString(fieldsCol);
-                    c.close();
+                if (nameCol >= 0 && fieldsCol >= 0 && modelName.equals(c.getString(nameCol))) {
+                    String csv = c.getString(fieldsCol); c.close();
                     if (csv == null) return new String[0];
                     return csv.split(FIELD_SEPARATOR);
                 }
@@ -334,17 +406,8 @@ public class AnkiBridgePlugin extends Plugin {
         return null;
     }
 
-    /**
-     * Write base64 audio/image bytes through the Media provider. AnkiDroid
-     * copies the file into its collection.media and returns the (possibly
-     * disambiguated) final filename. We embed that name in the note field
-     * as [sound:foo.mp3] or <img src="foo.jpg">.
-     */
     private String storeMediaBase64(String suggestedName, String base64) throws Exception {
-        // Decode bytes.
         byte[] data = Base64.decode(base64, Base64.DEFAULT);
-        // Write to a temp file in our cache dir so we have a URI to hand to
-        // AnkiDroid's Media provider.
         java.io.File cacheDir = getContext().getCacheDir();
         java.io.File tmp = new java.io.File(cacheDir,
                 "anki_outbound_" + System.currentTimeMillis() + "_" +
@@ -364,8 +427,6 @@ public class AnkiBridgePlugin extends Plugin {
             throw new Exception("Media insert returned null");
         }
         String finalName = result.getLastPathSegment();
-        // Best-effort cleanup; the file was already copied into the
-        // AnkiDroid collection.media folder.
         tmp.delete();
         return finalName;
     }
