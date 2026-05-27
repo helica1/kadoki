@@ -2277,76 +2277,109 @@
   // expression text, else the last-matched cursor), highlight it, and
   // center it on screen — no smooth animation.
   async function syncReaderToCurrentPosition() {
-    if (!chunks?.length) return;
-    let cueIdx = -1;
-    let chunkIdx = -1;
+    try {
+      rlog(`syncReader start: chunks=${chunks?.length || 0} cues=${abCues?.length || 0} ` +
+           `mapsReady=${!!abCueToChunk} cardIdx=${window.currentCardIndex} ` +
+           `audioMs=${abPositionRef?.ms || 0} lastMatched=${lastMatchedIdx}`);
+      if (!chunks?.length) return;
+      let cueIdx = -1;
+      let chunkIdx = -1;
+      let how = '';
 
-    // 1) Audio position → cue → chunk (most precise; requires audio loaded).
-    if (abCues?.length && Number.isFinite(abPositionRef?.ms) && abPositionRef.ms > 0) {
-      cueIdx = window.srtParser.findCueAtTime(abCues, abPositionRef.ms);
-      if (cueIdx >= 0 && abCueToChunk && abCueToChunk[cueIdx] >= 0) {
-        chunkIdx = abCueToChunk[cueIdx];
-      }
-    }
-
-    // 2) SRT-card titles: card index IS cue index. Use the cue↔chunk
-    //    map directly — and interpolate from nearest matched neighbors
-    //    if the exact cue didn't map. Works even when audio has never
-    //    played this session.
-    if (chunkIdx < 0 && Array.isArray(window.allNotes) &&
-        window.allNotes[0]?.isSrtCard && abCueToChunk) {
-      const ci = window.currentCardIndex;
-      if (Number.isFinite(ci) && ci >= 0 && ci < abCueToChunk.length) {
-        cueIdx = ci;
-        chunkIdx = abCueToChunk[ci];
-        if (chunkIdx < 0) {
-          // Walk to nearest matched neighbor in each direction.
-          let prev = -1, next = -1;
-          for (let i = ci - 1; i >= 0; i--) if (abCueToChunk[i] >= 0) { prev = abCueToChunk[i]; break; }
-          for (let i = ci + 1; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) { next = abCueToChunk[i]; break; }
-          if (prev >= 0 && next >= 0) chunkIdx = Math.round((prev + next) / 2);
-          else if (prev >= 0) chunkIdx = prev;
-          else if (next >= 0) chunkIdx = next;
+      // 1) Audio position → cue → chunk.
+      if (abCues?.length && Number.isFinite(abPositionRef?.ms) && abPositionRef.ms > 0) {
+        cueIdx = window.srtParser.findCueAtTime(abCues, abPositionRef.ms);
+        if (cueIdx >= 0 && abCueToChunk && abCueToChunk[cueIdx] >= 0) {
+          chunkIdx = abCueToChunk[cueIdx];
+          how = 'audio-position';
         }
       }
-    }
 
-    // 3) Generic: current card's expression text → first chunk containing it.
-    if (chunkIdx < 0 && Array.isArray(window.allNotes)) {
-      const card = window.allNotes[window.currentCardIndex];
-      if (card?.expression) {
-        const target = normalizeText(textWithoutRubyFromHtml(card.expression));
-        if (target) {
-          chunkIdx = findContainsFrom(target, 0);
-          if (chunkIdx >= 0 && abChunkToCue) {
-            const ci = abChunkToCue[chunkIdx];
-            if (ci >= 0) cueIdx = ci;
+      // 2) SRT-card titles: card index IS cue index. Use map directly with
+      //    neighbor-walk fallback for unmapped cues.
+      if (chunkIdx < 0 && Array.isArray(window.allNotes) &&
+          window.allNotes[0]?.isSrtCard && abCueToChunk) {
+        const ci = window.currentCardIndex;
+        if (Number.isFinite(ci) && ci >= 0 && ci < abCueToChunk.length) {
+          cueIdx = ci;
+          chunkIdx = abCueToChunk[ci];
+          how = 'srt-card-index';
+          if (chunkIdx < 0) {
+            let prev = -1, next = -1;
+            for (let i = ci - 1; i >= 0; i--) if (abCueToChunk[i] >= 0) { prev = abCueToChunk[i]; break; }
+            for (let i = ci + 1; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) { next = abCueToChunk[i]; break; }
+            if (prev >= 0 && next >= 0) chunkIdx = Math.round((prev + next) / 2);
+            else if (prev >= 0) chunkIdx = prev;
+            else if (next >= 0) chunkIdx = next;
+            if (chunkIdx >= 0) how = 'srt-card-neighbor';
           }
         }
       }
+
+      // 3) Deck card → matched cue (via SRT text) → chunk. Walks abCues
+      //    looking for one whose text contains the card's expression;
+      //    then uses abCueToChunk for the chunk. More reliable than
+      //    matching card.expression directly against chunks (cue text
+      //    is closer to chunk text than card text is).
+      if (chunkIdx < 0 && abCues?.length && abCueToChunk &&
+          Array.isArray(window.allNotes)) {
+        const card = window.allNotes[window.currentCardIndex];
+        const cardText = card?.expression
+          ? normalizeText(textWithoutRubyFromHtml(card.expression)) : '';
+        if (cardText) {
+          for (let i = 0; i < abCues.length; i++) {
+            if (normalizeText(abCues[i].text).includes(cardText)) {
+              if (abCueToChunk[i] >= 0) {
+                cueIdx = i;
+                chunkIdx = abCueToChunk[i];
+                how = 'card-text→cue→chunk';
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      // 4) Direct chunk text match (existing path).
+      if (chunkIdx < 0 && Array.isArray(window.allNotes)) {
+        const card = window.allNotes[window.currentCardIndex];
+        if (card?.expression) {
+          const target = normalizeText(textWithoutRubyFromHtml(card.expression));
+          if (target) {
+            const idx = findContainsFrom(target, 0);
+            if (idx >= 0) {
+              chunkIdx = idx;
+              how = 'card-text→chunk';
+              if (abChunkToCue && abChunkToCue[idx] >= 0) cueIdx = abChunkToCue[idx];
+            }
+          }
+        }
+      }
+
+      // 5) Last-matched cursor.
+      if (chunkIdx < 0 && lastMatchedIdx >= 0) {
+        chunkIdx = lastMatchedIdx;
+        how = 'last-cursor';
+      }
+
+      if (chunkIdx < 0 || !chunks[chunkIdx]) {
+        rlog(`syncReader → NO MATCH (chunks=${chunks?.length} cues=${abCues?.length} cardIdx=${window.currentCardIndex})`);
+        return;
+      }
+      rlog(`syncReader → chunk ${chunkIdx} (cue ${cueIdx}) via ${how}`);
+
+      setActive(chunkIdx, { instantScroll: true, center: true });
+
+      let highlightText = '';
+      if (cueIdx >= 0 && abCues?.[cueIdx]) highlightText = abCues[cueIdx].text;
+      else if (Array.isArray(window.allNotes)) {
+        const card = window.allNotes[window.currentCardIndex];
+        if (card?.expression) highlightText = textWithoutRubyFromHtml(card.expression);
+      }
+      if (highlightText) setCueHighlight(chunkIdx, highlightText);
+    } catch (e) {
+      rlog('syncReader error: ' + (e?.message || e));
     }
-
-    // 4) Last-matched cursor.
-    if (chunkIdx < 0 && lastMatchedIdx >= 0) chunkIdx = lastMatchedIdx;
-
-    if (chunkIdx < 0 || !chunks[chunkIdx]) {
-      rlog('syncReaderToCurrentPosition: no target chunk');
-      return;
-    }
-    rlog(`syncReaderToCurrentPosition → chunk ${chunkIdx} (cue ${cueIdx})`);
-
-    setActive(chunkIdx, { instantScroll: true, center: true });
-
-    // Cue-precise highlight from the cue if we found one; otherwise the
-    // current card's text gives us the substring to mark within the
-    // chunk (still cue-precise visually).
-    let highlightText = '';
-    if (cueIdx >= 0 && abCues[cueIdx]) highlightText = abCues[cueIdx].text;
-    else if (Array.isArray(window.allNotes)) {
-      const card = window.allNotes[window.currentCardIndex];
-      if (card?.expression) highlightText = textWithoutRubyFromHtml(card.expression);
-    }
-    if (highlightText) setCueHighlight(chunkIdx, highlightText);
   }
   window.syncReaderToCurrentPosition = syncReaderToCurrentPosition;
 
