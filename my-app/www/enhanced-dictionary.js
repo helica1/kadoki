@@ -1386,6 +1386,7 @@
                     const cueAudioPath = ctxCue?.cueAudioPath || window._currentReadingAudiobookPath || null;
                     const cueStartMs   = Number.isFinite(ctxCue?.cueStartMs) ? ctxCue.cueStartMs : window._currentReadingCueStartMs;
                     const cueEndMs     = Number.isFinite(ctxCue?.cueEndMs)   ? ctxCue.cueEndMs   : window._currentReadingCueEndMs;
+                    let finalSentence = sentence;
                     if (!audioData && cueAudioPath &&
                         Number.isFinite(cueStartMs) && Number.isFinite(cueEndMs) &&
                         window.waveform?.edit && window.Capacitor?.Plugins?.AudioSlicer) {
@@ -1393,9 +1394,12 @@
                         srcPath: cueAudioPath,
                         startMs: Math.round(cueStartMs),
                         endMs:   Math.round(cueEndMs),
-                        title: sentence || result.term
+                        title: sentence || result.term,
+                        cues: ctxCue?.cues,
+                        cueIndex: Number.isFinite(ctxCue?.cueIndex) ? ctxCue.cueIndex : -1
                       });
                       if (!adjusted) return; // user cancelled
+                      if (adjusted.text) finalSentence = adjusted.text;
                       try {
                         const slicer = window.Capacitor.Plugins.AudioSlicer;
                         const slice = await slicer.slice({
@@ -1422,7 +1426,7 @@
                     const ankiData = {
                         expression: result.term,
                         reading: reading,
-                        sentence: sentence,
+                        sentence: finalSentence,
                         meaning: meaning,
                         imageData,
                         audioData,

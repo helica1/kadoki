@@ -191,6 +191,20 @@
     ctx.fillStyle = rgba(accent, 0.06);
     ctx.fillRect(x0, wfTop, x1 - x0, wfHeight);
 
+    // ---- playhead (driven by bg position events) ----
+    if (Number.isFinite(state.playheadMs) &&
+        state.playheadMs >= wfStartMs && state.playheadMs <= wfEndMs) {
+      const px = ((state.playheadMs - wfStartMs) / wfRange) * cssW;
+      ctx.strokeStyle = '#ffffff';
+      ctx.globalAlpha = 0.85;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(px, wfTop);
+      ctx.lineTo(px, wfBottom);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
     // ---- handles (vertical line + circular cap) ----
     const drawHandle = (x) => {
       // Vertical line through the waveform.
@@ -463,10 +477,23 @@
         state.bucketsEndMs = wfEndMs;
         render();
       });
+      // Playhead: subscribe to bg position so the white tick line tracks
+      // playback in real time (preview + the user's normal audio output).
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (bg) {
+        bg.addListener('position', (d) => {
+          if (!state) return;
+          state.playheadMs = d.positionMs;
+          render();
+        }).then(h => { if (state) state.playheadHandle = h; }).catch(() => {});
+      }
     },
 
     hide() {
       cancelPreview();
+      if (state?.playheadHandle) {
+        try { state.playheadHandle.remove(); } catch (e) {}
+      }
       state = null;
     },
 
@@ -535,11 +562,19 @@
      *   srcPath  — file path or URI to the audio
      *   startMs/endMs — initial selection
      *   title    — text shown above the waveform (e.g., the cue expression)
-     * Returns a Promise that resolves to { startMs, endMs } when the user
-     * taps "Send", or null if they Cancel.
+     *   cues     — optional array of {startMs, endMs, text}. When provided
+     *              along with `cueIndex`, draggable left/right text-range
+     *              handles appear and the audio bounds snap to the
+     *              corresponding cue boundaries as the range expands or
+     *              contracts.
+     *   cueIndex — anchor cue (the one currently in focus).
+     * Returns a Promise that resolves to { startMs, endMs, text } when the
+     * user taps "Send", or null if they Cancel.
      */
-    edit({ srcPath, startMs, endMs, title }) {
+    edit({ srcPath, startMs, endMs, title, cues, cueIndex }) {
       return new Promise((resolve) => {
+        const useTextHandles = Array.isArray(cues) && Number.isFinite(cueIndex) &&
+                               cueIndex >= 0 && cueIndex < cues.length;
         // Overlay
         const overlay = document.createElement('div');
         overlay.id = 'waveformEditorOverlay';
@@ -553,15 +588,45 @@
           background:var(--bg,#0c0c0c); border:1px solid var(--border,#2a2a2a);
           border-radius:12px; width:min(560px,94vw); padding:16px;
         `;
-        panel.innerHTML = `
+        // Build the text-range row. If we have cues, the title text sits
+        // inside a "bouncing box" framed by two grab handles — drag a
+        // handle horizontally to include or drop neighboring cues. Without
+        // cues, fall back to the read-only title block.
+        const textRowHtml = useTextHandles ? `
+          <div data-role="text-row" style="display:flex;align-items:stretch;gap:6px;margin-bottom:10px;">
+            <div data-role="left-handle" class="text-range-handle" style="
+              flex:0 0 18px; display:flex; align-items:center; justify-content:center;
+              background:var(--accent-cyan,#00ffcc); color:#000; cursor:ew-resize;
+              border-radius:4px; font-weight:700; font-size:.8rem; user-select:none;
+              touch-action:none;">‹</div>
+            <div data-role="text-box" style="
+              flex:1; padding:8px 10px; background:#141414; border:1px solid #1f1f1f;
+              border-radius:6px; font-size:.85rem; color:var(--text,#e8e8e8);
+              font-family:var(--font-family-card,serif); line-height:1.4;
+              max-height:5em; overflow-y:auto;
+              transition: transform 0.16s cubic-bezier(0.34, 1.56, 0.64, 1);">
+              <span data-role="text-content"></span>
+            </div>
+            <div data-role="right-handle" class="text-range-handle" style="
+              flex:0 0 18px; display:flex; align-items:center; justify-content:center;
+              background:var(--accent-cyan,#00ffcc); color:#000; cursor:ew-resize;
+              border-radius:4px; font-weight:700; font-size:.8rem; user-select:none;
+              touch-action:none;">›</div>
+          </div>
+        ` : `
           <div style="font-size:.85rem;color:var(--text,#e8e8e8);margin-bottom:10px;
                       max-height:3.5em;overflow:hidden;text-overflow:ellipsis;
                       font-family:var(--font-family-card,serif);line-height:1.4;">
             ${title ? title : '<em style="color:#666;">Adjust bounds</em>'}
           </div>
+        `;
+        panel.innerHTML = `
+          ${textRowHtml}
           <div data-role="wf-host"></div>
           <div style="font-size:.7rem;color:#666;text-align:center;margin-top:6px;">
-            Drag vertically to zoom · drag horizontally to pan · drag handles to set bounds
+            ${useTextHandles
+              ? 'Drag text handles to expand or trim · drag waveform handles for fine bounds'
+              : 'Drag vertically to zoom · drag horizontally to pan · drag handles to set bounds'}
           </div>
           <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;">
             <button data-role="cancel" class="btn">Cancel</button>
@@ -576,6 +641,137 @@
         const host = panel.querySelector('[data-role="wf-host"]');
         this.show({ container: host, srcPath, startMs, endMs });
 
+        // Text-range state + drag bindings. leftIdx/rightIdx point into cues;
+        // text shown is the concatenation of cues[leftIdx..rightIdx]. The
+        // audio selection (and waveform viewport) snap to the matching cue
+        // boundaries whenever the range changes.
+        const textRangeState = useTextHandles ? {
+          leftIdx: cueIndex,
+          rightIdx: cueIndex
+        } : null;
+
+        function renderTextContent(bounce) {
+          if (!textRangeState) return;
+          const span = panel.querySelector('[data-role="text-content"]');
+          if (!span) return;
+          let text = '';
+          for (let i = textRangeState.leftIdx; i <= textRangeState.rightIdx; i++) {
+            if (i > textRangeState.leftIdx) text += ' ';
+            text += cues[i].text;
+          }
+          span.textContent = text;
+          if (bounce) {
+            const box = panel.querySelector('[data-role="text-box"]');
+            if (box) {
+              box.style.transform = 'scale(1.05)';
+              setTimeout(() => { box.style.transform = 'scale(1)'; }, 160);
+            }
+          }
+        }
+        function applyTextRange(bounce) {
+          if (!textRangeState) return;
+          renderTextContent(bounce);
+          // Snap the audio selection to the cue boundaries of the new range.
+          const newStart = cues[textRangeState.leftIdx].startMs;
+          const newEnd   = cues[textRangeState.rightIdx].endMs;
+          if (state) {
+            state.startMs = newStart;
+            state.endMs   = newEnd;
+            // Expand viewport if the new selection extends beyond it; this
+            // also triggers a re-decode at the wider range.
+            let viewportChanged = false;
+            if (newStart < state.wfStartMs) {
+              state.wfStartMs = Math.max(0, newStart - VIEWPORT_PAD_MS);
+              viewportChanged = true;
+            }
+            if (newEnd > state.wfEndMs) {
+              state.wfEndMs = newEnd + VIEWPORT_PAD_MS;
+              viewportChanged = true;
+            }
+            if (viewportChanged) {
+              const reqId = ++state._zoomReqId;
+              const rs = state.wfStartMs, re = state.wfEndMs;
+              loadWaveform(state.srcPath, rs, re).then(b => {
+                if (!state || reqId !== state._zoomReqId) return;
+                state.buckets = b;
+                state.bucketsStartMs = rs;
+                state.bucketsEndMs = re;
+                render();
+              });
+            }
+            render();
+          }
+        }
+        if (useTextHandles) {
+          renderTextContent(false);
+          // Drag binding: each handle absorbs/ejects one cue per ~50 px of
+          // horizontal travel. Left handle drag-left expands (prepend prev
+          // cue), drag-right contracts (drop first included cue). Right
+          // handle is the mirror.
+          const STEP_PX = 50;
+          const bindHandle = (el, role) => {
+            let startX = 0;
+            let activeIdx = 0;     // leftIdx or rightIdx at gesture start
+            let dragging = false;
+            const onStart = (clientX) => {
+              startX = clientX;
+              activeIdx = role === 'left' ? textRangeState.leftIdx : textRangeState.rightIdx;
+              dragging = true;
+            };
+            const onMove = (clientX) => {
+              if (!dragging) return;
+              const dx = clientX - startX;
+              // signed steps: drag-left → negative, drag-right → positive.
+              const steps = Math.round(dx / STEP_PX);
+              if (role === 'left') {
+                // Left handle: drag LEFT (dx<0, steps<0) → decrease leftIdx
+                // = include the previous cue. Drag RIGHT → trim from start.
+                let want = activeIdx + steps;
+                if (want < 0) want = 0;
+                if (want > textRangeState.rightIdx) want = textRangeState.rightIdx;
+                if (want !== textRangeState.leftIdx) {
+                  textRangeState.leftIdx = want;
+                  applyTextRange(true);
+                }
+              } else {
+                // Right handle: drag RIGHT → include next cue, LEFT → trim.
+                let want = activeIdx + steps;
+                if (want >= cues.length) want = cues.length - 1;
+                if (want < textRangeState.leftIdx) want = textRangeState.leftIdx;
+                if (want !== textRangeState.rightIdx) {
+                  textRangeState.rightIdx = want;
+                  applyTextRange(true);
+                }
+              }
+            };
+            const onEnd = () => { dragging = false; };
+            el.addEventListener('touchstart', (e) => {
+              if (!e.touches?.[0]) return;
+              onStart(e.touches[0].clientX);
+              e.preventDefault(); e.stopPropagation();
+            }, { passive: false });
+            el.addEventListener('touchmove', (e) => {
+              if (!e.touches?.[0]) return;
+              onMove(e.touches[0].clientX);
+              e.preventDefault(); e.stopPropagation();
+            }, { passive: false });
+            el.addEventListener('touchend', onEnd);
+            el.addEventListener('mousedown', (e) => {
+              onStart(e.clientX);
+              const move = (ev) => onMove(ev.clientX);
+              const up = () => {
+                onEnd();
+                window.removeEventListener('mousemove', move);
+                window.removeEventListener('mouseup', up);
+              };
+              window.addEventListener('mousemove', move);
+              window.addEventListener('mouseup', up);
+            });
+          };
+          bindHandle(panel.querySelector('[data-role="left-handle"]'), 'left');
+          bindHandle(panel.querySelector('[data-role="right-handle"]'), 'right');
+        }
+
         const close = (result) => {
           try { this.hide(); } catch (e) {}
           overlay.remove();
@@ -586,7 +782,19 @@
         panel.querySelector('[data-role="cancel"]').addEventListener('click', () => close(null));
         panel.querySelector('[data-role="send"]').addEventListener('click', () => {
           const cur = this.current();
-          close(cur ? { startMs: cur.startMs, endMs: cur.endMs } : null);
+          if (!cur) return close(null);
+          // When the text-range handles were used, hand back the expanded text
+          // so the caller can use it as the Anki expression. Otherwise the
+          // caller keeps whatever expression it already had.
+          let text = null;
+          if (textRangeState) {
+            text = '';
+            for (let i = textRangeState.leftIdx; i <= textRangeState.rightIdx; i++) {
+              if (i > textRangeState.leftIdx) text += ' ';
+              text += cues[i].text;
+            }
+          }
+          close({ startMs: cur.startMs, endMs: cur.endMs, text });
         });
       });
     }

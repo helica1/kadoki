@@ -2488,19 +2488,32 @@ function setupSwipe() {
                 }
                 // For SRT cards, open the waveform editor so the user can
                 // fine-tune bounds before we slice + send. Cancel aborts.
+                let finalExpression = expression;
                 if (card.isSrtCard && card.audiobookPath && window.Capacitor?.Plugins?.AudioSlicer) {
                   let finalStart = Math.round(card.audiobookStartMs);
                   let finalEnd   = Math.round(card.audiobookEndMs);
                   if (window.waveform?.edit) {
+                    // SRT-card index IS cue index. Pass the cue list so the
+                    // editor's text-range handles can expand/contract.
+                    const cuesFromCards = window.allNotes
+                      ?.filter(n => n.isSrtCard)
+                      .map(n => ({
+                        startMs: n.audiobookStartMs,
+                        endMs:   n.audiobookEndMs,
+                        text:    (n.expression || '').replace(/<[^>]+>/g, '').trim()
+                      }));
                     const result = await window.waveform.edit({
                       srcPath: card.audiobookPath,
                       startMs: finalStart,
                       endMs:   finalEnd,
-                      title: expression
+                      title: expression,
+                      cues: cuesFromCards,
+                      cueIndex: currentCardIndex
                     });
                     if (!result) return; // user cancelled
                     finalStart = Math.round(result.startMs);
                     finalEnd   = Math.round(result.endMs);
+                    if (result.text) finalExpression = result.text;
                     // Persist the adjusted bounds back into the in-memory card
                     // so the next replay/next-card transition uses them too.
                     card.audiobookStartMs = finalStart;
@@ -2519,7 +2532,7 @@ function setupSwipe() {
                     }
                   } catch (e) { debugLog('SRT slice for Anki: ' + e.message); }
                 }
-                sendToAnki({ expression, imageData, audioData });
+                sendToAnki({ expression: finalExpression, imageData, audioData });
               }
             }
           }
@@ -2778,6 +2791,8 @@ window.loadTitleAsSrtCards = async function (title) {
   currentCardIndex = restoreIdx;
   window.currentCardIndex = restoreIdx;
   window._activeTitleId = title.id;
+  // Title swap invalidates the audiobook pre-warm cache.
+  if (typeof window.invalidateAbContext === 'function') window.invalidateAbContext();
 
   // Show the title as the "deck name" so the rest of the app (which reads
   // currentDeckName from #deckName) uses the title for pref namespacing.

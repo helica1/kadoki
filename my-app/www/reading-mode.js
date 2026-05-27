@@ -501,11 +501,16 @@
     if (!r) { alert('This sentence has no matched audiobook cue.'); return; }
     if (!window.waveform?.edit) return;
     const text = textWithoutRuby(chunk).trim();
+    // Locate the anchor cue so the editor can expose text-range handles.
+    const chunkIdx = chunks.indexOf(chunk);
+    const cueIdx = (chunkIdx >= 0 && abChunkToCue) ? abChunkToCue[chunkIdx] : -1;
     const adjusted = await window.waveform.edit({
       srcPath: r.srcPath,
       startMs: Math.round(r.startMs),
       endMs:   Math.round(r.endMs),
-      title: text
+      title: text,
+      cues: abCues,
+      cueIndex: cueIdx
     });
     if (!adjusted) return;
     // Persist override on the chunk's dataset so a subsequent Add-to-Anki
@@ -524,13 +529,18 @@
       if (r) { startMs = Math.round(r.startMs); endMs = Math.round(r.endMs); }
     }
     let audioData = '';
+    let finalText = text;
     if (Number.isFinite(startMs) && Number.isFinite(endMs) && abAudioPath &&
         window.Capacitor?.Plugins?.AudioSlicer) {
       // Let user fine-tune before send. Cancel = abort.
+      const chunkIdx = chunks.indexOf(chunk);
+      const cueIdx = (chunkIdx >= 0 && abChunkToCue) ? abChunkToCue[chunkIdx] : -1;
       const adjusted = await window.waveform.edit({
-        srcPath: abAudioPath, startMs, endMs, title: text
+        srcPath: abAudioPath, startMs, endMs, title: text,
+        cues: abCues, cueIndex: cueIdx
       });
       if (!adjusted) return;
+      if (adjusted.text) finalText = adjusted.text;
       try {
         const slice = await window.Capacitor.Plugins.AudioSlicer.slice({
           srcPath: abAudioPath,
@@ -552,7 +562,7 @@
         if (tit?.attachments?.cover?.dataUri) imageData = tit.attachments.cover.dataUri;
       }
     } catch (e) {}
-    await window.sendToAnki({ expression: text, imageData, audioData });
+    await window.sendToAnki({ expression: finalText, imageData, audioData });
   }
 
   // Lazy: wrap a chunk's text in per-char dict-frag spans (skipping rt/rp).
@@ -604,7 +614,7 @@
     const cardIdx = findCardForChunk(chunk);
     const card = (cardIdx >= 0 && Array.isArray(window.allNotes)) ? window.allNotes[cardIdx] : null;
     const chunkIdxLocal = chunks.indexOf(chunk);
-    let cueAudioPath = null, cueStartMs = null, cueEndMs = null, cueText = '';
+    let cueAudioPath = null, cueStartMs = null, cueEndMs = null, cueText = '', cueIdxOut = -1;
     if (abChunkToCue && chunkIdxLocal >= 0) {
       const cueIdx = abChunkToCue[chunkIdxLocal];
       if (cueIdx >= 0 && abCues[cueIdx]) {
@@ -612,6 +622,7 @@
         cueStartMs = abCues[cueIdx].startMs;
         cueEndMs   = abCues[cueIdx].endMs;
         cueText    = abCues[cueIdx].text;
+        cueIdxOut  = cueIdx;
       }
     }
     window.lookupContext = {
@@ -621,7 +632,9 @@
       sentence: cueText || textWithoutRuby(chunk),
       cueAudioPath,
       cueStartMs,
-      cueEndMs
+      cueEndMs,
+      cueIndex: cueIdxOut,
+      cues: abCues
     };
 
     try {
@@ -1715,8 +1728,20 @@
       abCueToChunk = maps.cueToChunk;
       abChunkToCue = maps.chunkToCue;
     }
+    // Mark pre-warm successful so a later openAudiobookMode skips re-loading.
+    abContextLoadedForDeck = deck;
     return true;
   }
+
+  // Pre-warm: if we've already loaded the cue context for the current deck,
+  // openAudiobookMode can skip the "Loading audiobook…" placeholder. Tracks
+  // by deck name; null if a fresh load is needed.
+  let abContextLoadedForDeck = null;
+
+  function invalidateAbContext() {
+    abContextLoadedForDeck = null;
+  }
+  window.invalidateAbContext = invalidateAbContext;
 
   async function abLoadContextForCurrentDeck() {
     const deck = currentDeckName();
@@ -1734,6 +1759,11 @@
       const view = document.getElementById('audiobookModeView');
       if (view) view.style.display = 'flex';
       return false;
+    }
+    // Fast path: pre-warmed for this deck, paths unchanged. Skip the
+    // ~500 ms SRT fetch+parse+map. Caller hides "Loading audiobook…".
+    if (abContextLoadedForDeck === deck && abCues?.length && abAudioPath === audio.path) {
+      return true;
     }
     abAudioPath = audio.path;
     abAudioName = audio.name;
@@ -1767,6 +1797,7 @@
       abChunkToCue = null;
       rlog('No EPUB chunks yet — cue↔chunk mapping skipped');
     }
+    abContextLoadedForDeck = deck;
     return true;
   }
 
@@ -1906,8 +1937,15 @@
     const view = document.getElementById('audiobookModeView');
     if (view) {
       view.style.display = 'flex';
-      const cueEl = document.getElementById('audiobookCueText');
-      if (cueEl) cueEl.textContent = 'Loading audiobook…';
+      // Only show the "Loading audiobook…" placeholder when we actually have
+      // to load. If the reader already pre-warmed the cue context for this
+      // deck, skip the message — it'd flash visibly for ~0 ms.
+      const deck = currentDeckName();
+      const isPreWarmed = abContextLoadedForDeck === deck && abCues?.length;
+      if (!isPreWarmed) {
+        const cueEl = document.getElementById('audiobookCueText');
+        if (cueEl) cueEl.textContent = 'Loading audiobook…';
+      }
     }
     const ok = await abLoadContextForCurrentDeck();
     if (!ok) return;
@@ -2239,9 +2277,15 @@
     rlog('Opening reading mode');
     // Show the reader view IMMEDIATELY (before any awaits) so there's
     // no brief flash of the card-mode underlay when switching from
-    // audiobook mode.
+    // audiobook mode. Content stays at opacity 0 until syncReader paints
+    // + scrolls — that hides the "scroll-from-top then jump" flash.
     const view = document.getElementById('readingModeView');
     view.style.display = 'flex';
+    const content = document.getElementById('readingModeContent');
+    if (content) {
+      content.style.opacity = '0';
+      content.style.transition = 'opacity 0.15s ease';
+    }
     await applyFontPrefs();
     installReadActivityHooks();
     setPref(KEYS.MODE_OPEN, 'true');
@@ -2270,6 +2314,10 @@
     // Snap the reader to the current playhead. Centered + instant so
     // the user lands directly on the right line.
     await syncReaderToCurrentPosition();
+    // Reveal content only after sync — no visible scroll-from-top flash.
+    if (content) {
+      requestAnimationFrame(() => { content.style.opacity = '1'; });
+    }
   };
 
   // Open-reader and tab-switch sync: locate the chunk that matches the
