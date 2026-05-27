@@ -1,0 +1,3 @@
+npx cap copy
+
+chrome://inspect/#devices

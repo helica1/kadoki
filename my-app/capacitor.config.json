@@ -1,0 +1,23 @@
+{
+  "appId": "com.example.app",
+  "appName": "AnkiDeckReader", 
+  "webDir": "www",
+  "server": {
+    "hostname": "localhost",
+    "androidScheme": "https",
+    "allowNavigation": ["http://127.0.0.1:8765", "http://localhost:8765"]
+  },
+  "android": {
+    "allowMixedContent": true,
+    "webContentsDebuggingEnabled": true
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": false
+    },
+    "Filesystem": {
+      "androidRequestAllFilesAccessPermission": true
+    },
+    "Preferences": {}
+  }
+}

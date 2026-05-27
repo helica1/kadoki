@@ -1,0 +1,655 @@
+/* =====================================================================
+ * theme.css — Pigments-inspired design tokens + utility classes.
+ *
+ * This file is the canonical place for colors, spacing, typography, and
+ * common component looks. New surfaces should consume these tokens via
+ * CSS variables (`var(--accent-cyan)`) rather than hardcoding values.
+ *
+ * No JS, no behavior — purely visual.
+ * ===================================================================== */
+
+:root {
+  /* ---- Color tokens ---- */
+  --bg:               #0c0c0c;
+  --bg-elev:          #131313;
+  --panel:            #161616;
+  --panel-elev:       #1c1c1c;
+  --border:           #2a2a2a;
+  --border-strong:    #3a3a3a;
+  --text:             #e8e8e8;
+  --text-muted:       #888;
+  --text-faint:       #5a5a5a;
+
+  /* Accents — cyan is the primary; per-mode accents tint mode tabs + play. */
+  --accent-cyan:        #00ffcc;
+  --accent-cyan-dim:    #00b894;
+  --accent-cyan-soft:   rgba(0, 255, 204, 0.18);
+  --accent-cyan-glow:   rgba(0, 255, 204, 0.45);
+  --accent-card:        #ff9550;   /* warm orange — card mode */
+  --accent-read:        #4caf50;   /* green — read mode */
+  --accent-audio:       #b794f6;   /* lavender — audiobook mode */
+  --accent-warn:        #ffd54a;
+  --accent-danger:      #ff5555;
+  --accent-green:       #4caf50;   /* timer "running" — vivid green */
+
+  /* ---- Spacing scale ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* ---- Radius scale ---- */
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-pill: 999px;
+
+  /* ---- Typography ---- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --type-xs: 11px;
+  --type-sm: 13px;
+  --type-base: 15px;
+  --type-lg: 18px;
+  --type-xl: 22px;
+  --type-2xl: 32px;
+
+  /* ---- Per-mode appearance (overridden by appearance.js on boot) ---- */
+  --font-size-card: 1.8rem;
+  --font-size-read: 1rem;
+  --font-size-audio: 1.6rem;
+  --align-card: center;
+  --align-read: left;
+  --align-audio: center;
+  --image-card-display: block;
+  --image-card-opacity: 1;
+  --image-card-align: flex-start;
+  --image-audio-display: block;
+  --image-audio-opacity: 0.6;
+  --image-audio-align: center;
+}
+
+/* Cue-precise highlight via CSS Custom Highlight API. Drawn ON TOP of
+   any chunk-level .active background so the user sees the exact SRT cue
+   text being read, not just "this sentence is current". */
+::highlight(cue-active) {
+  background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.45));
+  color: inherit;
+}
+/* With a precise cue highlight, drop the diffuse chunk-level bg but
+   keep a thin sharp ring around the chunk so the user still sees which
+   sentence the highlight belongs to. */
+body.has-cue-highlight #readingModeContent .reading-chunk.active {
+  background-color: transparent;
+  box-shadow: 0 0 0 1px var(--reader-highlight-ring, rgba(76,175,80,0.55));
+  border-radius: 2px;
+}
+
+/* ---- Apply per-mode appearance vars ---- */
+body.mode-card #cardContainer .subtitle-text,
+body.mode-card #cardContainer .card-text {
+  font-size: var(--font-size-card) !important;
+  text-align: var(--align-card) !important;
+  font-family: var(--font-family-card) !important;
+}
+body.mode-card #cardContainer img,
+body.mode-card #cardContainer .card-image img {
+  display: var(--image-card-display);
+  opacity: var(--image-card-opacity);
+}
+body.mode-card #cardContainer {
+  justify-content: var(--image-card-align);
+}
+body.mode-read #readingModeContent {
+  font-size: var(--font-size-read) !important;
+  text-align: var(--align-read) !important;
+  font-family: var(--font-family-read) !important;
+}
+body.mode-audio #audiobookCueText {
+  font-size: var(--font-size-audio) !important;
+  text-align: var(--align-audio) !important;
+  font-family: var(--font-family-audio) !important;
+}
+body.mode-audio #audiobookCardImage {
+  display: var(--image-audio-display);
+  opacity: var(--image-audio-opacity);
+  align-self: var(--image-audio-align);
+}
+
+/* =====================================================================
+ * Utility classes
+ * ===================================================================== */
+
+/* All-caps small label with letter-spacing — Pigments header style. */
+.label-cap {
+  font-family: var(--font-sans);
+  font-size: var(--type-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Panel: subtle bordered card on the dark bg. */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+/* Buttons */
+.btn {
+  -webkit-appearance: none;
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: var(--sp-3) var(--sp-4);
+  font-family: var(--font-sans);
+  font-size: var(--type-base);
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.btn:hover { background: var(--panel-elev); }
+.btn:active { background: var(--bg-elev); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+
+/* Primary (cyan). */
+.btn-primary {
+  background: var(--accent-cyan);
+  color: #0a0a0a;
+  border-color: var(--accent-cyan);
+  font-weight: 600;
+}
+.btn-primary:hover { background: var(--accent-cyan-dim); border-color: var(--accent-cyan-dim); }
+
+/* Ghost — no border, transparent. */
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn-ghost:hover { background: var(--panel); }
+
+/* Icon-only round-ish button. */
+.btn-icon {
+  padding: var(--sp-2) var(--sp-3);
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: var(--r-md);
+  font-size: var(--type-lg);
+}
+
+/* Round pill button. */
+.btn-pill { border-radius: var(--r-pill); padding-left: var(--sp-4); padding-right: var(--sp-4); }
+
+/* Active state — used for mode tabs, active highlights. */
+.is-active {
+  color: var(--accent-cyan);
+  box-shadow: 0 0 0 1px var(--accent-cyan-soft) inset;
+}
+
+/* Subtle glow ring — active chunk, focused control. */
+.glow-cyan {
+  box-shadow: 0 0 0 1px var(--accent-cyan-soft),
+              0 0 16px var(--accent-cyan-soft);
+}
+
+/* =====================================================================
+ * App shell base
+ * Header + footer are 44 px tall slim bars. Content fills the middle.
+ * ===================================================================== */
+
+/* No #appShell wrapper — appHeader is a direct child of body so its
+   z-index competes directly with sibling mode views (no parent stacking
+   context can trap it). */
+
+#appHeader {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 48px;
+  background: rgba(13, 13, 13, 0.94);
+  /* No backdrop-filter: that creates a stacking context which has caused
+     subtle hit-testing issues on some Android WebViews. The solid bg above
+     is opaque enough that blur is unnecessary. */
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--sp-3);
+  gap: var(--sp-2);
+  transition: transform 0.22s ease, opacity 0.18s ease;
+  /* Above all mode views (#readingModeView 2700, #audiobookModeView 2750). */
+  z-index: 9000 !important;
+  pointer-events: auto !important;
+}
+body.chrome-hidden #appHeader {
+  transform: translateY(-110%);
+  opacity: 0;
+  pointer-events: none !important;
+}
+
+#appHeader .shell-spacer { flex: 1; }
+
+#appHeader .mode-tabs {
+  display: flex;
+  gap: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 2px;
+}
+#appHeader .mode-tab {
+  padding: 7px 14px;
+  font-size: var(--type-xs);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-family: var(--font-sans);
+}
+#appHeader .mode-tab[data-active="1"] {
+  color: #0a0a0a;
+  background: var(--accent-cyan);
+}
+#appHeader .mode-tab[data-mode="card"][data-active="1"]  { background: var(--accent-card); }
+#appHeader .mode-tab[data-mode="read"][data-active="1"]  { background: var(--accent-read); }
+#appHeader .mode-tab[data-mode="audio"][data-active="1"] { background: var(--accent-audio); }
+#appHeader .mode-tab:disabled { opacity: 0.4; cursor: default; }
+/* Empty-mode visual hint: mode has no required attachments for current deck.
+   Tappable (mode view shows its own empty-state) but visually muted. */
+#appHeader .mode-tab[data-empty="1"] { color: var(--text-faint); opacity: 0.55; }
+
+/* Text buttons (no icons). Used for TIMER, PLAY, MORE in the header. */
+#appHeader .shell-text-btn {
+  background: transparent;
+  color: var(--text);
+  border: none;
+  padding: 8px 12px;
+  font-family: var(--font-sans);
+  font-size: var(--type-sm);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: var(--r-sm);
+  min-width: 56px;
+}
+#appHeader .shell-text-btn:active { background: var(--panel-elev); }
+
+/* Timer label — pigments-style: mono numbers + tiny caps "TIMER" prefix.
+   Green when running, red when paused. Mode-agnostic (it's a state
+   indicator, not a mode indicator). */
+#appHeader #shellTimerLabel {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent-green) !important;
+  letter-spacing: 0.06em;
+  text-transform: none;
+  font-weight: 600;
+  font-size: .85rem;
+  padding: 4px 10px;
+  border: 1px solid currentColor;
+  border-radius: var(--r-pill);
+  background: transparent;
+  position: relative;
+  min-width: 64px;
+  text-align: center;
+}
+#appHeader #shellTimerLabel::before {
+  content: "TIMER";
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-sans);
+  font-size: 8px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  color: var(--text-muted);
+  background: rgba(13, 13, 13, 0.94);
+  padding: 0 4px;
+}
+#appHeader #shellTimerLabel.paused { color: var(--accent-danger) !important; }
+#appHeader #shellTimerLabel.paused::before { content: "PAUSED"; }
+#appHeader #shellTimerLabel.hidden { display: none; }
+
+/* Play button slightly emphasized — accent text + thin border. */
+#appHeader #shellPlayBtn {
+  color: var(--accent-cyan);
+  border: 1px solid var(--accent-cyan);
+}
+#appHeader #shellPlayBtn.mode-card  { color: var(--accent-card); border-color: var(--accent-card); }
+#appHeader #shellPlayBtn.mode-read  { color: var(--accent-read); border-color: var(--accent-read); }
+#appHeader #shellPlayBtn.mode-audio { color: var(--accent-audio); border-color: var(--accent-audio); }
+
+/* Small floating menu (timer menu, etc.). */
+.shell-menu {
+  position: fixed;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+  /* Above all overlay mode views so the menu doesn't get hidden behind them. */
+  z-index: 3600;
+  min-width: 200px;
+  padding: 4px 0;
+}
+.shell-menu .menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 10px 14px;
+  font-size: var(--type-sm);
+  cursor: pointer;
+}
+.shell-menu .menu-item:hover { background: var(--panel-elev); }
+.shell-menu .menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
+
+/* =====================================================================
+ * Coexistence with legacy chrome
+ * The shell is now the only persistent UI strip (single top bar, no
+ * footer). All legacy bars are hidden — their functions live in the
+ * shell's MORE menu or in the reading settings modal.
+ * ===================================================================== */
+
+/* =====================================================================
+ * Legacy chrome: hidden entirely. Their functions moved to the shell's
+ * MORE menu. Only the thin #progressBar at the very bottom remains as
+ * persistent secondary chrome (tappable to jump to card).
+ * ===================================================================== */
+
+#topBarHandle, #topBar { display: none !important; }
+#readingModeToolbar { display: none !important; }
+#audiobookModeView > div:first-child { display: none !important; } /* internal title strip */
+/* Internal transport bar (skip / play / skip / speed) is shown — adds
+   tappable controls so the user doesn't always have to drag the unified
+   progress bar slider. */
+
+/* Tint audio-mode chrome with the lavender accent. */
+#audiobookTimeLabel { color: var(--accent-audio) !important; font-family: var(--font-mono); }
+#audiobookScrub { accent-color: var(--accent-audio); }
+/* Audiobook speed-control buttons — show which speed is active. */
+.ab-speed[data-active="1"] {
+  background: var(--accent-audio);
+  color: #0a0a0a;
+  border-color: var(--accent-audio);
+  font-weight: 700;
+}
+
+/* Card-mode COPY pill, anchored above the progress bar. Only visible in
+   card mode; hides with chrome. */
+#cardCopyBtn {
+  display: none;
+  position: fixed;
+  bottom: 36px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2810;
+  background: transparent;
+  color: var(--accent-card, #ff9550);
+  border: 1px solid var(--accent-card, #ff9550);
+  padding: 6px 18px;
+  border-radius: 999px;
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  font-family: var(--font-sans);
+  -webkit-tap-highlight-color: transparent;
+  transition: transform .22s ease, opacity .18s ease;
+}
+body.mode-card #cardCopyBtn { display: inline-block; }
+body.chrome-hidden #cardCopyBtn {
+  transform: translateX(-50%) translateY(110%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Unified bottom bar — shown in all three modes with mode-specific content.
+   z-index sits ABOVE the reading + audiobook mode views (2700 / 2750) so
+   it stays visible and tappable. The COPY pill follows the same rule. */
+#progressBar {
+  display: block !important;
+  position: fixed !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  height: 28px !important;
+  z-index: 2800 !important;
+  transition: transform 0.22s ease, opacity 0.18s ease;
+}
+/* Per-mode fill color follows the mode accent. */
+body.mode-card  #progressFill { background: var(--accent-card)  !important; }
+body.mode-read  #progressFill { background: var(--accent-read)  !important; }
+body.mode-audio #progressFill { background: var(--accent-audio) !important; }
+body.mode-card  #progressBar  { border-top-color: var(--accent-card)  !important; }
+body.mode-read  #progressBar  { border-top-color: var(--accent-read)  !important; }
+body.mode-audio #progressBar  { border-top-color: var(--accent-audio) !important; }
+/* When chrome is hidden (single-tap-to-hide), slide the bar off-screen. */
+body.chrome-hidden #progressBar {
+  transform: translateY(110%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Mode views are ALWAYS full-screen (inset:0). The shell header and bottom
+   progress bar overlay them — toggling chrome doesn't reflow content. */
+#readingModeView,
+#audiobookModeView {
+  top: 0 !important;
+  bottom: 0 !important;
+  height: 100% !important;
+}
+
+/* Inside each view, the scrollable content area gets top+bottom padding so
+   the first/last lines aren't hidden under the bars when chrome is shown.
+   When chrome hides, the padding stays (no reflow) — bars just disappear. */
+#readingModeContent { padding-top: 56px; padding-bottom: 36px; }
+
+/* Card container fills the viewport; image/text are centered visually
+   regardless of bar state. The bars overlay the top + bottom edges.
+   Long subtitle content scrolls (touch-pan) inside the container. */
+#cardContainer {
+  height: 100% !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+  padding-top: 48px;
+  padding-bottom: 28px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+#cardContainer .subtitle-text {
+  max-height: none;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* ---- Per-mode stats blocks ---- */
+.stats-block {
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  padding: 8px 12px 4px;
+  margin-bottom: 10px;
+  background: var(--panel, #161616);
+}
+.stats-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 4px;
+}
+.stats-block-title {
+  font-size: .72rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--text, #e8e8e8);
+}
+.stats-block[data-mode="card"]  .stats-block-title { color: var(--accent-card); }
+.stats-block[data-mode="read"]  .stats-block-title { color: var(--accent-read); }
+.stats-block[data-mode="audio"] .stats-block-title { color: var(--accent-audio); }
+.stats-block-status {
+  font-size: .65rem;
+  color: var(--text-faint, #5a5a5a);
+  transition: color .2s;
+}
+.stats-block[data-running="1"][data-mode="card"]  .stats-block-status { color: var(--accent-card); }
+.stats-block[data-running="1"][data-mode="read"]  .stats-block-status { color: var(--accent-read); }
+.stats-block[data-running="1"][data-mode="audio"] .stats-block-status { color: var(--accent-audio); }
+
+/* ---- Stats panel rows (pigments-style numeric readout) ---- */
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border, #1f1f1f);
+}
+.stat-row-last { border-bottom: none; }
+.stat-label {
+  color: var(--text-muted, #888);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.stat-value {
+  color: var(--text, #e8e8e8);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 1.4rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.stat-value-accent { color: var(--accent-read, #4caf50); }
+
+/* ---- Preferences modal: sectioned form ---- */
+.prefs-section { border-bottom: 1px solid var(--border, #2a2a2a); margin-bottom: 10px; }
+.prefs-section[open] { padding-bottom: 8px; }
+.prefs-heading {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 0;
+  color: var(--text, #e8e8e8);
+  font-size: .8rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.prefs-heading::marker, .prefs-heading::-webkit-details-marker { display: none; }
+.prefs-heading::before {
+  content: "▸ ";
+  display: inline-block;
+  color: var(--text-muted, #888);
+  transition: transform .15s;
+}
+.prefs-section[open] .prefs-heading::before { content: "▾ "; }
+
+.prefs-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: .82rem;
+  color: var(--text-muted, #aaa);
+}
+.prefs-row label {
+  flex: 0 0 45%;
+  color: var(--text-muted, #aaa);
+}
+.prefs-row input[type="text"],
+.prefs-row input[type="number"],
+.prefs-row select {
+  flex: 1;
+  background: var(--panel, #161616);
+  color: var(--text, #e8e8e8);
+  border: 1px solid var(--border, #2a2a2a);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: .85rem;
+  min-width: 0;
+}
+.prefs-row input[type="range"] { flex: 1; }
+
+/* Appearance subsection block (one per mode) */
+.appearance-mode {
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: var(--panel, #161616);
+}
+.appearance-mode .mode-label {
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text, #e8e8e8);
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.appearance-mode .mode-label[data-mode="card"]  { color: var(--accent-card); }
+.appearance-mode .mode-label[data-mode="read"]  { color: var(--accent-read); }
+.appearance-mode .mode-label[data-mode="audio"] { color: var(--accent-audio); }
+.appearance-mode .seg {
+  display: inline-flex;
+  background: var(--bg, #0c0c0c);
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.appearance-mode .seg button {
+  background: transparent;
+  color: var(--text-muted, #888);
+  border: none;
+  padding: 5px 10px;
+  font-size: .72rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  font-weight: 600;
+}
+.appearance-mode .seg button[data-on="1"] {
+  background: var(--accent-cyan, #00ffcc);
+  color: #0a0a0a;
+}
+
+/* Lock body scroll when modal is open so swipes inside the modal don't
+   chain to the underlying page. */
+body.prefs-open { overflow: hidden !important; touch-action: none; }
+body.prefs-open #appHeader,
+body.prefs-open #progressBar { pointer-events: none; }
+
+/* Narrow-device header layout. */
+@media (max-width: 380px) {
+  #appHeader { padding: 0 var(--sp-2); gap: var(--sp-1); }
+  #appHeader .shell-text-btn {
+    padding: 6px 8px;
+    min-width: 0;
+    font-size: var(--type-xs);
+  }
+  #appHeader .mode-tab { padding: 6px 9px; }
+}

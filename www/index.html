@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Head content -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anki Deck Previewer</title>
+    <style>
+        :root {
+            --bg-color: #1a1a1a;
+            --text-color: #e0e0e0;
+            --primary-color: #3498db;
+            --secondary-color: #2c3e50;
+            --accent-color: #e74c3c;
+            --card-bg: #2c2c2c;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            padding: 0;
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            transition: background-color 0.3s, color 0.3s;
+            overflow: hidden; /* Prevent scrolling with arrow keys */
+        }
+        h1, h3, h4 {
+            color: var(--primary-color);
+        }
+        #uploadSection {
+            padding: 20px;
+        }
+        #cardContainer {
+            min-height: 200px;
+            border: 1px solid var(--secondary-color);
+            border-radius: 8px;
+            padding: 0;
+            margin: 20px auto;
+            position: relative;
+            background-color: var(--card-bg);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        #cardFields {
+            position: relative;
+            width: 100%;
+        }
+        .card-image {
+            width: 100%;
+            height: auto;
+            display: block;
+            margin: auto;
+        }
+        .subtitles-container {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            display: flex;
+            flex-direction: column;
+            background: rgba(0, 0, 0, 0.5);
+            margin: auto;
+        }
+        .subtitle-text {
+            padding: 10px;
+            color: #fff;
+            text-align: center;
+            font-size: 1.2em;
+            text-shadow: 2px 2px 4px #000;
+            box-sizing: border-box;
+        }
+        .card-controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px;
+        }
+        .left-buttons, .right-buttons {
+            display: flex;
+            gap: 10px;
+        }
+        .center-counter {
+            text-align: center;
+            flex-grow: 1;
+        }
+        .card-controls button {
+            padding: 5px 10px;
+            font-size: 14px;
+            min-width: 80px;
+        }
+        #settingsMenu {
+            position: fixed;
+            right: -300px;
+            top: 0;
+            width: 300px;
+            height: 100%;
+            background-color: var(--secondary-color);
+            transition: right 0.3s ease-in-out;
+            padding: 20px;
+            box-sizing: border-box;
+            overflow-y: auto;
+            z-index: 1000;
+        }
+        #settingsMenu.open {
+            right: 0;
+        }
+        #hamburgerBtn {
+            position: fixed;
+            right: 20px;
+            top: 20px;
+            z-index: 1001;
+            cursor: pointer;
+            font-size: 24px;
+            background: none;
+            border: none;
+            color: var(--text-color);
+        }
+        .slider {
+            width: 100%;
+            -webkit-appearance: none;
+            height: 15px;
+            border-radius: 5px;
+            background: var(--secondary-color);
+            outline: none;
+            opacity: 0.7;
+            transition: opacity .2s;
+        }
+        .slider:hover {
+            opacity: 1;
+        }
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            background: var(--primary-color);
+            cursor: pointer;
+        }
+        .slider::-moz-range-thumb {
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            background: var(--primary-color);
+            cursor: pointer;
+        }
+        button {
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+            min-width: 80px;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        input[type="file"] {
+            background-color: var(--secondary-color);
+            color: var(--text-color);
+            border: 1px solid var(--primary-color);
+            padding: 5px;
+            border-radius: 5px;
+        }
+        select {
+            background-color: var(--secondary-color);
+            color: var(--text-color);
+            border: 1px solid var(--primary-color);
+            padding: 5px;
+            border-radius: 5px;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .switch-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        .switch-slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .switch-slider {
+            background-color: var(--primary-color);
+        }
+        input:checked + .switch-slider:before {
+            transform: translateX(26px);
+        }
+        /* Progress Bar Styles */
+        #progressContainer {
+            margin-top: 20px;
+            text-align: center;
+            display: none;
+        }
+        #progressBar {
+            width: 100%;
+            height: 20px;
+        }
+        /* Adjust cardContainer to take full page */
+        body.deck-loaded #uploadSection {
+            display: none;
+        }
+        body.deck-loaded #cardContainer {
+            margin-top: 0;
+            padding-top: 0;
+            width: 100%;
+            height: calc(100vh - 60px);
+        }
+        /* Ensure images fill container width */
+        .card-image {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        /* Scrollbar for cards */
+        #cardSliderContainer {
+            margin: 20px auto;
+        }
+        /* Prevent text size slider from affecting controls */
+        .card-controls, .card-controls * {
+            font-size: 14px;
+        }
+        /* Center the card content */
+        .card-content {
+            position: relative;
+            width: 100%;
+            margin: 0 auto;
+            overflow: hidden;
+        }
+        /* Audio container hidden */
+        .audio-container {
+            display: none;
+        }
+        /* Ensure the image container expands with the image */
+        .image-container {
+            position: relative;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="uploadSection">
+        <h1>Anki Deck Previewer</h1>
+
+        <input type="file" id="apkgFile" accept=".apkg" />
+        <button onclick="uploadFile()">Upload Deck</button>
+
+        <!-- Progress Bar -->
+        <div id="progressContainer">
+            <progress id="progressBar" value="0" max="100"></progress>
+            <span id="progressText">0%</span>
+        </div>
+    </div>
+
+    <div id="cardContainer">
+        <!-- Card content will be injected here -->
+    </div>
+
+    <!-- Card Slider -->
+    <div id="cardSliderContainer" style="display: none;">
+        <input type="range" id="cardSlider" class="slider" min="1" max="1" value="1">
+    </div>
+
+    <button id="hamburgerBtn" onclick="toggleSettingsMenu()">☰</button>
+
+    <div id="settingsMenu">
+        <h3>Settings</h3>
+        <div id="ankiSettings">
+            <h4>Anki Settings</h4>
+            <label for="deckName">Deck Name:</label>
+            <select id="deckName" onchange="saveState()"></select><br><br>
+            <label for="modelName">Card Type (Model):</label>
+            <select id="modelName"></select><br><br>
+
+            <div id="fieldMapping">
+                <h4>Field Mapping</h4>
+                <div id="fieldMappingOptions"></div>
+            </div>
+        </div>
+
+        <div id="fieldSelection">
+            <h4>Select Fields to Display:</h4>
+            <div id="fieldOptions"></div>
+        </div>
+
+        <div id="fieldNameVisibility">
+            <h4>Field Name Visibility:</h4>
+            <label class="switch">
+                <input type="checkbox" id="fieldNameToggle" checked>
+                <span class="switch-slider"></span>
+            </label>
+            <span>Show Field Names</span>
+        </div>
+
+        <div id="imageSizeControl">
+            <label for="imageSize">Adjust Image Size:</label>
+            <input type="range" id="imageSize" class="slider" min="10" max="200" value="100">
+        </div>
+
+        <div id="textSizeControl">
+            <label for="textSize">Adjust Text Size:</label>
+            <input type="range" id="textSize" class="slider" min="10" max="36" value="16">
+        </div>
+
+        <button onclick="loadNewDeck()">Load New Deck</button>
+        <button onclick="resetToDefault()">Reset to Default</button>
+    </div>
+
+    <script>
+        let currentCardIndex = 0;
+        let totalCards = 0;
+        let uploadedFileName = '';
+        let allNotes = [];
+        let fieldNames = [];
+        let fieldVisibility = {};
+        let ankiFieldNames = [];
+        let currentImageSize = 100;
+        let showFieldNames = true;
+
+        function initializeFieldVisibility() {
+            fieldNames.forEach((_, index) => {
+                if (fieldVisibility[index] === undefined) {
+                    fieldVisibility[index] = true;
+                }
+            });
+        }
+
+        function uploadFile() {
+            const fileInput = document.getElementById('apkgFile');
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('apkgFile', file);
+
+            const xhr = new XMLHttpRequest();
+
+            xhr.open('POST', '/upload', true);
+
+            xhr.upload.addEventListener('progress', function (e) {
+                if (e.lengthComputable) {
+                    const percentComplete = (e.loaded / e.total) * 100;
+                    const progressBar = document.getElementById('progressBar');
+                    const progressText = document.getElementById('progressText');
+                    progressBar.value = percentComplete;
+                    progressText.textContent = percentComplete.toFixed(0) + '%';
+                    if (percentComplete >= 100) {
+                        progressText.textContent = 'Processing...';
+                        progressBar.removeAttribute('value'); // Make the progress bar indeterminate
+                    }
+                }
+            });
+
+            xhr.addEventListener('readystatechange', function () {
+                if (xhr.readyState == XMLHttpRequest.DONE) {
+                    if (xhr.status == 200) {
+                        const data = JSON.parse(xhr.responseText);
+                        uploadedFileName = data.uploadedFileName;
+                        allNotes = data.notes;
+                        totalCards = allNotes.length;
+                        fieldNames = data.fieldNames;
+                        currentCardIndex = 0;
+                        initializeFieldVisibility();
+                        displayCard(allNotes[currentCardIndex]);
+                        updateCardCounter();
+                        populateFieldOptions();
+                        fetchAnkiSettings();
+
+                        // Update card slider
+                        const cardSlider = document.getElementById('cardSlider');
+                        cardSlider.max = totalCards;
+                        cardSlider.value = currentCardIndex + 1;
+                        document.getElementById('cardSliderContainer').style.display = 'block';
+
+                        // Hide progress bar
+                        document.getElementById('progressContainer').style.display = 'none';
+
+                        // Hide upload section and expand card container
+                        document.body.classList.add('deck-loaded');
+                        saveState();
+                    } else {
+                        console.error('Error uploading file');
+                        // Hide progress bar
+                        document.getElementById('progressContainer').style.display = 'none';
+                    }
+                }
+            });
+
+            // Show progress bar
+            document.getElementById('progressContainer').style.display = 'block';
+
+            xhr.send(formData);
+        }
+
+        function navigateCard(direction) {
+            currentCardIndex += direction;
+            if (currentCardIndex < 0) currentCardIndex = 0;
+            if (currentCardIndex >= totalCards) currentCardIndex = totalCards - 1;
+            displayCard(allNotes[currentCardIndex]);
+            updateCardCounter();
+            saveState();
+
+            // Update card slider
+            document.getElementById('cardSlider').value = currentCardIndex + 1;
+
+            // Play audio automatically if present
+            replayAudio();
+        }
+
+
+        function displayCard(note) {
+        const cardContainer = document.getElementById('cardContainer');
+        cardContainer.innerHTML = `
+            <div id="cardFields"></div>
+        `;
+        const cardFields = document.getElementById('cardFields');
+
+        let imageField = '';
+        let textFields = '';
+        let audioElement = null;
+        note.fields.forEach((field, index) => {
+            if (field.includes('<audio')) {
+                audioElement = field;
+            }
+            if (fieldVisibility[index]) {
+                if (field.includes('<img')) {
+                    const fieldWithClass = field.replace(/<img/g, '<img class="card-image"');
+                    imageField += fieldWithClass;
+                } else if (!field.includes('<audio')) {
+                    textFields += `
+                        <div class="subtitle-text" id="field-${index}">
+                            ${showFieldNames ? `<strong class="field-name">${fieldNames[index]}:</strong> ` : ''}
+                            ${field}
+                        </div>
+                    `;
+                }
+            }
+        });
+
+        cardFields.innerHTML = `
+            <div class="card-content">
+                <div class="image-container">
+                    ${imageField}
+                    <div class="subtitles-container">
+                        ${textFields}
+                    </div>
+                </div>
+            </div>
+        `;
+
+        if (audioElement) {
+            const audioContainer = document.createElement('div');
+            audioContainer.className = 'audio-container';
+            audioContainer.innerHTML = audioElement;
+            cardContainer.appendChild(audioContainer);
+            window.currentAudio = audioContainer.querySelector('audio');
+        } else {
+            window.currentAudio = null;
+        }
+
+        const controlsHTML = `
+            <div class="card-controls">
+                <div class="left-buttons">
+                    <button onclick="addToAnki()">Add to Anki</button>
+                    <button onclick="selectAudioFile()">Select Audio File</button>
+                </div>
+                <div class="center-counter">
+                    <span id="cardCounter"></span>
+                </div>
+                <div class="right-buttons">
+                    <button id="prevButton" onclick="navigateCard(-1)">Previous</button>
+                    <button id="nextButton" onclick="navigateCard(1)">Next</button>
+                </div>
+            </div>
+        `;
+        cardContainer.insertAdjacentHTML('beforeend', controlsHTML);
+
+        adjustImageSize(currentImageSize);
+        adjustTextSize(document.getElementById('textSize').value);
+        updateCardCounter();
+
+        const imageElement = cardContainer.querySelector('.card-image');
+        const subtitlesContainer = cardContainer.querySelector('.subtitles-container');
+        if (imageElement && subtitlesContainer) {
+            const adjustSubtitlesWidth = () => {
+                subtitlesContainer.style.width = `${imageElement.offsetWidth}px`;
+            };
+            imageElement.onload = adjustSubtitlesWidth;
+            adjustSubtitlesWidth(); // Set initial width
+        }
+    }
+
+    function updateCardCounter() {
+        const cardCounter = document.getElementById('cardCounter');
+        if (cardCounter) {
+            cardCounter.textContent = `Card ${currentCardIndex + 1} of ${totalCards}`;
+        }
+    }
+
+    function populateFieldOptions() {
+        const fieldOptions = document.getElementById('fieldOptions');
+        fieldOptions.innerHTML = fieldNames.map((fieldName, index) => `
+            <div>
+                <input type="checkbox" id="field${index}" name="field${index}" ${fieldVisibility[index] ? 'checked' : ''} onchange="toggleFieldVisibility(${index})">
+                <label for="field${index}">${fieldName}</label>
+            </div>
+        `).join('');
+    }
+
+    function toggleFieldVisibility(index) {
+        fieldVisibility[index] = !fieldVisibility[index];
+        displayCard(allNotes[currentCardIndex]);
+        saveState();
+    }
+
+    async function fetchAnkiSettings(state = {}) {
+        try {
+            const deckResponse = await fetch('/get-deck-names');
+            const deckData = await deckResponse.json();
+            const deckSelect = document.getElementById('deckName');
+            deckSelect.innerHTML = deckData.deckNames.map(deck => `<option value="${deck}">${deck}</option>`).join('');
+
+            const modelResponse = await fetch('/get-model-names');
+            const modelData = await modelResponse.json();
+            const modelSelect = document.getElementById('modelName');
+            modelSelect.innerHTML = modelData.modelNames.map(model => `<option value="${model}">${model}</option>`).join('');
+
+            if (state.ankiSettings) {
+                deckSelect.value = state.ankiSettings.deckName;
+                modelSelect.value = state.ankiSettings.modelName;
+            }
+
+            modelSelect.onchange = () => fetchModelFields(state);
+            fetchModelFields(state);
+        } catch (error) {
+            console.error('Error fetching Anki settings:', error);
+        }
+    }
+
+    async function fetchModelFields(state = {}) {
+        const modelName = document.getElementById('modelName').value;
+        try {
+            const response = await fetch('/get-model-field-names', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ modelName }),
+            });
+            const data = await response.json();
+            ankiFieldNames = data.fieldNames;
+            populateFieldMapping(data.fieldNames);
+
+            if (state.fieldMapping) {
+                Object.entries(state.fieldMapping).forEach(([ankiField, value]) => {
+                    const index = ankiFieldNames.indexOf(ankiField);
+                    if (index !== -1) {
+                        const select = document.getElementById(`fieldMap${index}`);
+                        if (select) {
+                            select.value = value;
+                        }
+                    }
+                });
+            }
+        } catch (error) {
+            console.error('Error fetching model fields:', error);
+        }
+    }
+
+    function populateFieldMapping(ankiFields) {
+        const fieldMappingOptions = document.getElementById('fieldMappingOptions');
+        fieldMappingOptions.innerHTML = ankiFields.map((ankiField, index) => `
+            <div>
+                <label for="fieldMap${index}">${ankiField}:</label>
+                <select id="fieldMap${index}" name="fieldMap${index}" onchange="saveState()">
+                    <option value="OFF">OFF</option>
+                    ${fieldNames.map((field, i) => `<option value="${i}">${field}</option>`).join('')}
+                </select>
+            </div>
+        `).join('');
+    }
+
+    async function addToAnki() {
+        const deckName = document.getElementById('deckName').value;
+        const modelName = document.getElementById('modelName').value;
+        const note = allNotes[currentCardIndex];
+
+        const ankiFieldsMapping = {};
+        ankiFieldNames.forEach((ankiField, index) => {
+            const select = document.getElementById(`fieldMap${index}`);
+            const selectedValue = select.value;
+            if (selectedValue !== 'OFF') {
+                const deckFieldIndex = parseInt(selectedValue);
+                ankiFieldsMapping[ankiField] = deckFieldIndex;
+            }
+        });
+
+        const audioFileName = note.audioFileName;
+
+        try {
+            const response = await fetch('/add-to-anki', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    noteId: note.id,
+                    audioFileName,
+                    uploadedFileName,
+                    deckName,
+                    modelName,
+                    ankiFieldsMapping
+                })
+            });
+            const data = await response.json();
+            if (data.result) {
+                // Card added successfully
+            } else {
+                alert('Failed to add card to Anki.');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('An error occurred while adding the card to Anki.');
+        }
+    }
+
+    function selectAudioFile() {
+        const currentNote = allNotes[currentCardIndex];
+        if (currentNote.audioFileName) {
+            fetch('/open-audio', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    uploadedFileName,
+                    audioFileName: currentNote.audioFileName
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (!data.success) {
+                    console.error('Failed to open audio file.');
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error opening audio file. See console for details.');
+            });
+        } else {
+            alert('No audio file associated with this card.');
+        }
+    }
+
+    function adjustImageSize(size) {
+        currentImageSize = size;
+        document.querySelectorAll('.card-image').forEach(img => {
+            img.style.width = `${size}%`;
+            img.style.height = 'auto';
+        });
+        saveState();
+    }
+
+    function adjustTextSize(size) {
+        document.querySelectorAll('.subtitle-text').forEach(container => {
+            container.style.fontSize = `${size}px`;
+        });
+        saveState();
+    }
+
+    function toggleSettingsMenu() {
+        const settingsMenu = document.getElementById('settingsMenu');
+        settingsMenu.classList.toggle('open');
+    }
+
+    function saveState() {
+        const state = {
+            uploadedFileName,
+            currentCardIndex,
+            currentImageSize,
+            fieldVisibility,
+            showFieldNames,
+            imageSize: document.getElementById('imageSize').value,
+            textSize: document.getElementById('textSize').value,
+            ankiSettings: {
+                deckName: document.getElementById('deckName').value,
+                modelName: document.getElementById('modelName').value,
+            },
+            fieldMapping: {}
+        };
+
+        ankiFieldNames.forEach((ankiField, index) => {
+            const select = document.getElementById(`fieldMap${index}`);
+            if (select) {
+                state.fieldMapping[ankiField] = select.value;
+            }
+        });
+
+        localStorage.setItem('ankiPreviewerState', JSON.stringify(state));
+    }
+
+    function loadState() {
+        const stateJSON = localStorage.getItem('ankiPreviewerState');
+        if (stateJSON) {
+            const state = JSON.parse(stateJSON);
+
+            uploadedFileName = state.uploadedFileName;
+            currentCardIndex = state.currentCardIndex || 0;
+            currentImageSize = state.currentImageSize || 100;
+            fieldVisibility = state.fieldVisibility || {};
+            showFieldNames = state.showFieldNames !== undefined ? state.showFieldNames : true;
+
+            document.getElementById('imageSize').value = state.imageSize || 100;
+            document.getElementById('textSize').value = state.textSize || 16;
+
+            const fieldNameToggle = document.getElementById('fieldNameToggle');
+            fieldNameToggle.checked = showFieldNames;
+
+            if (uploadedFileName) {
+                loadDeck(uploadedFileName, state);
+            }
+        }
+    }
+
+    function loadDeck(uploadedFileName, state) {
+        fetch('/load-deck', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadedFileName })
+        })
+        .then(response => response.json())
+        .then(data => {
+            allNotes = data.notes;
+            totalCards = allNotes.length;
+            fieldNames = data.fieldNames;
+            initializeFieldVisibility();
+
+            Object.keys(fieldVisibility).forEach(index => {
+                fieldVisibility[index] = state.fieldVisibility[index];
+            });
+
+            displayCard(allNotes[currentCardIndex]);
+            updateCardCounter();
+            populateFieldOptions();
+            fetchAnkiSettings(state);
+
+            const cardSlider = document.getElementById('cardSlider');
+            cardSlider.max = totalCards;
+            cardSlider.value = currentCardIndex + 1;
+            document.getElementById('cardSliderContainer').style.display = 'block';
+
+            document.body.classList.add('deck-loaded');
+        })
+        .catch(error => {
+            console.error('Error loading deck:', error);
+        });
+    }
+
+    window.onload = loadState;
+
+    function loadNewDeck() {
+        localStorage.removeItem('ankiPreviewerState');
+        location.reload();
+    }
+
+    function resetToDefault() {
+        localStorage.removeItem('ankiPreviewerState');
+        currentCardIndex = 0;
+        currentImageSize = 100;
+        fieldVisibility = {};
+        showFieldNames = true;
+        initializeFieldVisibility();
+        displayCard(allNotes[currentCardIndex]);
+        updateCardCounter();
+        populateFieldOptions();
+        fetchAnkiSettings();
+        adjustImageSize(100);
+        adjustTextSize(16);
+        saveState();
+    }
+
+    const fieldNameToggle = document.getElementById('fieldNameToggle');
+    fieldNameToggle.addEventListener('change', () => {
+        showFieldNames = fieldNameToggle.checked;
+        displayCard(allNotes[currentCardIndex]);
+        saveState();
+    });
+
+    const imageSizeSlider = document.getElementById('imageSize');
+    imageSizeSlider.addEventListener('input', function() {
+        adjustImageSize(this.value);
+    });
+
+    const textSizeSlider = document.getElementById('textSize');
+    textSizeSlider.addEventListener('input', function() {
+        adjustTextSize(this.value);
+    });
+
+    const cardSlider = document.getElementById('cardSlider');
+    cardSlider.addEventListener('input', function() {
+        currentCardIndex = parseInt(this.value) - 1;
+        displayCard(allNotes[currentCardIndex]);
+        updateCardCounter();
+        saveState();
+        replayAudio();
+    });
+
+    document.addEventListener('keydown', function(event) {
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            navigateCard(-1);
+        } else if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            navigateCard(1);
+        } else if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            replayAudio();
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            addToAnki();
+        }
+    });
+
+    function playPauseAudio() {
+        if (window.currentAudio) {
+            if (window.currentAudio.paused) {
+                window.currentAudio.play();
+            } else {
+                window.currentAudio.pause();
+            }
+        }
+    }
+
+    function replayAudio() {
+        if (window.currentAudio) {
+            window.currentAudio.currentTime = 0;
+            window.currentAudio.play();
+        }
+    }
+</script>
+</body>
+</html>

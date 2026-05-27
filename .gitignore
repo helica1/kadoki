@@ -1,0 +1,76 @@
+# ===== Node =====
+node_modules/
+
+# ===== Android / Gradle =====
+**/.gradle/
+**/build/
+**/.idea/
+**/local.properties
+**/captures/
+**/output-metadata.json
+*.apk
+*.aab
+*.aar
+*.iml
+
+# Capacitor copies www/ → android/app/src/main/assets/public/. Don't track
+# the synced copy; the source of truth is my-app/www/.
+my-app/android/app/src/main/assets/public/
+
+# Capacitor's generated capacitor.config.json inside android/app/src/main/assets/
+my-app/android/app/src/main/assets/capacitor.config.json
+my-app/android/app/src/main/assets/capacitor.plugins.json
+
+# Signing — NEVER commit keystores or passwords.
+*.keystore
+*.jks
+keystore.properties
+release.keystore
+debug.keystore
+
+# ===== Bundled assets that are huge / licensed / user-owned =====
+# Patterns intentionally NOT path-anchored so nested copies (e.g.
+# my-app/my-app/...) are caught too.
+yomichan-audio/
+yomitan/
+assets/dictionaries/
+
+# Large JMDict/Yomitan JSON blobs (re-download via fetch script).
+JMDict*.json
+jmdict-index.json
+JMnedict*.json
+
+# Saved screenshots / mirrored EPUB content used during early dev.
+index_files/
+
+# Nested duplicate of the project (created by a past misnamed copy).
+my-app/my-app/
+
+# ===== User-personal content =====
+# User's Anki decks, audiobooks, EPUBs, SRTs — copyrighted, sideloaded.
+# Cache is per-user; never commit.
+my-app/android/app/src/main/cache/
+my-app/www/test-content/
+
+# ===== Logs / scratch =====
+*.log
+logs*.txt
+megalog.txt
+*.tgz
+*.zip
+!my-app/www/jszip.min.js
+
+# Old scaffolding archives sitting at repo root.
+/popup_*.zip
+/test_popup_*.zip
+/anki_mobile_capacitor_scaffold.zip
+/popup_dictionary_update.zip
+/installer-patch.zip
+/cmd.exe
+
+# ===== IDE / OS =====
+.DS_Store
+.vscode/
+*.swp
+*.swo
+Thumbs.db

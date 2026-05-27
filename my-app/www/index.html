@@ -1,0 +1,2232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Anki Deck Previewer</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background-color: black;
+      color: white;
+      font-family: sans-serif;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    #progressBar {
+      position: fixed;
+      bottom: 36px; /* Adjusted for single bottom bar */
+      left: 0;
+      width: 100%;
+      height: 28px;
+      background: linear-gradient(to right, #444, #222);
+      color: #ffffff;
+      text-align: center;
+      line-height: 28px;
+      font-weight: 600;
+      font-family: monospace;
+      letter-spacing: 1px;
+      border-top: 1px solid #00ffcc;
+      z-index: 1000;
+      cursor: pointer;
+    }
+
+    #progressFill {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 28px;
+      background: #4caf50;
+      z-index: 0;
+      width: 0%;
+      transition: width 0.2s ease-in-out;
+    }
+
+    #progressLabel {
+      position: relative;
+      z-index: 1;
+    }
+
+    #topBar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px;
+      background-color: rgba(17,17,17,0.96);
+      color: white;
+      font-size: 16px;
+      flex-wrap: wrap;
+      gap: 10px;
+      position: fixed;
+      bottom: 28px;
+      width: 100%;
+      z-index: 1100;
+      box-sizing: border-box;
+      border-top: 1px solid #333;
+      transform: translateY(calc(100% + 28px));
+      transition: transform 0.22s ease;
+    }
+    #topBar.visible {
+      transform: translateY(0);
+    }
+
+    #topBarHandle {
+      position: fixed;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(50,50,50,0.85);
+      color: #ddd;
+      border: 1px solid #444;
+      border-radius: 999px;
+      padding: 2px 22px;
+      font-size: 14px;
+      z-index: 1200;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .file-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .file-wrapper label {
+      background: #444;
+      padding: 12px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+      min-height: 48px;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .file-wrapper input[type="file"] {
+      display: none;
+    }
+
+    .file-name {
+      font-size: 14px;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Status indicator for restored decks */
+    .file-name.restored {
+      color: #4caf50;
+    }
+
+    .file-name.restoring {
+      color: #ff9800;
+    }
+    
+    .file-name.restoring::after {
+      content: " (Restoring...)";
+      font-size: 12px;
+    }
+
+    .file-name.restoration-failed {
+      color: #f44336;
+      text-decoration: underline;
+    }
+    
+    .file-name.restoration-failed::after {
+      content: " (Click to reopen)";
+      font-size: 12px;
+    }
+
+    #topBar button {
+      background: #444;
+      color: white;
+      border: none;
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-size: 16px;
+      min-height: 48px;
+      cursor: pointer;
+    }
+
+    #topBar button:hover {
+      background: #555;
+    }
+
+    #topBar span {
+      font-size: 16px;
+      min-width: 60px;
+      display: inline-block;
+    }
+
+    #cardContainer {
+      height: calc(100% - 28px); /* full minus progress bar; topBar overlays when shown */
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      position: relative;
+      margin-bottom: 64px; /* Added margin to account for bottom bars */
+    }
+
+    .card-image {
+      width: 100%;
+      max-height: 70vh;
+      object-fit: contain;
+      display: block;
+      margin: 0 auto;
+    }
+
+    .subtitle-text {
+      font-size: 2.3rem;
+      padding: 8px 16px;
+      text-align: center;
+      position: absolute;
+      top: calc(env(safe-area-inset-top, 0px) + var(--subtitle-offset, 0px));
+      left: 0;
+      right: 0;
+      color: #fff;
+      box-sizing: border-box;
+      width: fit-content;
+      margin: 0 auto;
+      text-shadow: 2px 2px 8px rgba(0, 0, 0, 0.9), -2px -2px 8px rgba(0, 0, 0, 0.9), 2px -2px 8px rgba(0, 0, 0, 0.9), -2px 2px 8px rgba(0, 0, 0, 0.9), 0px 0px 16px rgba(0, 0, 0, 0.8);
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 4px;
+    }
+
+    /* Library Page Styles */
+    #libraryPage {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: black;
+      /* Above the shell header (z-index 9000) so the library is a full
+         takeover with its own visible close button. */
+      z-index: 9500;
+      display: none;
+      overflow-y: auto;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+
+    #libraryPage.visible {
+      display: block;
+    }
+
+    .library-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      border-bottom: 2px solid #00ffcc;
+      padding-bottom: 10px;
+    }
+
+    .library-header h2 {
+      color: #00ffcc;
+      margin: 0;
+    }
+
+    .close-library {
+      background: #f44336;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .deck-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .deck-item {
+      background: var(--panel, #161616);
+      border: 1px solid var(--border, #2a2a2a);
+      border-radius: 10px;
+      padding: 14px;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s, transform 0.08s;
+      position: relative;
+    }
+    .deck-item:hover,
+    .deck-item:active {
+      background: var(--panel-elev, #1c1c1c);
+      border-color: var(--border-strong, #3a3a3a);
+    }
+    .deck-item:active { transform: scale(0.995); }
+
+    .title-chip {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 0.66rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      border: 1px solid currentColor;
+      background: transparent;
+    }
+    .title-chip.off {
+      color: var(--text-faint, #444);
+      border-color: rgba(255,255,255,0.06);
+    }
+
+    .deck-item.unavailable {
+      opacity: 0.55;
+      background: var(--bg-elev, #131313);
+      border-color: var(--border, #2a2a2a);
+    }
+    .deck-item.unavailable:hover {
+      cursor: not-allowed;
+    }
+
+    .deck-delete {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: transparent;
+      color: var(--text-muted, #888);
+      border: 1px solid var(--border, #2a2a2a);
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .deck-delete:hover {
+      color: var(--accent-danger, #ff5555);
+      border-color: var(--accent-danger, #ff5555);
+    }
+
+    .deck-name {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text, #e8e8e8);
+      letter-spacing: 0.01em;
+      margin-bottom: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .deck-info {
+      font-size: 14px;
+      color: #ccc;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .deck-progress {
+      color: #4caf50;
+    }
+
+    .deck-available {
+      color: #4caf50;
+    }
+
+    .deck-manual-selection {
+      color: #2196f3;
+      font-style: italic;
+    }
+
+    .no-decks {
+      text-align: center;
+      color: #666;
+      font-size: 16px;
+      margin-top: 50px;
+    }
+
+    /* Instructions overlay for new users */
+    #instructions {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.9);
+      color: white;
+      padding: 20px;
+      border-radius: 8px;
+      border: 2px solid #00ffcc;
+      max-width: 400px;
+      text-align: center;
+      z-index: 2000;
+      display: none;
+    }
+
+    #instructions h3 {
+      margin-top: 0;
+      color: #00ffcc;
+    }
+
+    #instructions button {
+      background: #00ffcc;
+      color: black;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+
+    /* Field Mapping Modal */
+    #fieldMappingModal {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.8);
+      z-index: 3000;
+      display: none;
+      justify-content: center;
+      align-items: center;
+    }
+
+    #fieldMappingModal.visible {
+      display: flex;
+    }
+
+    .field-mapping-content {
+      background: #222;
+      border: 2px solid #00ffcc;
+      border-radius: 8px;
+      padding: 20px;
+      max-width: 500px;
+      width: 90%;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+
+    .field-mapping-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      border-bottom: 1px solid #444;
+      padding-bottom: 10px;
+    }
+
+    .field-mapping-header h3 {
+      color: #00ffcc;
+      margin: 0;
+    }
+
+    .field-mapping-close {
+      background: #f44336;
+      color: white;
+      border: none;
+      padding: 8px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .field-mapping-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 15px;
+      gap: 10px;
+    }
+
+    .field-mapping-row label {
+      min-width: 80px;
+      color: #ccc;
+      font-weight: bold;
+    }
+
+    .field-mapping-row select {
+      flex: 1;
+      background: #333;
+      color: white;
+      border: 1px solid #555;
+      padding: 8px;
+      border-radius: 4px;
+    }
+
+    .field-mapping-row select option {
+      background: #333;
+      color: white;
+    }
+
+    .field-mapping-preview {
+      margin-top: 15px;
+      padding: 10px;
+      background: #111;
+      border-radius: 4px;
+      border: 1px solid #444;
+    }
+
+    .field-mapping-preview h4 {
+      color: #00ffcc;
+      margin: 0 0 10px 0;
+      font-size: 14px;
+    }
+
+    .field-mapping-preview-content {
+      color: #ccc;
+      font-size: 12px;
+      max-height: 100px;
+      overflow-y: auto;
+      word-break: break-all;
+    }
+
+    .field-mapping-actions {
+      display: flex;
+      gap: 10px;
+      margin-top: 20px;
+      justify-content: flex-end;
+    }
+
+    .field-mapping-actions button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .field-mapping-save {
+      background: #4caf50;
+      color: white;
+    }
+
+    .field-mapping-cancel {
+      background: #666;
+      color: white;
+    }
+
+    /* Field mapping button in top bar */
+    .field-mapping-button {
+      background: #ff9800;
+      color: white;
+      border: none;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .field-mapping-button:hover {
+      background: #f57c00;
+    }
+    .loading-indicator {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border: 2px solid #444;
+      border-radius: 50%;
+      border-top-color: #00ffcc;
+      animation: spin 1s ease-in-out infinite;
+      margin-left: 8px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Keyboard shortcuts help */
+    #shortcuts {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0, 0, 0, 0.9);
+      color: white;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: monospace;
+      display: none;
+      z-index: 2500;
+      border: 1px solid #555;
+    }
+
+    /* Show shortcuts on hover */
+    #shortcutsToggle {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: #444;
+      color: white;
+      border: none;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      z-index: 2500;
+    }
+
+    #shortcutsToggle:hover {
+      background: #555;
+    }
+
+    /* Debug console styles */
+    #debugConsole {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.95);
+      color: #00ff00;
+      padding: 10px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-family: monospace;
+      max-width: 350px;
+      max-height: 300px;
+      overflow-y: auto;
+      border: 1px solid #333;
+      display: none;
+      z-index: 2500;
+    }
+
+    #debugToggle {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: #333;
+      color: white;
+      border: none;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      z-index: 2500;
+    }
+
+    .debug-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      border-bottom: 1px solid #444;
+      padding-bottom: 4px;
+    }
+
+    .debug-close {
+      background: #f44336;
+      color: white;
+      border: none;
+      padding: 2px 6px;
+      border-radius: 2px;
+      font-size: 10px;
+      cursor: pointer;
+    }
+
+    .debug-clear {
+      background: #666;
+      color: white;
+      border: none;
+      padding: 2px 6px;
+      border-radius: 2px;
+      font-size: 10px;
+      cursor: pointer;
+      margin-left: 4px;
+    }
+  
+/* Book Mode adjustments */
+.book-mode .card-image { opacity: 0.05 !important; }
+.book-mode #cardContainer { justify-content: flex-start !important; }
+.book-mode .multi-subtitles { display: flex; flex-direction: column; align-items: flex-start; gap: 0.5rem;}
+.book-mode .subtitle-text { text-align: left !important; font-size: 3rem !important; line-height: 1.25; }
+.book-mode .subtitle-current { font-weight: 600; }
+
+body.dimmed .card-image {
+  opacity: 0.05;
+  transition: opacity 0.25s;
+}
+</style>
+<link rel="stylesheet" href="theme.css">
+<script src="mode-colors.js"></script>
+<script src="appearance.js"></script>
+</head>
+<body>
+
+  <!-- Unified app top bar. Direct child of body (no wrapper) so its z-index
+       and pointer-events compete cleanly with sibling mode views. Tap empty
+       content area to hide (chrome-hidden on body). No bottom row. -->
+  <div id="appHeader">
+    <div class="mode-tabs" id="shellModeTabs">
+      <button class="mode-tab" data-mode="card"  data-active="1" onclick="window.setShellMode && window.setShellMode('card')">CARD</button>
+      <button class="mode-tab" data-mode="read"  onclick="window.setShellMode && window.setShellMode('read')">READ</button>
+      <button class="mode-tab" data-mode="audio" onclick="window.setShellMode && window.setShellMode('audio')">AUDIO</button>
+    </div>
+    <span class="shell-spacer"></span>
+    <button class="shell-text-btn" id="shellTimerLabel" onclick="window.openShellTimerMenu && window.openShellTimerMenu(event)">0:00</button>
+    <span class="shell-spacer"></span>
+    <button class="shell-text-btn" id="shellPlayBtn" onclick="window.shellTogglePlay && window.shellTogglePlay()">PLAY</button>
+    <button class="shell-text-btn" id="shellMoreBtn" onclick="window.openShellMoreMenu && window.openShellMoreMenu(event)">MORE</button>
+  </div>
+
+  <div id="instructions">
+    <h3>🎴 Anki Deck Previewer</h3>
+    <p>Choose an .apkg file to start viewing your deck. Your progress will be automatically saved!</p>
+    <p><strong>Navigation:</strong><br>
+    • Swipe left/right or use arrow keys<br>
+    • Swipe down to replay audio<br>
+    • Click progress bar to jump to card<br>
+    • Access Library to view recent decks</p>
+    <button onclick="hideInstructions()">Got it!</button>
+  </div>
+
+  <!-- Library Page -->
+  <div id="libraryPage">
+    <div class="library-header">
+      <h2>Library</h2>
+      <div style="display:flex;gap:8px;">
+        <button onclick="createNewTitle()" style="background:#00ffcc;color:#0a0a0a;border:none;padding:8px 14px;border-radius:4px;font-weight:700;">+ New title</button>
+        <button class="close-library" onclick="closeLibrary()">✕ Close</button>
+      </div>
+    </div>
+    <div id="deckList" class="deck-list">
+      <!-- Title items will be populated here -->
+    </div>
+  </div>
+
+  <!-- Field Mapping Modal -->
+  <div id="fieldMappingModal">
+    <div class="field-mapping-content">
+      <div class="field-mapping-header">
+        <h3>🔧 Field Mapping</h3>
+        <button class="field-mapping-close" onclick="closeFieldMapping()">✕</button>
+      </div>
+      
+      <p style="color: #ccc; margin-bottom: 20px;">
+        Choose which fields to use for each content type:
+      </p>
+      
+      <div class="field-mapping-row">
+        <label>Expression:</label>
+        <select id="expressionFieldSelect">
+          <option value="">-- Select Field --</option>
+        </select>
+      </div>
+      
+      <div class="field-mapping-row">
+        <label>Image:</label>
+        <select id="imageFieldSelect">
+          <option value="">-- Select Field --</option>
+        </select>
+      </div>
+      
+      <div class="field-mapping-row">
+        <label>Audio:</label>
+        <select id="audioFieldSelect">
+          <option value="">-- Select Field --</option>
+        </select>
+      </div>
+      
+      <div class="field-mapping-preview">
+        <h4>Preview:</h4>
+        <div id="fieldMappingPreview" class="field-mapping-preview-content">
+          Select fields above to see preview...
+        </div>
+      </div>
+      
+      <div class="field-mapping-actions">
+        <button class="field-mapping-cancel" onclick="closeFieldMapping()">Cancel</button>
+        <button class="field-mapping-save" onclick="saveFieldMapping()">Save Mapping</button>
+      </div>
+    </div>
+  </div>
+
+  
+  <!-- Preferences Modal — sectioned, scrollable -->
+  <div id="preferencesModal" style="position:fixed;inset:0;background:rgba(0,0,0,0.85);display:none;justify-content:center;align-items:center;z-index:3000;">
+    <div class="prefs-panel" style="background:var(--bg,#0c0c0c);border:1px solid var(--border,#2a2a2a);border-radius:12px;width:min(560px,92vw);max-height:88vh;display:flex;flex-direction:column;">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border,#2a2a2a);">
+        <h3 style="margin:0;color:var(--text,#e8e8e8);font-size:1.05rem;letter-spacing:.06em;text-transform:uppercase;font-weight:600;">Preferences</h3>
+        <div style="display:flex;gap:8px;">
+          <button onclick="closePreferences()" style="background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#2a2a2a);padding:6px 12px;border-radius:6px;font-size:.8rem;">Cancel</button>
+          <button onclick="savePreferences()" style="background:var(--accent-cyan,#00ffcc);color:#0a0a0a;border:none;padding:6px 14px;border-radius:6px;font-size:.8rem;font-weight:700;">Save</button>
+        </div>
+      </div>
+      <div id="prefsScroll" style="overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;padding:18px;">
+
+        <!-- ===== APPEARANCE ===== -->
+        <details open class="prefs-section">
+          <summary class="prefs-heading">Appearance</summary>
+          <div id="prefsAppearance"></div>
+        </details>
+
+        <!-- ===== MODE COLORS ===== -->
+        <details open class="prefs-section">
+          <summary class="prefs-heading">Mode accent colors</summary>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:8px 0;">
+            <label style="display:flex;flex-direction:column;align-items:center;gap:4px;font-size:.78rem;color:#aaa;">
+              Card
+              <input id="modeColorCard" type="color" value="#ff9550"
+                     oninput="window.applyModeColor && window.applyModeColor('card', this.value)"
+                     style="width:48px;height:36px;border:1px solid #444;border-radius:6px;background:transparent;">
+            </label>
+            <label style="display:flex;flex-direction:column;align-items:center;gap:4px;font-size:.78rem;color:#aaa;">
+              Read
+              <input id="modeColorRead" type="color" value="#4caf50"
+                     oninput="window.applyModeColor && window.applyModeColor('read', this.value)"
+                     style="width:48px;height:36px;border:1px solid #444;border-radius:6px;background:transparent;">
+            </label>
+            <label style="display:flex;flex-direction:column;align-items:center;gap:4px;font-size:.78rem;color:#aaa;">
+              Audio
+              <input id="modeColorAudio" type="color" value="#b794f6"
+                     oninput="window.applyModeColor && window.applyModeColor('audio', this.value)"
+                     style="width:48px;height:36px;border:1px solid #444;border-radius:6px;background:transparent;">
+            </label>
+          </div>
+        </details>
+
+        <!-- ===== DICTIONARIES ===== -->
+        <details class="prefs-section">
+          <summary class="prefs-heading">Dictionaries</summary>
+          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;">
+            Toggle dictionaries on/off and drag-reorder. Order is the search priority (top first).
+          </div>
+          <div id="prefsDictList"></div>
+        </details>
+
+        <!-- ===== ANKI: SWIPE-UP ===== -->
+        <details class="prefs-section">
+          <summary class="prefs-heading">Anki: swipe-up save</summary>
+          <div class="prefs-row">
+            <label>Deck</label>
+            <select id="ankiSwipeDeck"></select>
+          </div>
+          <div class="prefs-row">
+            <label>Note type</label>
+            <select id="ankiSwipeModel"></select>
+          </div>
+          <div class="prefs-row">
+            <label>Expression → field</label>
+            <select id="ankiSwipeFieldExpression"></select>
+          </div>
+          <div class="prefs-row">
+            <label>Image → field</label>
+            <select id="ankiSwipeFieldImage"></select>
+          </div>
+          <div class="prefs-row">
+            <label>Sentence audio → field</label>
+            <select id="ankiSwipeFieldAudio"></select>
+          </div>
+        </details>
+
+        <!-- ===== ANKI: DICTIONARY ===== -->
+        <details class="prefs-section">
+          <summary class="prefs-heading">Anki: dictionary add-word</summary>
+          <div class="prefs-row">
+            <label>Deck</label>
+            <select id="ankiDictDeck"></select>
+          </div>
+          <div class="prefs-row">
+            <label>Note type</label>
+            <select id="ankiDictModel"></select>
+          </div>
+          <div class="prefs-row"><label>Term → field</label><select id="ankiDictFieldTerm"></select></div>
+          <div class="prefs-row"><label>Reading → field</label><select id="ankiDictFieldReading"></select></div>
+          <div class="prefs-row"><label>Sentence → field</label><select id="ankiDictFieldSentence"></select></div>
+          <div class="prefs-row"><label>Meaning → field</label><select id="ankiDictFieldMeaning"></select></div>
+          <div class="prefs-row"><label>Image → field</label><select id="ankiDictFieldImage"></select></div>
+          <div class="prefs-row"><label>Sentence audio → field</label><select id="ankiDictFieldSentenceAudio"></select></div>
+          <div class="prefs-row"><label>Term audio → field</label><select id="ankiDictFieldTermAudio"></select></div>
+        </details>
+
+        <!-- ===== PLAYBACK ===== -->
+        <details class="prefs-section">
+          <summary class="prefs-heading">Playback</summary>
+          <div class="prefs-row">
+            <label>Audio speed <span id="audioSpeedLabel" style="color:var(--accent-cyan,#00ffcc);font-weight:bold;">1.00×</span></label>
+            <input id="audioSpeedSlider" type="range" min="1.0" max="1.8" step="0.05" value="1.0"
+                   oninput="document.getElementById('audioSpeedLabel').textContent=parseFloat(this.value).toFixed(2)+'×';">
+          </div>
+          <div class="prefs-row">
+            <label>Subtitle vertical offset <span id="subtitleOffsetLabel" style="color:var(--accent-cyan,#00ffcc);font-weight:bold;">0px</span></label>
+            <input id="subtitleOffsetSlider" type="range" min="0" max="150" step="1" value="0"
+                   oninput="document.getElementById('subtitleOffsetLabel').textContent=this.value+'px';document.documentElement.style.setProperty('--subtitle-offset',this.value+'px');">
+          </div>
+          <div class="prefs-row">
+            <label>Stopwatch inactivity timeout (s)</label>
+            <input id="timeoutInput" type="number" min="5" max="600">
+          </div>
+          <!-- Keep #deckSelect alive for legacy code paths that still reference it. Hidden mirror of ankiSwipeDeck. -->
+          <select id="deckSelect" style="display:none;"></select>
+        </details>
+
+      </div>
+    </div>
+  </div>
+
+
+  <!-- Card-mode COPY button: small text button sitting above the bottom bar.
+       Hidden in read + audio modes. Hides with chrome. -->
+  <button id="cardCopyBtn" onclick="copyCurrentCardText()">COPY</button>
+
+  <div id="progressBar" onclick="onProgressBarTap(event)">
+    <div id="progressFill"></div>
+    <span id="progressLabel">Select a deck file</span>
+  </div>
+
+  <button id="topBarHandle" onclick="window.toggleMainTopBar && window.toggleMainTopBar()">▲ Menu</button>
+
+  <div id="topBar">
+    <div class="file-wrapper">
+      <label for="apkgFile" onclick="event.preventDefault(); openFilePicker();">Choose File</label>
+      <input type="file" id="apkgFile" accept=".apkg" />
+      <span class="file-name" id="deckName">No file chosen</span>
+      <button class="field-mapping-button" onclick="openFieldMapping()" id="fieldMappingBtn" style="display: none; margin-left: 8px;">🔧 Fields</button>
+    </div>
+    <div>
+      <button onclick="openLibrary()">Library</button>
+      <button onclick="openReadingMode()">📖 Reading</button>
+      <button onclick="window.testBgAudio && window.testBgAudio()">🎧 BG Pick&Play</button>
+      <button onclick="window.bgPauseToggle && window.bgPauseToggle()">⏯ BG</button>
+      <button onclick="window.bgSeek && window.bgSeek(-10000)">−10s</button>
+      <button onclick="window.bgSeek && window.bgSeek(10000)">+10s</button>
+      <button onclick="window.bgSetRate && window.bgSetRate(0.75)">0.75×</button>
+      <button onclick="window.bgSetRate && window.bgSetRate(1.0)">1×</button>
+      <button onclick="window.bgSetRate && window.bgSetRate(1.5)">1.5×</button>
+      <button onclick="window.stopBgAudio && window.stopBgAudio()">⏹ Stop BG</button>
+      <button onclick="window.bgCycleTestMetadata && window.bgCycleTestMetadata()">📝 Test Lockscreen</button>
+      <span id="bgAudioPosLabel" style="color:#00ffcc;font-variant-numeric:tabular-nums;font-size:14px;min-width:90px;">–:–– / –:––</span>
+    </div>
+    <div>
+      <button onclick="openPreferences()">⚙️</button>
+    </div>
+    <div>
+      <span id="stopwatch">0s</span>
+      <button onclick="resetStopwatch()">Reset Time</button>
+    </div>
+    <div>
+      <span id="noteCounter">0 notes</span>
+      <button onclick="resetNoteCounter()">Reset Count</button>
+    </div>
+  </div>
+
+  <div id="cardContainer">
+    <div style="color: #666; font-size: 1.5rem; text-align: center;">
+      Select an Anki deck file (.apkg) to begin<br>
+      <small style="color: #888; font-size: 1rem;">Or check your Library for recent decks</small>
+    </div>
+  </div>
+
+
+  <!-- Reading Mode View -->
+  <div id="readingModeView" style="display:none;position:fixed;inset:0;background:#1a1a1a;z-index:2700;flex-direction:column;">
+    <div id="readingModeToolbar" style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:10px;padding:14px 14px;background:rgba(17,17,17,0.95);border-bottom:1px solid #333;z-index:2;flex-wrap:wrap;transform:translateY(0);transition:transform 0.22s ease;">
+      <button onclick="pickReadingEpub()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;">📂</button>
+      <button id="readingPlayPauseBtn" onclick="window.toggleReadingPlaybackUI && window.toggleReadingPlaybackUI()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;min-width:56px;">▶</button>
+      <button onclick="openReadingSettings()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;">⚙️</button>
+      <span id="readingModeTitle" style="color:#ccc;font-size:16px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No EPUB loaded</span>
+      <span id="readingTimerLabel" onclick="window.openReadingStats && window.openReadingStats()" style="color:#00ffcc;font-size:18px;font-variant-numeric:tabular-nums;cursor:pointer;user-select:none;padding:8px 6px;">0:00</span>
+    </div>
+    <div id="readingModeContent" style="flex:1;overflow:auto;padding:24px;color:#e8e8e8;background:#1a1a1a;font-family:var(--reader-font,serif);font-size:var(--reader-font-size,1.1rem);line-height:1.7;">
+      <p style="color:#888;text-align:center;margin-top:40vh;">Tap 📂 Open EPUB to begin.</p>
+    </div>
+    <div id="readingProgressBar" style="position:absolute;bottom:0;left:0;right:0;display:flex;align-items:center;gap:12px;padding:8px 12px;background:rgba(17,17,17,0.92);border-top:1px solid #333;z-index:3;transform:translateY(110%);transition:transform 0.22s ease;">
+      <div id="readingProgressTrack" style="flex:1;height:5px;background:rgba(255,255,255,0.18);border-radius:3px;overflow:hidden;">
+        <div id="readingProgressFill" style="height:100%;width:0%;background:#00ffcc;transition:width 0.3s ease;"></div>
+      </div>
+      <span id="readingProgressLabel" onclick="window.cycleReadingProgressMode && window.cycleReadingProgressMode()"
+            style="color:#fff;font-size:13px;min-width:120px;text-align:right;font-variant-numeric:tabular-nums;cursor:pointer;user-select:none;">0%</span>
+    </div>
+  </div>
+
+  <!-- Audiobook Mode View -->
+  <div id="audiobookModeView" style="display:none;position:fixed;inset:0;background:#0d0d0d;z-index:2750;flex-direction:column;color:#e8e8e8;">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;background:rgba(17,17,17,0.95);border-bottom:1px solid #333;flex-shrink:0;">
+      <span id="audiobookTitle" style="color:#ccc;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No audiobook loaded</span>
+      <span id="audiobookTimeLabel" style="color:#00ffcc;font-size:14px;font-variant-numeric:tabular-nums;min-width:110px;text-align:right;">–:–– / –:––</span>
+    </div>
+    <div id="audiobookContent" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px 24px;overflow:auto;gap:16px;">
+      <img id="audiobookCardImage" alt="" style="max-width:80%;max-height:45vh;border-radius:8px;display:none;object-fit:contain;">
+      <div id="audiobookCueText" style="text-align:center;font-size:1.6rem;line-height:1.7;font-family:var(--reader-font,serif);">
+        Pick an audiobook + SRT in reading settings, then tap ▶ Audiobook Mode.
+      </div>
+    </div>
+    <!-- Audiobook transport — pigments-style. Hidden scrub input kept for
+         backward compatibility with code that touches abScrubbing/etc. -->
+    <input id="audiobookScrub" type="range" min="0" max="1000" value="0" style="display:none;">
+    <div class="ab-transport" style="flex-shrink:0;padding:14px 18px 26px;background:rgba(10,10,10,0.7);border-top:1px solid var(--border,#2a2a2a);">
+      <div style="display:flex;align-items:center;justify-content:center;gap:14px;">
+        <button class="btn" onclick="window.audiobookSkip && window.audiobookSkip(-30000)"
+                style="padding:10px 14px;font-size:.72rem;letter-spacing:.1em;font-weight:700;">−30s</button>
+        <button class="btn" onclick="window.audiobookSkip && window.audiobookSkip(-10000)"
+                style="padding:10px 14px;font-size:.72rem;letter-spacing:.1em;font-weight:700;">−10s</button>
+        <button id="audiobookPlayPause" onclick="window.audiobookTogglePlay && window.audiobookTogglePlay()"
+                class="btn"
+                style="background:var(--accent-audio);color:#0a0a0a;border-color:var(--accent-audio);padding:14px 22px;font-size:.85rem;font-weight:700;letter-spacing:.18em;min-width:88px;">PLAY</button>
+        <button class="btn" onclick="window.audiobookSkip && window.audiobookSkip(10000)"
+                style="padding:10px 14px;font-size:.72rem;letter-spacing:.1em;font-weight:700;">+10s</button>
+        <button class="btn" onclick="window.audiobookSkip && window.audiobookSkip(30000)"
+                style="padding:10px 14px;font-size:.72rem;letter-spacing:.1em;font-weight:700;">+30s</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:14px;font-size:.7rem;color:var(--text-muted,#888);letter-spacing:.1em;text-transform:uppercase;">
+        <span>Speed</span>
+        <button class="btn ab-speed" data-speed="0.75" onclick="setGlobalPlaybackRate(0.75)" style="padding:5px 10px;font-size:.72rem;">0.75×</button>
+        <button class="btn ab-speed" data-speed="1.00" onclick="setGlobalPlaybackRate(1.00)" style="padding:5px 10px;font-size:.72rem;">1×</button>
+        <button class="btn ab-speed" data-speed="1.25" onclick="setGlobalPlaybackRate(1.25)" style="padding:5px 10px;font-size:.72rem;">1.25×</button>
+        <button class="btn ab-speed" data-speed="1.50" onclick="setGlobalPlaybackRate(1.50)" style="padding:5px 10px;font-size:.72rem;">1.5×</button>
+        <button class="btn ab-speed" data-speed="1.75" onclick="setGlobalPlaybackRate(1.75)" style="padding:5px 10px;font-size:.72rem;">1.75×</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Audiobook → Reading Re-entry Modal -->
+  <div id="audiobookReentryModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:2900;justify-content:center;align-items:center;">
+    <div style="background:#222;border:2px solid #00ffcc;border-radius:10px;padding:22px;max-width:380px;width:90%;">
+      <h3 style="color:#00ffcc;margin:0 0 14px 0;font-size:18px;">Reading position</h3>
+      <p id="audiobookReentryText" style="color:#ccc;font-size:14px;line-height:1.5;margin:0 0 16px 0;">Audio is at a different position than your reading cursor.</p>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <button onclick="window.reentryChoose && window.reentryChoose('cursor')" style="padding:12px;background:#444;color:#fff;border:none;border-radius:6px;font-size:14px;text-align:left;">Keep current position</button>
+        <button onclick="window.reentryChoose && window.reentryChoose('audio')" style="padding:12px;background:#2196f3;color:#fff;border:none;border-radius:6px;font-size:14px;text-align:left;">Jump to audio position</button>
+        <button onclick="window.reentryChoose && window.reentryChoose('summary')" style="padding:12px;background:var(--accent-audio,#b794f6);color:#0a0a0a;border:none;border-radius:6px;font-size:14px;text-align:left;">Jump + AI summary of the gap</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Title sheet (used from library) -->
+  <div id="titleEditModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.86);z-index:9700;justify-content:center;align-items:center;">
+    <div style="background:#161616;border:1px solid #333;border-radius:10px;padding:22px;max-width:480px;width:92%;max-height:90vh;overflow-y:auto;color:#e8e8e8;font-family:var(--font-sans,sans-serif);">
+      <h3 style="color:#00ffcc;margin:0 0 14px 0;font-size:1.1rem;letter-spacing:0.06em;">EDIT TITLE</h3>
+      <input id="titleEditName" type="text" placeholder="Title name"
+             style="width:100%;box-sizing:border-box;background:#0c0c0c;color:#e8e8e8;border:1px solid #333;border-radius:6px;padding:10px 12px;font-size:1rem;margin-bottom:14px;">
+      <div id="titleEditAttachments"></div>
+      <div style="display:flex;justify-content:space-between;gap:12px;margin-top:18px;">
+        <button onclick="confirmDeleteTitle()" style="background:transparent;color:#ff5555;border:1px solid #553333;padding:9px 14px;border-radius:6px;font-size:0.9rem;">Delete title</button>
+        <button onclick="closeTitleEdit()" style="background:#00ffcc;color:#0a0a0a;border:none;padding:10px 18px;border-radius:6px;font-weight:700;font-size:0.95rem;">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats Modal — three sections (CARD / READ / AUDIO) -->
+  <div id="readingStatsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:2850;justify-content:center;align-items:center;">
+    <div class="stats-panel" style="background:var(--bg,#0c0c0c);border:1px solid var(--border,#2a2a2a);border-radius:12px;width:min(460px,94vw);max-height:88vh;overflow:auto;">
+      <div style="padding:14px 18px;border-bottom:1px solid var(--border,#2a2a2a);display:flex;align-items:center;justify-content:space-between;">
+        <div class="label-cap" style="color:var(--text,#e8e8e8);">Session Stats</div>
+        <button onclick="window.closeReadingStats && window.closeReadingStats()" style="background:transparent;border:none;color:var(--text-muted,#888);font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;">Close</button>
+      </div>
+      <div style="padding:18px;">
+        <!-- CARD -->
+        <div id="statsCard" class="stats-block" data-mode="card">
+          <div class="stats-block-header">
+            <span class="stats-block-title">Card</span>
+            <span class="stats-block-status">●</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Time</span>
+            <span id="statsCardTime" class="stat-value">0:00</span>
+          </div>
+          <div class="stat-row stat-row-last">
+            <span class="stat-label">Cards advanced</span>
+            <span id="statsCardCount" class="stat-value">0</span>
+          </div>
+        </div>
+        <!-- READ -->
+        <div id="statsRead" class="stats-block" data-mode="read">
+          <div class="stats-block-header">
+            <span class="stats-block-title">Read</span>
+            <span class="stats-block-status">●</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Time</span>
+            <span id="statsReadTime" class="stat-value">0:00</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Chars read</span>
+            <span id="statsReadChars" class="stat-value">0</span>
+          </div>
+          <div class="stat-row stat-row-last">
+            <span class="stat-label">Chars / hr</span>
+            <span id="statsReadRate" class="stat-value">—</span>
+          </div>
+        </div>
+        <!-- AUDIO -->
+        <div id="statsAudio" class="stats-block" data-mode="audio">
+          <div class="stats-block-header">
+            <span class="stats-block-title">Audio</span>
+            <span class="stats-block-status">●</span>
+          </div>
+          <div class="stat-row stat-row-last">
+            <span class="stat-label">Time playing</span>
+            <span id="statsAudioTime" class="stat-value">0:00</span>
+          </div>
+        </div>
+        <button onclick="window.resetReadingTimer && window.resetReadingTimer()"
+                class="btn btn-ghost" style="display:block;width:100%;margin-top:14px;padding:10px;letter-spacing:.12em;text-transform:uppercase;font-size:.72rem;color:var(--text-muted,#888);">
+          Reset All Stats
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reading Settings Modal -->
+  <div id="readingSettingsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:2800;justify-content:center;align-items:center;">
+    <div style="background:#222;border:2px solid #00ffcc;border-radius:8px;padding:20px;max-width:380px;width:90%;">
+      <h3 style="color:#00ffcc;margin-top:0;">Reading Settings</h3>
+      <label style="color:#ccc;">Font family:</label><br>
+      <select id="readerFontSelect" style="width:100%;margin-bottom:15px;background:#333;color:white;padding:8px;border-radius:4px;border:1px solid #555;">
+        <option value='serif'>Serif (default)</option>
+        <option value='sans-serif'>Sans-serif</option>
+        <option value='monospace'>Monospace</option>
+        <option value='"Hiragino Mincho ProN", "Noto Serif CJK JP", serif'>Japanese Serif (Mincho)</option>
+        <option value='"Hiragino Sans", "Noto Sans CJK JP", sans-serif'>Japanese Sans (Gothic)</option>
+      </select>
+      <label style="color:#ccc;">Font size: <span id="readerFontSizeLabel" style="color:#00ffcc;font-weight:bold;">1.1rem</span></label><br>
+      <input id="readerFontSizeSlider" type="range" min="0.8" max="2.5" step="0.05" value="1.1"
+             style="width:100%;margin-bottom:15px;"
+             oninput="document.getElementById('readerFontSizeLabel').textContent=parseFloat(this.value).toFixed(2)+'rem';document.documentElement.style.setProperty('--reader-font-size',this.value+'rem');"><br>
+      <label style="color:#ccc;">Playback speed: <span id="readerSpeedLabel" style="color:#00ffcc;font-weight:bold;">1.00×</span></label><br>
+      <input id="readerSpeedSlider" type="range" min="1.0" max="2.0" step="0.05" value="1.0"
+             style="width:100%;margin-bottom:15px;"
+             oninput="window.setReadingPlaybackRateLive && window.setReadingPlaybackRateLive(parseFloat(this.value))"><br>
+      <label style="color:#ccc;display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer;">
+        <input id="readerVerticalToggle" type="checkbox" style="width:18px;height:18px;">
+        Vertical text (縦書き)
+      </label>
+      <label style="color:#ccc;display:block;margin-top:10px;margin-bottom:6px;">Audiobook pairing (for this deck):</label>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:15px;">
+        <button type="button" id="readerPickAudiobookBtn" onclick="window.pickAudiobookFile && window.pickAudiobookFile()"
+                style="padding:10px;background:#333;color:#fff;border:1px solid #555;border-radius:6px;font-size:14px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Pick Audiobook</button>
+        <button type="button" id="readerPickSrtBtn" onclick="window.pickSrtFile && window.pickSrtFile()"
+                style="padding:10px;background:#333;color:#fff;border:1px solid #555;border-radius:6px;font-size:14px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📄 Pick SRT</button>
+        <button type="button" onclick="window.openAudiobookMode && window.openAudiobookMode()"
+                style="padding:10px;background:#2196f3;color:#fff;border:none;border-radius:6px;font-size:14px;">▶ Audiobook Mode</button>
+      </div>
+      <label style="color:#ccc;display:flex;align-items:center;gap:8px;margin-bottom:15px;cursor:pointer;">
+        <input id="readerAutoAdvanceToggle" type="checkbox" style="width:18px;height:18px;">
+        Auto-advance to next card when audio ends
+      </label>
+      <label style="color:#ccc;display:block;margin-bottom:6px;">Highlight color:</label>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:15px;flex-wrap:wrap;">
+        <input id="readerHighlightColor" type="color" value="#00ffcc"
+               style="width:42px;height:32px;border:1px solid #555;border-radius:4px;background:#333;cursor:pointer;">
+        <button type="button" data-color="#00ffcc" class="hl-preset" style="width:24px;height:24px;border-radius:50%;border:1px solid #555;background:#00ffcc;cursor:pointer;"></button>
+        <button type="button" data-color="#ffd54a" class="hl-preset" style="width:24px;height:24px;border-radius:50%;border:1px solid #555;background:#ffd54a;cursor:pointer;"></button>
+        <button type="button" data-color="#ff6b9d" class="hl-preset" style="width:24px;height:24px;border-radius:50%;border:1px solid #555;background:#ff6b9d;cursor:pointer;"></button>
+        <button type="button" data-color="#7fc8ff" class="hl-preset" style="width:24px;height:24px;border-radius:50%;border:1px solid #555;background:#7fc8ff;cursor:pointer;"></button>
+        <button type="button" data-color="#b794f6" class="hl-preset" style="width:24px;height:24px;border-radius:50%;border:1px solid #555;background:#b794f6;cursor:pointer;"></button>
+        <button type="button" data-color="#9ad080" class="hl-preset" style="width:24px;height:24px;border-radius:50%;border:1px solid #555;background:#9ad080;cursor:pointer;"></button>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:10px;">
+        <button onclick="closeReadingSettings()" style="background:#666;color:white;border:none;padding:8px 12px;border-radius:4px;">Close</button>
+        <button onclick="saveReadingSettings()" style="background:#4caf50;color:white;border:none;padding:8px 12px;border-radius:4px;">Save</button>
+      </div>
+    </div>
+  </div>
+
+<script src="jszip.min.js"></script>
+  <script src="sql-wasm.js"></script>
+  <script src="app.js"></script>
+  <script src="sendToAnkiConnect.js"></script>
+  <script src="preferences.js"></script>
+  <script src="dict-cache.js"></script>
+  <script src="dict-prefs.js"></script>
+  <script src="title-store.js"></script>
+  <script src="cover-extract.js"></script>
+  <script src="stats.js"></script>
+  <script src="enhanced-dictionary.js"></script>
+  <script src="local-audio.js"></script>
+  <script src="srt-parser.js"></script>
+  <script src="waveform.js"></script>
+  <script src="reading-mode.js"></script>
+  <script src="shell.js"></script>
+  
+  <script>
+    // Simple debug function that only logs to console
+    function debugLog(message) {
+      const timestamp = new Date().toLocaleTimeString();
+      console.log(`${timestamp}: ${message}`);
+    }
+
+    // Make debugLog available globally
+    window.debugLog = debugLog;
+
+    // -------- Background audio test + minimal controls --------
+    // Picks an audio file, plays it via the native foreground service, and
+    // shows live position events so we can verify seek/rate/position APIs.
+    let bgPosListenerAttached = false;
+    function fmtMs(ms) {
+      if (!Number.isFinite(ms) || ms < 0) return '–:––';
+      const s = Math.floor(ms / 1000);
+      const m = Math.floor(s / 60);
+      const ss = String(s % 60).padStart(2, '0');
+      return m + ':' + ss;
+    }
+    async function attachBgPositionListener() {
+      if (bgPosListenerAttached) return;
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg) return;
+      bgPosListenerAttached = true;
+      bg.addListener('position', (d) => {
+        const el = document.getElementById('bgAudioPosLabel');
+        if (el) el.textContent = fmtMs(d.positionMs) + ' / ' + fmtMs(d.durationMs);
+      });
+      bg.addListener('ended', () => {
+        const el = document.getElementById('bgAudioPosLabel');
+        if (el) el.textContent = '(ended)';
+      });
+      bg.addListener('error', (d) => {
+        alert('BG audio error: ' + (d && d.message ? d.message : 'unknown'));
+      });
+    }
+
+    window.testBgAudio = async function () {
+      const fa = window.Capacitor?.Plugins?.FileAccess;
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!fa) { alert('FileAccess plugin not loaded'); return; }
+      if (!bg) { alert('BackgroundAudio plugin not loaded — rebuild Android'); return; }
+      try {
+        const picked = await fa.pickFileWithUri({ kind: 'audio' });
+        if (!picked || !picked.uri) return;
+        const mat = await fa.materializeToCache({ uri: picked.uri });
+        if (!mat || !mat.path) { alert('Materialize failed'); return; }
+        const url = mat.path.startsWith('file://') ? mat.path : 'file://' + mat.path;
+        await attachBgPositionListener();
+        await bg.play({ url, startMs: 0, rate: 1.0 });
+      } catch (e) {
+        if (String(e && e.message).toLowerCase().includes('cancel')) return;
+        alert('Background audio test error: ' + (e && e.message ? e.message : e));
+      }
+    };
+
+    window.stopBgAudio = async function () {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg) return;
+      try { await bg.stop(); } catch (e) {}
+    };
+
+    window.bgPauseToggle = async function () {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg) return;
+      const s = await bg.getState();
+      if (s.playing) await bg.pause(); else await bg.resume();
+    };
+
+    window.bgSeek = async function (deltaMs) {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg) return;
+      const s = await bg.getState();
+      const target = Math.max(0, (s.positionMs || 0) + deltaMs);
+      await bg.seek({ ms: target });
+    };
+
+    window.bgSetRate = async function (rate) {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg) return;
+      await bg.setRate({ rate });
+    };
+
+    window.bgSetMetadata = async function (title, subtitle) {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg) return;
+      await bg.setMetadata({ title, subtitle });
+    };
+
+    // Test helper: cycle a fake "current sentence" so we can verify lock screen
+    // updates as audio plays. Tap the button while audio is playing, then lock.
+    window.bgCycleTestMetadata = async function () {
+      const sentences = [
+        '今日はいい天気ですね。',
+        '雨が降りそうです。',
+        '本を読んでいます。',
+        '少し休みましょう。'
+      ];
+      const i = Math.floor(Date.now() / 5000) % sentences.length;
+      await window.bgSetMetadata('テスト本', sentences[i]);
+    };
+
+    // Show / hide the main bottom action bar.
+    window.toggleMainTopBar = function () {
+      const bar = document.getElementById('topBar');
+      const handle = document.getElementById('topBarHandle');
+      if (!bar) return;
+      const showing = bar.classList.toggle('visible');
+      if (handle) handle.textContent = showing ? '▼ Hide' : '▲ Menu';
+    };
+
+    // Library functionality
+    async function openLibrary() {
+      debugLog('Opening library');
+      await populateLibrary();
+      document.getElementById('libraryPage').classList.add('visible');
+    }
+
+    function closeLibrary() {
+      debugLog('Closing library');
+      document.getElementById('libraryPage').classList.remove('visible');
+    }
+
+    function chipHtml(kind, label, on) {
+      // Active chips inherit the live mode accent so a custom read color
+      // (etc.) is reflected everywhere automatically. srt has no mode of
+      // its own; it uses the warn token.
+      const colorVar = on
+        ? { card: 'var(--accent-card)', read: 'var(--accent-read)',
+            audio: 'var(--accent-audio)', srt: 'var(--accent-warn,#ffd54a)' }[kind] || 'var(--accent-cyan)'
+        : null;
+      return on
+        ? `<span class="title-chip on" style="color:${colorVar};">${label}</span>`
+        : `<span class="title-chip off">${label}</span>`;
+    }
+
+    async function populateLibrary() {
+      debugLog('Populating library');
+      const deckList = document.getElementById('deckList');
+
+      // Use the new Title store. Migration auto-runs the first time.
+      const titles = window.titleStore ? await window.titleStore.list() : [];
+
+      if (!titles.length) {
+        deckList.innerHTML = '<div class="no-decks">Library is empty.<br>Load a deck or pick files to get started.</div>';
+        return;
+      }
+
+      // Sort by lastOpenedAt desc.
+      titles.sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
+
+      deckList.innerHTML = '';
+      for (const title of titles) {
+        const a = title.attachments || {};
+        const item = document.createElement('div');
+        item.className = 'deck-item';
+        const enabled = window.titleStore.enabledModes(title);
+        // Cover preview: prefer the user-set cover dataUri; else letter
+        // avatar tinted by which attachment kind is present first.
+        const coverUri = a.cover?.dataUri;
+        const firstLetter = (title.name || '?').trim().charAt(0) || '?';
+        const avatarTint = a.epub ? 'var(--accent-read)'
+                          : a.audiobook ? 'var(--accent-audio)'
+                          : a.deck ? 'var(--accent-card)'
+                          : 'var(--text-faint)';
+        const thumb = coverUri
+          ? `<img src="${coverUri}" alt="" style="width:56px;height:56px;border-radius:6px;object-fit:cover;flex-shrink:0;">`
+          : `<div class="title-avatar" style="width:56px;height:56px;border-radius:6px;background:var(--panel-elev);color:${avatarTint};display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:700;font-family:var(--font-sans);flex-shrink:0;border:1px solid var(--border);">${escapeHtml(firstLetter)}</div>`;
+        item.innerHTML = `
+          <button class="deck-delete title-edit-btn" data-id="${title.id}" title="Edit this title" style="right:48px;background:#333;">✎</button>
+          <button class="deck-delete" data-id="${title.id}" title="Remove from library">✕</button>
+          <div style="display:flex;gap:12px;align-items:flex-start;">
+            ${thumb}
+            <div style="flex:1;min-width:0;">
+              <div class="deck-name" style="margin:0;">${escapeHtml(title.name || 'Untitled')}</div>
+              <div class="title-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">
+                ${chipHtml('card',  'DECK',  !!a.deck)}
+                ${chipHtml('read',  'EPUB',  !!a.epub)}
+                ${chipHtml('audio', 'AUDIO', !!a.audiobook)}
+                ${chipHtml('srt',   'SRT',   !!a.srt)}
+              </div>
+              <div class="deck-info" style="color:#888;font-size:0.85em;display:flex;gap:10px;flex-wrap:wrap;">
+                ${a.deck ? `<span>Card ${(a.deck.cardIndex || 0) + 1}${a.deck.totalCards ? ' / ' + a.deck.totalCards : ''}</span>` : ''}
+                <span>${new Date(title.lastOpenedAt || title.createdAt).toLocaleDateString()}</span>
+              </div>
+            </div>
+          </div>
+        `;
+        item.onclick = (e) => {
+          if (e.target.classList.contains('title-edit-btn')) {
+            const id = e.target.getAttribute('data-id');
+            if (id) openTitleEdit(id);
+            return;
+          }
+          if (e.target.classList.contains('deck-delete')) {
+            const id = e.target.getAttribute('data-id');
+            if (id && window.titleStore) {
+              if (confirm('Remove this title from your library?')) {
+                window.titleStore.remove(id).then(populateLibrary).catch(() => {});
+              }
+            }
+            return;
+          }
+          loadTitleFromLibrary(title);
+        };
+        item.style.cursor = 'pointer';
+        deckList.appendChild(item);
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s || '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[ch]));
+    }
+
+    // ----- Edit Title sheet -----
+
+    let _editingTitleId = null;
+    // Mirror to window so shell.js's tab-gating can fall back to the title
+    // currently being edited (before it's been loaded from the library).
+    Object.defineProperty(window, '_editingTitleId', {
+      get() { return _editingTitleId; }
+    });
+
+    async function openTitleEdit(id) {
+      _editingTitleId = id;
+      const titles = await window.titleStore.list();
+      const title = titles.find(t => t.id === id);
+      if (!title) return;
+      const nameInput = document.getElementById('titleEditName');
+      nameInput.value = title.name || '';
+      nameInput.oninput = () => {
+        window.titleStore.update(_editingTitleId, { name: nameInput.value });
+      };
+      renderAttachmentRows(title);
+      document.getElementById('titleEditModal').style.display = 'flex';
+    }
+
+    function renderAttachmentRows(title) {
+      const cont = document.getElementById('titleEditAttachments');
+      const a = title.attachments || {};
+      const kinds = [
+        { id: 'deck',      label: 'Anki deck (.apkg)' },
+        { id: 'epub',      label: 'EPUB' },
+        { id: 'audiobook', label: 'Audiobook' },
+        { id: 'srt',       label: 'SRT subtitles' }
+      ];
+      let html = kinds.map(k => {
+        const at = a[k.id];
+        const name = at?.name || '<i style="color:#666;">Not attached</i>';
+        return `
+          <div style="display:flex;align-items:center;gap:8px;padding:12px 0;border-bottom:1px solid #2a2a2a;">
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:0.72rem;color:#888;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;">${k.label}</div>
+              <div style="font-size:0.95rem;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${at ? '#e8e8e8' : '#666'};">${name}</div>
+            </div>
+            <button onclick="pickTitleAttachment('${k.id}')" style="background:#333;color:#fff;border:1px solid #444;padding:7px 12px;border-radius:5px;font-size:0.85rem;">${at ? 'Replace' : 'Pick'}</button>
+            ${at ? `<button onclick="removeTitleAttachment('${k.id}')" style="background:transparent;color:#aaa;border:1px solid #333;padding:7px 10px;border-radius:5px;font-size:0.85rem;">✕</button>` : ''}
+          </div>
+        `;
+      }).join('');
+
+      // Cover row — picture used in audio mode + sent to Anki.
+      const cv = a.cover;
+      html += `
+        <div style="display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #2a2a2a;">
+          <div style="width:48px;height:48px;border-radius:4px;background:#1a1a1a;border:1px solid #333;overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;">
+            ${cv?.dataUri
+              ? `<img src="${cv.dataUri}" style="width:100%;height:100%;object-fit:cover;">`
+              : `<span style="color:#444;font-size:.65rem;letter-spacing:.1em;">NONE</span>`}
+          </div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:0.72rem;color:#888;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;">Cover image</div>
+            <div style="font-size:0.85rem;margin-top:2px;color:${cv ? '#e8e8e8' : '#666'};">${cv ? (cv.source || 'manual') : 'Auto-extract from audiobook or EPUB'}</div>
+          </div>
+          <button onclick="autoExtractTitleCover()" style="background:#333;color:#fff;border:1px solid #444;padding:7px 10px;border-radius:5px;font-size:0.78rem;">Auto</button>
+          <button onclick="pickTitleCoverManual()" style="background:#333;color:#fff;border:1px solid #444;padding:7px 10px;border-radius:5px;font-size:0.78rem;">${cv ? 'Replace' : 'Pick'}</button>
+          ${cv ? `<button onclick="removeTitleAttachment('cover')" style="background:transparent;color:#aaa;border:1px solid #333;padding:7px 10px;border-radius:5px;font-size:0.85rem;">✕</button>` : ''}
+        </div>
+      `;
+      cont.innerHTML = html;
+    }
+
+    // ---- Cover-image actions for the Edit Title sheet ----
+
+    window.autoExtractTitleCover = async function () {
+      if (!_editingTitleId) return;
+      const titles = await window.titleStore.list();
+      const title = titles.find(t => t.id === _editingTitleId);
+      if (!title) return;
+      const a = title.attachments || {};
+      if (!window.coverExtract) { alert('Cover extractor not loaded'); return; }
+      // Audiobook preferred; EPUB fallback.
+      let result = null;
+      if (a.audiobook?.cachePath) {
+        result = await window.coverExtract.fromAudio(a.audiobook.cachePath);
+        if (result) result.source = 'id3';
+      }
+      if (!result && a.epub?.uri) {
+        // EPUB needs to live in cache; materialize if it isn't already.
+        let epubPath = null;
+        const fa = window.Capacitor?.Plugins?.FileAccess;
+        try {
+          if (fa) {
+            const mat = await fa.materializeToCache({ uri: a.epub.uri });
+            epubPath = mat?.path;
+          }
+        } catch (e) {}
+        if (epubPath) {
+          result = await window.coverExtract.fromEpub(epubPath);
+          if (result) result.source = 'epub';
+        }
+      }
+      if (!result) {
+        alert('No embedded cover found. Use Pick to choose an image manually.');
+        return;
+      }
+      await window.titleStore.attach(_editingTitleId, 'cover',
+        { dataUri: result.dataUri, mime: result.mime, source: result.source, name: 'cover' });
+      const updated = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
+      renderAttachmentRows(updated);
+    };
+
+    window.pickTitleCoverManual = function () {
+      // Hidden file input — simpler than going through FileAccess for an image.
+      let input = document.getElementById('coverPickInput');
+      if (!input) {
+        input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        input.id = 'coverPickInput';
+        input.style.display = 'none';
+        document.body.appendChild(input);
+      }
+      input.value = '';
+      input.onchange = async () => {
+        const f = input.files?.[0];
+        if (!f) return;
+        const r = await window.coverExtract.fromFile(f);
+        if (!r) { alert('Could not read image'); return; }
+        await window.titleStore.attach(_editingTitleId, 'cover',
+          { dataUri: r.dataUri, mime: r.mime, source: 'manual', name: f.name || 'cover' });
+        const updated = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
+        renderAttachmentRows(updated);
+      };
+      input.click();
+    };
+
+    // Sync title attachments back to the legacy per-deck pref keys so the
+    // existing reading-mode + audiobook code paths keep working. For
+    // deck-less titles the title name itself is the pseudo-deck namespace.
+    async function syncTitleToLegacyPrefs(title) {
+      const setP = async (k, v) => {
+        if (window.Capacitor?.Plugins?.Preferences) {
+          await window.Capacitor.Plugins.Preferences.set({ key: k, value: String(v) });
+        } else localStorage.setItem(k, String(v));
+      };
+      const pseudo = title.attachments?.deck?.name || title.name;
+      if (!pseudo) return;
+      if (title.attachments.epub) {
+        await setP('READING_PAIRING_' + pseudo, title.attachments.epub.name);
+        if (title.attachments.epub.uri) {
+          await setP('READING_EPUB_NAME', title.attachments.epub.name);
+          await setP('READING_EPUB_URI', title.attachments.epub.uri);
+        }
+      }
+      if (title.attachments.audiobook) {
+        await setP('READING_AUDIO_PAIR_' + pseudo, title.attachments.audiobook.cachePath);
+        await setP('READING_AUDIO_NAME_' + pseudo, title.attachments.audiobook.name);
+      }
+      if (title.attachments.srt) {
+        await setP('READING_SRT_PAIR_' + pseudo, title.attachments.srt.cachePath);
+        await setP('READING_SRT_NAME_' + pseudo, title.attachments.srt.name);
+      }
+    }
+
+    function stripExtension(name) {
+      if (!name) return '';
+      return name.replace(/\.[^.]+$/, '');
+    }
+
+    window.pickTitleAttachment = async function (kind) {
+      const fa = window.Capacitor?.Plugins?.FileAccess;
+      if (!fa) { alert('FileAccess plugin not loaded'); return; }
+      let pickerKind = 'any';
+      let needsMaterialize = false;
+      if (kind === 'epub' || kind === 'deck') pickerKind = 'epub';
+      else if (kind === 'audiobook') { pickerKind = 'audio'; needsMaterialize = true; }
+      else if (kind === 'srt') { pickerKind = 'any'; needsMaterialize = true; }
+      try {
+        const picked = await fa.pickFileWithUri({ kind: pickerKind });
+        if (!picked || !picked.uri) return;
+        let attachment;
+        if (needsMaterialize) {
+          const mat = await fa.materializeToCache({ uri: picked.uri });
+          if (!mat || !mat.path) { alert('Could not import file'); return; }
+          attachment = { cachePath: mat.path, name: picked.name };
+        } else {
+          attachment = { uri: picked.uri, name: picked.name };
+        }
+        await window.titleStore.attach(_editingTitleId, kind, attachment);
+        let titles = await window.titleStore.list();
+        let title = titles.find(t => t.id === _editingTitleId);
+
+        // Inherit name from the first picked file when title still has its
+        // default name. Strip extension.
+        const isDefaultName = !title.name ||
+          title.name === 'New title' || title.name === 'Untitled';
+        if (isDefaultName && picked.name) {
+          const cleanName = stripExtension(picked.name);
+          await window.titleStore.update(_editingTitleId, { name: cleanName });
+          titles = await window.titleStore.list();
+          title = titles.find(t => t.id === _editingTitleId);
+          const nameInput = document.getElementById('titleEditName');
+          if (nameInput) nameInput.value = cleanName;
+        }
+
+        await syncTitleToLegacyPrefs(title);
+        // Silently try to auto-extract a cover when one of the
+        // cover-bearing kinds was added and the title has no cover yet.
+        if (!title.attachments?.cover && (kind === 'epub' || kind === 'audiobook')) {
+          try { await silentAutoExtractCover(_editingTitleId); } catch (e) {}
+          const refreshed = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
+          if (refreshed) renderAttachmentRows(refreshed);
+        } else {
+          renderAttachmentRows(title);
+        }
+        populateLibrary();
+      } catch (e) {
+        const msg = String(e?.message || e);
+        if (!msg.toLowerCase().includes('cancel')) alert('Pick failed: ' + msg);
+      }
+    };
+
+    // Quietly try to pull a cover from the attached audiobook (ID3) or
+    // EPUB (zip); no alerts, no UI feedback. Called automatically after
+    // a relevant attachment is added.
+    async function silentAutoExtractCover(titleId) {
+      if (!titleId || !window.coverExtract || !window.titleStore) return;
+      const titles = await window.titleStore.list();
+      const title = titles.find(t => t.id === titleId);
+      if (!title || title.attachments?.cover) return;
+      const a = title.attachments || {};
+      let result = null;
+      if (a.audiobook?.cachePath) {
+        result = await window.coverExtract.fromAudio(a.audiobook.cachePath);
+        if (result) result.source = 'id3';
+      }
+      if (!result && a.epub?.uri) {
+        let epubPath = null;
+        try {
+          const mat = await window.Capacitor?.Plugins?.FileAccess?.materializeToCache?.({ uri: a.epub.uri });
+          epubPath = mat?.path;
+        } catch (e) {}
+        if (epubPath) {
+          result = await window.coverExtract.fromEpub(epubPath);
+          if (result) result.source = 'epub';
+        }
+      }
+      if (!result) return;
+      await window.titleStore.attach(titleId, 'cover',
+        { dataUri: result.dataUri, mime: result.mime, source: result.source, name: 'cover' });
+    }
+
+    window.removeTitleAttachment = async function (kind) {
+      await window.titleStore.detach(_editingTitleId, kind);
+      const titles = await window.titleStore.list();
+      const title = titles.find(t => t.id === _editingTitleId);
+      renderAttachmentRows(title);
+      populateLibrary();
+    };
+
+    window.closeTitleEdit = function () {
+      document.getElementById('titleEditModal').style.display = 'none';
+      _editingTitleId = null;
+    };
+
+    window.confirmDeleteTitle = async function () {
+      if (!confirm('Delete this title from your library?')) return;
+      await window.titleStore.remove(_editingTitleId);
+      window.closeTitleEdit();
+      populateLibrary();
+    };
+
+    window.createNewTitle = async function () {
+      const t = await window.titleStore.create({ name: 'New title' });
+      openTitleEdit(t.id);
+      populateLibrary();
+    };
+
+    async function loadTitleFromLibrary(title) {
+      debugLog('📚 Loading title: ' + title.name);
+      const a = title.attachments || {};
+      if (window.titleStore) await window.titleStore.touchOpened(title.id);
+      window._activeTitleId = title.id;
+      // If a deck is attached, reuse the existing deck-restore path. That
+      // path already restores per-deck pairings (EPUB / audiobook / SRT)
+      // from prefs which we kept in sync via migration.
+      if (a.deck) {
+        closeLibrary();
+        // Make sure prefs are synced under the deck name before tab gating
+        // runs (covers the case where attachments were added before this
+        // sync step existed, or under a different name).
+        try { await syncTitleToLegacyPrefs(title); } catch (e) {}
+        loadDeckFromLibrary({
+          fileName: a.deck.name,
+          fileUri: a.deck.uri,
+          cardIndex: a.deck.cardIndex || 0,
+          totalCards: a.deck.totalCards || 0,
+          requiresManualSelection: !a.deck.uri,
+          available: true,
+          lastAccessed: title.lastOpenedAt
+        });
+        // Kick a tab refresh once the deckName has been painted so we don't
+        // have to wait up to 3 s for the next interval tick.
+        setTimeout(() => { if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability(); }, 50);
+        setTimeout(() => { if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability(); }, 600);
+        return;
+      }
+      // Deck-less title with audiobook + SRT → build synthetic cards from SRT.
+      if (a.audiobook && a.srt) {
+        closeLibrary();
+        try { await syncTitleToLegacyPrefs(title); } catch (e) {}
+        if (typeof window.loadTitleAsSrtCards === 'function') {
+          const ok = await window.loadTitleAsSrtCards(title);
+          if (ok) {
+            if (typeof window.setShellMode === 'function') window.setShellMode('card');
+            if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
+            return;
+          }
+        }
+        return;
+      }
+      // EPUB-only title → switch to read mode (user opens the EPUB via MORE).
+      if (a.epub) {
+        closeLibrary();
+        try { await syncTitleToLegacyPrefs(title); } catch (e) {}
+        const deckEl = document.getElementById('deckName');
+        if (deckEl) deckEl.textContent = title.name;
+        if (typeof window.setShellMode === 'function') await window.setShellMode('read');
+        if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
+        return;
+      }
+      // Audiobook-only title → switch to audio mode.
+      if (a.audiobook) {
+        closeLibrary();
+        try { await syncTitleToLegacyPrefs(title); } catch (e) {}
+        const deckEl = document.getElementById('deckName');
+        if (deckEl) deckEl.textContent = title.name;
+        if (typeof window.setShellMode === 'function') await window.setShellMode('audio');
+        if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
+        return;
+      }
+      alert('This title has no attachments yet. Use the ✎ button to add a deck, EPUB, audiobook, or SRT.');
+    }
+
+    async function loadDeckFromLibrary(deckInfo) {
+      debugLog(`📚 Loading deck from library: ${deckInfo.fileName} (hasUri: ${!!deckInfo.fileUri})`);
+      
+      // Set pending card index and expected deck name for validation
+      window.pendingCardIndex = deckInfo.cardIndex;
+      window.expectedDeckName = deckInfo.fileName;
+      
+      debugLog(`🎯 Setting validation variables: pendingCardIndex=${window.pendingCardIndex}, expectedDeckName="${window.expectedDeckName}"`);
+      
+      closeLibrary();
+      
+      if (deckInfo.fileUri && !deckInfo.requiresManualSelection) {
+        // Try auto-restore using file URI
+        debugLog(`Attempting auto-restore using URI: ${deckInfo.fileUri}`);
+        const restored = await window.tryAutoRestoreFile(deckInfo.fileUri, deckInfo.fileName);
+        
+        if (!restored) {
+          debugLog('Auto-restore failed, falling back to file picker');
+          const message = `Could not auto-restore ${deckInfo.fileName}. Please select it manually to continue from card ${deckInfo.cardIndex + 1}.`;
+          showToast(message, 5000);
+          debugLog('🔄 About to open file picker - validation should trigger when file is selected');
+          openFilePicker();
+        }
+      } else {
+        // No URI available - use file picker
+        const message = `Select "${deckInfo.fileName}" to continue from card ${deckInfo.cardIndex + 1}${deckInfo.totalCards ? ` of ${deckInfo.totalCards}` : ''}.`;
+        
+        debugLog(`No URI available, opening file picker: ${message}`);
+        showToast(message, 5000);
+        debugLog('🔄 About to open file picker - validation should trigger when file is selected');
+        document.getElementById('apkgFile').click();
+      }
+    }
+
+    async function getRecentDecks() {
+      debugLog('Getting recent decks list');
+      const recentDecks = [];
+      
+      try {
+        // Wait a moment to ensure Capacitor is fully initialized
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Check if we're in Capacitor environment with more detailed logging
+        const isCapacitor = !!(window.Capacitor && 
+                              window.Capacitor.Plugins && 
+                              window.Capacitor.Plugins.Filesystem && 
+                              window.Capacitor.Plugins.Preferences);
+        
+        debugLog(`Capacitor environment available: ${isCapacitor}`);
+        debugLog(`window.Capacitor: ${!!window.Capacitor}`);
+        debugLog(`window.Capacitor.Plugins: ${!!window.Capacitor?.Plugins}`);
+        debugLog(`Filesystem: ${!!window.Capacitor?.Plugins?.Filesystem}`);
+        debugLog(`Preferences: ${!!window.Capacitor?.Plugins?.Preferences}`);
+        
+        // Show what plugins ARE available
+        if (window.Capacitor?.Plugins) {
+          debugLog(`Available Capacitor plugins: ${Object.keys(window.Capacitor.Plugins).join(', ')}`);
+        }
+        
+        if (isCapacitor) {
+          // Get the deck list from Capacitor preferences
+          try {
+            const deckListResult = await window.Capacitor.Plugins.Preferences.get({ key: 'ankiDeckList' });
+            const deckListJson = deckListResult.value;
+            
+            debugLog(`Deck list JSON from Capacitor: ${deckListJson ? 'found' : 'not found'}`);
+            
+            if (deckListJson) {
+              const savedDecks = JSON.parse(deckListJson);
+              debugLog(`Found ${savedDecks.length} saved decks in Capacitor`);
+              
+              // Since Capacitor is working, try to check file availability
+              for (const deck of savedDecks) {
+                deck.available = await checkDeckFileAvailability(deck);
+                recentDecks.push(deck);
+              }
+            } else {
+              debugLog('No deck list found in Capacitor preferences');
+            }
+          } catch (error) {
+            debugLog(`Error reading deck list from Capacitor: ${error.message}`);
+          }
+        } else {
+          // Fallback to localStorage for web OR when Capacitor plugins aren't working
+          debugLog('Using localStorage fallback (Capacitor plugins not available)');
+          const deckListJson = localStorage.getItem('ankiDeckList');
+          
+          debugLog(`Deck list JSON from localStorage: ${deckListJson ? 'found' : 'not found'}`);
+          
+          if (deckListJson) {
+            try {
+              const savedDecks = JSON.parse(deckListJson);
+              debugLog(`Found ${savedDecks.length} saved decks in localStorage`);
+              
+              for (const deck of savedDecks) {
+                // In web environment or without working Capacitor plugins, 
+                // we can't check file availability but still show the decks
+                deck.available = false;
+                recentDecks.push(deck);
+              }
+            } catch (parseError) {
+              debugLog(`Error parsing deck list from localStorage: ${parseError.message}`);
+            }
+          } else {
+            debugLog('No deck list found in localStorage either');
+          }
+        }
+      } catch (error) {
+        debugLog(`Error getting recent decks: ${error.message}`);
+      }
+      
+      // Sort by last accessed (most recent first)
+      recentDecks.sort((a, b) => b.lastAccessed - a.lastAccessed);
+      
+      // Limit to 25 most recent decks
+      const limitedDecks = recentDecks.slice(0, 25);
+      
+      debugLog(`Found ${limitedDecks.length} recent decks`);
+      return limitedDecks;
+    }
+
+    // Helper function to check if a deck file is available
+    async function checkDeckFileAvailability(deck) {
+      if (!deck.storedPath) {
+        debugLog(`No stored path for deck: ${deck.fileName}`);
+        return false;
+      }
+
+      try {
+        debugLog(`Checking availability of: ${deck.storedPath}`);
+        
+        // Try the standard Documents directory first
+        await window.Capacitor.Plugins.Filesystem.stat({
+          path: deck.storedPath,
+          directory: window.Capacitor.Plugins.Filesystem.Directory.Documents
+        });
+        debugLog(`✅ Deck ${deck.fileName} is available in Documents`);
+        return true;
+        
+      } catch (e) {
+        debugLog(`❌ Deck ${deck.fileName} not in Documents: ${e.message}`);
+        
+        // Try other directories if Documents doesn't work
+        const directories = [
+          { name: 'Data', dir: window.Capacitor.Plugins.Filesystem.Directory.Data },
+          { name: 'Cache', dir: window.Capacitor.Plugins.Filesystem.Directory.Cache },
+          { name: 'External', dir: window.Capacitor.Plugins.Filesystem.Directory.External }
+        ];
+        
+        for (const { name, dir } of directories) {
+          if (!dir) continue; // Skip if directory doesn't exist
+          
+          try {
+            await window.Capacitor.Plugins.Filesystem.stat({
+              path: deck.storedPath,
+              directory: dir
+            });
+            debugLog(`✅ Deck ${deck.fileName} found in ${name} directory`);
+            return true;
+          } catch (dirError) {
+            debugLog(`❌ Not in ${name}: ${dirError.message}`);
+          }
+        }
+      }
+      
+      return false;
+    }
+
+    // UI helper functions
+    function hideInstructions() {
+      document.getElementById('instructions').style.display = 'none';
+      localStorage.setItem('instructionsShown', 'true');
+    }
+
+    function showInstructions() {
+      document.getElementById('instructions').style.display = 'block';
+    }
+
+    // Show instructions on first visit
+    if (!localStorage.getItem('instructionsShown')) {
+      showInstructions();
+    }
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'KeyL' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        const libraryPage = document.getElementById('libraryPage');
+        if (libraryPage.classList.contains('visible')) {
+          closeLibrary();
+        } else {
+          openLibrary();
+        }
+      }
+    });
+
+    // Field mapping functionality
+    let currentFieldNames = [];
+    let currentDeckName = '';
+    let currentFieldMappings = null;
+
+    function openFieldMapping() {
+      debugLog('Opening field mapping modal');
+      
+      if (!window.allNotes || window.allNotes.length === 0) {
+        showToast('Please load a deck first', 3000);
+        return;
+      }
+
+      // Check if field names are available
+      if (!window.currentFieldNames || window.currentFieldNames.length === 0) {
+        debugLog('❌ No currentFieldNames available');
+        showToast('Field names not available. Try reloading the deck.', 3000);
+        return;
+      }
+
+      debugLog(`Field names available: ${window.currentFieldNames.join(', ')}`);
+      
+      // Populate field selects
+      populateFieldSelects();
+      
+      // Show modal
+      document.getElementById('fieldMappingModal').classList.add('visible');
+    }
+
+    function closeFieldMapping() {
+      debugLog('Closing field mapping modal');
+      document.getElementById('fieldMappingModal').classList.remove('visible');
+    }
+
+    function populateFieldSelects() {
+      debugLog(`Populating field selects with ${window.currentFieldNames.length} fields`);
+      
+      const expressionSelect = document.getElementById('expressionFieldSelect');
+      const imageSelect = document.getElementById('imageFieldSelect');
+      const audioSelect = document.getElementById('audioFieldSelect');
+      
+      // Clear existing options
+      [expressionSelect, imageSelect, audioSelect].forEach(select => {
+        select.innerHTML = '<option value="">-- Select Field --</option>';
+      });
+      
+      // Check if we have field names
+      if (!window.currentFieldNames || window.currentFieldNames.length === 0) {
+        debugLog('❌ No field names available');
+        showToast('No field names available. Please load a deck first.', 3000);
+        return;
+      }
+      
+      debugLog(`Available field names: ${window.currentFieldNames.join(', ')}`);
+      
+      // Add field options
+      window.currentFieldNames.forEach((fieldName, index) => {
+        const safeFieldName = fieldName.replace(/'/g, "&apos;").replace(/"/g, "&quot;");
+        const option = `<option value="${index}">${safeFieldName}</option>`;
+        expressionSelect.innerHTML += option;
+        imageSelect.innerHTML += option;
+        audioSelect.innerHTML += option;
+      });
+      
+      debugLog(`✅ Added ${window.currentFieldNames.length} field options to selects`);
+      
+      // Load existing mappings if available
+      loadExistingMappings();
+      
+      // Set up preview updates
+      [expressionSelect, imageSelect, audioSelect].forEach(select => {
+        select.addEventListener('change', updateFieldPreview);
+      });
+      
+      updateFieldPreview();
+    }
+
+    async function loadExistingMappings() {
+      try {
+        const mappingKey = `fieldMapping_${currentDeckName}`;
+        let savedMappings = null;
+        
+        if (window.isCapacitorEnvironment && window.isCapacitorEnvironment()) {
+          const result = await window.Capacitor.Plugins.Preferences.get({ key: mappingKey });
+          if (result.value) {
+            savedMappings = JSON.parse(result.value);
+          }
+        } else {
+          const mappingJson = localStorage.getItem(mappingKey);
+          if (mappingJson) {
+            savedMappings = JSON.parse(mappingJson);
+          }
+        }
+        
+        if (savedMappings) {
+          debugLog(`Loaded existing field mappings for ${currentDeckName}`);
+          document.getElementById('expressionFieldSelect').value = savedMappings.expression || '';
+          document.getElementById('imageFieldSelect').value = savedMappings.image || '';
+          document.getElementById('audioFieldSelect').value = savedMappings.audio || '';
+          currentFieldMappings = savedMappings;
+        }
+      } catch (error) {
+        debugLog(`Error loading field mappings: ${error.message}`);
+      }
+    }
+
+    function updateFieldPreview() {
+      const expressionIdx = document.getElementById('expressionFieldSelect').value;
+      const imageIdx = document.getElementById('imageFieldSelect').value;
+      const audioIdx = document.getElementById('audioFieldSelect').value;
+      
+      const preview = document.getElementById('fieldMappingPreview');
+      
+      if (!window.allNotes || window.allNotes.length === 0) {
+        preview.innerHTML = 'No deck loaded';
+        return;
+      }
+      
+      // Use first few notes to show better preview
+      const sampleNote = window.allNotes[0];
+      let previewHtml = '';
+      
+      if (expressionIdx !== '') {
+        const expressionContent = sampleNote.rawFields[parseInt(expressionIdx)] || 'Empty';
+        const contentType = analyzeFieldType(expressionContent);
+        previewHtml += `<strong>Expression:</strong> (${contentType}) ${expressionContent.substring(0, 150)}${expressionContent.length > 150 ? '...' : ''}<br><br>`;
+      }
+      
+      if (imageIdx !== '') {
+        const imageContent = sampleNote.rawFields[parseInt(imageIdx)] || 'Empty';
+        const contentType = analyzeFieldType(imageContent);
+        previewHtml += `<strong>Image:</strong> (${contentType}) ${imageContent.substring(0, 150)}${imageContent.length > 150 ? '...' : ''}<br><br>`;
+      }
+      
+      if (audioIdx !== '') {
+        const audioContent = sampleNote.rawFields[parseInt(audioIdx)] || 'Empty';
+        const contentType = analyzeFieldType(audioContent);
+        previewHtml += `<strong>Audio:</strong> (${contentType}) ${audioContent.substring(0, 150)}${audioContent.length > 150 ? '...' : ''}`;
+      }
+      
+      preview.innerHTML = previewHtml || 'Select fields above to see preview...';
+    }
+
+    function analyzeFieldType(content) {
+      if (!content || !content.trim()) return 'Empty';
+      if (content.includes('<img')) return 'Image HTML';
+      if (content.includes('[sound:')) return 'Audio';
+      if (content.includes('<')) return 'HTML';
+      if (/[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9faf]/.test(content)) return 'Japanese';
+      if (content.length > 100) return 'Long Text';
+      return 'Text';
+    }
+
+    async function saveFieldMapping() {
+      const expressionIdx = document.getElementById('expressionFieldSelect').value;
+      const imageIdx = document.getElementById('imageFieldSelect').value;
+      const audioIdx = document.getElementById('audioFieldSelect').value;
+      
+      if (!expressionIdx) {
+        alert('Please select at least an Expression field');
+        return;
+      }
+      
+      const mappings = {
+        expression: expressionIdx,
+        image: imageIdx || null,
+        audio: audioIdx || null,
+        timestamp: Date.now()
+      };
+      
+      try {
+        // Save mappings
+        const mappingKey = `fieldMapping_${currentDeckName}`;
+        const mappingJson = JSON.stringify(mappings);
+        
+        if (window.isCapacitorEnvironment && window.isCapacitorEnvironment()) {
+          await window.Capacitor.Plugins.Preferences.set({
+            key: mappingKey,
+            value: mappingJson
+          });
+        } else {
+          localStorage.setItem(mappingKey, mappingJson);
+        }
+        
+        debugLog(`Saved field mappings for ${currentDeckName}`);
+        currentFieldMappings = mappings;
+        
+        // Reprocess all notes with new mappings
+        await reprocessNotesWithMappings(mappings);
+        
+        closeFieldMapping();
+        showToast('Field mappings saved and applied!', 3000);
+        
+      } catch (error) {
+        debugLog(`Error saving field mappings: ${error.message}`);
+        alert(`Error saving mappings: ${error.message}`);
+      }
+    }
+
+    async function reprocessNotesWithMappings(mappings) {
+      debugLog('Reprocessing notes with custom field mappings...');
+      
+      // Reprocess each note
+      window.allNotes.forEach((note, index) => {
+        // Update expression
+        if (mappings.expression !== null) {
+          const newExpression = note.rawFields[parseInt(mappings.expression)];
+          if (newExpression) {
+            note.expression = newExpression.trim();
+          }
+        }
+        
+        // Update image filename
+        note.imageFilename = null;
+        note.imageHtml = "";
+        if (mappings.image !== null) {
+          const imageField = note.rawFields[parseInt(mappings.image)];
+          if (imageField) {
+            const match = imageField.match(/<img[^>]+src=["']([^"']+)["']/i);
+            if (match) {
+              const filename = match[1].replace(/^.*[\/\\]/, '');
+              note.imageFilename = filename;
+            }
+          }
+        }
+        
+        // Update audio filename
+        note.audioFilename = null;
+        note.audioSrc = "";
+        if (mappings.audio !== null) {
+          const audioField = note.rawFields[parseInt(mappings.audio)];
+          if (audioField) {
+            const audioMatch = audioField.match(/\[sound:(.+?)\]/);
+            if (audioMatch) {
+              note.audioFilename = audioMatch[1];
+            }
+          }
+        }
+      });
+      
+      // Refresh current card display
+      if (window.displayCard) {
+        await window.displayCard();
+      }
+      
+      debugLog('Notes reprocessed with custom mappings');
+    }
+
+    // Make functions globally available
+    window.openFieldMapping = openFieldMapping;
+    window.closeFieldMapping = closeFieldMapping;
+    window.saveFieldMapping = saveFieldMapping;
+    async function deleteDeck(fileName, event) {
+      event.stopPropagation(); // Prevent deck loading
+      
+      debugLog(`Attempting to delete deck: ${fileName}`);
+      
+      const confirmed = confirm(`Delete "${fileName}" from library?\n\nThis will remove it from your recent decks list but won't delete the actual file.`);
+      
+      if (!confirmed) {
+        debugLog('Delete cancelled by user');
+        return;
+      }
+      
+      try {
+        // Check if we're in Capacitor environment
+        const isCapacitor = !!(window.Capacitor && 
+                              window.Capacitor.Plugins && 
+                              window.Capacitor.Plugins.Preferences);
+        
+        let deckList = [];
+        
+        // Get existing deck list
+        if (isCapacitor) {
+          try {
+            const deckListResult = await window.Capacitor.Plugins.Preferences.get({ key: 'ankiDeckList' });
+            if (deckListResult.value) {
+              deckList = JSON.parse(deckListResult.value);
+            }
+          } catch (error) {
+            debugLog(`Error reading deck list from Capacitor: ${error.message}`);
+            // Fall back to localStorage
+            isCapacitor = false;
+          }
+        }
+        
+        if (!isCapacitor) {
+          const deckListJson = localStorage.getItem('ankiDeckList');
+          if (deckListJson) {
+            deckList = JSON.parse(deckListJson);
+          }
+        }
+        
+        // Remove the deck from the list
+        const originalLength = deckList.length;
+        deckList = deckList.filter(deck => deck.fileName !== fileName);
+        
+        if (deckList.length === originalLength) {
+          debugLog(`Deck "${fileName}" not found in list`);
+          showToast(`Deck "${fileName}" not found in library`, 3000);
+          return;
+        }
+        
+        // Save updated list
+        const listJson = JSON.stringify(deckList);
+        
+        if (isCapacitor) {
+          await window.Capacitor.Plugins.Preferences.set({
+            key: 'ankiDeckList',
+            value: listJson
+          });
+        } else {
+          localStorage.setItem('ankiDeckList', listJson);
+        }
+        
+        debugLog(`✅ Deleted deck "${fileName}" from library`);
+        showToast(`Deleted "${fileName}" from library`, 2000);
+        
+        // Refresh the library view
+        await populateLibrary();
+        
+      } catch (error) {
+        debugLog(`❌ Error deleting deck: ${error.message}`);
+        showToast(`Error deleting deck: ${error.message}`, 3000);
+      }
+    }
+  </script>
+  
+</body>
+</html>
