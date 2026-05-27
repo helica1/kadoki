@@ -1411,6 +1411,7 @@
     if (!el) return;
     el.classList.add('active');
     if (opts && opts.instantScroll) el.dataset._instantScroll = '1';
+    if (opts && opts.center) el.dataset._scrollCenter = '1';
     if (!el.dataset.counted) {
       const len = textWithoutRuby(el).length;
       if (len > 0) {
@@ -1445,17 +1446,22 @@
       eRect.bottom <= cRect.bottom + tol &&
       eRect.left   >= cRect.left   - tol &&
       eRect.right  <= cRect.right  + tol;
-    if (fullyVisible) return;
+    // Skip the visibility shortcut when the caller explicitly asked to
+    // CENTER the chunk — user wants it in the middle, not just "somewhere
+    // on screen" (matters for the open-reader sync).
+    if (fullyVisible && !el.dataset._scrollCenter) return;
 
-    // inline:'start' is the writing-mode-aware start of the inline axis,
-    // which matches what we want in both vertical-rl and horizontal.
-    // Reading-mode-open path tags the chunk with _instantScroll so the
-    // first paint doesn't animate (avoids the cascading scrolls the
-    // user sees on tab switch).
+    // inline:'start' is the writing-mode-aware start of the inline axis.
+    // _instantScroll skips the smooth animation (used on reader-open
+    // sync). _scrollCenter centers the chunk vertically — used by
+    // syncReaderToCurrentPosition so the user lands with the active line
+    // in the middle of the page instead of the top.
     const behavior = el.dataset._instantScroll ? 'instant' : 'smooth';
+    const block    = el.dataset._scrollCenter  ? 'center'  : 'start';
     delete el.dataset._instantScroll;
+    delete el.dataset._scrollCenter;
     try {
-      el.scrollIntoView({ behavior, block: 'start', inline: 'start' });
+      el.scrollIntoView({ behavior, block, inline: 'start' });
     } catch (e) {
       el.scrollIntoView(true);
     }
@@ -2238,26 +2244,67 @@
     if (pairedName !== currentEpubName) {
       await restoreLastEpub();
     }
-    // Jump (instantly, no animation) to whichever chunk should be active.
-    // Prefer the cue currently being played; if that's unknown, fall back
-    // to the last-matched chunk. Instant scroll avoids the cascading
-    // smooth-scrolls the user noticed on tab switch.
-    let targetChunkIdx = lastMatchedIdx;
-    if (abCues?.length && Number.isFinite(abPositionRef?.ms)) {
-      const curCueIdx = window.srtParser.findCueAtTime(abCues, abPositionRef.ms);
-      if (curCueIdx >= 0 && abCueToChunk && abCueToChunk[curCueIdx] >= 0) {
-        targetChunkIdx = abCueToChunk[curCueIdx];
-      }
-    }
-    if (targetChunkIdx >= 0 && chunks[targetChunkIdx]) {
-      setActive(targetChunkIdx, { instantScroll: true });
-      // Trigger an immediate cue-precise highlight too if we know the cue.
-      if (abCues?.length && Number.isFinite(abPositionRef?.ms)) {
-        const cIdx = window.srtParser.findCueAtTime(abCues, abPositionRef.ms);
-        if (cIdx >= 0 && abCues[cIdx]) setCueHighlight(targetChunkIdx, abCues[cIdx].text);
-      }
-    }
+    // Snap the reader to the current playhead. Centered + instant so
+    // the user lands directly on the right line.
+    await syncReaderToCurrentPosition();
   };
+
+  // Open-reader and tab-switch sync: locate the chunk that matches the
+  // current playhead (audio cue → mapped chunk, else the current card's
+  // expression text, else the last-matched cursor), highlight it, and
+  // center it on screen — no smooth animation.
+  async function syncReaderToCurrentPosition() {
+    if (!chunks?.length) return;
+    let cueIdx = -1;
+    let chunkIdx = -1;
+
+    // 1) Audio position → cue → chunk (most precise; requires audio loaded).
+    if (abCues?.length && Number.isFinite(abPositionRef?.ms) && abPositionRef.ms > 0) {
+      cueIdx = window.srtParser.findCueAtTime(abCues, abPositionRef.ms);
+      if (cueIdx >= 0 && abCueToChunk && abCueToChunk[cueIdx] >= 0) {
+        chunkIdx = abCueToChunk[cueIdx];
+      }
+    }
+
+    // 2) Current card's expression text → first chunk that contains it.
+    //    Works even when audio has never played in this session.
+    if (chunkIdx < 0 && Array.isArray(window.allNotes)) {
+      const card = window.allNotes[window.currentCardIndex];
+      if (card?.expression) {
+        const target = normalizeText(textWithoutRubyFromHtml(card.expression));
+        if (target) {
+          chunkIdx = findContainsFrom(target, 0);
+          if (chunkIdx >= 0 && abChunkToCue) {
+            const ci = abChunkToCue[chunkIdx];
+            if (ci >= 0) cueIdx = ci;
+          }
+        }
+      }
+    }
+
+    // 3) Last-matched cursor.
+    if (chunkIdx < 0 && lastMatchedIdx >= 0) chunkIdx = lastMatchedIdx;
+
+    if (chunkIdx < 0 || !chunks[chunkIdx]) {
+      rlog('syncReaderToCurrentPosition: no target chunk');
+      return;
+    }
+    rlog(`syncReaderToCurrentPosition → chunk ${chunkIdx} (cue ${cueIdx})`);
+
+    setActive(chunkIdx, { instantScroll: true, center: true });
+
+    // Cue-precise highlight from the cue if we found one; otherwise the
+    // current card's text gives us the substring to mark within the
+    // chunk (still cue-precise visually).
+    let highlightText = '';
+    if (cueIdx >= 0 && abCues[cueIdx]) highlightText = abCues[cueIdx].text;
+    else if (Array.isArray(window.allNotes)) {
+      const card = window.allNotes[window.currentCardIndex];
+      if (card?.expression) highlightText = textWithoutRubyFromHtml(card.expression);
+    }
+    if (highlightText) setCueHighlight(chunkIdx, highlightText);
+  }
+  window.syncReaderToCurrentPosition = syncReaderToCurrentPosition;
 
   window.closeReadingMode = async function () {
     rlog('Closing reading mode');
