@@ -925,7 +925,7 @@ body.dimmed .card-image {
 
 
   <!-- Reading Mode View -->
-  <div id="readingModeView" style="display:none;position:fixed;inset:0;background:#1a1a1a;z-index:2700;flex-direction:column;">
+  <div id="readingModeView" style="display:none;position:fixed;inset:0;background:#000000;z-index:2700;flex-direction:column;">
     <div id="readingModeToolbar" style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:10px;padding:14px 14px;background:rgba(17,17,17,0.95);border-bottom:1px solid #333;z-index:2;flex-wrap:wrap;transform:translateY(0);transition:transform 0.22s ease;">
       <button onclick="pickReadingEpub()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;">📂</button>
       <button id="readingPlayPauseBtn" onclick="window.toggleReadingPlaybackUI && window.toggleReadingPlaybackUI()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;min-width:56px;">▶</button>
@@ -960,27 +960,22 @@ body.dimmed .card-image {
     <!-- Audiobook transport — pigments-style. Hidden scrub input kept for
          backward compatibility with code that touches abScrubbing/etc. -->
     <input id="audiobookScrub" type="range" min="0" max="1000" value="0" style="display:none;">
-    <div class="ab-transport" style="flex-shrink:0;padding:14px 18px 26px;background:rgba(10,10,10,0.7);border-top:1px solid var(--border,#2a2a2a);">
-      <div style="display:flex;align-items:center;justify-content:center;gap:14px;">
+    <div class="ab-transport" style="flex-shrink:0;padding:18px 18px 56px;background:rgba(10,10,10,0.7);border-top:1px solid var(--border,#2a2a2a);">
+      <div style="display:flex;align-items:center;justify-content:center;gap:18px;">
         <button class="btn" onclick="window.audiobookSkip && window.audiobookSkip(-30000)"
                 style="padding:10px 14px;font-size:.72rem;letter-spacing:.1em;font-weight:700;">−30s</button>
-        <button class="btn" onclick="window.audiobookSkip && window.audiobookSkip(-10000)"
-                style="padding:10px 14px;font-size:.72rem;letter-spacing:.1em;font-weight:700;">−10s</button>
         <button id="audiobookPlayPause" onclick="window.audiobookTogglePlay && window.audiobookTogglePlay()"
                 class="btn"
-                style="background:var(--accent-audio);color:#0a0a0a;border-color:var(--accent-audio);padding:14px 22px;font-size:.85rem;font-weight:700;letter-spacing:.18em;min-width:88px;">PLAY</button>
-        <button class="btn" onclick="window.audiobookSkip && window.audiobookSkip(10000)"
-                style="padding:10px 14px;font-size:.72rem;letter-spacing:.1em;font-weight:700;">+10s</button>
+                style="background:var(--accent-audio);color:#0a0a0a;border-color:var(--accent-audio);padding:14px 22px;font-size:.85rem;font-weight:700;letter-spacing:.18em;min-width:96px;">PLAY</button>
         <button class="btn" onclick="window.audiobookSkip && window.audiobookSkip(30000)"
                 style="padding:10px 14px;font-size:.72rem;letter-spacing:.1em;font-weight:700;">+30s</button>
       </div>
-      <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-top:14px;font-size:.7rem;color:var(--text-muted,#888);letter-spacing:.1em;text-transform:uppercase;">
-        <span>Speed</span>
-        <button class="btn ab-speed" data-speed="0.75" onclick="setGlobalPlaybackRate(0.75)" style="padding:5px 10px;font-size:.72rem;">0.75×</button>
-        <button class="btn ab-speed" data-speed="1.00" onclick="setGlobalPlaybackRate(1.00)" style="padding:5px 10px;font-size:.72rem;">1×</button>
-        <button class="btn ab-speed" data-speed="1.25" onclick="setGlobalPlaybackRate(1.25)" style="padding:5px 10px;font-size:.72rem;">1.25×</button>
-        <button class="btn ab-speed" data-speed="1.50" onclick="setGlobalPlaybackRate(1.50)" style="padding:5px 10px;font-size:.72rem;">1.5×</button>
-        <button class="btn ab-speed" data-speed="1.75" onclick="setGlobalPlaybackRate(1.75)" style="padding:5px 10px;font-size:.72rem;">1.75×</button>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:18px;font-size:.7rem;color:var(--text-muted,#888);letter-spacing:.1em;text-transform:uppercase;">
+        <span style="min-width:42px;">Speed</span>
+        <input id="audiobookSpeed" type="range" min="0.5" max="2.5" step="0.05" value="1.0"
+               style="flex:1;accent-color:var(--accent-audio);"
+               oninput="onAudiobookSpeedInput(this.value)">
+        <span id="audiobookSpeedLabel" class="mono" style="min-width:48px;text-align:right;color:var(--accent-audio);font-weight:600;">1.00×</span>
       </div>
     </div>
   </div>

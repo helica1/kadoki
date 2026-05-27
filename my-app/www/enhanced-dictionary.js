@@ -1373,12 +1373,15 @@
 
                     let audioData = currentCard.audioSrc || "";
                     let imageData = currentCard.imageHtml?.match(/src="([^"]+)"/)?.[1] || "";
-                    // Reading/audio mode lookup: if we have a matched cue
-                    // backed by an audiobook (no deck audio yet), open the
-                    // waveform editor for that cue range and slice on confirm.
-                    const cueAudioPath = window._currentReadingAudiobookPath || null;
-                    const cueStartMs   = window._currentReadingCueStartMs;
-                    const cueEndMs     = window._currentReadingCueEndMs;
+                    // Pull cue range from the TAPPED-chunk's lookupContext
+                    // first; fall back to the playing cue's globals only if
+                    // the tap context didn't carry one. This prevents
+                    // sending the wrong sentence/audio when the user looks
+                    // up a word outside the currently-playing cue.
+                    const ctxCue = (ctx && ctx.source === 'reading') ? ctx : null;
+                    const cueAudioPath = ctxCue?.cueAudioPath || window._currentReadingAudiobookPath || null;
+                    const cueStartMs   = Number.isFinite(ctxCue?.cueStartMs) ? ctxCue.cueStartMs : window._currentReadingCueStartMs;
+                    const cueEndMs     = Number.isFinite(ctxCue?.cueEndMs)   ? ctxCue.cueEndMs   : window._currentReadingCueEndMs;
                     if (!audioData && cueAudioPath &&
                         Number.isFinite(cueStartMs) && Number.isFinite(cueEndMs) &&
                         window.waveform?.edit && window.Capacitor?.Plugins?.AudioSlicer) {

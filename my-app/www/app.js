@@ -1136,11 +1136,22 @@ window.setGlobalPlaybackRate = async function (rate) {
       localStorage.setItem('AUDIO_SPEED', String(r));
     }
   } catch (e) {}
-  // Highlight the active speed button in the audiobook transport.
-  document.querySelectorAll('.ab-speed').forEach(b => {
-    const sp = parseFloat(b.dataset.speed);
-    b.dataset.active = Math.abs(sp - r) < 0.005 ? '1' : '0';
-  });
+  // Reflect the new rate in the audiobook slider (no oninput recursion —
+  // setting .value programmatically doesn't fire `input`).
+  const slider = document.getElementById('audiobookSpeed');
+  const label  = document.getElementById('audiobookSpeedLabel');
+  if (slider) slider.value = r;
+  if (label)  label.textContent = r.toFixed(2) + '×';
+};
+
+// Slider-input handler — wired to #audiobookSpeed.
+window.onAudiobookSpeedInput = function (v) {
+  const r = parseFloat(v) || 1;
+  const label = document.getElementById('audiobookSpeedLabel');
+  if (label) label.textContent = r.toFixed(2) + '×';
+  // Coalesce rapid drags via a tiny debounce so we don't spam bg.setRate.
+  if (window._speedDebounce) clearTimeout(window._speedDebounce);
+  window._speedDebounce = setTimeout(() => window.setGlobalPlaybackRate(r), 80);
 };
 
 // H:MM:SS (drops the hour segment when < 1 h so short clips read nicely).
@@ -2788,6 +2799,17 @@ window.loadTitleAsSrtCards = async function (title) {
 
   _ensureBgListenersForSrtCards();
 
+  // Plumb the parsed cues into reading-mode so its position listener +
+  // cue-precise highlight work right away in audio/read mode without
+  // requiring a tab switch to "wake up".
+  if (typeof window.setAudiobookContextForSrtCards === 'function') {
+    window.setAudiobookContextForSrtCards({
+      audioPath: ab.cachePath,
+      audioName: ab.name,
+      cues
+    });
+  }
+
   // Stop any prior card audio.
   if (typeof window.stopCardAudio === 'function') window.stopCardAudio();
 
@@ -2831,26 +2853,34 @@ window.isReadingPlaying = function () {
 };
 
 window.toggleReadingPlayback = function () {
-  // SRT-card mode: toggle plugin.
+  // SRT-card mode: PLAY → always (re)start the current card from its
+  // startMs (don't merely resume). PAUSE → pause.
   if (_currentCardIsSrtCard()) {
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (!bg) return false;
     bg.getState().then(s => {
-      if (s.playing) bg.pause();
-      else if (s.ready) bg.resume();
-      else displayCard(); // not loaded yet; kick fresh play
+      if (s.playing) {
+        bg.pause();
+      } else {
+        // Force a fresh play from the start of the current card.
+        window.startupAutoPlayBlocked = false;
+        window._skipNextCardAudioRestart = false;
+        try { displayCard(); } catch (e) { debugLog('PLAY-kick: ' + e.message); }
+      }
     }).catch(() => {});
     return true;
   }
-  // Deck-card mode: act on the <Audio> element.
+  // Deck-card mode: PLAY → restart current card audio from 0.
   if (!currentAudio) {
     if (Array.isArray(allNotes) && allNotes.length > 0 && typeof displayCard === 'function') {
+      window.startupAutoPlayBlocked = false;
       try { displayCard(); } catch (e) { debugLog(`PLAY-kick displayCard error: ${e.message}`); }
       return true;
     }
     return false;
   }
   if (currentAudio.paused || currentAudio.ended) {
+    try { currentAudio.currentTime = 0; } catch (e) {}
     currentAudio.play().catch(err => debugLog(`Play toggle error: ${err.message}`));
     return true;
   }

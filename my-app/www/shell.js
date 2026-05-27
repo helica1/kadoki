@@ -45,6 +45,8 @@
     document.body.classList.add('mode-' + mode);
     // Broadcast so anything mode-color-aware (waveform, etc.) can repaint.
     try { window.dispatchEvent(new CustomEvent('shell:mode-change', { detail: { mode } })); } catch (e) {}
+    // Persist so the next launch opens in the same mode.
+    try { localStorage.setItem('LAST_MODE_V1', mode); } catch (e) {}
   }
 
   // ---------- Chrome hide-on-content-tap ----------
@@ -476,11 +478,20 @@
     refreshTabAvailability();
     setInterval(refreshTabAvailability, 3000);
     updateTabsUI(currentMode);
-    // Keep the unified bottom bar live in read + audio modes (card mode
-    // updates it imperatively from displayCard already).
     setInterval(() => {
       if (typeof window.updateProgressBar === 'function') window.updateProgressBar();
     }, 500);
+    // Restore the last mode the user was in. Wait briefly so the active
+    // title finishes loading (otherwise we'd try to enter read/audio
+    // before chunks / cues are ready and bounce back to card).
+    setTimeout(() => {
+      let lastMode = null;
+      try { lastMode = localStorage.getItem('LAST_MODE_V1'); } catch (e) {}
+      if (lastMode && lastMode !== 'card' && lastMode !== currentMode &&
+          typeof window.setShellMode === 'function') {
+        window.setShellMode(lastMode);
+      }
+    }, 1500);
   }
 
   // Expose so title-load paths can force an immediate refresh.

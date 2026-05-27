@@ -75,16 +75,25 @@
    any chunk-level .active background so the user sees the exact SRT cue
    text being read, not just "this sentence is current". */
 ::highlight(cue-active) {
-  background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.45));
+  background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.4));
+  text-decoration: underline solid var(--accent-read, #4caf50) 2px;
+  text-underline-offset: 4px;
   color: inherit;
 }
-/* With a precise cue highlight, drop the diffuse chunk-level bg but
-   keep a thin sharp ring around the chunk so the user still sees which
-   sentence the highlight belongs to. */
+/* Pending up-swipe selection: dashed underline on the matched cue (not
+   the whole chunk). Different shade so it's distinguishable from the
+   active-playback highlight. */
+::highlight(cue-pending) {
+  text-decoration: underline dashed var(--accent-read, #4caf50) 2px;
+  text-underline-offset: 4px;
+}
+/* When a precise cue highlight is set, the active chunk's chrome stays
+   completely invisible — the cue's coloured characters carry all the
+   visual signal. Anything wider would imply "the whole sentence is
+   playing", which often isn't true. */
 body.has-cue-highlight #readingModeContent .reading-chunk.active {
   background-color: transparent;
-  box-shadow: 0 0 0 1px var(--reader-highlight-ring, rgba(76,175,80,0.55));
-  border-radius: 2px;
+  box-shadow: none;
 }
 
 /* ---- Apply per-mode appearance vars ---- */

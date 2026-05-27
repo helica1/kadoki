@@ -185,6 +185,7 @@
       }
       #readingModeContent {
         font-size: var(--reader-font-size, 1.1rem);
+        background: #000000;
       }
       #readingModeContent .reading-chunk {
         transition: background-color 0.25s ease;
@@ -194,13 +195,10 @@
         background-color: var(--reader-highlight-bg, rgba(0, 255, 204, 0.18));
         box-shadow: 0 0 0 2px var(--reader-highlight-ring, rgba(0, 255, 204, 0.35));
       }
-      #readingModeContent .reading-chunk.long-press-armed {
-        outline: 1px dashed var(--accent-read, rgba(76,175,80,0.6));
-      }
-      #readingModeContent .reading-chunk.pending {
-        outline: 2px dashed var(--accent-read, #4caf50);
-        outline-offset: 2px;
-      }
+      /* No chunk-level outlines — pending + active visuals are drawn at
+         the SRT-cue granularity via CSS Custom Highlight. */
+      #readingModeContent .reading-chunk.long-press-armed { /* no-op */ }
+      #readingModeContent .reading-chunk.pending { /* no-op */ }
       #readingModeContent, #readingModeContent .reading-chunk {
         -webkit-user-select: none;
         user-select: none;
@@ -365,6 +363,7 @@
       pendingChunk.classList.remove('pending');
       pendingChunk = null;
     }
+    try { if (window.CSS?.highlights) CSS.highlights.delete('cue-pending'); } catch (e) {}
   }
 
   function setPendingChunk(chunk) {
@@ -374,6 +373,15 @@
     }
     pendingChunk = chunk;
     chunk.classList.add('pending');
+    // Set cue-precise pending highlight: dashed underline on the chunk's
+    // matched SRT cue text only (never on surrounding sentence chars).
+    const cIdx = chunks.indexOf(chunk);
+    if (abChunkToCue && cIdx >= 0) {
+      const cueIdx = abChunkToCue[cIdx];
+      const cueText = (cueIdx >= 0 && abCues[cueIdx]) ? abCues[cueIdx].text : '';
+      if (cueText) setCueHighlightFor('cue-pending', cIdx, cueText);
+      else { try { CSS.highlights.delete('cue-pending'); } catch (e) {} }
+    }
   }
 
   function handleDownSwipe() {
@@ -589,15 +597,31 @@
     const idx = spans.indexOf(target);
     if (idx < 0) return;
 
-    // Establish Anki context: sentence + media come from the chunk the user
-    // tapped — not from whatever card happens to be currently playing.
+    // Establish Anki context: sentence, card AND audiobook cue range
+    // come from the TAPPED chunk — not from whatever cue happens to be
+    // currently playing. (Bug: previously the Anki "Add" used the
+    // playing cue, sending the wrong audio + sentence for the word.)
     const cardIdx = findCardForChunk(chunk);
     const card = (cardIdx >= 0 && Array.isArray(window.allNotes)) ? window.allNotes[cardIdx] : null;
+    const chunkIdxLocal = chunks.indexOf(chunk);
+    let cueAudioPath = null, cueStartMs = null, cueEndMs = null, cueText = '';
+    if (abChunkToCue && chunkIdxLocal >= 0) {
+      const cueIdx = abChunkToCue[chunkIdxLocal];
+      if (cueIdx >= 0 && abCues[cueIdx]) {
+        cueAudioPath = abAudioPath;
+        cueStartMs = abCues[cueIdx].startMs;
+        cueEndMs   = abCues[cueIdx].endMs;
+        cueText    = abCues[cueIdx].text;
+      }
+    }
     window.lookupContext = {
       source: 'reading',
       card,
       cardIdx,
-      sentence: textWithoutRuby(chunk)
+      sentence: cueText || textWithoutRuby(chunk),
+      cueAudioPath,
+      cueStartMs,
+      cueEndMs
     };
 
     try {
@@ -1288,11 +1312,20 @@
     document.body.classList.remove('has-cue-highlight');
   }
   function setCueHighlight(chunkIdx, cueText) {
+    setCueHighlightFor('cue-active', chunkIdx, cueText);
+    if (document.body && CSS.highlights?.has?.('cue-active')) {
+      document.body.classList.add('has-cue-highlight');
+    } else {
+      document.body.classList.remove('has-cue-highlight');
+    }
+  }
+  function setCueHighlightFor(name, chunkIdx, cueText) {
     if (!window.CSS?.highlights || typeof Highlight === 'undefined' || !cueText) {
-      clearCueHighlight(); return;
+      try { CSS.highlights?.delete?.(name); } catch (e) {}
+      return;
     }
     const chunk = chunks[chunkIdx];
-    if (!chunk) { clearCueHighlight(); return; }
+    if (!chunk) { try { CSS.highlights.delete(name); } catch (e) {} return; }
     // Collect visible text nodes (skip ruby readings inside <rt>/<rp>).
     const flat = [];
     const walker = document.createTreeWalker(chunk, NodeFilter.SHOW_TEXT, {
@@ -1331,7 +1364,7 @@
       if (eNode === null && rawEnd <= next) { eNode = f.node; eOff = rawEnd - acc; break; }
       acc = next;
     }
-    if (sNode === null) { clearCueHighlight(); return; }
+    if (sNode === null) { try { CSS.highlights.delete(name); } catch (e) {} return; }
     if (eNode === null) {
       eNode = flat[flat.length - 1].node;
       eOff = flat[flat.length - 1].text.length;
@@ -1340,10 +1373,9 @@
       const range = new Range();
       range.setStart(sNode, sOff);
       range.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
-      CSS.highlights.set('cue-active', new Highlight(range));
-      document.body.classList.add('has-cue-highlight');
+      CSS.highlights.set(name, new Highlight(range));
     } catch (e) {
-      clearCueHighlight();
+      try { CSS.highlights.delete(name); } catch (er) {}
     }
   }
 
@@ -1608,6 +1640,18 @@
       </div>
     `;
   }
+
+  // Public setter for SRT-card titles (deck-less, no EPUB). app.js's
+  // loadTitleAsSrtCards already parsed the SRT; we just plumb it into
+  // the closure state so abUpdateCueDisplay works and the position
+  // listener gets attached.
+  window.setAudiobookContextForSrtCards = function ({ audioPath, audioName, cues }) {
+    if (!Array.isArray(cues) || !cues.length || !audioPath) return;
+    abAudioPath = audioPath;
+    abAudioName = audioName || 'Audiobook';
+    abCues = cues;
+    abAttachListenersOnce();
+  };
 
   // Data-only cue context loader — pulls the SRT into abCues and builds
   // cue↔chunk maps without showing any UI. Used by loadEpubFromUri so the
