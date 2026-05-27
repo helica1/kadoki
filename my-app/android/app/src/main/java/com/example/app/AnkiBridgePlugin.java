@@ -2,11 +2,14 @@ package com.example.app;
 
 import android.content.ContentResolver;
 import android.content.ContentValues;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.util.Base64;
 import android.util.Log;
+
+import androidx.core.content.FileProvider;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -329,11 +332,14 @@ public class AnkiBridgePlugin extends Plugin {
                 tagsBuf.append(tags.getString(i));
             }
 
+            // Notes table has no deck_id column — adding it makes AnkiDroid
+            // silently reject the insert. The note lands in the default deck;
+            // we move its cards to the target deck below via the dedicated
+            // notes/{id}/cards endpoint (same pattern Manatan uses).
             ContentValues values = new ContentValues();
             values.put("mid", modelId);
             values.put("flds", flds.toString());
             values.put("tags", tagsBuf.toString());
-            values.put("deck_id", deckId);
 
             Uri inserted = getContext().getContentResolver().insert(NOTES_URI, values);
             if (inserted == null) {
@@ -342,6 +348,11 @@ public class AnkiBridgePlugin extends Plugin {
             }
             long noteId = -1;
             try { noteId = Long.parseLong(inserted.getLastPathSegment()); } catch (Exception ignored) {}
+
+            // Move every card of this note into the target deck.
+            if (noteId > 0 && deckId > 0) {
+                moveCardsToDeck(noteId, deckId);
+            }
 
             JSObject ret = new JSObject();
             ret.put("noteId", noteId);
@@ -406,27 +417,84 @@ public class AnkiBridgePlugin extends Plugin {
         return null;
     }
 
+    /**
+     * Move every card of `noteId` into `deckId`. AnkiDroid's notes provider
+     * doesn't accept a deck_id at insert time; you have to set it per card
+     * after the fact via notes/{noteId}/cards. Same flow Manatan uses.
+     */
+    private void moveCardsToDeck(long noteId, long deckId) {
+        Uri cardsUri = Uri.withAppendedPath(NOTES_URI, noteId + "/cards");
+        try (Cursor c = getContext().getContentResolver().query(cardsUri,
+                new String[]{"ord", "deck_id"}, null, null, null)) {
+            if (c == null) {
+                Log.w(TAG, "moveCardsToDeck: cards cursor null for note " + noteId);
+                return;
+            }
+            while (c.moveToNext()) {
+                int ord = c.getInt(0);
+                long currentDeckId = c.getLong(1);
+                if (currentDeckId != deckId) {
+                    Uri cardUri = Uri.withAppendedPath(cardsUri, String.valueOf(ord));
+                    ContentValues v = new ContentValues();
+                    v.put("deck_id", deckId);
+                    int rows = getContext().getContentResolver()
+                                           .update(cardUri, v, null, null);
+                    Log.d(TAG, "moveCardsToDeck: card ord=" + ord + " -> deck "
+                            + deckId + " (rows=" + rows + ")");
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "moveCardsToDeck failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Write base64 bytes through the Media provider. Two important details
+     * (learned from the first attempt failing silently):
+     *   1) AnkiDroid can't read `file://` URIs from another app's cache dir
+     *      on modern Android due to FILE_URI exposure restrictions. We must
+     *      go through a content:// URI (FileProvider).
+     *   2) The FileProvider URI must also be explicitly granted to
+     *      com.ichi2.anki via grantUriPermission, otherwise the insert
+     *      will fail with a permission denial when AnkiDroid tries to read
+     *      the bytes.
+     */
     private String storeMediaBase64(String suggestedName, String base64) throws Exception {
         byte[] data = Base64.decode(base64, Base64.DEFAULT);
         java.io.File cacheDir = getContext().getCacheDir();
+        String safeSuggested = (suggestedName == null) ? "media" : suggestedName;
         java.io.File tmp = new java.io.File(cacheDir,
-                "anki_outbound_" + System.currentTimeMillis() + "_" +
-                (suggestedName == null ? "media" : suggestedName));
+                "anki_outbound_" + System.currentTimeMillis() + "_" + safeSuggested);
         FileOutputStream fos = new FileOutputStream(tmp);
         fos.write(data);
         fos.close();
 
-        Uri fileUri = Uri.fromFile(tmp);
+        Uri shareUri = FileProvider.getUriForFile(
+                getContext(),
+                getContext().getPackageName() + ".fileprovider",
+                tmp);
+        getContext().grantUriPermission("com.ichi2.anki",
+                shareUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
         ContentValues v = new ContentValues();
-        v.put("file_uri", fileUri.toString());
-        if (suggestedName != null) v.put("preferred_name", suggestedName);
+        v.put("file_uri", shareUri.toString());
+        // AnkiDroid strips the extension internally then re-applies one based
+        // on MIME type. Pass the bare name so the suffix isn't duplicated.
+        if (suggestedName != null) {
+            String bare = suggestedName.replaceAll("\\.[^.]*$", "");
+            v.put("preferred_name", bare);
+        }
 
         Uri result = getContext().getContentResolver().insert(MEDIA_URI, v);
         if (result == null) {
             tmp.delete();
-            throw new Exception("Media insert returned null");
+            throw new Exception("Media insert returned null — does the field exist in your model?");
         }
-        String finalName = result.getLastPathSegment();
+        // The provider returns content://...media/<finalName>. Take just the
+        // last segment as the filename for the [sound:...] / <img src=...>
+        // token in the note's flds.
+        String finalName = new java.io.File(result.getPath()).getName();
         tmp.delete();
         return finalName;
     }
