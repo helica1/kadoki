@@ -1316,25 +1316,22 @@ body.dimmed .card-image {
         : `<span class="title-chip off">${label}</span>`;
     }
 
-    // Best-effort book progress for the library card. Reads the chunk
-    // cursor + cumulative chars saved by reading-mode.js (per deck, since
-    // that's the pref namespace used). Falls back to "Opened" if we have
-    // a chunk index but no char totals.
+    // Book progress for the library card. Uses the same metric as the
+    // reader's bottom progress bar: current chunk's char offset / total
+    // book chars. Both are mirrored to localStorage by reading-mode.js
+    // on each setActive() so the library render is sync.
     function bookProgressHtml(title) {
       const deck = title.attachments?.deck?.name || title.name;
       const epubName = title.attachments?.epub?.name;
       if (!deck || !epubName) return '';
       try {
-        const charsRaw  = localStorage.getItem('READING_CHARS_' + deck);
-        const totalRaw  = localStorage.getItem('READING_TOTAL_CHARS_' + deck + '_' + epubName);
-        const chars     = parseInt(charsRaw)  || 0;
-        const total     = parseInt(totalRaw)  || 0;
-        if (chars > 0 && total > 0) {
-          const pct = Math.min(100, Math.round((chars / total) * 100));
+        const posRaw   = localStorage.getItem('READING_POS_' + deck + '_' + epubName);
+        const totalRaw = localStorage.getItem('READING_TOTAL_CHARS_' + deck + '_' + epubName);
+        const pos      = parseInt(posRaw)   || 0;
+        const total    = parseInt(totalRaw) || 0;
+        if (pos > 0 && total > 0) {
+          const pct = Math.min(100, Math.max(0, Math.round((pos / total) * 100)));
           return `<span style="color:var(--accent-read);">📖 ${pct}%</span>`;
-        }
-        if (chars > 0) {
-          return `<span style="color:var(--accent-read);">📖 ${chars.toLocaleString()} chars</span>`;
         }
       } catch (e) {}
       return '';

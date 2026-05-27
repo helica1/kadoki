@@ -1466,17 +1466,23 @@
         cumulativeChars += len;
         el.dataset.counted = '1';
         setPref(KEYS.CHARS, Math.floor(cumulativeChars));
-        // Mirror to localStorage so the library can show book progress
-        // without an async Preferences round-trip per title at render time.
-        try {
-          const deck = currentDeckName();
-          if (deck) {
-            localStorage.setItem('READING_CHARS_' + deck,
-                                 String(Math.floor(cumulativeChars)));
-          }
-        } catch (e) {}
       }
     }
+    // Mirror the CURRENT POSITION (chunk's char offset + length) to
+    // localStorage so the library card can show actual reading progress —
+    // not the cumulative chars-ever-read counter, which would only go up
+    // and never reflect where the user is. The position is the END of the
+    // active chunk so a freshly-opened book reads 0% and a fully-read
+    // book reads 100%.
+    try {
+      const deck = currentDeckName();
+      if (deck && currentEpubName) {
+        const off = parseInt(el.dataset.charOffset) || 0;
+        const len = parseInt(el.dataset.charLen) || 0;
+        localStorage.setItem('READING_POS_' + deck + '_' + currentEpubName,
+                             String(off + len));
+      }
+    } catch (e) {}
     const view = document.getElementById('readingModeView');
     if (view && view.style.display !== 'none') {
       paginatedScrollToChunk(el);
