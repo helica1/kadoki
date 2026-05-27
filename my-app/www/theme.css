@@ -315,6 +315,14 @@ body.chrome-hidden #appHeader {
    Tappable (mode view shows its own empty-state) but visually muted. */
 #appHeader .mode-tab[data-empty="1"] { color: var(--text-faint); opacity: 0.55; }
 
+/* Icon buttons in the header (hamburger menu). */
+#appHeader .shell-icon-btn {
+  padding: 6px 8px !important;
+  letter-spacing: 0 !important;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+#appHeader .shell-icon-btn svg { display: block; }
+
 /* Text buttons (no icons). Used for TIMER, PLAY, MORE in the header. */
 #appHeader .shell-text-btn {
   background: transparent;
@@ -350,6 +358,14 @@ body.chrome-hidden #appHeader {
   position: relative;
   min-width: 64px;
   text-align: center;
+  /* Center the timer text within the pill on narrow screens. Without
+     these, flex parents can squish the button below min-width and the
+     digits drift off-center inside the oval border. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-sizing: border-box;
 }
 /* Running timer takes the active mode's accent, so the three timers read
    as visually distinct at a glance. Stopped state is always red so the

@@ -396,6 +396,13 @@ async function autoRestoreFromTitles() {
       await setP(PERSISTENCE_KEYS.CARD_INDEX, String(idx));
       await setP(PERSISTENCE_KEYS.LAST_ACCESSED, String(t.lastOpenedAt || Date.now()));
       window._activeTitleId = t.id;
+      // Pre-warm EPUB chunk index in the background after the deck loads.
+      // The deck restoration is async and fires from the legacy path; we
+      // schedule a delayed prewarm so the heavy SRT parse + map build
+      // overlap with idle time.
+      if (a.epub && typeof window.prewarmReader === 'function') {
+        setTimeout(() => window.prewarmReader(), 1500);
+      }
       return false; // legacy path handles the actual load
     }
 
@@ -403,6 +410,12 @@ async function autoRestoreFromTitles() {
     if (a.audiobook && a.srt && typeof window.loadTitleAsSrtCards === 'function') {
       window._activeTitleId = t.id;
       const ok = await window.loadTitleAsSrtCards(t);
+      // Pre-warm the reader in the background. EPUB parse + chunk index
+      // takes 1–2 s on a large book; running it now means the first tap
+      // on READ doesn't sit on a blank screen waiting for the parse.
+      if (a.epub && typeof window.prewarmReader === 'function') {
+        setTimeout(() => window.prewarmReader(), 0);
+      }
       return !!ok;
     }
 
@@ -414,6 +427,9 @@ async function autoRestoreFromTitles() {
         deckEl.className = 'file-name restored';
       }
       window._activeTitleId = t.id;
+      if (a.epub && typeof window.prewarmReader === 'function') {
+        setTimeout(() => window.prewarmReader(), 0);
+      }
       return false;
     }
     return false;

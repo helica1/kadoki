@@ -685,7 +685,13 @@ body.dimmed .card-image {
     <button class="shell-text-btn" id="shellTimerLabel" onclick="window.openShellTimerMenu && window.openShellTimerMenu(event)">0:00</button>
     <span class="shell-spacer"></span>
     <button class="shell-text-btn" id="shellPlayBtn" onclick="window.shellTogglePlay && window.shellTogglePlay()">PLAY</button>
-    <button class="shell-text-btn" id="shellMoreBtn" onclick="window.openShellMoreMenu && window.openShellMoreMenu(event)">MORE</button>
+    <button class="shell-text-btn shell-icon-btn" id="shellMoreBtn" aria-label="Menu" onclick="window.openShellMoreMenu && window.openShellMoreMenu(event)">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+        <line x1="4" y1="7"  x2="20" y2="7"/>
+        <line x1="4" y1="12" x2="20" y2="12"/>
+        <line x1="4" y1="17" x2="20" y2="17"/>
+      </svg>
+    </button>
   </div>
 
   <div id="instructions">

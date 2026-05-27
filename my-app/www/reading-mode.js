@@ -1442,7 +1442,10 @@
     if (view && view.style.display !== 'none') {
       paginatedScrollToChunk(el);
     }
-    if (progressBarShown) refreshProgressBar();
+    // Always update the progress bar DOM — the bar's fill width has to be
+    // correct whether it's currently visible or not, because the user can
+    // toggle it on without us re-running setActive. The DOM write is cheap.
+    refreshProgressBar();
   }
 
   // Pseudo-pagination: if the chunk is fully inside the scrollable viewport,
@@ -2289,6 +2292,28 @@
     totalBookChars = 0;
   }
 
+  // Background-prewarm hook called from app.js right after a title loads.
+  // Parses the paired EPUB and builds chunks silently, so by the time the
+  // user taps READ for the first time, restoreLastEpub is a no-op and
+  // openReadingMode's cold path is essentially as fast as the warm path.
+  let _prewarmInFlight = null;
+  window.prewarmReader = async function () {
+    if (_prewarmInFlight) return _prewarmInFlight;
+    if (chunks.length) return Promise.resolve(true); // already loaded
+    _prewarmInFlight = (async () => {
+      try {
+        await restoreLastEpub();
+        return true;
+      } catch (e) {
+        rlog('prewarm failed: ' + (e?.message || e));
+        return false;
+      } finally {
+        _prewarmInFlight = null;
+      }
+    })();
+    return _prewarmInFlight;
+  };
+
   async function restoreLastEpub() {
     const deck = currentDeckName();
     if (!deck) {
@@ -2396,7 +2421,11 @@
     startPlayStatePoll();
     setPref(KEYS.MODE_OPEN, 'true');
     startTimer();
-    if (pairedName !== currentEpubName) {
+    // If app.js fired prewarmReader at title load and it's still parsing,
+    // wait on the same promise instead of starting a duplicate load.
+    if (_prewarmInFlight) {
+      await _prewarmInFlight;
+    } else if (pairedName !== currentEpubName) {
       await restoreLastEpub();
     }
     await syncReaderToCurrentPosition();

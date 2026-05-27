@@ -1304,43 +1304,43 @@
         const term = result.term;
         const reading = extractReadingFromResult(result);
 
+        // Preserve the SVG icon. Earlier versions clobbered btn.textContent
+        // on click/unavailable, which wiped the icon and made the button
+        // appear to disappear.
+        const originalIconHTML = btn.innerHTML;
+
         const markUnavailable = () => {
-            btn.textContent = '✕';
-            btn.disabled = true;
-            btn.style.opacity = '0.45';
+            btn.style.opacity = '0.35';
             btn.style.cursor = 'default';
+            btn.disabled = true;
             btn.title = 'No local audio for this word';
         };
 
-        // Async availability check while the popup is shown. The index is
-        // cached after the first load, so subsequent checks are immediate.
         if (typeof window.lookupLocalAudio === 'function') {
             window.lookupLocalAudio(term, reading).then(urls => {
                 if (!urls || urls.length === 0) markUnavailable();
-            }).catch(() => { /* leave 🔊; click will report the error */ });
+            }).catch(() => { /* leave the icon as-is; click will report any error */ });
         }
 
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
             if (btn.disabled) return;
             if (typeof window.playLocalAudio !== 'function') return;
-            const original = btn.textContent;
             btn.disabled = true;
-            btn.textContent = '⏳';
+            btn.style.opacity = '0.55';
             try {
                 const ok = await window.playLocalAudio(term, reading);
-                if (ok) {
-                    btn.textContent = original;
-                } else {
-                    markUnavailable();
-                    return; // don't re-enable
-                }
+                if (!ok) { markUnavailable(); return; }
             } catch (err) {
                 console.warn('Audio play error:', err);
-                btn.textContent = original;
             } finally {
-                if (!btn.disabled || btn.textContent === original) btn.disabled = false;
+                if (!btn.title || btn.title.indexOf('No local') < 0) {
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                }
             }
+            // Defensive: if anything stripped the SVG, restore it.
+            if (!btn.querySelector('svg')) btn.innerHTML = originalIconHTML;
         });
     }
 
