@@ -704,11 +704,16 @@ body.prefs-open #progressBar { pointer-events: none; }
 
 /* Narrow-device header layout. */
 @media (max-width: 380px) {
-  #appHeader { padding: 0 var(--sp-2); gap: var(--sp-1); }
+  #appHeader { padding: 0 4px; gap: 3px; }
   #appHeader .shell-text-btn {
-    padding: 6px 8px;
+    padding: 6px 6px;
     min-width: 0;
     font-size: var(--type-xs);
   }
-  #appHeader .mode-tab { padding: 6px 9px; }
+  #appHeader .mode-tab { padding: 6px 7px; font-size: var(--type-xs); }
+  #appHeader .shell-icon-btn { padding: 6px 4px !important; }
+  #appHeader #shellTimerLabel { padding: 4px 6px; min-width: 52px; font-size: .78rem; }
+  /* TIMER and PAUSED captions overflow the pill border on very narrow
+     widths; shrink them so they don't break the layout. */
+  #appHeader #shellTimerLabel::before { font-size: 7px; letter-spacing: 0.12em; }
 }

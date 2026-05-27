@@ -220,6 +220,28 @@
     persist(mode);
   }
 
+  // Modal pause/resume — Preferences and Library open while a session is
+  // active, but they're meta-config, not "active session" time. Pause the
+  // running timer for the modal's lifetime, then resume the SAME mode if
+  // it was running on open.
+  let _modalPausedMode = null;
+  function pauseForModal() {
+    for (const m of ['card', 'read', 'audio']) {
+      if (timers[m].runningSince) {
+        _modalPausedMode = m;
+        stopMode(m);
+        return;
+      }
+    }
+    _modalPausedMode = null;
+  }
+  function resumeFromModal() {
+    if (_modalPausedMode) {
+      startMode(_modalPausedMode);
+      _modalPausedMode = null;
+    }
+  }
+
   window.stats = {
     liveTotal, isRunning,
     getCardSec:  () => liveTotal('card'),
@@ -230,5 +252,6 @@
     touch, bumpRead, resetAll, resetMode, persist,
     stopAll, startMode, stopMode,
     currentMode,
+    pauseForModal, resumeFromModal,
   };
 })();

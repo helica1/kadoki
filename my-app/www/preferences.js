@@ -117,7 +117,7 @@
       slider.value = String(Math.round(px));
       slider.style.flex = '1';
       const label = document.createElement('span');
-      label.style.cssText = 'min-width:48px;text-align:right;color:var(--accent-cyan,#00ffcc);font-weight:600;font-size:.78rem;';
+      label.style.cssText = 'min-width:48px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;';
       label.textContent = px.toFixed(0) + 'px';
       slider.addEventListener('input', () => {
         const rem = (parseFloat(slider.value) / 16).toFixed(3) + 'rem';
@@ -137,7 +137,7 @@
       slider.value = String(getCurrent());
       slider.style.flex = '1';
       const label = document.createElement('span');
-      label.style.cssText = 'min-width:36px;text-align:right;color:var(--accent-cyan,#00ffcc);font-weight:600;font-size:.78rem;';
+      label.style.cssText = 'min-width:36px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;';
       label.textContent = Math.round(getCurrent() * 100) + '%';
       slider.addEventListener('input', () => {
         const v = parseFloat(slider.value);
@@ -249,6 +249,9 @@
   window.openPreferences = async function() {
     const modal = document.getElementById('preferencesModal');
     if (!modal) return;
+    // Pause the running timer for the duration of the modal — Preferences
+    // is meta-config, not "active session", so it shouldn't keep ticking.
+    if (window.stats?.pauseForModal) window.stats.pauseForModal();
     modal.style.display = 'flex';
     document.body.classList.add('prefs-open');
 
@@ -287,6 +290,7 @@
     const modal = document.getElementById('preferencesModal');
     if (modal) modal.style.display = 'none';
     document.body.classList.remove('prefs-open');
+    if (window.stats?.resumeFromModal) window.stats.resumeFromModal();
   };
 
   window.savePreferences = async function() {

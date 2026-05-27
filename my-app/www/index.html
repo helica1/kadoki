@@ -684,7 +684,10 @@ body.dimmed .card-image {
     <span class="shell-spacer"></span>
     <button class="shell-text-btn" id="shellTimerLabel" onclick="window.openShellTimerMenu && window.openShellTimerMenu(event)">0:00</button>
     <span class="shell-spacer"></span>
-    <button class="shell-text-btn" id="shellPlayBtn" onclick="window.shellTogglePlay && window.shellTogglePlay()">PLAY</button>
+    <button class="shell-text-btn shell-icon-btn" id="shellPlayBtn" aria-label="Play/pause" onclick="window.shellTogglePlay && window.shellTogglePlay()">
+      <svg data-role="play" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      <svg data-role="pause" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" style="display:none;"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+    </button>
     <button class="shell-text-btn shell-icon-btn" id="shellMoreBtn" aria-label="Menu" onclick="window.openShellMoreMenu && window.openShellMoreMenu(event)">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
         <line x1="4" y1="7"  x2="20" y2="7"/>
@@ -774,7 +777,7 @@ body.dimmed .card-image {
         <h3 style="margin:0;color:var(--text,#e8e8e8);font-size:1.05rem;letter-spacing:.06em;text-transform:uppercase;font-weight:600;">Preferences</h3>
         <div style="display:flex;gap:8px;">
           <button onclick="closePreferences()" style="background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#2a2a2a);padding:6px 12px;border-radius:6px;font-size:.8rem;">Cancel</button>
-          <button onclick="savePreferences()" style="background:var(--accent-cyan,#00ffcc);color:#0a0a0a;border:none;padding:6px 14px;border-radius:6px;font-size:.8rem;font-weight:700;">Save</button>
+          <button onclick="savePreferences()" style="background:#fff;color:#0a0a0a;border:none;padding:6px 14px;border-radius:6px;font-size:.8rem;font-weight:700;">Save</button>
         </div>
       </div>
       <div id="prefsScroll" style="overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;padding:18px;">
@@ -864,22 +867,27 @@ body.dimmed .card-image {
           <div class="prefs-row"><label>Term audio → field</label><select id="ankiDictFieldTermAudio"></select></div>
         </details>
 
-        <!-- ===== PLAYBACK ===== -->
+        <!-- ===== CARD MODE ===== -->
         <details class="prefs-section">
-          <summary class="prefs-heading">Playback</summary>
+          <summary class="prefs-heading">Card mode</summary>
           <div class="prefs-row">
-            <label>Audio speed <span id="audioSpeedLabel" style="color:var(--accent-cyan,#00ffcc);font-weight:bold;">1.00×</span></label>
-            <input id="audioSpeedSlider" type="range" min="1.0" max="1.8" step="0.05" value="1.0"
-                   oninput="document.getElementById('audioSpeedLabel').textContent=parseFloat(this.value).toFixed(2)+'×';">
-          </div>
-          <div class="prefs-row">
-            <label>Subtitle vertical offset <span id="subtitleOffsetLabel" style="color:var(--accent-cyan,#00ffcc);font-weight:bold;">0px</span></label>
+            <label>Subtitle vertical offset <span id="subtitleOffsetLabel" style="color:#fff;font-weight:bold;">0px</span></label>
             <input id="subtitleOffsetSlider" type="range" min="0" max="150" step="1" value="0"
                    oninput="document.getElementById('subtitleOffsetLabel').textContent=this.value+'px';document.documentElement.style.setProperty('--subtitle-offset',this.value+'px');">
           </div>
           <div class="prefs-row">
             <label>Stopwatch inactivity timeout (s)</label>
             <input id="timeoutInput" type="number" min="5" max="600">
+          </div>
+        </details>
+
+        <!-- ===== PLAYBACK ===== -->
+        <details class="prefs-section">
+          <summary class="prefs-heading">Playback</summary>
+          <div class="prefs-row">
+            <label>Audio speed <span id="audioSpeedLabel" style="color:#fff;font-weight:bold;">1.00×</span></label>
+            <input id="audioSpeedSlider" type="range" min="1.0" max="1.8" step="0.05" value="1.0"
+                   oninput="document.getElementById('audioSpeedLabel').textContent=parseFloat(this.value).toFixed(2)+'×';">
           </div>
           <div class="prefs-row">
             <label>Pause audio on dictionary lookup
@@ -1281,6 +1289,10 @@ body.dimmed .card-image {
     // Library functionality
     async function openLibrary() {
       debugLog('Opening library');
+      // Pause the running timer for the duration of the modal — see
+      // [[modal-pause]] in stats.js: opening Library shouldn't credit
+      // session time. Resume on dismiss if it was running.
+      if (window.stats?.pauseForModal) window.stats.pauseForModal();
       await populateLibrary();
       document.getElementById('libraryPage').classList.add('visible');
     }
@@ -1288,6 +1300,7 @@ body.dimmed .card-image {
     function closeLibrary() {
       debugLog('Closing library');
       document.getElementById('libraryPage').classList.remove('visible');
+      if (window.stats?.resumeFromModal) window.stats.resumeFromModal();
     }
 
     function chipHtml(kind, label, on) {

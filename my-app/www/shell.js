@@ -370,27 +370,31 @@
     refreshShellPlayLabel();
   };
 
+  function setPlayBtnState(btn, playing) {
+    const playSvg = btn.querySelector('svg[data-role="play"]');
+    const pauseSvg = btn.querySelector('svg[data-role="pause"]');
+    if (!playSvg || !pauseSvg) { btn.textContent = playing ? 'PAUSE' : 'PLAY'; return; }
+    playSvg.style.display  = playing ? 'none' : 'block';
+    pauseSvg.style.display = playing ? 'block' : 'none';
+  }
+
   function refreshShellPlayLabel() {
     const btn = el('shellPlayBtn');
     if (!btn) return;
-    let playing = false;
     if (currentMode === 'audio') {
-      // Audiobook playing state — best-effort from plugin state poll.
       const bg = window.Capacitor?.Plugins?.BackgroundAudio;
       if (bg && typeof bg.getState === 'function') {
-        // Async; debounce by caching last state on a window flag.
         bg.getState().then(s => {
           if (window._lastBgPlaying !== !!s.playing) {
             window._lastBgPlaying = !!s.playing;
-            btn.textContent = s.playing ? 'PAUSE' : 'PLAY';
+            setPlayBtnState(btn, !!s.playing);
           }
         }).catch(() => {});
         return;
       }
-    } else {
-      playing = typeof window.isReadingPlaying === 'function' && window.isReadingPlaying();
     }
-    btn.textContent = playing ? 'PAUSE' : 'PLAY';
+    const playing = typeof window.isReadingPlaying === 'function' && window.isReadingPlaying();
+    setPlayBtnState(btn, playing);
   }
 
   // --------- MORE menu (preferences, library, etc.) ----------
