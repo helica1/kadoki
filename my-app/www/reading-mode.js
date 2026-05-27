@@ -1678,7 +1678,22 @@
   // reading-mode highlight can follow audio even when the user never opens
   // the audio mode view.
   async function ensureCueContextLoaded() {
-    if (abCues.length) return true;
+    // Cues already loaded — but maps may not be built yet if cues were
+    // loaded BEFORE chunks (e.g. user opened audio mode before reader).
+    // Rebuild if needed; otherwise we're done.
+    if (abCues.length) {
+      const needsMaps = chunks.length &&
+        (!abCueToChunk || abCueToChunk.length !== abCues.length);
+      if (needsMaps && window.srtParser?.buildCueChunkMaps) {
+        const maps = window.srtParser.buildCueChunkMaps(abCues, chunks, (s) => normalizeText(s));
+        abCueToChunk = maps.cueToChunk;
+        abChunkToCue = maps.chunkToCue;
+        let matched = 0;
+        for (let i = 0; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) matched++;
+        rlog(`Rebuilt cue maps post-chunks: ${matched}/${abCues.length} cues mapped`);
+      }
+      return true;
+    }
     const deck = currentDeckName();
     if (!deck) return false;
     const audio = await getAudiobookPairing(deck);
@@ -2217,9 +2232,12 @@
 
   window.openReadingMode = async function () {
     rlog('Opening reading mode');
-    await applyFontPrefs();
+    // Show the reader view IMMEDIATELY (before any awaits) so there's
+    // no brief flash of the card-mode underlay when switching from
+    // audiobook mode.
     const view = document.getElementById('readingModeView');
     view.style.display = 'flex';
+    await applyFontPrefs();
     installReadActivityHooks();
     setPref(KEYS.MODE_OPEN, 'true');
     installContentTapHandler();
