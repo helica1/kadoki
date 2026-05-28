@@ -39,6 +39,10 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
     private static let bookmarksKey = "FileAccess.bookmarks.v1"
     private var pendingPickCall: CAPPluginCall?
 
+    public override func load() {
+        NSLog("[FileAccess] plugin loaded — jsName=\(jsName) methods=\(pluginMethods.count)")
+    }
+
     // MARK: - pickFileWithUri
 
     @objc func pickFileWithUri(_ call: CAPPluginCall) {
@@ -123,14 +127,13 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: - getPersistedUriPermissions
 
     @objc func getPersistedUriPermissions(_ call: CAPPluginCall) {
+        // Match the Android plugin's contract: { uris: [String, ...] }.
+        // The JS-side caller (app.js autoRestoreFromTitles) does
+        // `uris.includes(savedUri)`, which only works on a flat string
+        // array. Returning the richer {uri,name,lastUsed} objects we used
+        // to expose silently broke recall on iOS.
         let bookmarks = loadBookmarks()
-        let uris: [[String: Any]] = bookmarks.map { bm in
-            [
-                "uri":      bm.uri,
-                "name":     bm.name,
-                "lastUsed": bm.lastUsed
-            ]
-        }
+        let uris: [String] = bookmarks.map { $0.uri }
         call.resolve(["uris": uris])
     }
 

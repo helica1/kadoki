@@ -27,7 +27,7 @@
   // keep working before they open Preferences once.
   const ANKI_DEFAULTS = {
     swipe: {
-      deck: 'Shadowing5',
+      deck: 'Shadowing9',
       model: 'jidoujisho Kinomoto BLUE',
       fields: { expression: 'Term', image: 'Image', audio: 'Sentence Audio' }
     },

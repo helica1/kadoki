@@ -284,9 +284,12 @@ public class AnkiBridgePlugin extends Plugin {
                     JSObject a = JSObject.fromJSONObject(audioArr.getJSONObject(i));
                     String filename = a.getString("filename");
                     String b64      = a.getString("dataBase64");
+                    String srcPath  = a.getString("srcPath");
                     String field    = a.getString("field");
-                    if (b64 == null || field == null) continue;
-                    String stored = storeMediaBase64(filename, b64);
+                    if (field == null) continue;
+                    byte[] bytes = mediaBytes(b64, srcPath);
+                    if (bytes == null) continue;
+                    String stored = storeMediaBytes(filename, bytes);
                     audioResultNames.put(stored);
                     String token = "[sound:" + stored + "]";
                     fieldAppends.computeIfAbsent(field, k -> new StringBuilder())
@@ -299,9 +302,12 @@ public class AnkiBridgePlugin extends Plugin {
                     JSObject p = JSObject.fromJSONObject(pictureArr.getJSONObject(i));
                     String filename = p.getString("filename");
                     String b64      = p.getString("dataBase64");
+                    String srcPath  = p.getString("srcPath");
                     String field    = p.getString("field");
-                    if (b64 == null || field == null) continue;
-                    String stored = storeMediaBase64(filename, b64);
+                    if (field == null) continue;
+                    byte[] bytes = mediaBytes(b64, srcPath);
+                    if (bytes == null) continue;
+                    String stored = storeMediaBytes(filename, bytes);
                     pictureResultNames.put(stored);
                     String token = "<img src=\"" + stored + "\">";
                     fieldAppends.computeIfAbsent(field, k -> new StringBuilder())
@@ -459,6 +465,72 @@ public class AnkiBridgePlugin extends Plugin {
      *      will fail with a permission denial when AnkiDroid tries to read
      *      the bytes.
      */
+    /**
+     * Resolve the media bytes from either a base64 string OR an on-disk path.
+     * The JS side prefers `srcPath` on iOS (skips a base64 round-trip through
+     * WKWebView that was returning empty data URIs for tmp/ files). Android's
+     * cacheFileToDataUri works fine so the JS still sends dataBase64 here,
+     * but we accept srcPath too for forward-compat + symmetry with iOS.
+     */
+    private byte[] mediaBytes(String base64, String srcPath) {
+        try {
+            if (base64 != null && !base64.isEmpty()) {
+                return Base64.decode(base64, Base64.DEFAULT);
+            }
+            if (srcPath != null && !srcPath.isEmpty()) {
+                java.io.File src = new java.io.File(srcPath);
+                if (!src.exists() || !src.canRead()) return null;
+                java.io.FileInputStream in = new java.io.FileInputStream(src);
+                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                in.close();
+                return out.toByteArray();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "mediaBytes failed: " + e.getMessage(), e);
+        }
+        return null;
+    }
+
+    /// Write raw bytes through the Media provider. Shared by base64 and
+    /// srcPath paths so we don't duplicate the FileProvider + permission
+    /// dance.
+    private String storeMediaBytes(String suggestedName, byte[] data) throws Exception {
+        java.io.File cacheDir = getContext().getCacheDir();
+        String safeSuggested = (suggestedName == null) ? "media" : suggestedName;
+        java.io.File tmp = new java.io.File(cacheDir,
+                "anki_outbound_" + System.currentTimeMillis() + "_" + safeSuggested);
+        FileOutputStream fos = new FileOutputStream(tmp);
+        fos.write(data);
+        fos.close();
+
+        Uri shareUri = FileProvider.getUriForFile(
+                getContext(),
+                getContext().getPackageName() + ".fileprovider",
+                tmp);
+        getContext().grantUriPermission("com.ichi2.anki",
+                shareUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        ContentValues v = new ContentValues();
+        v.put("file_uri", shareUri.toString());
+        if (suggestedName != null) {
+            String bare = suggestedName.replaceAll("\\.[^.]*$", "");
+            v.put("preferred_name", bare);
+        }
+
+        Uri result = getContext().getContentResolver().insert(MEDIA_URI, v);
+        if (result == null) {
+            tmp.delete();
+            throw new Exception("Media insert returned null — does the field exist in your model?");
+        }
+        String last = result.getLastPathSegment();
+        tmp.delete();
+        return last;
+    }
+
     private String storeMediaBase64(String suggestedName, String base64) throws Exception {
         byte[] data = Base64.decode(base64, Base64.DEFAULT);
         java.io.File cacheDir = getContext().getCacheDir();

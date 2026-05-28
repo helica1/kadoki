@@ -264,18 +264,25 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         stopPositionTimer()
         // 150 ms matches the Android polling cadence so cue tracking + the
         // waveform editor's playhead behave identically across platforms.
-        positionTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+        //
+        // CRITICAL: schedule on the MAIN runloop in .common mode. Capacitor
+        // plugin methods run on a background dispatch queue whose runloop
+        // doesn't pump scheduled timers; using Timer.scheduledTimer from
+        // there silently never fires. .common mode keeps the timer alive
+        // during scrolling / modal presentation. This is the bug that made
+        // cues / subtitles / reader-follow appear frozen while audio still
+        // played fine.
+        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
             guard let self = self, let p = self.player else { return }
             self.emitPosition(positionMs: Int(p.currentTime * 1000),
                               durationMs: Int(p.duration * 1000),
                               playing: p.isPlaying)
             if !p.isPlaying {
-                // Defensive: if AVAudioPlayer's internal isPlaying flipped
-                // without our knowledge (interruption, route change), stop
-                // the timer ourselves.
                 self.stopPositionTimer()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        positionTimer = timer
     }
 
     private func stopPositionTimer() {

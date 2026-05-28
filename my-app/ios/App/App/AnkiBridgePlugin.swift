@@ -128,34 +128,66 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
         let audioArr   = mediaArrayParam(call, key: "audio")
         let pictureArr = mediaArrayParam(call, key: "picture")
 
-        let mediaFolder = resolveMediaFolder()
-        let mediaLinked = mediaFolder != nil
+        // Primary media delivery: embedded HTTP server on 127.0.0.1. Manatan's
+        // decoded approach (see reference-manatan-ios-strategy memory). Each
+        // media blob gets written to NSTemporaryDirectory, then exposed via
+        // http://127.0.0.1:<port>/<filename> for AnkiMobile to fetch.
+        // The bookmarked-media-folder path is kept as a fallback for users
+        // who already set it up — server first, folder write second.
+        AnkiMediaServer.shared.sweepOldFiles()
+        let serverStarted = AnkiMediaServer.shared.start()
+        let mediaFolder   = resolveMediaFolder()
+        let mediaLinked   = mediaFolder != nil
 
         var savedAudioRefs:   [String] = []
         var savedPictureRefs: [String] = []
-        var fieldAppends: [String: String] = [:]
+        // Per-field appends. Two kinds:
+        //   urlAppends:  HTTP URL string → goes straight into the field value
+        //                so AnkiMobile fetches via loopback.
+        //   refAppends:  classic [sound:filename] / <img src=...> string →
+        //                requires AnkiMobile to find the file in its media
+        //                folder. Used only if we couldn't serve via HTTP.
+        var urlAppends: [String: String] = [:]
+        var refAppends: [String: String] = [:]
 
         for m in audioArr {
-            if let stored = storeMedia(m, into: mediaFolder) {
-                savedAudioRefs.append(stored.filename)
-                if let f = m["field"] as? String, !f.isEmpty {
-                    var existing = fieldAppends[f] ?? ""
-                    if !existing.isEmpty { existing += " " }
-                    existing += "[sound:\(stored.filename)]"
-                    fieldAppends[f] = existing
-                }
+            guard let stored = decodeAndServe(m, kind: .audio, useServer: serverStarted, fallbackFolder: mediaFolder) else { continue }
+            savedAudioRefs.append(stored.filename)
+            guard let f = m["field"] as? String, !f.isEmpty else { continue }
+            if let urlStr = stored.httpURL {
+                // For the URL path we DON'T wrap in [sound:]; AnkiMobile
+                // recognizes a bare http://… in the audio field and
+                // downloads + plays the file. (Same as Manatan's pattern.)
+                if urlAppends[f] == nil { urlAppends[f] = urlStr }
+                else { urlAppends[f]! += " " + urlStr }
+            } else {
+                if refAppends[f] == nil { refAppends[f] = "[sound:\(stored.filename)]" }
+                else { refAppends[f]! += " [sound:\(stored.filename)]" }
             }
         }
         for m in pictureArr {
-            if let stored = storeMedia(m, into: mediaFolder) {
-                savedPictureRefs.append(stored.filename)
-                if let f = m["field"] as? String, !f.isEmpty {
-                    var existing = fieldAppends[f] ?? ""
-                    if !existing.isEmpty { existing += " " }
-                    existing += "<img src=\"\(stored.filename)\">"
-                    fieldAppends[f] = existing
-                }
+            guard let stored = decodeAndServe(m, kind: .picture, useServer: serverStarted, fallbackFolder: mediaFolder) else { continue }
+            savedPictureRefs.append(stored.filename)
+            guard let f = m["field"] as? String, !f.isEmpty else { continue }
+            if let urlStr = stored.httpURL {
+                // Bare URL — AnkiMobile fetches it and rewrites the field
+                // to <img src="local-filename"> automatically. Wrapping it
+                // ourselves in <img> made AnkiMobile treat the URL as plain
+                // HTML to store, which left the card with a broken-image
+                // icon pointing at our (long-since-shut-down) loopback URL.
+                if urlAppends[f] == nil { urlAppends[f] = urlStr }
+                else { urlAppends[f]! += " " + urlStr }
+            } else {
+                let tag = "<img src=\"\(stored.filename)\">"
+                if refAppends[f] == nil { refAppends[f] = tag }
+                else { refAppends[f]! += " " + tag }
             }
+        }
+        // Merge the two: URL appends take precedence; ref appends only kick
+        // in if there's no URL version for that field.
+        var fieldAppends: [String: String] = urlAppends
+        for (k, v) in refAppends where fieldAppends[k] == nil {
+            fieldAppends[k] = v
         }
 
         var components = URLComponents()
@@ -177,10 +209,13 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
         for (key, val) in fieldAppends where fieldsObj[key] == nil {
             items.append(URLQueryItem(name: "fld\(key)", value: val))
         }
-        for raw in tagsArr {
-            if let s = raw as? String, !s.isEmpty {
-                items.append(URLQueryItem(name: "tag", value: s))
-            }
+        // AnkiMobile's URL scheme expects a SINGLE `tags=` parameter with
+        // space-separated values (not multiple `tag=` params — that raises
+        // "Unknown argument tag"). Same convention as anki:// docs.
+        let tagStrings = tagsArr.compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespaces) }
+                                .filter { !$0.isEmpty }
+        if !tagStrings.isEmpty {
+            items.append(URLQueryItem(name: "tags", value: tagStrings.joined(separator: " ")))
         }
         // x-callback-url success/error: AnkiMobile opens these after
         // creating the note (or failing). Pointing at our own URL
@@ -194,20 +229,37 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Failed to construct anki:// URL")
             return
         }
-        NSLog("[AnkiBridge] open: \(url.absoluteString.prefix(160))")
+        // Verify the media server is actually reachable before handing the
+        // URL to AnkiMobile. If our server isn't responding, AnkiMobile will
+        // show "connection timed out" when it fetches the http:// media URLs.
+        let pingOk = AnkiMediaServer.shared.selfPing(timeoutSeconds: 0.5)
+        // Log the full URL via NSLog using %@ (the {public}@ syntax is for
+        // os_log unified logging, NOT classic NSLog — passing it via NSLog
+        // emits the literal "{public}@" in the log). Replace any % in the
+        // URL with %% so the URL's own URL-escapes don't get interpreted
+        // as printf specifiers.
+        let fullURL = url.absoluteString
+        let safeURL = fullURL.replacingOccurrences(of: "%", with: "%%")
+        NSLog("[AnkiBridge] open(len=\(fullURL.count) serverPing=\(pingOk ? 1 : 0)): \(safeURL)")
+        NSLog("[AnkiBridge] deck=\(deckName) model=\(modelName) audioFiles=\(savedAudioRefs) picFiles=\(savedPictureRefs)")
+        // Also log the field keys so we can verify the JS payload reached
+        // us. Helps diagnose "field came in empty" cases (e.g. Sentence
+        // Audio appearing blank in the final card).
+        let fieldSummary = fieldsObj.map { "\($0.key)=\(String(describing: $0.value).prefix(40))" }.joined(separator: " | ")
+        NSLog("[AnkiBridge] fields: \(fieldSummary)")
 
         DispatchQueue.main.async {
             UIApplication.shared.open(url, options: [:]) { ok in
                 if ok {
-                    var info: [String: Any] = [
+                    let info: [String: Any] = [
                         "noteId":            -1,
                         "audioFilenames":    savedAudioRefs,
                         "pictureFilenames":  savedPictureRefs,
-                        "mediaFolderLinked": mediaLinked
+                        "mediaFolderLinked": mediaLinked,
+                        "mediaServerActive": serverStarted,
+                        "mediaServerPort":   AnkiMediaServer.shared.port,
+                        "mediaServerPingOk": pingOk
                     ]
-                    if !mediaLinked && (!savedAudioRefs.isEmpty || !savedPictureRefs.isEmpty) {
-                        info["mediaWarning"] = "Media not delivered — link AnkiMobile's media folder in Preferences for zero-tap audio."
-                    }
                     call.resolve(info)
                 } else {
                     call.reject("Failed to open AnkiMobile URL")
@@ -254,9 +306,73 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private struct StoredMedia { let filename: String; let path: String }
+    private struct ServedMedia  { let filename: String; let httpURL: String? }
 
-    /// Write base64-decoded bytes to `folder` if non-nil (with security-scoped
-    /// access), else to a temp directory. Returns the final filename.
+    private enum MediaKind { case audio, picture }
+
+    /// Decode the base64 bytes of an attachment and make them available
+    /// to AnkiMobile. Preferred path: write to the embedded HTTP server's
+    /// temp dir and return a loopback HTTP URL (zero user setup). Fallback:
+    /// write to the bookmarked AnkiMobile media folder if linked, so the
+    /// classic [sound:filename] reference works. Last resort: write to
+    /// our own temp dir — the filename is returned but AnkiMobile won't
+    /// find the bytes.
+    private func decodeAndServe(_ attachment: [String: Any],
+                                 kind: MediaKind,
+                                 useServer: Bool,
+                                 fallbackFolder: URL?) -> ServedMedia? {
+        guard let suggestedName = attachment["filename"] as? String else {
+            return nil
+        }
+        // Two ways the JS side can provide the bytes:
+        //   1) `dataBase64`: classic — JS reads the file, base64-encodes it,
+        //      passes the string. Required to go through Capacitor's bridge
+        //      which can mangle large transfers (and on iOS the
+        //      cacheFileToDataUri fetch sometimes returns "" silently when
+        //      WKWebView can't access the path).
+        //   2) `srcPath`: NEW — JS just passes the absolute on-disk path
+        //      (e.g. a fresh AudioSlicer output). Native reads it directly,
+        //      skips the base64 round-trip. Same trick Manatan uses.
+        let data: Data
+        if let base64 = attachment["dataBase64"] as? String,
+           let decoded = Data(base64Encoded: base64), !decoded.isEmpty {
+            data = decoded
+        } else if let srcPath = attachment["srcPath"] as? String,
+                  let bytes = try? Data(contentsOf: URL(fileURLWithPath: srcPath)),
+                  !bytes.isEmpty {
+            data = bytes
+            NSLog("[AnkiBridge] srcPath read OK: %d bytes from %@", bytes.count, srcPath)
+        } else {
+            NSLog("[AnkiBridge] media \"%@\" has neither readable dataBase64 nor srcPath — dropping", suggestedName)
+            return nil
+        }
+        // Path 1: embedded HTTP server.
+        if useServer, let served = AnkiMediaServer.shared.writeMedia(data, suggestedName: suggestedName) {
+            return ServedMedia(filename: served.filename, httpURL: served.url.absoluteString)
+        }
+        // Path 2: bookmarked AnkiMobile media folder.
+        if let folder = fallbackFolder {
+            let didStart = folder.startAccessingSecurityScopedResource()
+            defer { if didStart { folder.stopAccessingSecurityScopedResource() } }
+            let out = folder.appendingPathComponent(suggestedName)
+            if (try? data.write(to: out, options: .atomic)) != nil {
+                return ServedMedia(filename: suggestedName, httpURL: nil)
+            }
+            NSLog("[AnkiBridge] linked-folder write failed — falling through")
+        }
+        // Path 3: tmp only (caller can decide what to do; usually nothing).
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("anki-outbound", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let out = dir.appendingPathComponent(suggestedName)
+        if (try? data.write(to: out, options: .atomic)) != nil {
+            return ServedMedia(filename: suggestedName, httpURL: nil)
+        }
+        return nil
+    }
+
+    /// Legacy storeMedia — kept for any future callers that want the
+    /// raw write without the URL/server logic. Currently unused inside
+    /// addNote (which uses decodeAndServe).
     private func storeMedia(_ attachment: [String: Any], into folder: URL?) -> StoredMedia? {
         guard let suggestedName = attachment["filename"] as? String,
               let base64        = attachment["dataBase64"] as? String,

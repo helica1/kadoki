@@ -8,6 +8,16 @@
  * No JS, no behavior — purely visual.
  * ===================================================================== */
 
+/* Lock UI scale: prevent iOS WebKit's text-autoscaling kicking in after
+   orientation changes / dynamic type changes, and stop user pinch-zoom
+   from blowing up the layout. Pair this with the viewport meta tag's
+   user-scalable=no. */
+html, body {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  touch-action: pan-x pan-y;
+}
+
 :root {
   /* ---- Color tokens ---- */
   --bg:               #0c0c0c;
@@ -124,8 +134,16 @@ body.mode-card #cardContainer .card-image img {
   display: var(--image-card-display);
   opacity: var(--image-card-opacity);
 }
+/* New layout: subtitle is in-flow at top via flex order, image fills the
+   remaining space below it via flex:1. So we always want flex-start at the
+   container level (otherwise the subtitle floats halfway down). The user's
+   "Image position" pref (top/center/bottom) now drives the image's
+   object-position so the contained picture sticks to that edge instead. */
 body.mode-card #cardContainer {
-  justify-content: var(--image-card-align);
+  justify-content: flex-start;
+}
+body.mode-card #cardContainer .card-image {
+  object-position: center var(--image-card-objpos, center);
 }
 body.mode-read #readingModeContent {
   font-size: var(--font-size-read) !important;

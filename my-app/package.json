@@ -10,7 +10,9 @@
   "scripts": {
     "start": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "cap:copy:ios": "npx cap copy ios && rm -rf ios/App/App/public/yomichan-audio ios/App/App/public/assets/dictionaries",
+    "cap:sync:ios": "npx cap sync ios && rm -rf ios/App/App/public/yomichan-audio ios/App/App/public/assets/dictionaries"
   },
   "dependencies": {
     "@capacitor/android": "^7.2.0",

@@ -374,8 +374,15 @@ async function autoRestoreFromTitles() {
     const titles = await window.titleStore.list();
     if (!titles?.length) return false;
     const sorted = titles.slice().sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
-    const t = sorted[0];
+    let t = sorted[0];
     if (!t) return false;
+    // Rebuild audio/SRT cache files from their stored URIs if they were
+    // wiped from NSTemporaryDirectory (Xcode rebuild, iOS purge, etc.).
+    // Without this the title looks "loaded" but the legacy prefs that get
+    // synced below carry dead paths and audiobook playback fails silently.
+    if (typeof window.rehydrateTitleCachePaths === 'function') {
+      try { t = await window.rehydrateTitleCachePaths(t) || t; } catch (e) {}
+    }
     const a = t.attachments || {};
     debugLog(`autoRestoreFromTitles → "${t.name}" (id=${t.id})`);
 
@@ -867,7 +874,7 @@ function showToast(message, duration = 3000) {
   toast.textContent = message;
   toast.style.cssText = `
     position: fixed;
-    top: 20px;
+    top: calc(20px + env(safe-area-inset-top, 0px));
     left: 50%;
     transform: translateX(-50%);
     background: rgba(0, 0, 0, 0.9);
@@ -2294,7 +2301,7 @@ async function displayCard() {
   if (card.isSrtCard) {
     container.innerHTML = `
       <div class="subtitle-text">${card.expression}</div>
-      <div id="srtCardWaveform" style="width:90%;max-width:520px;margin:18px auto 0;"></div>
+      <div id="srtCardWaveform" style="width:90%;max-width:520px;margin:auto auto 24px auto;order:2;align-self:center;flex:0 0 auto;"></div>
     `;
     if (window.wrapSubtitleTokens) window.wrapSubtitleTokens();
     if (window.syncReadingToCard) {

@@ -13,6 +13,9 @@ PODS:
     - Capacitor
   - FileAccess (0.0.1):
     - Capacitor
+  - GCDWebServer (3.5.4):
+    - GCDWebServer/Core (= 3.5.4)
+  - GCDWebServer/Core (3.5.4)
   - IONFilesystemLib (1.1.2)
 
 DEPENDENCIES:
@@ -23,9 +26,11 @@ DEPENDENCIES:
   - "CapacitorPreferences (from `../../node_modules/@capacitor/preferences`)"
   - "CapacitorSplashScreen (from `../../node_modules/@capacitor/splash-screen`)"
   - FileAccess (from `../../../file-access`)
+  - GCDWebServer (~> 3.5.4)
 
 SPEC REPOS:
   trunk:
+    - GCDWebServer
     - IONFilesystemLib
 
 EXTERNAL SOURCES:
@@ -52,8 +57,9 @@ SPEC CHECKSUMS:
   CapacitorPreferences: 6c98117d4d7508034a4af9db64d6b26fc75d7b94
   CapacitorSplashScreen: 1d67815a422a9b61539c94f283c08ed56667c0fc
   FileAccess: 9455ddbf1298d175a259496429abfd4f619ba3e5
+  GCDWebServer: 2c156a56c8226e2d5c0c3f208a3621ccffbe3ce4
   IONFilesystemLib: 21a63377696b2d8fab5632ecfb7d2ac67bddb68a
 
-PODFILE CHECKSUM: 5ad51cb2d36f9477c624ffc0ad52e2ba32b72798
+PODFILE CHECKSUM: 1b2df03cb17ac5aa6b772d4960b511fb9e588a44
 
 COCOAPODS: 1.16.2

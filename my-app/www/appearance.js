@@ -29,7 +29,7 @@
   const DEFAULTS = {
     card:  { fontSize: '1.8rem', align: 'center', fontFamily: 'serif',
              imageDisplay: 'block', imageOpacity: 1, imageAlign: 'flex-start' },
-    read:  { fontSize: '1rem',   align: 'left',   fontFamily: 'serif',
+    read:  { fontSize: '1.875rem', align: 'left',   fontFamily: 'serif',
              imageDisplay: 'none',  imageOpacity: 1, imageAlign: 'flex-start',
              // 'bg' = current behavior (translucent fill + underline);
              // 'text' = recolor the cue text only (less artifact-prone).
@@ -74,7 +74,16 @@
       root.style.setProperty(`--font-family-${mode}`,    FONT_STACKS[fontKey] || FONT_STACKS.serif);
       root.style.setProperty(`--image-${mode}-display`,  s.imageDisplay || DEFAULTS[mode].imageDisplay);
       root.style.setProperty(`--image-${mode}-opacity`,  s.imageOpacity ?? DEFAULTS[mode].imageOpacity);
-      root.style.setProperty(`--image-${mode}-align`,    s.imageAlign   || DEFAULTS[mode].imageAlign);
+      const imgAlign = s.imageAlign || DEFAULTS[mode].imageAlign;
+      root.style.setProperty(`--image-${mode}-align`,    imgAlign);
+      // Mirror flex-align values to CSS object-position keywords so card-mode
+      // can pin the contained image to top / center / bottom in the new
+      // flex-driven layout (image fills the available area; the pref decides
+      // which edge it sticks to inside that box).
+      const objPos = imgAlign === 'flex-start' ? 'top'
+                    : imgAlign === 'flex-end'   ? 'bottom'
+                    : 'center';
+      root.style.setProperty(`--image-${mode}-objpos`, objPos);
     }
     // Reading-mode highlight style: 'bg' (translucent fill + underline)
     // vs 'text' (recolor the cue text). Toggled via a body class so

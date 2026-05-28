@@ -197,12 +197,18 @@ window.fetchModelFieldNames = fetchModelFieldNames;
 async function sendToAnki({ expression, imageData, audioData }) {
   const cfg = (typeof window.getAnkiSettings === 'function')
     ? await window.getAnkiSettings('swipe')
-    : { deck: (await getPref('SELECTED_DECK')) || 'Shadowing5',
+    : { deck: (await getPref('SELECTED_DECK')) || 'Shadowing9',
         model: 'jidoujisho Kinomoto BLUE',
         fields: { expression: 'Term', image: 'Image', audio: 'Sentence Audio' } };
 
+  // Pre-flight: verify the deck exists, BUT only when we actually got a
+  // non-empty list back. iOS AnkiMobile has no listing API in the URL
+  // scheme — our AnkiBridge.deckNames() returns an empty array there.
+  // If we treat empty-list as "deck not found" we'd block every send on
+  // iOS, which is what was happening (silent no-op + "Shadowing9 doesn't
+  // exist" alert even when the deck did exist).
   const decks = await fetchDeckNames();
-  if (!decks.includes(cfg.deck)) {
+  if (decks.length > 0 && !decks.includes(cfg.deck)) {
     alert(`Deck "${cfg.deck}" not found. Pick an existing deck in Preferences.`);
     return;
   }

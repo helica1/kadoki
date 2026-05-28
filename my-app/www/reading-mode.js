@@ -102,9 +102,19 @@
   }
   async function getAudiobookPairing(deckName) {
     if (!deckName) return null;
-    const path = await getPref(KEYS.AUDIO_PAIR_PREFIX + deckName);
+    let path = await getPref(KEYS.AUDIO_PAIR_PREFIX + deckName);
+    let name = await getPref(KEYS.AUDIO_NAME_PREFIX + deckName);
+    // Fallback: when legacy prefs are missing (older title, or post-rehydrate
+    // edge case), read straight from the active title's attachment.
+    if (!path && window._activeTitleId && window.titleStore) {
+      try {
+        const titles = await window.titleStore.list();
+        const t = titles.find(x => x.id === window._activeTitleId);
+        const ab = t?.attachments?.audiobook;
+        if (ab?.cachePath) { path = ab.cachePath; name = name || ab.name; }
+      } catch (e) {}
+    }
     if (!path) return null;
-    const name = await getPref(KEYS.AUDIO_NAME_PREFIX + deckName);
     return { path, name: name || 'audiobook' };
   }
   async function saveSrtPairing(deckName, cachePath, displayName) {
@@ -114,9 +124,17 @@
   }
   async function getSrtPairing(deckName) {
     if (!deckName) return null;
-    const path = await getPref(KEYS.SRT_PAIR_PREFIX + deckName);
+    let path = await getPref(KEYS.SRT_PAIR_PREFIX + deckName);
+    let name = await getPref(KEYS.SRT_NAME_PREFIX + deckName);
+    if (!path && window._activeTitleId && window.titleStore) {
+      try {
+        const titles = await window.titleStore.list();
+        const t = titles.find(x => x.id === window._activeTitleId);
+        const sr = t?.attachments?.srt;
+        if (sr?.cachePath) { path = sr.cachePath; name = name || sr.name; }
+      } catch (e) {}
+    }
     if (!path) return null;
-    const name = await getPref(KEYS.SRT_NAME_PREFIX + deckName);
     return { path, name: name || 'subtitles' };
   }
   async function saveAudiobookLastPosition(deckName, ms, chunkIdx) {
@@ -191,9 +209,11 @@
         transition: background-color 0.25s ease;
         border-radius: 3px;
       }
+      /* Active chunk: text-color recolor (matches Android shadowing flow).
+         No box / no background — Japanese text stays readable, and the
+         mode-color text is enough signal that this is the active line. */
       #readingModeContent .reading-chunk.active {
-        background-color: var(--reader-highlight-bg, rgba(0, 255, 204, 0.18));
-        box-shadow: 0 0 0 2px var(--reader-highlight-ring, rgba(0, 255, 204, 0.35));
+        color: color-mix(in srgb, var(--accent-read, #4caf50) 75%, white 25%);
       }
       /* No chunk-level outlines — pending + active visuals are drawn at
          the SRT-cue granularity via CSS Custom Highlight. */
@@ -238,9 +258,19 @@
         -webkit-writing-mode: vertical-rl;
         text-orientation: mixed;
         -webkit-text-orientation: mixed;
-        overflow-x: auto;
-        overflow-y: hidden;
+        overflow-x: auto !important;
+        overflow-y: hidden !important;
         height: 100%;
+        /* Lock the scroll origin in vertical-rl so the start-of-text edge
+           stays fixed — iOS WebKit sometimes "snaps back" to scrollLeft=0
+           after a layout change (dict popup, font resize, etc.). */
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+      }
+      /* Lock horizontal scrolling in horizontal mode — chunks that overflow
+         their inline-axis should clip, never become a hidden scrollable. */
+      #readingModeContent:not(.vertical) {
+        overscroll-behavior: contain;
       }
       #readingModeContent.vertical hr {
         border: 0 !important;
@@ -268,10 +298,15 @@
       getPref(KEYS.AUTO_ADVANCE)
     ]);
     document.documentElement.style.setProperty('--reader-font', font || 'serif');
-    document.documentElement.style.setProperty('--reader-font-size', (size || '1.1') + 'rem');
-    applyVertical(vertical === 'true');
+    document.documentElement.style.setProperty('--reader-font-size', (size || '1.875') + 'rem');
+    // Vertical writing mode is now the only mode. Horizontal mode was
+    // removed because its left-right scroll interfered with the up/down
+    // swipe gestures (start/stop, select-to-Anki).
+    applyVertical(true);
     applyHighlightColor(hi || DEFAULT_HIGHLIGHT);
-    window.readingAutoAdvance = auto !== 'false';
+    // Default to STOP at cue end. User must explicitly enable
+    // auto-advance via the Preferences toggle (auto === 'true').
+    window.readingAutoAdvance = auto === 'true';
   }
 
   function hexToRgba(hex, alpha) {
@@ -308,8 +343,27 @@
   function applyVertical(vertical) {
     const content = document.getElementById('readingModeContent');
     if (!content) return;
+    // Remember the current chunk so we can scroll it back into view after
+    // WebKit recomputes layout for the new writing-mode (otherwise the
+    // viewport snaps to origin, which in vertical-rl looks like "back
+    // to the beginning of the book").
+    const targetIdx = lastMatchedIdx >= 0 ? lastMatchedIdx : -1;
     content.classList.toggle('vertical', !!vertical);
+    if (targetIdx >= 0 && chunks[targetIdx]) {
+      // Two-frame restore covers both the immediate reflow and any deferred
+      // layer-tree work iOS WebKit kicks off after writing-mode changes.
+      const recenter = () => {
+        try {
+          const el = chunks[targetIdx];
+          if (el && typeof el.scrollIntoView === 'function') {
+            el.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+          }
+        } catch (e) {}
+      };
+      requestAnimationFrame(() => { recenter(); requestAnimationFrame(recenter); });
+    }
   }
+  window.applyReaderVerticalNow = applyVertical;
 
   function showToolbar() {
     const tb = document.getElementById('readingModeToolbar');
@@ -604,7 +658,21 @@
       rlog('Dictionary not available (performDictLookup missing)');
       return;
     }
+    // Save scroll position before wrapping chars in <span> — that DOM
+    // mutation triggers a layout pass that iOS WebKit resets to origin
+    // in vertical-rl mode (visible to the user as "lookup teleports me
+    // to the beginning of the book"). Restore on the next two frames so
+    // we catch both the immediate reflow and any deferred ones.
+    const content = document.getElementById('readingModeContent');
+    const savedLeft = content?.scrollLeft;
+    const savedTop  = content?.scrollTop;
     wrapChunkForLookup(chunk);
+    const restoreScroll = () => {
+      if (!content) return;
+      if (Number.isFinite(savedLeft) && content.scrollLeft !== savedLeft) content.scrollLeft = savedLeft;
+      if (Number.isFinite(savedTop)  && content.scrollTop  !== savedTop ) content.scrollTop  = savedTop;
+    };
+    requestAnimationFrame(() => { restoreScroll(); requestAnimationFrame(restoreScroll); });
     const target = document.elementFromPoint(x, y);
     if (!target || !target.classList.contains('dict-frag')) return;
     if (!chunk.contains(target)) return;
@@ -1046,19 +1114,28 @@
   };
 
   // Cross-mode sync: when switching INTO card mode, jump the card index
-  // to whatever cue the audio is currently playing. Sets a global flag
-  // so displayCard skips its bg.play() (audio is already running at the
-  // right position; restarting would cause a back-jump).
+  // to wherever the user was — audio cue if playing, otherwise reader cursor.
+  // Sets a global flag so displayCard skips its bg.play() (audio is already
+  // running at the right position; restarting would cause a back-jump).
   window.syncCardToCurrentCue = function () {
     if (!Array.isArray(window.allNotes)) return;
     const isSrt = !!window.allNotes[0]?.isSrtCard;
+
+    // Pick the most reliable source-of-truth for "where the user is".
+    // Order: audio cue → reader cursor (lastMatchedIdx → chunk → cue).
+    let cueIdx = abCurrentCueIdx;
+    if (cueIdx < 0 && abChunkToCue && lastMatchedIdx >= 0) {
+      const mapped = abChunkToCue[lastMatchedIdx];
+      if (mapped >= 0) cueIdx = mapped;
+    }
+
     let target = -1;
     if (isSrt) {
       // SRT-cards mode: cue index == card index.
-      target = abCurrentCueIdx;
-    } else if (abCueToChunk && abCurrentCueIdx >= 0) {
+      target = cueIdx;
+    } else if (abCueToChunk && cueIdx >= 0) {
       // Deck-card mode: cue → chunk → card via tagged dataset.
-      const chunkIdx = abCueToChunk[abCurrentCueIdx];
+      const chunkIdx = abCueToChunk[cueIdx];
       if (chunkIdx >= 0 && chunks[chunkIdx]) {
         const tagged = parseInt(chunks[chunkIdx].dataset.cardIdx);
         if (Number.isFinite(tagged)) target = tagged;
@@ -1503,6 +1580,17 @@
     const container = document.getElementById('readingModeContent');
     if (!container) return;
     const isVertical = container.classList.contains('vertical');
+    // In vertical-rl, iOS WebKit's scrollIntoView misbehaves spectacularly
+    // (often scrolls scrollLeft to a value where ALL content is off-screen,
+    // producing a totally-black viewport). Skip the scroll for routine
+    // cue-driven follow updates — the highlight + text-color recolor is
+    // enough signal. Only explicit "go here" requests (instantScroll or
+    // scrollCenter, set by syncReaderToCurrentPosition or progress-bar
+    // jumps) get to scroll.
+    const explicitScroll = !!(el.dataset._instantScroll || el.dataset._scrollCenter);
+    if (isVertical && !explicitScroll) {
+      return;
+    }
     const cRect = container.getBoundingClientRect();
     const eRect = el.getBoundingClientRect();
     const tol = 2; // px tolerance for "fully visible"
@@ -1512,16 +1600,8 @@
       eRect.bottom <= cRect.bottom + tol &&
       eRect.left   >= cRect.left   - tol &&
       eRect.right  <= cRect.right  + tol;
-    // Skip the visibility shortcut when the caller explicitly asked to
-    // CENTER the chunk — user wants it in the middle, not just "somewhere
-    // on screen" (matters for the open-reader sync).
     if (fullyVisible && !el.dataset._scrollCenter) return;
 
-    // inline:'start' is the writing-mode-aware start of the inline axis.
-    // _instantScroll skips the smooth animation (used on reader-open
-    // sync). _scrollCenter centers the chunk vertically — used by
-    // syncReaderToCurrentPosition so the user lands with the active line
-    // in the middle of the page instead of the top.
     const behavior = el.dataset._instantScroll ? 'instant' : 'smooth';
     const block    = el.dataset._scrollCenter  ? 'center'  : 'start';
     delete el.dataset._instantScroll;
@@ -2470,14 +2550,38 @@
     return _prewarmInFlight;
   };
 
+  // Try the active title's EPUB attachment when the deck-pairing path fails
+  // (deck-less titles, or first-launch where the legacy prefs haven't been
+  // written yet). Returns true if a load was kicked off.
+  async function tryLoadFromActiveTitle() {
+    try {
+      if (!window.titleStore || !window._activeTitleId) return false;
+      const titles = await window.titleStore.list();
+      const t = titles.find(x => x.id === window._activeTitleId);
+      const ep = t?.attachments?.epub;
+      if (!ep?.uri || !ep?.name) return false;
+      rlog(`Active-title fallback: loading ${ep.name}`);
+      await loadEpubFromUri(ep.uri, ep.name);
+      return true;
+    } catch (e) {
+      rlog(`Active-title fallback failed: ${e.message}`);
+      const content = document.getElementById('readingModeContent');
+      if (content) content.innerHTML =
+        `<p style="color:#f66;text-align:center;margin-top:40vh;padding:0 20px;">Could not open EPUB: ${e.message}</p>`;
+      return true;
+    }
+  }
+
   async function restoreLastEpub() {
     const deck = currentDeckName();
     if (!deck) {
+      if (await tryLoadFromActiveTitle()) return;
       renderReadingEmptyState('No deck loaded.');
       return;
     }
     const name = await getPairedEpub(deck);
     if (!name) {
+      if (await tryLoadFromActiveTitle()) return;
       renderReadingEmptyState(`No EPUB paired with <b>${deck}</b>.`);
       return;
     }
@@ -2487,6 +2591,7 @@
       uri = await getPref(KEYS.EPUB_URI);
     }
     if (!uri) {
+      if (await tryLoadFromActiveTitle()) return;
       renderReadingEmptyState(`The paired EPUB (<b>${name}</b>) is no longer accessible.`);
       return;
     }
@@ -2495,23 +2600,103 @@
     } catch (e) {
       rlog(`Restore failed: ${e.message}`);
       const content = document.getElementById('readingModeContent');
-      content.innerHTML = `<p style="color:#f66;text-align:center;margin-top:40vh;">Could not reopen ${name}: ${e.message}<br>Use MORE → Library to pick again.</p>`;
+      content.innerHTML = `<p style="color:#f66;text-align:center;margin-top:40vh;padding:0 20px;">Could not reopen ${name}: ${e.message}<br>Use MORE → Library to pick again.</p>`;
     }
   }
 
   // Wire a one-time scroll listener on the content area: any non-trivial
   // scroll counts as "actively reading" and starts/refreshes the read
   // timer. Casual background taps are intentionally NOT enough.
+  // ALSO drives the scroll-based char counter (for no-audio reading).
   function installReadActivityHooks() {
     const content = document.getElementById('readingModeContent');
     if (!content || content.dataset.statsHooked === '1') return;
     content.dataset.statsHooked = '1';
-    let lastScrollTop = content.scrollTop;
+    let lastScrollTop  = content.scrollTop;
+    let lastScrollLeft = content.scrollLeft;
+    const tickCharCounter = () => {
+      // Vertical mode scrolls horizontally; pick the relevant axis.
+      const isVertical = content.classList.contains('vertical');
+      const cRect = content.getBoundingClientRect();
+      // "Past the 60% reading line" = chunk has been read.
+      //   horizontal: chunk.bottom <= viewport.top + 60% of height
+      //               (chunk's bottom edge is above the reading line)
+      //   vertical-rl: chunk.left >= viewport.left + 40% of width
+      //               (chunk's left edge is in the right 60% of viewport,
+      //               i.e., already past the leftward reading flow)
+      let furthestPastIdx = -1;
+      for (let i = 0; i < chunks.length; i++) {
+        const ch = chunks[i];
+        const r = ch.getBoundingClientRect();
+        const past = isVertical
+          ? r.left >= cRect.left + cRect.width * 0.4
+          : r.bottom <= cRect.top + cRect.height * 0.6;
+        if (past) {
+          furthestPastIdx = i;
+          if (!ch.dataset.counted) {
+            const len = textWithoutRuby(ch).length;
+            if (len > 0) {
+              cumulativeChars += len;
+              ch.dataset.counted = '1';
+            }
+          }
+        }
+      }
+      // Use the furthest-past chunk as the reading-position cursor so the
+      // progress bar / current-position label follows scroll even without
+      // audio-driven setActive. ALSO toggle the visual `.active` class so
+      // the chunk is highlighted (was tracked logically but invisible).
+      if (furthestPastIdx >= 0) {
+        if (furthestPastIdx !== lastMatchedIdx) {
+          // Lightweight active-class toggle — DON'T use setActive() here
+          // because it scroll-into-views and would fight the user's own
+          // scrolling. Just paint the highlight.
+          clearActiveHighlight();
+          // Also drop any stale cue-precise highlight + the body class
+          // that hides the chunk-level highlight; otherwise the user
+          // sees no visual indicator when no audio cue is current.
+          clearCueHighlight();
+          const el = chunks[furthestPastIdx];
+          if (el) el.classList.add('active');
+          lastMatchedIdx = furthestPastIdx;
+          // Publish cue range so audio/card-mode sync to scroll position
+          // when the user switches tabs.
+          publishChunkCueRange(furthestPastIdx);
+        }
+        try {
+          const deck = currentDeckName();
+          if (deck && currentEpubName && chunks[furthestPastIdx]) {
+            const el = chunks[furthestPastIdx];
+            const off = parseInt(el.dataset.charOffset) || 0;
+            const len = parseInt(el.dataset.charLen) || 0;
+            localStorage.setItem('READING_POS_' + deck + '_' + currentEpubName,
+                                 String(off + len));
+          }
+        } catch (e) {}
+        refreshProgressBar();
+      }
+      setPref(KEYS.CHARS, Math.floor(cumulativeChars));
+      // Refresh the live label if the stats panel is open.
+      const label = document.getElementById('statsReadChars');
+      if (label) label.textContent = cumulativeChars.toLocaleString();
+    };
+    let pending = false;
     content.addEventListener('scroll', () => {
-      if (Math.abs(content.scrollTop - lastScrollTop) < 8) return;
-      lastScrollTop = content.scrollTop;
+      // In vertical-rl, content scrolls HORIZONTALLY — scrollTop is always 0.
+      // Check both axes so the listener fires in either writing mode.
+      const dx = Math.abs(content.scrollLeft - lastScrollLeft);
+      const dy = Math.abs(content.scrollTop  - lastScrollTop);
+      if (dx < 8 && dy < 8) return;
+      lastScrollLeft = content.scrollLeft;
+      lastScrollTop  = content.scrollTop;
       if (window.stats?.bumpRead) window.stats.bumpRead();
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => { pending = false; tickCharCounter(); });
     }, { passive: true });
+    // Also run once immediately so the first chunk on screen gets counted
+    // even before any scroll.
+    requestAnimationFrame(tickCharCounter);
   }
 
   // Session-level "warm" flag. The first openReadingMode does the heavy
@@ -2527,31 +2712,21 @@
     const view = document.getElementById('readingModeView');
     view.style.display = 'flex';
     const content = document.getElementById('readingModeContent');
-
-    // Warm path: snap to the right chunk BEFORE showing content. Keeps
-    // opacity:0 just long enough for setActive to scroll, then reveals.
-    // Without the gate the user briefly saw whatever scroll position the
-    // reader was left at (e.g. 96% from a stray progress-bar tap).
-    if (readerWarmed) {
-      if (content) {
-        content.style.opacity = '0';
-        content.style.transition = 'opacity 0.08s ease';
-      }
-      setPref(KEYS.MODE_OPEN, 'true');
-      startTimer();
-      // Sync is synchronous (no awaits beyond a defunct outer signature),
-      // so the scroll commits this microtask. Reveal on the next frame.
-      try { syncReaderToCurrentPosition(); } catch (e) {}
-      requestAnimationFrame(() => { if (content) content.style.opacity = '1'; });
-      return;
+    // Always keep content visible — the previous opacity:0 → 1 transition
+    // could strand the reader blank if any await in the cold path stalled
+    // or threw silently. A brief flash of unsynced scroll is better than
+    // a permanently blank screen.
+    if (content) {
+      content.style.opacity = '1';
+      content.style.transition = '';
     }
 
-    // Cold path: do the expensive setup once. Keep content invisible
-    // while everything wires up so the user doesn't see a flash of
-    // unstyled content / scroll-to-top.
-    if (content) {
-      content.style.opacity = '0';
-      content.style.transition = 'opacity 0.15s ease';
+    // Warm path: just sync the highlight + scroll position and return.
+    if (readerWarmed) {
+      setPref(KEYS.MODE_OPEN, 'true');
+      startTimer();
+      try { syncReaderToCurrentPosition(); } catch (e) {}
+      return;
     }
     // Run every awaitable piece concurrently. Each Capacitor Preferences
     // call hops the bridge; running them sequentially burned ~500 ms.
@@ -2580,14 +2755,40 @@
     // If app.js fired prewarmReader at title load and it's still parsing,
     // wait on the same promise instead of starting a duplicate load.
     if (_prewarmInFlight) {
-      await _prewarmInFlight;
+      try { await _prewarmInFlight; } catch (e) { rlog(`prewarm wait failed: ${e.message}`); }
     } else if (pairedName !== currentEpubName) {
       await restoreLastEpub();
     }
-    await syncReaderToCurrentPosition();
-    if (content) {
-      requestAnimationFrame(() => { content.style.opacity = '1'; });
+    // Belt-and-suspenders: if after all that we STILL have no chunks
+    // loaded, force a load from the active title's EPUB attachment.
+    // Without this the reader could land on a permanently-blank screen
+    // when the pairedName/currentEpubName/_prewarm dance silently no-ops.
+    if (!chunks?.length) {
+      rlog('cold path produced no chunks — forcing tryLoadFromActiveTitle');
+      try { await tryLoadFromActiveTitle(); } catch (e) { rlog(`forced load failed: ${e.message}`); }
     }
+    // Last-resort visible recovery: if we STILL have no chunks, render an
+    // explicit "Reload EPUB" button so the user isn't staring at a blank
+    // screen with no way to recover.
+    if (!chunks?.length && content) {
+      content.innerHTML = `
+        <div style="max-width:380px;margin:30vh auto 0 auto;text-align:center;
+                    font-family:var(--font-sans);padding:0 24px;">
+          <div style="font-size:.7rem;letter-spacing:.18em;text-transform:uppercase;
+                      color:var(--accent-read,#4caf50);font-weight:700;margin-bottom:10px;">Reader</div>
+          <div style="font-size:1rem;color:var(--text,#e8e8e8);line-height:1.5;margin-bottom:18px;">
+            Couldn't load the EPUB. The cache may be gone — re-pick the file.
+          </div>
+          <button onclick="window.pickReadingEpub && window.pickReadingEpub()"
+                  style="background:transparent;color:var(--accent-read,#4caf50);
+                         border:1px solid var(--accent-read,#4caf50);
+                         padding:10px 18px;border-radius:8px;font-weight:700;
+                         font-family:var(--font-sans);font-size:.95rem;">
+            📂 Pick EPUB
+          </button>
+        </div>`;
+    }
+    await syncReaderToCurrentPosition();
     readerWarmed = true;
   };
 

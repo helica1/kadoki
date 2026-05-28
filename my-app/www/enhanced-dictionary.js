@@ -964,12 +964,14 @@
             return;
         }
 
-        // Card mode: anchor below the subtitle text.
+        // Card mode: anchor below the subtitle text. Works for BOTH classic
+        // image+subtitle cards AND SRT-cards (subtitle + waveform, no image).
+        // Previously this required `imageVisible && subtitleVisible` which
+        // skipped SRT-card mode and fell through to the reading-mode
+        // centered fallback — that's why the popup was covering context.
         const subtitleEl = document.querySelector('.subtitle-text');
         const subtitleVisible = subtitleEl && subtitleEl.offsetParent !== null;
-        const imageElement = document.querySelector('.card-image');
-        const imageVisible = imageElement && imageElement.offsetParent !== null;
-        if (imageVisible && subtitleVisible) {
+        if (subtitleVisible) {
             const subRect = subtitleEl.getBoundingClientRect();
             const top = Math.max(margin, subRect.bottom + margin);
             const maxH = Math.min(vh * 0.72, 520);
@@ -1465,9 +1467,13 @@
                           startMs: Math.round(adjusted.startMs),
                           endMs:   Math.round(adjusted.endMs)
                         });
-                        if (slice?.path && typeof window.cacheFileToDataUri === 'function') {
-                          audioData = await window.cacheFileToDataUri(slice.path, slice.mime || 'audio/mp4');
-                          console.log('[dict] slice bytes=' + (audioData?.length || 0) + ' mime=' + (slice.mime || ''));
+                        if (slice?.path) {
+                          // Pass the on-disk path to native — skips the
+                          // base64 round-trip through WKWebView which was
+                          // returning empty data URIs silently for tmp/
+                          // files on iOS, leaving the Anki audio blank.
+                          window._lastDictSliceSrcPath = slice.path;
+                          console.log('[dict] slice srcPath=' + slice.path);
                         }
                       } catch (e) { console.warn('dict slice for Anki:', e); }
                     }
@@ -1488,9 +1494,14 @@
                         meaning: meaning,
                         imageData,
                         audioData,
+                        // Native plugin can read this directly off disk —
+                        // avoids the iOS base64-via-WKWebView empty-result
+                        // issue. Consumed by sendWordToAnki below.
+                        audioSrcPath: window._lastDictSliceSrcPath || null,
                         wordAudio: wordAudio,
                         dictionary: result.dictionary
                     };
+                    window._lastDictSliceSrcPath = null;
 
                     await sendWordToAnki(ankiData);
                     if (inReadingMode) {
@@ -1525,22 +1536,40 @@
                 .flatMap(s => (s.gloss || []).map(g => g.text))
                 .slice(0, 3)
                 .join('; ');
-        } else {
-            // Extract from Yomitan structured content (simplified)
-            const definitions = result.entry[5] || [];
-            const meanings = [];
-            
-            for (const def of definitions.slice(0, 2)) {
-                if (def.type === 'structured-content') {
+        }
+        // Yomitan-format entry: definitions live at entry[5]. Each item is
+        // either a plain string (simple gloss), a {type:'structured-content',
+        // content:...} object, or a {type:'text', text:...} object.
+        const definitions = result.entry[5] || [];
+        const meanings = [];
+        for (const def of definitions.slice(0, 4)) {
+            if (typeof def === 'string') {
+                const s = def.trim();
+                if (s) meanings.push(s.substring(0, 200));
+            } else if (def && typeof def === 'object') {
+                if (def.type === 'text' && typeof def.text === 'string') {
+                    const s = def.text.trim();
+                    if (s) meanings.push(s.substring(0, 200));
+                } else if (def.type === 'structured-content') {
                     const simpleText = extractSimpleTextFromStructured(def.content);
-                    if (simpleText && simpleText.length > 10 && simpleText.length < 200) {
-                        meanings.push(simpleText.substring(0, 100));
-                    }
+                    if (simpleText) meanings.push(simpleText.substring(0, 200));
                 }
             }
-            
-            return meanings.join('; ') || `Definition from ${result.dictionary}`;
+            if (meanings.length >= 3) break;
         }
+        if (meanings.length) return meanings.join('; ');
+        // Final fallback: stringify the first def (helps diagnose unfamiliar
+        // structures) — never reach the "Definition from <name>" placeholder
+        // again. That placeholder ended up on real cards.
+        if (definitions.length) {
+            try {
+                const dump = typeof definitions[0] === 'string'
+                  ? definitions[0]
+                  : JSON.stringify(definitions[0]);
+                if (dump) return dump.substring(0, 200);
+            } catch (e) {}
+        }
+        return '';
     }
     
     function extractReadingFromResult(result) {
@@ -1553,7 +1582,7 @@
 
     // ==================== ANKI INTEGRATION (FROM EXISTING CODE) ====================
     
-    async function sendWordToAnki({ expression, reading, sentence, meaning, imageData, audioData, wordAudio, dictionary }) {
+    async function sendWordToAnki({ expression, reading, sentence, meaning, imageData, audioData, audioSrcPath, wordAudio, dictionary }) {
         // Pull live settings; fall back to the prior hardcoded mapping.
         const cfg = (typeof window.getAnkiSettings === 'function')
           ? await window.getAnkiSettings('dict')
@@ -1584,7 +1613,16 @@
                 // audio land on the same note. The native plugin splices
                 // [sound:...] tokens into the matching field for each.
                 const audioList = [];
-                if (audioData) {
+                if (audioSrcPath) {
+                    // Native AnkiBridge reads bytes straight off disk —
+                    // skips the base64-via-WKWebView round-trip that was
+                    // silently returning empty data URIs on iOS tmp/ files.
+                    audioList.push({
+                        filename: sentenceAudioFilename,
+                        srcPath:  audioSrcPath,
+                        field:    cfg.fields.sentenceAudio
+                    });
+                } else if (audioData) {
                     audioList.push({
                         filename:   sentenceAudioFilename,
                         dataBase64: audioData.split(',')[1],
@@ -1934,17 +1972,21 @@
            color-mixed with transparent so the highlight reads as a
            soft tint of the mode color rather than a fixed cyan. */
         .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 32%, transparent) !important;
+            background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 60%, transparent) !important;
             border-radius: 3px;
+            color: #000 !important;
         }
         body.mode-card  .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-card, #ff9550) 32%, transparent) !important;
+            background: color-mix(in srgb, var(--accent-card, #ff9550) 70%, transparent) !important;
+            color: #000 !important;
         }
         body.mode-read  .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-read, #4caf50) 32%, transparent) !important;
+            background: color-mix(in srgb, var(--accent-read, #4caf50) 60%, transparent) !important;
+            color: #000 !important;
         }
         body.mode-audio .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-audio, #b794f6) 32%, transparent) !important;
+            background: color-mix(in srgb, var(--accent-audio, #b794f6) 60%, transparent) !important;
+            color: #000 !important;
         }
         
         .subtitle-text {
