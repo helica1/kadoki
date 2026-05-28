@@ -396,19 +396,23 @@
 
     async function ingestZipBuffer(arrayBuffer, opts) {
         opts = opts || {};
+        const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : () => {};
+        onProgress({ phase: 'unzip', pct: 0 });
         const zip = await JSZip.loadAsync(arrayBuffer);
         const indexFile = zip.file('index.json');
         if (!indexFile) throw new Error('Not a Yomitan dictionary: index.json missing');
         const indexData = JSON.parse(await indexFile.async('text'));
         const dictName = (indexData.title || opts.fallbackName || 'Imported').trim();
         if (!dictName) throw new Error('Dictionary has no title');
+
+        // Count banks first so we can drive a real progress bar.
+        let bankCount = 0;
+        while (zip.file(`term_bank_${bankCount + 1}.json`)) bankCount++;
+
         const termEntries = new Map();
-        let bankIndex = 1;
         let totalEntries = 0;
-        while (true) {
-            const bankFile = zip.file(`term_bank_${bankIndex}.json`);
-            if (!bankFile) break;
-            const bankData = JSON.parse(await bankFile.async('text'));
+        for (let b = 1; b <= bankCount; b++) {
+            const bankData = JSON.parse(await zip.file(`term_bank_${b}.json`).async('text'));
             for (const entry of bankData) {
                 const [term, reading] = entry;
                 if (!termEntries.has(term)) termEntries.set(term, []);
@@ -419,21 +423,30 @@
                 }
                 totalEntries++;
             }
-            bankIndex++;
+            onProgress({ phase: 'parse', pct: b / bankCount, banks: b, totalBanks: bankCount });
+            // Yield to the UI runloop so the progress text actually paints.
+            await new Promise(r => setTimeout(r, 0));
         }
         if (totalEntries === 0) throw new Error('Dictionary has no term_bank entries');
         const metadata = { ...indexData, filename: opts.fallbackName || dictName + '.zip' };
-        // Register in-memory.
         dictionaries.set(dictName, termEntries);
         dictionaryMetadata.set(dictName, metadata);
-        // Persist for next launch.
         if (window.dictCache?.save) {
+            onProgress({ phase: 'cache', pct: 0 });
             await window.dictCache.save(
                 IMPORTED_CACHE_PREFIX + dictName,
                 IMPORTED_CACHE_VERSION,
                 { termEntries, metadata }
             );
         }
+        if (window.dictStore?.importFromMap) {
+            try {
+                await window.dictStore.importFromMap(dictName, metadata, termEntries, (p) => {
+                    onProgress({ phase: 'index', pct: p.pct, written: p.written, total: p.total });
+                });
+            } catch (e) { console.warn('[dictStore] import write failed:', e); }
+        }
+        onProgress({ phase: 'done', pct: 1 });
         // Track imported names.
         const list = listImportedDicts();
         if (!list.includes(dictName)) {
@@ -590,14 +603,91 @@
     }
 
     // ==================== MULTI-DICTIONARY LOOKUP ====================
-    
+    //
+    // Two paths:
+    //   FAST: window.dictStore (IDB-indexed) is populated → single
+    //         async getAll() into the on-disk index, ~5-10 ms regardless
+    //         of dictionary count or size. Same architecture Yomitan /
+    //         Manatan / Jidoujisho use. No in-memory entry maps.
+    //   SLOW: legacy in-memory Map (dictionaries) populated by ensureJM().
+    //         Triggered on first launch / after re-import.
+    //
+    // We also opportunistically MIGRATE: after a slow lookup hits, we
+    // background-write the loaded Maps into dictStore so subsequent boots
+    // skip ensureJM() entirely.
+
+    let dictStoreReadyCache = null;     // null = unknown, bool once probed
+    let dictStoreMigrationStarted = false;
+    async function isDictStoreReady() {
+        if (dictStoreReadyCache !== null) return dictStoreReadyCache;
+        if (!window.dictStore) { dictStoreReadyCache = false; return false; }
+        try {
+            dictStoreReadyCache = await window.dictStore.isPopulated();
+        } catch (e) {
+            dictStoreReadyCache = false;
+        }
+        // Pre-warm the term set so deinflection works on the very first tap.
+        // Fires in the background; greedyDeinflect-callers await it explicitly
+        // if it's still pending.
+        if (dictStoreReadyCache && window.dictStore.buildTermSet) {
+            window.dictStore.buildTermSet();
+        }
+        return dictStoreReadyCache;
+    }
+
+    function enabledNameSet(allNames) {
+        const isEnabled = (n) => window.dictPrefs?.isEnabled
+            ? window.dictPrefs.isEnabled(n) : true;
+        const out = new Set();
+        for (const n of allNames) if (isEnabled(n)) out.add(n);
+        return out;
+    }
+
+    async function migrateInMemoryToStore() {
+        if (dictStoreMigrationStarted) return;
+        dictStoreMigrationStarted = true;
+        if (!window.dictStore) return;
+        try {
+            for (const [name, termEntries] of dictionaries) {
+                if (!(termEntries instanceof Map)) continue;
+                // We don't track per-dict meta in a Map — pass the name as
+                // both title + filename. Good enough for the manager UI.
+                const meta = { title: name, filename: name, revision: 'migrated' };
+                await window.dictStore.importFromMap(name, meta, termEntries);
+                console.log(`[dictStore] migrated "${name}" (${termEntries.size} headwords)`);
+            }
+            dictStoreReadyCache = true;
+        } catch (e) {
+            console.warn('[dictStore] migration failed:', e);
+        }
+    }
+
     async function multiDictionaryLookup(term) {
+        // ----- Fast path -----
+        if (await isDictStoreReady()) {
+            const meta = await window.dictStore.list();
+            const allNames = meta.map(m => m.dictName);
+            const ordered = (window.dictPrefs?.orderedNames)
+              ? window.dictPrefs.orderedNames(allNames)
+              : allNames;
+            const enabled = enabledNameSet(allNames);
+            const records = await window.dictStore.lookup(term, { enabledDicts: enabled });
+            // dictStore doesn't preserve dict order; sort by user's ordering.
+            const orderIdx = new Map(ordered.map((n, i) => [n, i]));
+            records.sort((a, b) => (orderIdx.get(a.dictName) ?? 999) - (orderIdx.get(b.dictName) ?? 999));
+            const results = records.map(r => ({
+                dictionary: r.dictName,
+                term:       r.term,
+                entry:      r.entry,
+                type:       r.dictName === 'JMDict' ? 'jmdict' : 'yomitan'
+            }));
+            console.log(`🔍 [store] ${results.length} results for "${term}"`);
+            return results;
+        }
+
+        // ----- Legacy path -----
         await ensureJM();
-
         const results = [];
-
-        // Use user-defined dictionary order + enable flags (dict-prefs.js)
-        // when available; otherwise fall back to original behavior.
         const allNames = Array.from(dictionaries.keys());
         const ordered = (window.dictPrefs && typeof window.dictPrefs.orderedNames === 'function')
           ? window.dictPrefs.orderedNames(allNames)
@@ -620,8 +710,12 @@
                 }
             }
         }
+        console.log(`🔍 [mem] Found ${results.length} results for "${term}"`);
 
-        console.log(`🔍 Found ${results.length} results for "${term}" across dictionaries`);
+        // Migrate to indexed store in the background. Next boot skips
+        // ensureJM() entirely.
+        Promise.resolve().then(migrateInMemoryToStore);
+
         return results;
     }
 
@@ -955,37 +1049,37 @@
             const cueRect = audiobookCue.getBoundingClientRect();
             const w  = Math.min(vw * 0.92, 500);
             const availAbove = cueRect.top - margin * 2;
-            const h  = Math.min(420, Math.max(220, availAbove));
-            const top = Math.max(margin, cueRect.top - margin - h);
-            popup.style.width  = `${w}px`;
-            popup.style.height = `${h}px`;
-            popup.style.left   = `${(vw - w) / 2}px`;
-            popup.style.top    = `${top}px`;
+            // maxHeight (not height) so the popup shrinks to its content
+            // — short entries don't leave a giant empty box dangling.
+            const maxH  = Math.min(420, Math.max(220, availAbove));
+            popup.style.width     = `${w}px`;
+            popup.style.height    = 'auto';
+            popup.style.maxHeight = `${maxH}px`;
+            popup.style.left      = `${(vw - w) / 2}px`;
+            popup.style.top       = `${Math.max(margin, cueRect.top - margin - maxH)}px`;
             return;
         }
 
         // Card mode: anchor below the subtitle text. Works for BOTH classic
         // image+subtitle cards AND SRT-cards (subtitle + waveform, no image).
-        // Previously this required `imageVisible && subtitleVisible` which
-        // skipped SRT-card mode and fell through to the reading-mode
-        // centered fallback — that's why the popup was covering context.
         const subtitleEl = document.querySelector('.subtitle-text');
         const subtitleVisible = subtitleEl && subtitleEl.offsetParent !== null;
         if (subtitleVisible) {
             const subRect = subtitleEl.getBoundingClientRect();
             const top = Math.max(margin, subRect.bottom + margin);
-            const maxH = Math.min(vh * 0.72, 520);
-            const h = Math.min(maxH, Math.max(180, vh - top - margin * 2));
+            const maxH = Math.min(vh * 0.72, 520, Math.max(180, vh - top - margin * 2));
             const w = Math.min(vw * 0.92, 560);
-            popup.style.width = `${w}px`;
-            popup.style.height = `${h}px`;
-            popup.style.left = `${(vw - w) / 2}px`;
-            popup.style.top = `${top}px`;
+            popup.style.width     = `${w}px`;
+            popup.style.height    = 'auto';
+            popup.style.maxHeight = `${maxH}px`;
+            popup.style.left      = `${(vw - w) / 2}px`;
+            popup.style.top       = `${top}px`;
             return;
         }
         // Reading-mode fallback: keep the popup out of the active chunk so the
         // user can still see the highlighted word being looked up.
-        const w = Math.min(vw * 0.92, 600);
+        // Smaller width than before — was covering too much of the page.
+        const w = Math.min(vw * 0.84, 460);
 
         // Find the area to avoid. Prefer the highlighted dict-frag(s); fall
         // back to the active reading-chunk; else just the touch-most-recent
@@ -1007,27 +1101,28 @@
         }
 
         // Compute available space above and below the avoid rect.
-        let h, top;
+        let maxH, top;
         if (avoid) {
             const spaceAbove = avoid.top - margin * 2;
             const spaceBelow = vh - avoid.bottom - margin * 2;
-            const maxH = Math.min(vh * 0.7, 520);
+            const cap = Math.min(vh * 0.7, 520);
             if (spaceBelow >= spaceAbove) {
-                h = Math.min(maxH, Math.max(180, spaceBelow));
-                top = Math.min(vh - h - margin, avoid.bottom + margin);
+                maxH = Math.min(cap, Math.max(180, spaceBelow));
+                top  = avoid.bottom + margin;
             } else {
-                h = Math.min(maxH, Math.max(180, spaceAbove));
-                top = Math.max(margin, avoid.top - h - margin);
+                maxH = Math.min(cap, Math.max(180, spaceAbove));
+                top  = Math.max(margin, avoid.top - maxH - margin);
             }
         } else {
-            h = Math.min(vh * 0.7, 520);
-            top = (vh - h) / 2;
+            maxH = Math.min(vh * 0.7, 520);
+            top  = (vh - maxH) / 2;
         }
 
-        popup.style.width = `${w}px`;
-        popup.style.height = `${h}px`;
-        popup.style.left = `${(vw - w) / 2}px`;
-        popup.style.top = `${Math.max(margin, top)}px`;
+        popup.style.width     = `${w}px`;
+        popup.style.height    = 'auto';
+        popup.style.maxHeight = `${maxH}px`;
+        popup.style.left      = `${(vw - w) / 2}px`;
+        popup.style.top       = `${Math.max(margin, top)}px`;
     }
 
     function getOrCreatePopup() {
@@ -1123,6 +1218,9 @@
             popup.innerHTML = '';
         }
         clearHighlight();
+        // Clear the reader's CSS Custom Highlight (set by the caret-based
+        // lookup path). Safe no-op if not in reader mode.
+        try { if (typeof window._clearReaderDictHighlight === 'function') window._clearReaderDictHighlight(); } catch (e) {}
         maybeResumeAfterLookup();
     }
 
@@ -1145,36 +1243,46 @@
         console.log(`🎨 Highlighted ${lastHovered.length} spans`);
     }
 
-    function greedyDeinflect(text, start, maxLength = 10) {
-        console.log(`🔍 Greedy deinflect at position ${start} in text: "${text.substring(start, start + 5)}..."`);
-        
-        let best = { match: text[start], base: text[start], length: 1 };
+    // `hasTermAnywhere` — checks both the in-memory legacy dictionaries
+    // Map AND the dict-store term set (lazy-loaded via dictStore migration).
+    // The in-memory check stays for the legacy fallback path; dictStore is
+    // the primary source post-migration.
+    function hasTermAnywhere(word) {
+        for (const [, entries] of dictionaries) {
+            if (entries.has(word)) return true;
+        }
+        if (window.dictStore?.termSetReady?.() && window.dictStore.hasTerm(word)) {
+            return true;
+        }
+        return false;
+    }
 
+    // Iterate longest surface first. As soon as ANY surface length has at
+    // least one valid deinflection in the dict, return — longer surface
+    // is almost always the right pick. The previous short→long sweep with
+    // "longer-base wins" let 説明した get clobbered by the noun 説き明かし
+    // (longer base entry happens to exist at the shorter "説明し" surface),
+    // and 積もらない get clobbered by single-char 積. Longest-surface-first
+    // matches what Yomitan does.
+    function greedyDeinflect(text, start, maxLength = 12) {
+        const fallback = { match: text[start], base: text[start], length: 1 };
         const searchLimit = Math.min(maxLength, text.length - start);
-        
-        for (let len = 1; len <= searchLimit; len++) {
+        for (let len = searchLimit; len >= 1; len--) {
             const surface = text.slice(start, start + len);
             const forms = getDeinflections(surface, 2);
-
+            let bestAtLen = null;
             for (const f of forms) {
-                // Check all dictionaries for this form
-                let found = false;
-                for (const [dictName, entries] of dictionaries) {
-                    if (entries.has(f.word)) {
-                        found = true;
-                        break;
-                    }
-                }
-                
-                if (found && f.word.length >= best.base.length) {
-                    console.log(`✨ Found better match: "${surface}" -> "${f.word}"`);
-                    best = { match: surface, base: f.word, length: len };
+                if (!hasTermAnywhere(f.word)) continue;
+                // Prefer longer base form (e.g., する > す for 「する」).
+                if (!bestAtLen || f.word.length > bestAtLen.word.length) {
+                    bestAtLen = f;
                 }
             }
+            if (bestAtLen) {
+                return { match: surface, base: bestAtLen.word, length: len };
+            }
         }
-
-        console.log(`🎯 Best match: "${best.match}" -> "${best.base}" (length: ${best.length})`);
-        return best;
+        return fallback;
     }
 
     // ==================== MAIN LOOKUP FUNCTION ====================
@@ -1188,12 +1296,33 @@
         }
         try {
             hidePopup();
-            
+
+            // Immediate visual feedback: show a "Looking up…" popup BEFORE
+            // any async wait so the user sees their tap registered. The
+            // termSet build (next step) can take 1–3 s on first launch and
+            // a silent wait reads as "the tap did nothing."
+            const earlyPopup = getOrCreatePopup();
+            earlyPopup.innerHTML = `
+                <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 0;">
+                    <div style="color:#4caf50;font-size:.9em;">Looking up…</div>
+                </div>`;
+            positionDictPopup(earlyPopup);
+            earlyPopup.style.display = 'block';
+
+            // Ensure dictionaries are loaded before deinflecting. Otherwise
+            // first-tap returns single-char matches because hasTermAnywhere
+            // sees empty stores. Awaits ensureJM (legacy in-memory load) OR
+            // dict-store termSet — whichever is the canonical data source.
+            try { if (window._dictLoadPromise) await window._dictLoadPromise; } catch (e) {}
+            if (window.dictStore && !window.dictStore.termSetReady?.()) {
+                try { await window.dictStore.buildTermSet(); } catch (e) {}
+            }
+
             const text = spans.map(s => s.textContent).join('');
             const charIndex = spans.slice(0, index)
                 .reduce((sum, s) => sum + s.textContent.length, 0);
             const best = greedyDeinflect(text, charIndex);
-            
+
             highlightSpans(spans, index, best.length);
             
             // Check if this is the first lookup and dictionaries aren't loaded yet
@@ -1777,13 +1906,29 @@
 
         console.log(`✅ Setting up handlers for ${spans.length} spans`);
 
-        // Add click-anywhere-to-close handler
+        // Click-anywhere-to-close (legacy desktop / non-touch path).
         document.addEventListener('click', (e) => {
             const popup = document.getElementById('dictPopup');
             if (popup && !popup.contains(e.target) && !e.target.classList.contains('dict-frag')) {
                 hidePopup();
             }
         });
+
+        // Touch path: race with shell.js's chrome-toggle on touchend. Fire
+        // FIRST (capture phase, touchstart-time) so the same gesture that
+        // would toggle the chrome instead closes the popup, and the chrome
+        // stays as-is. Without this, first tap toggled bars and only the
+        // second tap closed the popup.
+        document.addEventListener('touchstart', (e) => {
+            const popup = document.getElementById('dictPopup');
+            if (!popup || popup.style.display === 'none') return;
+            const t = e.target;
+            if (popup.contains(t)) return;
+            if (t && t.classList && t.classList.contains('dict-frag')) return;
+            hidePopup();
+            // Signal shell.js / reader to ignore this gesture.
+            window._dictPopupDismissedTs = Date.now();
+        }, { capture: true, passive: true });
 
         // Helper: bind lookupContext to the CURRENTLY DISPLAYED card before
         // each tap. Without this, the dict's Send falls back to the global
@@ -1817,57 +1962,42 @@
         }
 
         spans.forEach((span, index) => {
-            // Visual debugging
-            span.style.backgroundColor = 'rgba(255,0,0,0.1)';
-
-            // Touch handler for mobile
+            // Touch handler for mobile. We track touch motion so a SCROLL
+            // doesn't fire a lookup — on iOS, touchstart on a span is also
+            // the start of a scroll gesture, and we must not preventDefault
+            // until we know it's a tap (otherwise scrolling is dead). Track
+            // movement; only fire highlight+lookup if the finger stayed put.
+            let tsX = 0, tsY = 0, moved = false;
             span.addEventListener('touchstart', (e) => {
-                console.log(`👆 TOUCHSTART on span ${index}: "${span.textContent}"`);
+                const t = e.touches[0];
+                tsX = t ? t.clientX : 0;
+                tsY = t ? t.clientY : 0;
+                moved = false;
+                if (touchTimer) { clearTimeout(touchTimer); touchTimer = null; }
+            }, { passive: true });
+            span.addEventListener('touchmove', (e) => {
+                if (moved) return;
+                const t = e.touches[0];
+                if (!t) return;
+                const dx = Math.abs(t.clientX - tsX);
+                const dy = Math.abs(t.clientY - tsY);
+                if (dx > 8 || dy > 8) moved = true;
+            }, { passive: true });
+            span.addEventListener('touchend', (e) => {
+                if (moved) return; // scrolled, not a tap
                 e.preventDefault();
+                e.stopPropagation();
                 bindCardLookupContext();
-
-                if (touchTimer) {
-                    clearTimeout(touchTimer);
-                    touchTimer = null;
-                }
-
                 const text = spans.map(s => s.textContent).join('');
                 const charIndex = spans.slice(0, index)
                     .reduce((sum, s) => sum + s.textContent.length, 0);
                 const best = greedyDeinflect(text, charIndex);
-
                 highlightSpans(spans, index, best.length);
-            });
-
-            span.addEventListener('touchend', (e) => {
-                console.log(`👆 TOUCHEND on span ${index} - triggering lookup immediately`);
-                e.preventDefault();
-                e.stopPropagation();
-                bindCardLookupContext();
-
-                console.log(`👆 Touch lookup span ${index}: "${span.textContent}"`);
                 performLookup(spans, index);
             });
-
             span.addEventListener('touchcancel', () => {
-                console.log(`👆 TOUCHCANCEL on span ${index}`);
-                if (touchTimer) {
-                    clearTimeout(touchTimer);
-                    touchTimer = null;
-                }
+                if (touchTimer) { clearTimeout(touchTimer); touchTimer = null; }
                 clearHighlight();
-            });
-            
-            // Hover for visual feedback (desktop)
-            span.addEventListener('mouseenter', () => {
-                const popup = document.getElementById('dictPopup');
-                if (!popup || popup.style.display === 'none') {
-                    span.style.backgroundColor = 'rgba(0,255,0,0.3)';
-                }
-            });
-            
-            span.addEventListener('mouseleave', () => {
-                span.style.backgroundColor = 'rgba(255,0,0,0.1)';
             });
         });
         
@@ -1906,30 +2036,108 @@
     // ==================== MAIN INITIALIZATION ====================
     
     window.performDictLookup = async function (spans, index) {
-        // Ensure dictionaries start loading on first external use.
-        startGlobalDictionaryLoading();
+        // Ensure dictionaries start loading on first external use AND
+        // expose the promise so performLookup can await it before
+        // greedyDeinflect runs (fixes single-char matches on first tap).
+        window._dictLoadPromise = startGlobalDictionaryLoading();
         return performLookup(spans, index);
     };
 
-    window.wrapSubtitleTokens = async function() {
-        console.log('🚀 Initializing dictionary system for new card...');
-        
+    // Reader-mode dict lookup. Takes pre-computed flat text + char index
+    // (from reading-mode's caretRangeFromPoint path) and uses a caller-
+    // provided highlight painter to mark the matched span via CSS Custom
+    // Highlight API instead of mutating the chunk's DOM.
+    //
+    //   chunk:       the .reading-chunk element
+    //   textNodes:   array of Text nodes (rt/rp filtered)
+    //   flatText:    concatenation of textNodes' values
+    //   charIndex:   character offset of the tap within flatText
+    //   paintFn:     function(chunk, textNodes, charStart, length) — paints
+    //                the highlight via CSS.highlights.set
+    window.performDictLookupAtPosition = async function (chunk, textNodes, flatText, charIndex, paintFn) {
+        const loadPromise = startGlobalDictionaryLoading();
+        if (document.body.classList.contains('mode-read') && window.stats?.bumpRead) {
+            window.stats.bumpRead();
+        }
         try {
-            // Start global dictionary loading only once
-            const loadingPromise = startGlobalDictionaryLoading();
-            
+            hidePopup();
+            // Immediate feedback popup (same pattern as performLookup).
+            const earlyPopup = getOrCreatePopup();
+            earlyPopup.innerHTML = `
+                <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 0;">
+                    <div style="color:#4caf50;font-size:.9em;">Looking up…</div>
+                </div>`;
+            positionDictPopup(earlyPopup);
+            earlyPopup.style.display = 'block';
+
+            // CRITICAL: deinflection needs data. On first tap we must wait
+            // for either the in-memory `dictionaries` Map to be populated
+            // (ensureJM legacy path) or for dict-store's termSet to be
+            // built. Without this, greedyDeinflect returns single-char
+            // matches because hasTermAnywhere always returns false against
+            // empty stores (the symptom: "tapped 高かった, got just 高").
+            try { await loadPromise; } catch (e) {}
+            if (window.dictStore && !window.dictStore.termSetReady?.()) {
+                try { await window.dictStore.buildTermSet(); } catch (e) {}
+            }
+
+            const best = greedyDeinflect(flatText, charIndex);
+            // Paint via CSS Custom Highlight API — no DOM mutation.
+            if (typeof paintFn === 'function') {
+                try { paintFn(chunk, textNodes, charIndex, best.length); } catch (e) {}
+            }
+
+            const results = await multiDictionaryLookup(best.base);
+            currentLookupResults = results;
+            currentResultIndex = 0;
+
+            const popup = document.getElementById('dictPopup');
+            if (!popup) return;
+            if (!results || results.length === 0) {
+                popup.innerHTML = `
+                    <div style="padding:20px;text-align:center;">
+                        <div style="font-size:1.1em;font-weight:700;margin-bottom:8px;">${best.base}</div>
+                        <div style="color:#888;font-size:.85em;">No definition found.</div>
+                        <div style="color:#666;font-size:.7em;margin-top:12px;">Tap anywhere to close</div>
+                    </div>`;
+                positionDictPopup(popup);
+                maybePauseForLookup();
+                return;
+            }
+            popup.innerHTML = renderPopupContent(results, currentResultIndex);
+            popup.style.display = 'block';
+            positionDictPopup(popup);
+            setupAnkiHandler(results);
+            setupAudioHandler(results);
+            maybePauseForLookup();
+        } catch (e) {
+            console.error('performDictLookupAtPosition error:', e);
+        }
+    };
+
+    window.wrapSubtitleTokens = async function() {
+        console.log('🚀 Initializing card subtitle (lazy dict mode)…');
+
+        try {
+            // Lazy dict loading: do NOT kick off the dictionary load here.
+            // Wrapping subtitle chars in <span>s is cheap and tap-ready;
+            // the heavy JMDict + Yomitan IDB hydration only runs the first
+            // time the user actually taps a word (see performDictLookup).
+            // Boot warmup went from ~20 s to near-instant for users who
+            // don't immediately do a lookup.
+
             console.log('🔧 Wrapping text for current card...');
             wrapTextInSpans();
             console.log('✅ Text wrapping complete!');
-            
+
             console.log('🎯 Setting up lookup handlers...');
             setupLookupHandlers();
             console.log('✅ Lookup handlers ready!');
-            
-            // Don't wait for dictionaries - let them load in background
-            console.log('📚 Dictionaries loading in background...');
-            
-            // Optional: Wait for dictionaries to complete (but don't block UI)
+
+            // Faux promise so the existing .then().catch() chain below
+            // still works without restructuring. Resolves immediately;
+            // the real load promise lives behind performDictLookup.
+            const loadingPromise = Promise.resolve(true);
             loadingPromise.then((success) => {
                 if (success) {
                     console.log('🎉 Dictionary system fully ready!');
@@ -1968,25 +2176,30 @@
             display: inline;
         }
         
-        /* Dictionary highlight is mode-tinted. Each mode's accent gets
-           color-mixed with transparent so the highlight reads as a
-           soft tint of the mode color rather than a fixed cyan. */
+        /* Dictionary highlight: light translucent mode-color wash that lets
+           the text underneath stay readable. Forced black text + heavy fill
+           (60-70% alpha) made it look like dark blocks blurring out the
+           word being looked up — exactly the opposite of "highlight the
+           thing I tapped on". Now: 28% alpha of the mode's accent, native
+           text color inherited (white), and a 2px underline in the accent
+           so even partially-transparent picks remain visible. */
         .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 60%, transparent) !important;
-            border-radius: 3px;
-            color: #000 !important;
+            background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 28%, transparent) !important;
+            text-decoration: underline 2px var(--accent-cyan, #00ffcc) !important;
+            text-underline-offset: 3px !important;
+            border-radius: 2px;
         }
         body.mode-card  .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-card, #ff9550) 70%, transparent) !important;
-            color: #000 !important;
+            background: color-mix(in srgb, var(--accent-card, #ff9550) 28%, transparent) !important;
+            text-decoration: underline 2px var(--accent-card, #ff9550) !important;
         }
         body.mode-read  .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-read, #4caf50) 60%, transparent) !important;
-            color: #000 !important;
+            background: color-mix(in srgb, var(--accent-read, #4caf50) 28%, transparent) !important;
+            text-decoration: underline 2px var(--accent-read, #4caf50) !important;
         }
         body.mode-audio .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-audio, #b794f6) 60%, transparent) !important;
-            color: #000 !important;
+            background: color-mix(in srgb, var(--accent-audio, #b794f6) 28%, transparent) !important;
+            text-decoration: underline 2px var(--accent-audio, #b794f6) !important;
         }
         
         .subtitle-text {
@@ -2000,22 +2213,23 @@
             left: 10% !important;
             right: 10% !important;
             position: absolute !important;
-            top: calc(env(safe-area-inset-top, 0px) + var(--subtitle-offset, 0px)) !important;
+            top: calc(env(safe-area-inset-top, 0px) + var(--subtitle-offset, 30px)) !important;
             padding: 12px 20px !important;
             box-sizing: border-box !important;
             text-align: center !important;
             color: #fff !important;
         }
         
-        /* Fix maroonish-red background on dict-frag spans */
+        /* Idle dict-frag is invisible — no per-char dimming. The earlier
+           rgba(0,0,0,0.1) "fix" was actually the cause of the "very dark"
+           card-mode subtitle: it darkened every character a little, making
+           the whole sentence look muddled. Only flip backgrounds on
+           .highlight (driven by the selection logic).
+           NOTE: the :hover rule has been removed because iOS Mobile Safari
+           leaves :hover sticky on touched-and-released elements, producing
+           green smears across text after any drag/scroll. */
         .dict-frag {
-            background-color: rgba(0, 0, 0, 0.1) !important; /* Changed from rgba(255,0,0,0.1) to dark */
-        }
-        
-        @media (hover: hover) {
-            .dict-frag:hover {
-                background-color: rgba(0, 255, 0, 0.3) !important;
-            }
+            background-color: transparent !important;
         }
         
         #dictPopup {

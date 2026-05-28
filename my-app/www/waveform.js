@@ -117,7 +117,10 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
 
-    const TICK_AREA = 18; // top strip reserved for time ticks
+    // Fine-scale tick strip removed — was visual noise without adding
+     // useful info for the trim use case. Reclaim that 18px of vertical
+     // real estate for the waveform itself.
+    const TICK_AREA = 0;
     const wfStartMs = state.wfStartMs;
     const wfEndMs = state.wfEndMs;
     const wfRange = wfEndMs - wfStartMs;
@@ -139,24 +142,6 @@
     ctx.moveTo(0, midY);
     ctx.lineTo(cssW, midY);
     ctx.stroke();
-
-    // ---- time ticks (top strip) ----
-    const firstTickMs = Math.ceil(wfStartMs / TICK_MS) * TICK_MS;
-    ctx.fillStyle = '#555';
-    ctx.font = '9px ' + (getComputedStyle(document.body).getPropertyValue('--font-sans') || 'sans-serif');
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.strokeStyle = '#333';
-    for (let t = firstTickMs; t <= wfEndMs; t += TICK_MS) {
-      const x = ((t - wfStartMs) / wfRange) * cssW;
-      // Tick mark
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, 5);
-      ctx.stroke();
-      // Label (seconds, e.g. "12.5")
-      ctx.fillText((t / 1000).toFixed(1), x, 6);
-    }
 
     const buckets = state.buckets || [];
     const x0 = ((state.startMs - wfStartMs) / wfRange) * cssW;

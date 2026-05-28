@@ -2,16 +2,126 @@
   // Local audio integration for the dictionary popup.
   //
   // Layouts (themoeway "Local Audio Server for Yomitan"):
-  //   www/yomichan-audio/jpod_files/index.json
-  //   www/yomichan-audio/jpod_files/media-zips/<XX>.zip       (256 buckets)
-  //   www/yomichan-audio/shinmeikai8_files/index.json
-  //   www/yomichan-audio/shinmeikai8_files/media-zips/<NN>.zip (100 buckets)
-  //   www/yomichan-audio/nhk16_files/entries.json
-  //   www/yomichan-audio/nhk16_files/audio-zips/<SS>.zip       (60 buckets)
+  //   <base>/jpod_files/index.json
+  //   <base>/jpod_files/media-zips/<XX>.zip       (256 buckets)
+  //   <base>/shinmeikai8_files/index.json
+  //   <base>/shinmeikai8_files/media-zips/<NN>.zip (100 buckets)
+  //   <base>/nhk16_files/entries.json
+  //   <base>/nhk16_files/audio-zips/<SS>.zip       (60 buckets)
+  //
+  // <base> resolves to:
+  //   - Android: `yomichan-audio/...` — bundled in the APK alongside www/.
+  //   - iOS:     `Documents/yomichan-audio/...` after the user sideloads
+  //              the archive via Preferences → Audio archive → Import.
+  //              We fetch via Capacitor.convertFileSrc() which routes
+  //              through WKWebView's local file scheme.
   //
   // The originals exceed the APK ZIP central-directory limit (65,535 entries),
   // so MP3s ship in per-source bucket zips and we extract on demand with
   // JSZip + an LRU cache.
+
+  // Resolve the on-disk base directory for audio archives. On iOS we read
+  // the Documents path that ArchiveExtractor wrote when the user finished
+  // their .tar import. Cached after first resolve so per-lookup overhead
+  // stays at a Map.get(), not a bridge round-trip.
+  let resolvedBase = null;       // string or null
+  let resolveBasePromise = null; // dedupe concurrent first-lookup probes
+  function ensureResolvedBase() {
+    if (resolvedBase !== null) return Promise.resolve(resolvedBase);
+    if (resolveBasePromise) return resolveBasePromise;
+    resolveBasePromise = (async () => {
+      // 1) Preferences pref written by audio-archive.js when the user
+      //    extracted a .tar through the importer.
+      try {
+        if (window.Capacitor?.Plugins?.Preferences) {
+          const r = await window.Capacitor.Plugins.Preferences.get({ key: 'YOMICHAN_AUDIO_DIR' });
+          if (r.value) {
+            console.log(`[local-audio] base from Preferences: ${r.value}`);
+            resolvedBase = r.value;
+            return r.value;
+          }
+        }
+      } catch (e) {}
+      // 2) Fallback: if the user manually dragged files into
+      //    "On My iPhone → AnkiDeckReader → yomichan-audio" via Files.app,
+      //    no pref is set. Discover the path via the Filesystem plugin
+      //    (DOCUMENTS dir + "yomichan-audio").
+      try {
+        if (window.Capacitor?.Plugins?.Filesystem?.getUri) {
+          const u = await window.Capacitor.Plugins.Filesystem.getUri({
+            directory: 'DOCUMENTS',
+            path: 'yomichan-audio'
+          });
+          if (u?.uri) {
+            // Filesystem.getUri returns file:// — strip it; convertFileSrc
+            // wants a raw filesystem path on iOS.
+            const path = u.uri.replace(/^file:\/\//, '');
+            console.log(`[local-audio] base via Filesystem.getUri: ${path}`);
+            resolvedBase = path;
+            return path;
+          }
+        }
+      } catch (e) {
+        console.warn('[local-audio] Filesystem.getUri fallback failed:', e?.message);
+      }
+      // 3) Final fallback: relative path (Android bundles audio at
+      //    www/yomichan-audio/...).
+      resolvedBase = '';
+      return '';
+    })();
+    return resolveBasePromise;
+  }
+
+  // Probe-and-cache the actual subdirectory layout inside the extracted
+  // archive. The community archive (e.g. local-yomichan-audio-collection-
+  // 2023-06-11-mp3.tar) nests the source folders under a `user_files/`
+  // subdir; other distributions put them at the top level. We test which
+  // one works on first lookup per source and remember it.
+  const _layoutCache = new Map(); // src.id → resolved sub-path prefix
+  async function probeLayout(src) {
+    if (_layoutCache.has(src.id)) return _layoutCache.get(src.id);
+    const base = await ensureResolvedBase();
+    const candidates = base && window.Capacitor?.convertFileSrc
+      ? [
+          // Strip the bundled-Android prefix once, then try both layouts.
+          `${base}/${src.base.replace(/^yomichan-audio\/?/, '')}`,                // <root>/jpod_files
+          `${base}/user_files/${src.base.replace(/^yomichan-audio\/?/, '')}`,     // <root>/user_files/jpod_files
+        ]
+      : [src.base];
+    for (const cand of candidates) {
+      const probeUrl = window.Capacitor?.convertFileSrc
+        ? (cand.startsWith('http') || cand.startsWith('capacitor://')
+           ? `${cand}/${src.indexFile}`
+           : `${window.Capacitor.convertFileSrc(`${cand}/${src.indexFile}`)}`)
+        : `${cand}/${src.indexFile}`;
+      try {
+        const res = await fetch(probeUrl);
+        if (res.ok) {
+          _layoutCache.set(src.id, cand);
+          console.log(`[local-audio] ${src.id} resolved to ${cand} (probe ${res.status})`);
+          return cand;
+        }
+        console.log(`[local-audio] ${src.id} probe ${res.status} at ${probeUrl}`);
+      } catch (e) {
+        console.warn(`[local-audio] ${src.id} probe failed at ${probeUrl}:`, e?.message);
+      }
+    }
+    // Probe failed everywhere — cache the most-likely candidate so we
+    // don't re-probe on every lookup. Lookups will 404 and log.
+    const fallback = candidates[candidates.length - 1] || `${src.base}`;
+    _layoutCache.set(src.id, fallback);
+    console.warn(`[local-audio] ${src.id} could not resolve, using ${fallback}`);
+    return fallback;
+  }
+
+  async function resolveSrcURL(src, sub) {
+    const prefix = await probeLayout(src);
+    const path = `${prefix}/${sub}`;
+    if (window.Capacitor?.convertFileSrc && (await ensureResolvedBase())) {
+      return window.Capacitor.convertFileSrc(path);
+    }
+    return path;
+  }
 
   const SOURCES = [
     {
@@ -75,7 +185,8 @@
     if (src.indexLoaded) return src.indexLoaded;
     src.indexLoaded = (async () => {
       try {
-        const res = await fetch(`${src.base}/${src.indexFile}`);
+        const url = await resolveSrcURL(src, src.indexFile);
+        const res = await fetch(url);
         if (!res.ok) throw new Error(`fetch ${src.indexFile}: ${res.status}`);
         const json = await res.json();
         let idx;
@@ -110,7 +221,7 @@
       return null;
     }
     try {
-      const url = `${src.base}/${src.bucketsDir}/${bucketKey}.zip`;
+      const url = await resolveSrcURL(src, `${src.bucketsDir}/${bucketKey}.zip`);
       const res = await fetch(url);
       if (!res.ok) {
         console.warn(`[local-audio] bucket fetch failed ${cacheKey}: ${res.status}`);

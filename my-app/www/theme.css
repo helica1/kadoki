@@ -100,6 +100,18 @@ html, body {
   text-underline-offset: 4px;
   color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
 }
+/* Reader dictionary lookup highlight — used in place of dict-frag spans.
+   Painted by reading-mode's lookupAtPoint via CSS.highlights.set, with no
+   DOM mutation, so iOS WKWebView never has to relayout the chunk's render
+   tree (previously the DOM-wrap path triggered the "screen goes black"
+   crash in vertical-rl). */
+::highlight(reader-dict-lookup) {
+  background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.28));
+  text-decoration: underline solid var(--accent-read, #4caf50) 2px;
+  text-underline-offset: 3px;
+  border-radius: 2px;
+}
+
 /* User can opt in to translucent-fill style via Preferences → Read. */
 body.highlight-bg ::highlight(cue-active) {
   background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.4));
@@ -574,7 +586,14 @@ body.chrome-hidden #progressBar {
   overscroll-behavior: contain;
 }
 #cardContainer .subtitle-text {
-  max-height: none;
+  /* Cap long subtitles so the waveform + COPY button below them stay
+     visible. Without this, a very long card expression pushed the whole
+     bottom-row UI off-screen. The internal scroll lets the user read
+     the full text without breaking layout. */
+  max-height: 55vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   word-break: break-word;
   overflow-wrap: anywhere;
 }

@@ -92,6 +92,9 @@
       if (!started) return;   // skip very first event if we haven't recorded a start
       if (moved) return;
       if (Date.now() - tStart > 350) return;
+      // If a dict-popup outside-tap dismissed the popup in the same gesture,
+      // the user's intent was "close the popup," not "toggle chrome." Skip.
+      if (window._dictPopupDismissedTs && Date.now() - window._dictPopupDismissedTs < 500) return;
       const t = e.target;
       if (!t || !t.closest) return;
       // Skip shell + interactive + popups/modals.
@@ -177,6 +180,8 @@
   function inferActiveMode() {
     const ab = document.getElementById('audiobookModeView');
     if (ab && ab.style.display !== 'none') return 'audio';
+    const rdPaged = document.getElementById('readingPagedView');
+    if (rdPaged && rdPaged.style.display !== 'none') return 'read';
     const rd = document.getElementById('readingModeView');
     if (rd && rd.style.display !== 'none') return 'read';
     return 'card';

@@ -20,7 +20,8 @@ class MainViewController: CAPBridgeViewController {
         bridge.registerPluginInstance(AudioSlicerPlugin())
         bridge.registerPluginInstance(AnkiBridgePlugin())
         bridge.registerPluginInstance(FileAccessNativePlugin())
-        NSLog("[MainViewController] registered 4 app-target plugins")
+        bridge.registerPluginInstance(ArchiveExtractorPlugin())
+        NSLog("[MainViewController] registered 5 app-target plugins")
 
         // Boot the AnkiMediaServer eagerly while we're guaranteed to be on
         // the main thread (CAPBridgeViewController lifecycle). GCDWebServer

@@ -23,15 +23,15 @@
   const TIMEOUT_READ_SEC = 120;
 
   const timers = {
-    card:  { totalSec: 0, cards: 0, lastInteraction: 0, runningSince: 0 },
-    read:  { totalSec: 0,           lastInteraction: 0, runningSince: 0 },
-    audio: { totalSec: 0,                                runningSince: 0 },
+    card:  { totalSec: 0, cards: 0, chars: 0, lastInteraction: 0, runningSince: 0 },
+    read:  { totalSec: 0,                      lastInteraction: 0, runningSince: 0 },
+    audio: { totalSec: 0,                                           runningSince: 0 },
   };
 
   function persistableShape(mode) {
     const t = timers[mode];
     const out = { totalSec: t.totalSec };
-    if (mode === 'card') out.cards = t.cards;
+    if (mode === 'card') { out.cards = t.cards; out.chars = t.chars; }
     return out;
   }
   function persist(mode) {
@@ -45,6 +45,7 @@
         const o = JSON.parse(raw);
         if (Number.isFinite(o.totalSec)) timers[mode].totalSec = o.totalSec;
         if (mode === 'card' && Number.isFinite(o.cards)) timers[mode].cards = o.cards;
+        if (mode === 'card' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
       } catch (e) {}
       timers[mode].runningSince = 0;
     }
@@ -202,12 +203,17 @@
   }
   function isRunning(mode) { return !!timers[mode].runningSince; }
   function incrementCardCount() { timers.card.cards++; persist('card'); }
+  function incrementCardChars(n) {
+    if (!Number.isFinite(n) || n <= 0) return;
+    timers.card.chars += n;
+    persist('card');
+  }
   function resetAll() {
     for (const m of Object.keys(timers)) {
       const t = timers[m];
       t.totalSec = 0;
       t.runningSince = 0;
-      if (m === 'card') t.cards = 0;
+      if (m === 'card') { t.cards = 0; t.chars = 0; }
       persist(m);
     }
   }
@@ -216,7 +222,7 @@
     if (!t) return;
     t.totalSec = 0;
     t.runningSince = 0;
-    if (mode === 'card') t.cards = 0;
+    if (mode === 'card') { t.cards = 0; t.chars = 0; }
     persist(mode);
   }
 
@@ -248,7 +254,9 @@
     getReadSec:  () => liveTotal('read'),
     getAudioSec: () => liveTotal('audio'),
     getCardCount: () => timers.card.cards,
+    getCardChars: () => timers.card.chars,
     incrementCardCount,
+    incrementCardChars,
     touch, bumpRead, resetAll, resetMode, persist,
     stopAll, startMode, stopMode,
     currentMode,

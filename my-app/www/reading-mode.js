@@ -215,10 +215,23 @@
       #readingModeContent .reading-chunk.active {
         color: color-mix(in srgb, var(--accent-read, #4caf50) 75%, white 25%);
       }
-      /* No chunk-level outlines — pending + active visuals are drawn at
-         the SRT-cue granularity via CSS Custom Highlight. */
+      /* Up-swipe selection: paint the chunk in mode color so the user
+         sees that the swipe registered. The cue-precise highlight (CSS
+         Custom Highlight API) draws on top for the exact cue range when
+         abChunkToCue has a mapping. This chunk-level style is the fallback
+         when the cue map is missing OR when CSS.highlights isn't supported. */
       #readingModeContent .reading-chunk.long-press-armed { /* no-op */ }
-      #readingModeContent .reading-chunk.pending { /* no-op */ }
+      #readingModeContent .reading-chunk.pending {
+        background-color: color-mix(in srgb, var(--accent-read, #4caf50) 14%, transparent);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-read, #4caf50) 50%, transparent);
+        border-radius: 4px;
+      }
+      /* When a cue-precise highlight IS active, drop the chunk-level tint
+         so the cue underline isn't competing with a colored box. */
+      body.has-cue-highlight #readingModeContent .reading-chunk.pending {
+        background-color: transparent;
+        box-shadow: none;
+      }
       #readingModeContent, #readingModeContent .reading-chunk {
         -webkit-user-select: none;
         user-select: none;
@@ -299,10 +312,16 @@
     ]);
     document.documentElement.style.setProperty('--reader-font', font || 'serif');
     document.documentElement.style.setProperty('--reader-font-size', (size || '1.875') + 'rem');
-    // Vertical writing mode is now the only mode. Horizontal mode was
-    // removed because its left-right scroll interfered with the up/down
-    // swipe gestures (start/stop, select-to-Anki).
-    applyVertical(true);
+    // Writing mode: vertical-rl on Android (Chromium WebView has solid
+    // support), horizontal on iOS. iOS WKWebView has chronic vertical-rl
+    // layout bugs — the chunk's backing store gets corrupted whenever a
+    // popup opens / a CSS var changes / any reflow happens, producing
+    // the "screen goes black after dict opens" report. Going horizontal
+    // sidesteps the entire bug class. The gesture map still works:
+    // up/down scroll = page advance, FAST up/down swipe (thresholded by
+    // SWIPE_MIN_DELTA + SWIPE_MAX_TIME) = Anki / play.
+    const isIOS = window.Capacitor?.getPlatform?.() === 'ios';
+    applyVertical(!isIOS);
     applyHighlightColor(hi || DEFAULT_HIGHLIGHT);
     // Default to STOP at cue end. User must explicitly enable
     // auto-advance via the Preferences toggle (auto === 'true').
@@ -407,8 +426,13 @@
   };
 
   const LONG_PRESS_MS = 500;
-  const SWIPE_MIN_DELTA = 60;     // px
-  const SWIPE_MAX_TIME = 400;     // ms
+  // Looser thresholds — the user reported having to swipe 2-3 times before
+  // down-swipe-to-play registered. 60px / 400ms missed slow swipes on
+  // vertical-rl content. 36px / 700ms catches the natural finger motion
+  // without producing false positives against actual scroll (which still
+  // sets the `moved` flag and short-circuits at touchend).
+  const SWIPE_MIN_DELTA = 36;     // px
+  const SWIPE_MAX_TIME = 700;     // ms
   let longPressTimer = null;
   let longPressFired = false;
   let floatingControlsTimer = null;
@@ -418,10 +442,16 @@
   let progressBarShown = false;
 
   function clearPendingChunk() {
-    if (pendingChunk) {
-      pendingChunk.classList.remove('pending');
-      pendingChunk = null;
+    // Sweep all .pending chunks, not just the tracked one. Same race
+    // protection as clearActiveHighlight — pendingChunk can fall out of
+    // sync with the DOM during fast scroll on iOS, leaving green-tinted
+    // chunks stranded across the page (the smear the user keeps seeing).
+    const content = document.getElementById('readingModeContent');
+    if (content) {
+      content.querySelectorAll('.reading-chunk.pending').forEach(el =>
+        el.classList.remove('pending'));
     }
+    pendingChunk = null;
     try { if (window.CSS?.highlights) CSS.highlights.delete('cue-pending'); } catch (e) {}
   }
 
@@ -624,9 +654,17 @@
     await window.sendToAnki({ expression: finalText, imageData, audioData });
   }
 
-  // Lazy: wrap a chunk's text in per-char dict-frag spans (skipping rt/rp).
-  function wrapChunkForLookup(chunk) {
-    if (!chunk || chunk.dataset.lookupWrapped === '1') return;
+  // NO-OP placeholder for backward compatibility — the reader no longer
+  // wraps chunks into per-char spans. caretRangeFromPoint + CSS Custom
+  // Highlight API replaced the wrap path so iOS WKWebView never has to
+  // relayout the chunk's render tree in vertical-rl (the source of the
+  // "screen goes black after dictionary opens" crash).
+  function wrapChunkForLookup() { /* deprecated */ }
+
+  // Walk the chunk's text nodes in display order, skipping rt/rp (ruby
+  // readings). Returns { textNodes, flatText } where flatText is the
+  // concatenation of nodeValues — used to compute char-level offsets.
+  function flattenChunkText(chunk) {
     const walker = document.createTreeWalker(chunk, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         let cur = node.parentNode;
@@ -638,47 +676,126 @@
       }
     });
     const textNodes = [];
+    let flatText = '';
     let n;
-    while (n = walker.nextNode()) textNodes.push(n);
-    for (const tn of textNodes) {
-      const frag = document.createDocumentFragment();
-      for (const ch of tn.nodeValue) {
-        const sp = document.createElement('span');
-        sp.className = 'dict-frag';
-        sp.textContent = ch;
-        frag.appendChild(sp);
-      }
-      tn.parentNode.replaceChild(frag, tn);
-    }
-    chunk.dataset.lookupWrapped = '1';
+    while ((n = walker.nextNode())) { textNodes.push(n); flatText += n.nodeValue; }
+    return { textNodes, flatText };
   }
 
+  // Paint the lookup highlight via CSS Custom Highlight API. No DOM
+  // mutation — the chunk's render tree is untouched.
+  function setReaderDictHighlight(chunk, textNodes, charStart, length) {
+    if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
+    if (!textNodes.length) { CSS.highlights.delete('reader-dict-lookup'); return; }
+    let acc = 0, sNode = null, sOff = 0, eNode = null, eOff = 0;
+    const charEnd = charStart + length;
+    for (const node of textNodes) {
+      const next = acc + node.nodeValue.length;
+      if (sNode === null && charStart < next) {
+        sNode = node; sOff = charStart - acc;
+      }
+      if (charEnd <= next) {
+        eNode = node; eOff = charEnd - acc; break;
+      }
+      acc = next;
+    }
+    if (!sNode) { CSS.highlights.delete('reader-dict-lookup'); return; }
+    if (!eNode) {
+      eNode = textNodes[textNodes.length - 1];
+      eOff = eNode.nodeValue.length;
+    }
+    try {
+      const range = new Range();
+      range.setStart(sNode, sOff);
+      range.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
+      CSS.highlights.set('reader-dict-lookup', new Highlight(range));
+    } catch (e) {
+      try { CSS.highlights.delete('reader-dict-lookup'); } catch (er) {}
+    }
+  }
+  function clearReaderDictHighlight() {
+    try { CSS.highlights?.delete?.('reader-dict-lookup'); } catch (e) {}
+  }
+  // Expose so dict popup-close can clear it.
+  window._clearReaderDictHighlight = clearReaderDictHighlight;
+
   async function lookupAtPoint(chunk, x, y) {
-    if (typeof window.performDictLookup !== 'function') {
-      rlog('Dictionary not available (performDictLookup missing)');
+    if (typeof window.performDictLookupAtPosition !== 'function') {
+      rlog('Dictionary not available (performDictLookupAtPosition missing)');
       return;
     }
-    // Save scroll position before wrapping chars in <span> — that DOM
-    // mutation triggers a layout pass that iOS WebKit resets to origin
-    // in vertical-rl mode (visible to the user as "lookup teleports me
-    // to the beginning of the book"). Restore on the next two frames so
-    // we catch both the immediate reflow and any deferred ones.
-    const content = document.getElementById('readingModeContent');
-    const savedLeft = content?.scrollLeft;
-    const savedTop  = content?.scrollTop;
-    wrapChunkForLookup(chunk);
-    const restoreScroll = () => {
-      if (!content) return;
-      if (Number.isFinite(savedLeft) && content.scrollLeft !== savedLeft) content.scrollLeft = savedLeft;
-      if (Number.isFinite(savedTop)  && content.scrollTop  !== savedTop ) content.scrollTop  = savedTop;
-    };
-    requestAnimationFrame(() => { restoreScroll(); requestAnimationFrame(restoreScroll); });
-    const target = document.elementFromPoint(x, y);
-    if (!target || !target.classList.contains('dict-frag')) return;
-    if (!chunk.contains(target)) return;
-    const spans = Array.from(chunk.querySelectorAll('.dict-frag'));
-    const idx = spans.indexOf(target);
-    if (idx < 0) return;
+    rlog(`lookupAtPoint x=${x} y=${y} chunk=${chunks.indexOf(chunk)}`);
+    // Flatten the chunk's text upfront — we'll use this either as the
+    // direct source of truth, or as the fallback if caretRangeFromPoint
+    // can't resolve cleanly on iOS.
+    const { textNodes, flatText } = flattenChunkText(chunk);
+    if (!textNodes.length || !flatText) {
+      rlog('lookupAtPoint: chunk has no text nodes');
+      return;
+    }
+
+    // Try caretRangeFromPoint. iOS WKWebView sometimes returns a Range
+    // whose startContainer is an element (e.g. a wrapping <ruby> base
+    // span); when that happens, walk into the first text descendant.
+    const caret = (document.caretRangeFromPoint?.(x, y)) ||
+                  (document.caretPositionFromPoint?.(x, y));
+    let node = caret ? (caret.startContainer || caret.offsetNode) : null;
+    let offset = caret ? ((caret.startContainer ? caret.startOffset : caret.offset) | 0) : 0;
+    if (node && node.nodeType !== 3) {
+      // Walk down to first text node, prefer one in our chunk.
+      const tw = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+      const t = tw.nextNode();
+      if (t && chunk.contains(t)) { node = t; offset = 0; }
+      else { node = null; }
+    }
+
+    // If caret didn't land cleanly inside our chunk, fall back to a
+    // bounding-rect search: walk every text node in the chunk and find
+    // the character whose client rect contains (x, y).
+    let charIndex = -1;
+    if (node && chunk.contains(node)) {
+      // Skip if on rt/rp.
+      let p = node.parentNode, skip = false;
+      while (p && p !== chunk) {
+        if (p.tagName === 'RT' || p.tagName === 'RP') { skip = true; break; }
+        p = p.parentNode;
+      }
+      if (!skip) {
+        let acc = 0;
+        for (const tn of textNodes) {
+          if (tn === node) { charIndex = acc + offset; break; }
+          acc += tn.nodeValue.length;
+        }
+      }
+    }
+    if (charIndex < 0 || charIndex >= flatText.length) {
+      // Fallback: use Range bounding rects to find the char under (x,y).
+      const r = new Range();
+      let acc = 0;
+      outer:
+      for (const tn of textNodes) {
+        for (let i = 0; i < tn.nodeValue.length; i++) {
+          r.setStart(tn, i);
+          r.setEnd(tn, i + 1);
+          const rect = r.getBoundingClientRect();
+          if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+            charIndex = acc + i;
+            break outer;
+          }
+        }
+        acc += tn.nodeValue.length;
+      }
+      // Last resort: tap was on a chunk but no exact char — use chunk start.
+      if (charIndex < 0) {
+        rlog(`lookupAtPoint: caret + bounding-rect both failed, using chunk start`);
+        charIndex = 0;
+      } else {
+        rlog(`lookupAtPoint: bounding-rect fallback found char ${charIndex}`);
+      }
+    } else {
+      rlog(`lookupAtPoint: caret resolved char ${charIndex}`);
+    }
+    if (charIndex >= flatText.length) charIndex = flatText.length - 1;
 
     // Establish Anki context: sentence, card AND audiobook cue range
     // come from the TAPPED chunk — not from whatever cue happens to be
@@ -731,7 +848,7 @@
     };
 
     try {
-      await window.performDictLookup(spans, idx);
+      await window.performDictLookupAtPosition(chunk, textNodes, flatText, charIndex, setReaderDictHighlight);
     } catch (e) {
       rlog(`Dictionary error: ${e.message}`);
     }
@@ -899,6 +1016,12 @@
     content.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
       markInteraction();
+      // Clear any stale pending-chunk selection from a prior swipe — it
+      // shouldn't linger across a fresh scroll. Without this, the user
+      // saw green-tinted chunks accumulating as they scrolled through
+      // the book after even one accidental up-swipe.
+      if (typeof clearPendingChunk === 'function') clearPendingChunk();
+      hideSelectionActionPopup();
       // If the dictionary popup is open, any tap inside the EPUB content area
       // should close it (and NOT trigger a new lookup or any other gesture).
       const popup = document.getElementById('dictPopup');
@@ -932,7 +1055,11 @@
       if (!e.touches?.[0]) return;
       const dx = Math.abs(e.touches[0].clientX - xStart);
       const dy = Math.abs(e.touches[0].clientY - yStart);
-      if (dx > 10 || dy > 10) {
+      // 16px threshold (was 10) — iOS touch reports a few px of jitter on
+      // a stationary finger, and the 10px gate was killing dict lookups
+      // in horizontal mode (any pre-touchend movement turned tap → scroll
+      // and bailed before reaching lookupAtPoint).
+      if (dx > 16 || dy > 16) {
         moved = true;
         clearLongPress();
       }
@@ -957,16 +1084,27 @@
       const dy = touch ? (touch.clientY - yStart) : 0;
       const adx = Math.abs(dx), ady = Math.abs(dy);
 
-      // Fast vertical swipe → gesture (independent of any scroll that happened).
-      if (dt < SWIPE_MAX_TIME && ady > SWIPE_MIN_DELTA && ady > adx * 1.5) {
-        if (dy < 0) {
-          // Up-swipe: only meaningful on a chunk.
-          if (targetChunk) handleUpSwipe(targetChunk);
-        } else {
-          // Down-swipe: pause/play, or play from pending region.
-          handleDownSwipe();
+      // Gesture axis depends on writing mode:
+      //   vertical-rl (Android): page advance is horizontal scroll, so a
+      //     fast VERTICAL swipe is a free gesture. Up = select-to-Anki,
+      //     down = play/pause.
+      //   horizontal (iOS): page advance is vertical scroll, so a fast
+      //     HORIZONTAL swipe is the free gesture. Left = select-to-Anki,
+      //     right = play/pause. (Up/down swipes would collide with scroll
+      //     intent.)
+      const isVertical = content.classList.contains('vertical');
+      if (isVertical) {
+        if (dt < SWIPE_MAX_TIME && ady > SWIPE_MIN_DELTA && ady > adx * 2 && adx < 24) {
+          if (dy < 0) { if (targetChunk) handleUpSwipe(targetChunk); }
+          else        { handleDownSwipe(); }
+          return;
         }
-        return;
+      } else {
+        if (dt < SWIPE_MAX_TIME && adx > SWIPE_MIN_DELTA && adx > ady * 2 && ady < 24) {
+          if (dx < 0) { if (targetChunk) handleUpSwipe(targetChunk); }
+          else        { handleDownSwipe(); }
+          return;
+        }
       }
 
       if (moved) return; // ordinary scroll/drag
@@ -1021,6 +1159,13 @@
 
     setText('statsCardTime',  formatSec(cardSec));
     setText('statsCardCount', s.getCardCount().toLocaleString());
+    const cardChars = (typeof s.getCardChars === 'function') ? s.getCardChars() : 0;
+    setText('statsCardChars', cardChars.toLocaleString());
+    if (cardSec < 1 || cardChars === 0) {
+      setText('statsCardRate', '—');
+    } else {
+      setText('statsCardRate', Math.round(cardChars / (cardSec / 3600)).toLocaleString());
+    }
     setRunning('statsCard', s.isRunning('card'));
 
     setText('statsReadTime',  formatSec(readSec));
@@ -1431,8 +1576,16 @@
   };
 
   function clearActiveHighlight() {
-    if (lastMatchedIdx >= 0 && chunks[lastMatchedIdx]) {
-      chunks[lastMatchedIdx].classList.remove('active');
+    // Belt-and-suspenders: the "green smear" the user has been seeing
+    // through every iteration is multiple chunks carrying the .active
+    // class simultaneously — `lastMatchedIdx` gets out of sync with the
+    // DOM during fast iOS scroll, and the old single-index cleanup leaves
+    // orphaned green chunks behind. Sweep the whole tree so the invariant
+    // ("at most one .active chunk") is guaranteed regardless of any race.
+    const content = document.getElementById('readingModeContent');
+    if (content) {
+      content.querySelectorAll('.reading-chunk.active').forEach(el =>
+        el.classList.remove('active'));
     }
   }
 
@@ -1580,17 +1733,20 @@
     const container = document.getElementById('readingModeContent');
     if (!container) return;
     const isVertical = container.classList.contains('vertical');
-    // In vertical-rl, iOS WebKit's scrollIntoView misbehaves spectacularly
-    // (often scrolls scrollLeft to a value where ALL content is off-screen,
-    // producing a totally-black viewport). Skip the scroll for routine
-    // cue-driven follow updates — the highlight + text-color recolor is
-    // enough signal. Only explicit "go here" requests (instantScroll or
-    // scrollCenter, set by syncReaderToCurrentPosition or progress-bar
-    // jumps) get to scroll.
-    const explicitScroll = !!(el.dataset._instantScroll || el.dataset._scrollCenter);
-    if (isVertical && !explicitScroll) {
+    // In vertical-rl, iOS WebKit's scrollIntoView blanks the viewport
+    // catastrophically — even with explicit instantScroll/scrollCenter
+    // hints we couldn't get a working centered position. SKIP scrolling
+    // entirely in vertical-rl; the .active class + text-color recolor
+    // make the chunk findable, and the user manually scrolls.
+    // (We still do the early-return for non-explicit updates in
+    // horizontal mode for parity with the user's Android workflow.)
+    if (isVertical) {
+      // Clear the dataset flags so they don't pile up.
+      delete el.dataset._instantScroll;
+      delete el.dataset._scrollCenter;
       return;
     }
+    const explicitScroll = !!(el.dataset._instantScroll || el.dataset._scrollCenter);
     const cRect = container.getBoundingClientRect();
     const eRect = el.getBoundingClientRect();
     const tol = 2; // px tolerance for "fully visible"
@@ -2642,25 +2798,22 @@
           }
         }
       }
-      // Use the furthest-past chunk as the reading-position cursor so the
-      // progress bar / current-position label follows scroll even without
-      // audio-driven setActive. ALSO toggle the visual `.active` class so
-      // the chunk is highlighted (was tracked logically but invisible).
+      // Use the furthest-past chunk as the reading-position cursor for
+      // progress / position-save purposes only — do NOT paint a visible
+      // .active class during scroll. iOS WKWebView race conditions
+      // between scroll events and class toggles produce a "green smear"
+      // where every chunk swiped past stays green. The audio-driven
+      // setActive() still paints a cursor when audio is playing; pure
+      // scroll without audio just doesn't get a visible marker, which
+      // is the right trade — readers don't want their text recolored
+      // as they read.
       if (furthestPastIdx >= 0) {
         if (furthestPastIdx !== lastMatchedIdx) {
-          // Lightweight active-class toggle — DON'T use setActive() here
-          // because it scroll-into-views and would fight the user's own
-          // scrolling. Just paint the highlight.
+          // Belt-and-suspenders: still sweep stale .active classes so any
+          // residue from a prior code path can't strand green text.
           clearActiveHighlight();
-          // Also drop any stale cue-precise highlight + the body class
-          // that hides the chunk-level highlight; otherwise the user
-          // sees no visual indicator when no audio cue is current.
           clearCueHighlight();
-          const el = chunks[furthestPastIdx];
-          if (el) el.classList.add('active');
           lastMatchedIdx = furthestPastIdx;
-          // Publish cue range so audio/card-mode sync to scroll position
-          // when the user switches tabs.
           publishChunkCueRange(furthestPastIdx);
         }
         try {

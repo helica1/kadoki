@@ -385,7 +385,13 @@
     const subtitleOffsetSlider = document.getElementById('subtitleOffsetSlider');
     const subtitleOffsetLabel = document.getElementById('subtitleOffsetLabel');
     if (subtitleOffsetSlider) {
-      const savedOffset = parseInt(await getPref(PREF_KEYS.SUBTITLE_OFFSET)) || 0;
+      // Default 30px so the subtitle clears the shell top bar instead
+      // of starting flush at the safe-area inset (where it was hidden).
+      const raw = await getPref(PREF_KEYS.SUBTITLE_OFFSET);
+      const savedOffset = (raw === null || raw === undefined || raw === '')
+        ? 30
+        : (parseInt(raw) || 0);
+      applySubtitleOffset(savedOffset);
       subtitleOffsetSlider.value = savedOffset;
       if (subtitleOffsetLabel) subtitleOffsetLabel.textContent = savedOffset + 'px';
     }
@@ -455,11 +461,26 @@
   };
 
   // ---- Dictionary manager (enable + reorder + import) ----
-  function buildDictionarySection() {
+  async function buildDictionarySection() {
     const host = document.getElementById('prefsDictList');
     if (!host) return;
-    const names = (typeof window.getLoadedDictionaryNames === 'function')
+    // After dict-store migration, the in-memory `dictionaries` Map can be
+    // empty (lookups go straight to IDB). Merge both sources so dicts
+    // imported into the store show up in the manager.
+    const memNames = (typeof window.getLoadedDictionaryNames === 'function')
       ? window.getLoadedDictionaryNames() : [];
+    let storeNames = [];
+    try {
+      if (window.dictStore?.list) {
+        const meta = await window.dictStore.list();
+        storeNames = meta.map(m => m.dictName);
+      }
+    } catch (e) {}
+    const seen = new Set();
+    const names = [];
+    for (const n of [...memNames, ...storeNames]) {
+      if (!seen.has(n)) { seen.add(n); names.push(n); }
+    }
     const ordered = window.dictPrefs ? window.dictPrefs.orderedNames(names) : names;
     const importedSet = new Set((typeof window.listImportedDictionaries === 'function')
       ? window.listImportedDictionaries() : []);
@@ -532,16 +553,30 @@
       const f = input.files?.[0];
       if (!f) return;
       const status = document.getElementById('dictImportStatus');
-      if (status) status.textContent = 'Reading ' + f.name + '…';
+      const setStatus = (msg) => { if (status) status.textContent = msg; };
+      setStatus('Reading ' + f.name + '…');
       try {
         const buf = await f.arrayBuffer();
-        if (status) status.textContent = 'Parsing…';
-        const name = await window.importYomitanDictionaryFromBuffer(buf, { fallbackName: f.name });
-        if (status) status.textContent = `Imported "${name}".`;
+        const phaseLabel = {
+          unzip: 'Unzipping…',
+          parse: 'Parsing entries',
+          cache: 'Saving cache…',
+          index: 'Indexing',
+          done:  'Imported'
+        };
+        const name = await window.importYomitanDictionaryFromBuffer(buf, {
+          fallbackName: f.name,
+          onProgress: (p) => {
+            const pct = Math.floor((p.pct || 0) * 100);
+            const label = phaseLabel[p.phase] || p.phase;
+            setStatus(`${label} ${pct}%`);
+          }
+        });
+        setStatus(`Imported "${name}".`);
         buildDictionarySection();
       } catch (e) {
         console.error('Dict import failed:', e);
-        if (status) status.textContent = 'Failed: ' + (e?.message || e);
+        setStatus('Failed: ' + (e?.message || e));
       }
     };
     input.click();
@@ -703,7 +738,13 @@
     const subtitleOffsetSlider = document.getElementById('subtitleOffsetSlider');
     const subtitleOffsetLabel = document.getElementById('subtitleOffsetLabel');
     if (subtitleOffsetSlider) {
-      const savedOffset = parseInt(await getPref(PREF_KEYS.SUBTITLE_OFFSET)) || 0;
+      // Default 30px so the subtitle clears the shell top bar instead
+      // of starting flush at the safe-area inset (where it was hidden).
+      const raw = await getPref(PREF_KEYS.SUBTITLE_OFFSET);
+      const savedOffset = (raw === null || raw === undefined || raw === '')
+        ? 30
+        : (parseInt(raw) || 0);
+      applySubtitleOffset(savedOffset);
       subtitleOffsetSlider.value = savedOffset;
       if (subtitleOffsetLabel) subtitleOffsetLabel.textContent = savedOffset + 'px';
     }
@@ -765,8 +806,15 @@
     if (typeof window.setGlobalPlaybackRate === 'function') {
       setTimeout(() => window.setGlobalPlaybackRate(r), 100);
     }
+    // Apply subtitle offset on launch. Default 30px when never set so the
+    // subtitle clears the top bar; the user can adjust in Preferences →
+    // Card mode → Subtitle vertical offset.
     const initialSubtitleOffset = await getPref(PREF_KEYS.SUBTITLE_OFFSET);
-    if (initialSubtitleOffset != null) applySubtitleOffset(initialSubtitleOffset);
+    if (initialSubtitleOffset != null && initialSubtitleOffset !== '') {
+      applySubtitleOffset(initialSubtitleOffset);
+    } else {
+      applySubtitleOffset(30);
+    }
   }
 
   applyStartupPrefs();

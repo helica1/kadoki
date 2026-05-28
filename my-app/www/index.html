@@ -176,9 +176,10 @@
       text-align: center;
       position: relative;
       margin-bottom: 64px; /* Added margin to account for bottom bars */
-      /* Reserve top safe-area + subtitle space so the image never overlaps
-         the subtitle or sits behind the Dynamic Island. */
-      padding-top: calc(env(safe-area-inset-top, 0px) + 12px);
+      /* Push subtitle clear of the shell's top bar (~58px tall on iPhone
+         once you add the safe-area inset). The subtitle is order:1 in this
+         container, so the padding-top reserves the gap directly. */
+      padding-top: calc(env(safe-area-inset-top, 0px) + 72px);
       box-sizing: border-box;
     }
 
@@ -782,11 +783,81 @@ body.dimmed .card-image {
 
         <!-- ===== DICTIONARIES ===== -->
         <details class="prefs-section">
+          <summary class="prefs-heading">Paged reader (experimental)</summary>
+          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;">
+            Vertical-rl Japanese text with native horizontal scroll and
+            snap-to-paragraph. Built on TTU's continuous-vertical pattern.
+            Tap LEFT 25% = next page, RIGHT 25% = prev, middle = dict
+            lookup, UP-swipe = send to Anki.
+            <br><br>
+            Choice persists across launches: once you tap "Use paged
+            reader", the READ tab opens it automatically.
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button onclick="(function(){
+                    if(window.openPagedReader) window.openPagedReader();
+                    var m=document.getElementById('preferencesModal'); if(m) m.style.display='none';
+                  })()"
+                    style="background:transparent;color:var(--accent-read,#4caf50);
+                           border:1px solid var(--accent-read,#4caf50);
+                           padding:10px 16px;border-radius:8px;font-weight:600;
+                           font-family:var(--font-sans);font-size:.88rem;
+                           cursor:pointer;">
+              Use paged reader
+            </button>
+            <button onclick="(function(){
+                    if(window.disablePagedReader) window.disablePagedReader();
+                    var m=document.getElementById('preferencesModal'); if(m) m.style.display='none';
+                  })()"
+                    style="background:transparent;color:var(--text-muted,#888);
+                           border:1px solid #555;
+                           padding:10px 16px;border-radius:8px;font-weight:600;
+                           font-family:var(--font-sans);font-size:.88rem;
+                           cursor:pointer;">
+              Switch to legacy reader
+            </button>
+          </div>
+        </details>
+
+        <details class="prefs-section">
           <summary class="prefs-heading">Dictionaries</summary>
           <div style="font-size:.74rem;color:#777;margin:4px 0 8px;">
             Toggle dictionaries on/off and drag-reorder. Order is the search priority (top first).
           </div>
           <div id="prefsDictList"></div>
+        </details>
+
+        <!-- ===== AUDIO ARCHIVE (iOS sideload) ===== -->
+        <details class="prefs-section">
+          <summary class="prefs-heading">Audio archive</summary>
+          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;">
+            On iOS, the per-word audio archive is sideloaded as a single
+            <code>.tar</code> file (the unpacked form would be too many
+            individual files to transfer over USB). On your Mac:
+            <code>xz -d local-yomichan.tar.xz</code> → drop the resulting
+            <code>local-yomichan.tar</code> into this app via Finder's Files
+            tab → tap Import below. Extraction takes ~30 seconds and frees
+            the .tar after success.
+          </div>
+          <div id="prefsAudioArchiveStatus" style="font-size:.78rem;color:#aaa;margin:8px 0;"></div>
+          <button id="prefsAudioArchiveImport"
+                  style="background:transparent;color:var(--accent-cyan,#00ffcc);
+                         border:1px solid var(--accent-cyan,#00ffcc);
+                         padding:10px 16px;border-radius:8px;font-weight:600;
+                         font-family:var(--font-sans);font-size:.88rem;
+                         cursor:pointer;">
+            Import .tar
+          </button>
+          <div id="prefsAudioArchiveProgress" style="display:none;margin-top:12px;">
+            <div style="display:flex;justify-content:space-between;font-size:.75rem;color:#aaa;margin-bottom:4px;">
+              <span id="prefsAudioArchiveProgressLabel">Extracting…</span>
+              <span id="prefsAudioArchiveProgressPct">0%</span>
+            </div>
+            <div style="height:6px;background:#222;border-radius:3px;overflow:hidden;">
+              <div id="prefsAudioArchiveProgressFill"
+                   style="height:100%;width:0%;background:var(--accent-cyan,#00ffcc);transition:width 0.2s;"></div>
+            </div>
+          </div>
         </details>
 
         <!-- ===== ANKI: SWIPE-UP ===== -->
@@ -838,8 +909,8 @@ body.dimmed .card-image {
         <details class="prefs-section">
           <summary class="prefs-heading">Card mode</summary>
           <div class="prefs-row">
-            <label>Subtitle vertical offset <span id="subtitleOffsetLabel" style="color:#fff;font-weight:bold;">0px</span></label>
-            <input id="subtitleOffsetSlider" type="range" min="0" max="150" step="1" value="0"
+            <label>Subtitle vertical offset <span id="subtitleOffsetLabel" style="color:#fff;font-weight:bold;">30px</span></label>
+            <input id="subtitleOffsetSlider" type="range" min="0" max="150" step="1" value="30"
                    oninput="document.getElementById('subtitleOffsetLabel').textContent=this.value+'px';document.documentElement.style.setProperty('--subtitle-offset',this.value+'px');">
           </div>
           <div class="prefs-row">
@@ -921,6 +992,10 @@ body.dimmed .card-image {
 
   <!-- Reading Mode View -->
   <div id="readingModeView" style="display:none;position:fixed;inset:0;background:#000000;z-index:2700;flex-direction:column;">
+    <!-- Notch mask: opaque strip covering the Dynamic Island / status bar.
+         Sits ABOVE the toolbar (z-index higher) so even when the chrome is
+         hidden, text scrolling up never appears behind the notch cutout. -->
+    <div id="readingModeNotchMask" style="position:absolute;top:0;left:0;right:0;height:env(safe-area-inset-top, 0px);background:#000000;z-index:3;pointer-events:none;"></div>
     <div id="readingModeToolbar" style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:10px;padding:14px 14px;padding-top:calc(14px + env(safe-area-inset-top, 0px));background:rgba(17,17,17,0.95);border-bottom:1px solid #333;z-index:2;flex-wrap:wrap;transform:translateY(0);transition:transform 0.22s ease;">
       <button onclick="pickReadingEpub()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;">📂</button>
       <button id="readingPlayPauseBtn" onclick="window.toggleReadingPlaybackUI && window.toggleReadingPlaybackUI()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;min-width:56px;">▶</button>
@@ -950,8 +1025,11 @@ body.dimmed .card-image {
       <span id="audiobookTitle" style="color:#ccc;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No audiobook loaded</span>
       <span id="audiobookTimeLabel" style="color:#00ffcc;font-size:14px;font-variant-numeric:tabular-nums;min-width:110px;text-align:right;">–:–– / –:––</span>
     </div>
-    <div id="audiobookContent" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px 24px;overflow:auto;gap:16px;">
-      <img id="audiobookCardImage" alt="" style="max-width:80%;max-height:45vh;border-radius:8px;display:none;object-fit:contain;">
+    <div id="audiobookContent" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:calc(56px + env(safe-area-inset-top, 0px)) 24px 16px;overflow:auto;gap:16px;">
+      <!-- Fixed-height image slot so cue-text length changes don't reflow
+           the image (the "jiggle" the user noticed when subtitles grew /
+           shrank). Smaller default (35vh) since the cue is the focus. -->
+      <img id="audiobookCardImage" alt="" style="width:60%;max-width:280px;height:35vh;border-radius:8px;display:none;object-fit:contain;flex-shrink:0;">
       <div id="audiobookCueText" style="text-align:center;font-size:1.6rem;line-height:1.7;font-family:var(--reader-font,serif);">
         Pick an audiobook + SRT in reading settings, then tap ▶ Audiobook Mode.
       </div>
@@ -1024,9 +1102,17 @@ body.dimmed .card-image {
             <span class="stat-label">Time</span>
             <span id="statsCardTime" class="stat-value">0:00</span>
           </div>
-          <div class="stat-row stat-row-last">
+          <div class="stat-row">
             <span class="stat-label">Cards advanced</span>
             <span id="statsCardCount" class="stat-value">0</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Chars read</span>
+            <span id="statsCardChars" class="stat-value">0</span>
+          </div>
+          <div class="stat-row stat-row-last">
+            <span class="stat-label">Chars / hr</span>
+            <span id="statsCardRate" class="stat-value">—</span>
           </div>
         </div>
         <!-- READ -->
@@ -1126,7 +1212,9 @@ body.dimmed .card-image {
   <script src="sql-wasm.js"></script>
   <script src="app.js"></script>
   <script src="sendToAnkiConnect.js"></script>
+  <script src="dict-store.js"></script>
   <script src="preferences.js"></script>
+  <script src="audio-archive.js"></script>
   <script src="dict-cache.js"></script>
   <script src="dict-prefs.js"></script>
   <script src="title-store.js"></script>
@@ -1137,6 +1225,8 @@ body.dimmed .card-image {
   <script src="srt-parser.js"></script>
   <script src="waveform.js"></script>
   <script src="reading-mode.js"></script>
+  <script src="reading-mode-paged.js"></script>
+
   <script src="shell.js"></script>
   
   <script>

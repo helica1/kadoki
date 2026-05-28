@@ -919,8 +919,15 @@ function updateCardIndex(newIndex) {
       window.titleStore.setCardIndex(window._activeTitleId, newIndex).catch(() => {});
     }
     // Stats: a card advance counts toward the card-mode counter (even if
-    // it came from a swipe in card mode or a cross-mode sync).
+    // it came from a swipe in card mode or a cross-mode sync). Also count
+    // characters from the NEW card's expression so chars/hr reflects real
+    // reading throughput, not just card flips.
     if (window.stats?.incrementCardCount) window.stats.incrementCardCount();
+    if (window.stats?.incrementCardChars) {
+      const newCard = allNotes[newIndex];
+      const txt = newCard?.expression || '';
+      if (txt) window.stats.incrementCardChars(txt.length);
+    }
 
     displayCard();
     updateProgressBar();
@@ -2301,7 +2308,7 @@ async function displayCard() {
   if (card.isSrtCard) {
     container.innerHTML = `
       <div class="subtitle-text">${card.expression}</div>
-      <div id="srtCardWaveform" style="width:90%;max-width:520px;margin:auto auto 24px auto;order:2;align-self:center;flex:0 0 auto;"></div>
+      <div id="srtCardWaveform" style="width:90%;max-width:520px;margin:auto auto calc(96px + env(safe-area-inset-bottom, 0px)) auto;order:2;align-self:center;flex:0 0 auto;"></div>
     `;
     if (window.wrapSubtitleTokens) window.wrapSubtitleTokens();
     if (window.syncReadingToCard) {
@@ -2426,8 +2433,11 @@ function setupSwipe() {
     setTimeout(() => {
       try {
         const inReadingView = (target) => {
+          if (!target) return false;
+          const paged = document.getElementById('readingPagedView');
+          if (paged && paged.style.display !== 'none' && paged.contains(target)) return true;
           const view = document.getElementById('readingModeView');
-          return !!(view && view.style.display !== 'none' && target && view.contains(target));
+          return !!(view && view.style.display !== 'none' && view.contains(target));
         };
         const libraryOpen = () => {
           const lib = document.getElementById('libraryPage');
@@ -3037,6 +3047,20 @@ async function loadCounters() {
 
 window.addEventListener('DOMContentLoaded', () => {
   loadCounters();
+  // Pre-warm the dict-store term set so the first dictionary lookup
+  // doesn't block on a multi-second IDB scan. Fire-and-forget — by the
+  // time the user taps a word, the Set is ready and greedyDeinflect
+  // resolves verbs synchronously. Without this, first taps appeared to
+  // do nothing in card mode (the await was silent, the user impatient).
+  setTimeout(() => {
+    try {
+      if (window.dictStore?.isPopulated && window.dictStore?.buildTermSet) {
+        window.dictStore.isPopulated().then(ok => {
+          if (ok) window.dictStore.buildTermSet();
+        });
+      }
+    } catch (e) {}
+  }, 500);
 });
 
 /* Periodic persistence */
