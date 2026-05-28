@@ -1059,15 +1059,14 @@
     if (!chunk) return;
     const range = setCueRangeHighlight(chunk, cue.text);
     if (!range || !scrollEl) return;
-    // Grace logic: honor the 5-second user-scroll window ONLY when the
-    // new cue intersects the viewport at all. If the user wandered far
-    // away and the new cue is completely off-screen, override the grace
-    // so the highlight finds its way back to them at the start of a new
-    // line of audio.
-    const rr = range.getBoundingClientRect();
-    const sr = scrollEl.getBoundingClientRect();
-    const fullyOffscreen = rr.right <= sr.left || rr.left >= sr.right;
-    if (!fullyOffscreen && Date.now() - lastUserScrollTime < 5000) return;
+    // No user-scroll grace gate here — this hook only fires when the
+    // cue INDEX changes (the earlier `idx === lastHighlightedCue` early
+    // return guarantees that). Every new cue is a fresh chance to snap,
+    // and autoScrollForRange itself returns early when the cue is fully
+    // visible, so cues that DO fit on the current page never trigger a
+    // scroll regardless of grace. The grace check used to swallow new
+    // cues that landed partially off-screen right after a manual pan,
+    // which the user perceived as "doesn't snap until later."
     autoScrollForRange(range);
   };
 
