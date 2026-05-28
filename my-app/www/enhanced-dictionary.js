@@ -672,6 +672,8 @@
         // common conjugated verbs/adjs (高かった → 高い) failed to resolve
         // because the user's 2 monolingual dicts didn't have 高い but
         // JMDict did. Merging guarantees coverage.
+        const _t0 = performance.now();
+        const ms = () => Math.round(performance.now() - _t0);
         const results = [];
         const seen = new Set(); // dedupe by `${dictName}::${term}`
 
@@ -679,12 +681,14 @@
         if (await isDictStoreReady()) {
             try {
                 const meta = await window.dictStore.list();
+                console.log(`⏱   [lookup] dictStore.list: +${ms()}ms`);
                 const allNames = meta.map(m => m.dictName);
                 const ordered = (window.dictPrefs?.orderedNames)
                   ? window.dictPrefs.orderedNames(allNames)
                   : allNames;
                 const enabled = enabledNameSet(allNames);
                 const records = await window.dictStore.lookup(term, { enabledDicts: enabled });
+                console.log(`⏱   [lookup] dictStore.lookup("${term}"): +${ms()}ms → ${records.length} records`);
                 const orderIdx = new Map(ordered.map((n, i) => [n, i]));
                 records.sort((a, b) => (orderIdx.get(a.dictName) ?? 999) - (orderIdx.get(b.dictName) ?? 999));
                 for (const r of records) {
@@ -708,6 +712,7 @@
         // not yet migrated to dictStore, this is the only place to find
         // its entries. If a dict appears in BOTH paths, the seen-set
         // ensures we don't duplicate.
+        const _memT = performance.now();
         if (dictionaries.size > 0) {
             const allNames = Array.from(dictionaries.keys());
             const ordered = (window.dictPrefs?.orderedNames)
@@ -737,8 +742,9 @@
             // load-time perf, not correctness.
             Promise.resolve().then(migrateInMemoryToStore);
         }
+        console.log(`⏱   [lookup] in-memory scan: +${Math.round(performance.now() - _memT)}ms (${dictionaries.size} dicts)`);
 
-        console.log(`🔍 Found ${results.length} results for "${term}" (store+mem)`);
+        console.log(`🔍 Found ${results.length} results for "${term}" (store+mem) total +${ms()}ms`);
         return results;
     }
 
@@ -836,7 +842,14 @@
         rulesLoaded = true;
     }
 
+    let _deinflectDebugLogged = false;
     function getDeinflections(surface, maxDepth = 3) {
+        // One-shot diagnostic: confirm rules array state on first call.
+        if (!_deinflectDebugLogged) {
+            _deinflectDebugLogged = true;
+            const sample = rules.slice(0, 3).map(r => `${r.in}→${r.out}`).join(', ');
+            console.log(`[deinflect] rules.length=${rules.length} sample=[${sample}] rulesLoaded=${rulesLoaded}`);
+        }
         const results = new Map();
         results.set(surface, { word: surface, depth: 0, reason: null });
 
@@ -844,7 +857,7 @@
 
         while (queue.length) {
             const cur = queue.shift();
-            
+
             if (cur.depth >= maxDepth) continue;
 
             for (const rule of rules) {
@@ -1316,6 +1329,30 @@
     // (longer base entry happens to exist at the shorter "説明し" surface),
     // and 積もらない get clobbered by single-char 積. Longest-surface-first
     // matches what Yomitan does.
+    // Translate a candidate deinflected base into the term the dict
+    // ACTUALLY indexes by. dictStore stores headwords as `term` (often
+    // kanji, e.g., 頷く), and the kana reading (うなずく) lives inside
+    // the entry. The reading→term map built at termSet-build time lets
+    // us map deinflected kana bases back to the canonical kanji term so
+    // the subsequent multiDictionaryLookup actually finds the entry.
+    function canonicalLookupTerm(word) {
+        // Legacy in-memory dicts use the literal key, so any word found
+        // in the in-memory Map is canonical there.
+        for (const [, entries] of dictionaries) {
+            if (entries.has(word)) return word;
+        }
+        // dictStore: term-set hit means either it IS the term or it's
+        // only a reading. termForReading returns the kanji form if so;
+        // null if the word is a direct term.
+        if (window.dictStore?.termSetReady?.()) {
+            if (window.dictStore.hasTerm?.(word)) {
+                const fromReading = window.dictStore.termForReading?.(word);
+                return fromReading || word;
+            }
+        }
+        return word;
+    }
+
     function greedyDeinflect(text, start, maxLength = 12) {
         const fallback = { match: text[start], base: text[start], length: 1 };
         const searchLimit = Math.min(maxLength, text.length - start);
@@ -1325,13 +1362,15 @@
             let bestAtLen = null;
             for (const f of forms) {
                 if (!hasTermAnywhere(f.word)) continue;
-                // Prefer longer base form (e.g., する > す for 「する」).
                 if (!bestAtLen || f.word.length > bestAtLen.word.length) {
                     bestAtLen = f;
                 }
             }
             if (bestAtLen) {
-                return { match: surface, base: bestAtLen.word, length: len };
+                // Translate kana base → canonical kanji headword if the
+                // term is only known via the reading map.
+                const base = canonicalLookupTerm(bestAtLen.word);
+                return { match: surface, base, length: len };
             }
         }
         return fallback;
@@ -1340,7 +1379,23 @@
     // ==================== MAIN LOOKUP FUNCTION ====================
     
     async function performLookup(spans, index) {
+        const _t0 = performance.now();
+        const lap = (label) => console.log(`⏱ ${label}: +${Math.round(performance.now() - _t0)}ms`);
         console.log(`🚀 Performing multi-dictionary lookup for span ${index}...`);
+        // Kick off dict loading from inside performLookup, not just from
+        // the wrapper window.performDictLookup. Card-mode dict-frag taps
+        // call performLookup DIRECTLY (see the touchend handler in
+        // setupDictFragHandlers), bypassing the wrapper — and the
+        // wrapper was the only spot that set window._dictLoadPromise.
+        // Without this line, the touchend path never triggered
+        // startGlobalDictionaryLoading, so loadDeinflectRules never ran
+        // and rules.length stayed at 0 forever. That's why every
+        // inflected verb collapsed to a 1-char hit: getDeinflections
+        // had an empty rule array and could only return the identity
+        // surface.
+        if (!window._dictLoadPromise) {
+            window._dictLoadPromise = startGlobalDictionaryLoading();
+        }
         // Read-mode active-reading signal: looking up a word is a clear
         // sign of active reading, so start the read timer.
         if (document.body.classList.contains('mode-read') && window.stats?.bumpRead) {
@@ -1360,22 +1415,27 @@
                 </div>`;
             positionDictPopup(earlyPopup);
             earlyPopup.style.display = 'block';
+            lap('earlyPopup shown');
 
             // Ensure dictionaries are loaded before deinflecting. Otherwise
             // first-tap returns single-char matches because hasTermAnywhere
             // sees empty stores. Awaits ensureJM (legacy in-memory load) OR
             // dict-store termSet — whichever is the canonical data source.
             try { if (window._dictLoadPromise) await window._dictLoadPromise; } catch (e) {}
+            lap('after _dictLoadPromise');
             if (window.dictStore && !window.dictStore.termSetReady?.()) {
                 try { await window.dictStore.buildTermSet(); } catch (e) {}
             }
+            lap('after buildTermSet');
 
             const text = spans.map(s => s.textContent).join('');
             const charIndex = spans.slice(0, index)
                 .reduce((sum, s) => sum + s.textContent.length, 0);
             const best = greedyDeinflect(text, charIndex);
+            lap(`greedyDeinflect → "${best.base}" (${best.length}ch)`);
 
             highlightSpans(spans, index, best.length);
+            lap('highlightSpans');
             
             // Check if this is the first lookup and dictionaries aren't loaded yet
             const isFirstLookup = !dictLoaded;
@@ -1414,6 +1474,7 @@
             
             // Multi-dictionary lookup (this will load dictionaries on first call)
             const results = await multiDictionaryLookup(best.base);
+            lap(`multiDictionaryLookup → ${results.length} results`);
             currentLookupResults = results;
             currentResultIndex = 0;
             
@@ -2129,10 +2190,10 @@
         if (dictionaryLoadingStarted) {
             return dictionaryLoadingPromise; // Return existing promise
         }
-        
+
         dictionaryLoadingStarted = true;
         console.log('🌐 Starting global dictionary loading (one time only)...');
-        
+
         dictionaryLoadingPromise = (async () => {
             try {
                 await Promise.all([loadDeinflectRules(), ensureJM()]);
@@ -2144,9 +2205,16 @@
                 return false;
             }
         })();
-        
+
         return dictionaryLoadingPromise;
     }
+
+    // Eagerly kick off dictionary loading at script-evaluation time, so
+    // the rules + termSet are warm by the time the user navigates to a
+    // deck and taps their first word. This used to live somewhere
+    // implicit and clearly got lost in a refactor; making it explicit
+    // here so we don't lose it again.
+    window._dictLoadPromise = startGlobalDictionaryLoading();
 
     // ==================== MAIN INITIALIZATION ====================
     
@@ -2203,12 +2271,7 @@
             }
 
             // Cancellation: if another tap fired while we were awaiting
-            // dict load, abandon this stale lookup. The earlier "slow
-            // walk" fallback did dozens of async lookups per tap and
-            // every queued tap ran them all in series — produced the
-            // "Loading… flash then queued definitions pop up seconds
-            // later" symptom. Now: one fast greedyDeinflect + one
-            // lookup, and a token check so we never paint a stale result.
+            // dict load, abandon this stale lookup.
             if (token !== currentLookupToken) return;
 
             const best = greedyDeinflect(flatText, charIndex);

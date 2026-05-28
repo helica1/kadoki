@@ -3047,20 +3047,20 @@ async function loadCounters() {
 
 window.addEventListener('DOMContentLoaded', () => {
   loadCounters();
-  // Pre-warm the dict-store term set so the first dictionary lookup
-  // doesn't block on a multi-second IDB scan. Fire-and-forget — by the
-  // time the user taps a word, the Set is ready and greedyDeinflect
-  // resolves verbs synchronously. Without this, first taps appeared to
-  // do nothing in card mode (the await was silent, the user impatient).
-  setTimeout(() => {
-    try {
-      if (window.dictStore?.isPopulated && window.dictStore?.buildTermSet) {
-        window.dictStore.isPopulated().then(ok => {
-          if (ok) window.dictStore.buildTermSet();
-        });
-      }
-    } catch (e) {}
-  }, 500);
+  // Pre-warm the dict-store term set IMMEDIATELY at boot so the first
+  // dictionary lookup doesn't block on the ~5 s IDB cursor scan. Fire-
+  // and-forget — by the time the user finishes navigating into a deck
+  // and tapping their first word, the Set is ready and greedyDeinflect
+  // resolves synchronously. Skipping the previous 500 ms setTimeout
+  // because that just stacked atop the build duration; nothing else on
+  // the main thread needs that prelude window.
+  try {
+    if (window.dictStore?.isPopulated && window.dictStore?.buildTermSet) {
+      window.dictStore.isPopulated().then(ok => {
+        if (ok) window.dictStore.buildTermSet();
+      });
+    }
+  } catch (e) {}
 });
 
 /* Periodic persistence */

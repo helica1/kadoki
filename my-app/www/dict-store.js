@@ -246,29 +246,75 @@
   // once and check it sync. ~200k entries × ~10 bytes = 2 MB of heap —
   // a fair price for instant deinflection.
   let _termSet = null;
+  let _readingToTerm = null;  // Map<reading, canonicalTerm> for deinflection lookup
   let _termSetPromise = null;
   function termSetReady() { return _termSet !== null; }
-  function hasTerm(term) { return _termSet ? _termSet.has(term) : false; }
+  function hasTerm(term) {
+    if (!_termSet) return false;
+    if (_termSet.has(term)) return true;
+    // ALSO consult the reading map — dict entries store the headword
+    // as `term` (often kanji like 頷く) and the kana reading inside the
+    // entry array. The deinflector produces base forms in kana
+    // (うなずいた → うなずく), so without this map hasTerm("うなずく")
+    // would always return false and the parser fell back to 2-char うな.
+    return _readingToTerm ? _readingToTerm.has(term) : false;
+  }
+  // Given a reading (e.g., うなずく), return the canonical term that the
+  // dict actually stores (e.g., 頷く). Used by greedyDeinflect's caller
+  // to translate a deinflected kana base into a key dictStore.lookup
+  // can actually find. Returns null if not known.
+  function termForReading(reading) {
+    return _readingToTerm ? (_readingToTerm.get(reading) || null) : null;
+  }
   async function buildTermSet() {
     if (_termSet) return _termSet;
     if (_termSetPromise) return _termSetPromise;
     _termSetPromise = (async () => {
+      const t0 = performance.now();
       const db = await openDb();
+      // openCursor (full records, not just keys) so we can pull both
+      // the `term` AND extract the kana reading from `entry`. Slower
+      // per iteration than openKeyCursor but absolutely necessary —
+      // without the reading map, deinflected kana base forms (うなずく)
+      // can never be matched to dict entries indexed by kanji (頷く).
       const set = new Set();
+      const r2t = new Map();
       await new Promise((resolve) => {
-        const tx = db.transaction(ENTRIES, 'readonly');
-        // Cursor on the `by_term` index returns one row per stored
-        // entry — we only need the key (term), not the value.
-        const req = tx.objectStore(ENTRIES).index('by_term').openKeyCursor();
-        req.onsuccess = (e) => {
-          const c = e.target.result;
-          if (c) { set.add(c.key); c.continue(); }
-          else { resolve(); }
-        };
-        req.onerror = () => resolve();
+        try {
+          const tx = db.transaction(ENTRIES, 'readonly');
+          const req = tx.objectStore(ENTRIES).openCursor();
+          req.onsuccess = (e) => {
+            const c = e.target.result;
+            if (c) {
+              const rec = c.value;
+              if (rec?.term) set.add(rec.term);
+              // Yomitan entry: [term, reading, defTags, ruleTags, score, defs, ...]
+              // JMDict entry: { headwords: [...], sense: [...] } (no .reading at root)
+              const entry = rec?.entry;
+              let reading = null;
+              if (Array.isArray(entry) && entry.length >= 2 && typeof entry[1] === 'string') {
+                reading = entry[1];
+              } else if (entry && typeof entry === 'object' && Array.isArray(entry.headwords)) {
+                // JMDict-style: pull the first kana reading. We don't need
+                // all of them — the deinflector only ever produces one.
+                for (const h of entry.headwords) {
+                  if (h?.kana && typeof h.kana === 'string') { reading = h.kana; break; }
+                  if (h?.reading && typeof h.reading === 'string') { reading = h.reading; break; }
+                }
+              }
+              if (reading && reading !== rec.term && !r2t.has(reading)) {
+                r2t.set(reading, rec.term);
+              }
+              c.continue();
+            } else { resolve(); }
+          };
+          req.onerror = () => resolve();
+        } catch (e) { resolve(); }
       });
       _termSet = set;
-      console.log(`[dict-store] termSet built: ${set.size} headwords`);
+      _readingToTerm = r2t;
+      const ms = Math.round(performance.now() - t0);
+      console.log(`[dict-store] termSet built: ${set.size} terms, ${r2t.size} readings in ${ms}ms`);
       return set;
     })();
     return _termSetPromise;
