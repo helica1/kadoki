@@ -50,6 +50,11 @@
   let pagedCueToChunk = null;// cue index → paged chunk index
   let lastHighlightedCue = -1;
   let bgListenerHandle = null;
+  // Shared Highlight instance for the 'cue-active' key. Reused across
+  // every paint so WebKit's invalidator sees a single object whose
+  // range set changes, instead of a fresh Highlight per cue (which left
+  // ghost paints in iOS WKWebView during scroll animations).
+  let activeCueHighlight = null;
   // Auto-scroll grace period: don't yank the view back if the user
   // manually scrolled within the last 5 seconds.
   let lastUserScrollTime = 0;
@@ -392,13 +397,23 @@
       log(`centerOnActiveCard: card ${idx}, chunk found, highlighting`);
       // Paint the highlight FIRST so the user sees the new active sentence
       // immediately, even before any scroll animation completes.
-      setCueRangeHighlight(chunk, card.expression);
-      // Then scroll if needed, respecting user-scroll grace period (5 s
-      // since user manually scrolled = "they're reading independently,
-      // don't yank back"). openView resets lastUserScrollTime so the
-      // initial enter always centers correctly.
+      const range = setCueRangeHighlight(chunk, card.expression);
+      // Then scroll if any part of the highlight overflows the viewport,
+      // respecting the user-scroll grace period (5 s = "they're reading
+      // independently, don't yank back"). openView resets
+      // lastUserScrollTime so the initial enter always centers correctly.
       if (Date.now() - lastUserScrollTime < 5000) return;
-      if (!isChunkVisible(chunk)) {
+      // For the initial center-on-card we want full-on centering even if
+      // the chunk itself is partly off-screen with no highlight overflow
+      // yet. Fall back to chunk-based scroll if range overflow is zero
+      // but the chunk isn't visible.
+      const rangeRect = range?.getBoundingClientRect();
+      const sr = scrollEl?.getBoundingClientRect();
+      const rangeOverflows = !!(range && rangeRect && sr &&
+        (rangeRect.left < sr.left || rangeRect.right > sr.right));
+      if (rangeOverflows) {
+        autoScrollForRange(range);
+      } else if (!isChunkVisible(chunk)) {
         lastProgrammaticScrollTime = Date.now();
         scrollChunkIntoView(chunk);
       }
@@ -709,32 +724,14 @@
   }
 
   async function attachBgListener() {
-    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
-    if (!bg?.addListener) { log('attachBgListener: no BackgroundAudio plugin'); return; }
-    if (!bgListenerHandle) {
-      try {
-        await bg.addListener('position', (d) => {
-          if (!viewEl || viewEl.style.display === 'none') return;
-          onPositionUpdate(d?.positionMs || 0);
-        });
-        bgListenerHandle = true;
-        log('Paged reader: BG audio listener attached');
-      } catch (e) {
-        log('attachBgListener: addListener failed:', e?.message);
-      }
-    }
-    // Initial paint based on current state.
-    try {
-      if (typeof bg.getState === 'function') {
-        const s = await bg.getState();
-        log(`attachBgListener: initial getState positionMs=${s?.positionMs}`);
-        if (s && Number.isFinite(s.positionMs)) {
-          lastHighlightedCue = -1;
-          onPositionUpdate(s.positionMs);
-        }
-      }
-    } catch (e) { log('attachBgListener: getState failed:', e?.message); }
-
+    // No-op now that highlight sync is driven by the legacy reader's
+    // 'position' handler via the window.__onPagedCueUpdate hook. Keeping
+    // a stub so the call site in openView still works. We intentionally
+    // do NOT register a second listener — two listeners both painted
+    // 'cue-active' with potentially different cue indices (legacy's
+    // abCues vs paged's pagedCues can map differently), producing the
+    // multi-highlight artifact the user reported.
+    log('attachBgListener: deferring to legacy position handler + __onPagedCueUpdate hook');
   }
 
   function onPositionUpdate(positionMs) {
@@ -755,6 +752,7 @@
   }
 
   function clearCueHighlight() {
+    try { activeCueHighlight?.clear?.(); } catch (e) {}
     try { CSS.highlights?.delete?.('cue-active'); } catch (e) {}
     try { CSS.highlights?.delete?.('cue-pending'); } catch (e) {}
     document.body.classList.remove('has-cue-highlight');
@@ -774,17 +772,9 @@
       log(`paintCueHighlight: no chunk for cue ${cueIdx} "${cue.text.slice(0, 20)}"`);
       return;
     }
-    setCueRangeHighlight(chunk, cue.text);
-    // Auto-scroll only when the cue's chunk has left the viewport
-    // entirely. Within a paragraph (same chunk, multiple cues), the
-    // highlight moves but the chunk stays visible and we don't scroll.
-    // 5-second user-scroll grace period prevents yank-back during
-    // manual reading.
+    const range = setCueRangeHighlight(chunk, cue.text);
     if (Date.now() - lastUserScrollTime < 5000) return;
-    if (!isChunkVisible(chunk)) {
-      lastProgrammaticScrollTime = Date.now();
-      scrollChunkIntoView(chunk);
-    }
+    autoScrollForRange(range);
   }
 
   // Set a CSS Custom Highlight on the exact cue text within the chunk.
@@ -816,14 +806,24 @@
     if (normStart < 0) { clearCueHighlight(); return; }
     const normEnd = normStart + normCue.length;
     // Map normalized indices back to raw indices in `flat`.
+    // Two off-by-ones to avoid:
+    //  1. rawStart must skip LEADING strip chars — when normStart lands at
+    //     a sentence boundary, the previous sentence's trailing 。 occupies
+    //     the same normalized position as the current sentence's first
+    //     char, and setting rawStart there paints the previous period.
+    //  2. rawEnd must EXTEND OVER trailing strip chars — the cue text from
+    //     the SRT includes the closing 。/、 but normalizeJP strips them,
+    //     so the loop stops one char early and the closing punctuation
+    //     stays unhighlighted.
     const STRIP = /[\s　「」『』、。・…！？!?,.;:""'']/;
     let rawStart = -1, rawEnd = flat.length, np = 0;
     for (let i = 0; i < flat.length; i++) {
-      if (rawStart < 0 && np >= normStart) rawStart = i;
+      if (rawStart < 0 && np >= normStart && !STRIP.test(flat[i])) rawStart = i;
       if (np >= normEnd) { rawEnd = i; break; }
       if (!STRIP.test(flat[i])) np++;
     }
     if (rawStart < 0) { clearCueHighlight(); return; }
+    while (rawEnd < flat.length && STRIP.test(flat[rawEnd])) rawEnd++;
     // Convert raw index → (text node, offset).
     let acc = 0, sNode = null, sOff = 0, eNode = null, eOff = 0;
     for (const tn of textNodes) {
@@ -832,15 +832,77 @@
       if (rawEnd <= next) { eNode = tn; eOff = rawEnd - acc; break; }
       acc = next;
     }
-    if (!sNode) return;
+    if (!sNode) return null;
     if (!eNode) { eNode = textNodes[textNodes.length - 1]; eOff = eNode.nodeValue.length; }
     try {
       const r = new Range();
       r.setStart(sNode, sOff);
       r.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
-      CSS.highlights.set('cue-active', new Highlight(r));
+      // Reuse a single Highlight across all paints — clear its range
+      // set, then add the new one, then re-set on the registry. Creating
+      // a fresh Highlight via `new Highlight(r)` + replace caused
+      // residual "ghost" green ranges to linger in iOS WKWebView, as if
+      // the previous Highlight's painted region was never invalidated.
+      // Mutating an existing Highlight via clear()+add() forces WebKit
+      // to recompute the painted area against the new range set.
+      if (!activeCueHighlight) {
+        activeCueHighlight = new Highlight();
+      }
+      activeCueHighlight.clear();
+      activeCueHighlight.add(r);
+      // Re-set on the registry to ensure the registry knows the highlight
+      // is current (set-after-mutate is the documented pattern; some
+      // browsers paint immediately on add, others need the registry
+      // re-publish to trigger invalidation).
+      CSS.highlights.set('cue-active', activeCueHighlight);
       document.body.classList.add('has-cue-highlight');
-    } catch (e) {}
+      // Force a synchronous layout read so the new highlight invalidation
+      // is flushed before any subsequent paint queues up. Without this,
+      // rapid back-to-back paints during a smooth scroll animation could
+      // batch and the older range's paint would survive to the next
+      // frame.
+      void scrollEl.offsetWidth;
+      return r;
+    } catch (e) { return null; }
+  }
+
+  // Decide whether to scroll based on the painted range's actual extent.
+  // - Fully visible → no scroll.
+  // - Range wider than the viewport → too long to fit; skip auto-scroll
+  //   and let the user pan freely until the NEXT cue lands somewhere
+  //   that fits.
+  // - Otherwise → scroll by exactly the overflow amount. Signs are
+  //   determined empirically: in this WKWebView with vertical-rl content
+  //   and direction:rtl on the scroll container, a NEGATIVE scrollBy.left
+  //   advances forward (= leftward in screen space, which is the natural
+  //   reading direction for vertical Japanese). A POSITIVE scrollBy.left
+  //   scrolls backward (= rightward, toward earlier text).
+  function autoScrollForRange(range) {
+    if (!range || !scrollEl) return;
+    const rangeRect = range.getBoundingClientRect();
+    const sr = scrollEl.getBoundingClientRect();
+    if (!rangeRect.width || !sr.width) return;
+    // Oversized cue — won't fit on a single page even after scrolling.
+    // Skip and let the user pan; the NEXT cue gets another chance.
+    if (rangeRect.width > sr.width * 0.95) return;
+    // Don't scroll if the entire cue is already visible. The point of
+    // auto-scroll is to bring an off-screen / clipped cue back into view,
+    // not to nudge to a different position each line. The user explicitly
+    // wants the page to stay put while a cue is fully readable, and only
+    // shift when the cue runs off the edge.
+    const fullyVisible = rangeRect.left >= sr.left && rangeRect.right <= sr.right;
+    if (fullyVisible) return;
+    // Cue overflows on one side (or is entirely off-screen). Right-justify
+    // the cue's BEGINNING at the viewport's right edge (= top-right of
+    // the first vertical column = where reading starts in vertical-rl).
+    const pad = Math.min(24, sr.width * 0.05);
+    const targetX = sr.right - pad;
+    // Positive delta = scroll backward (= rightward in screen space).
+    // Negative delta = scroll forward (= leftward, reading direction).
+    const delta = rangeRect.right - targetX;
+    if (Math.abs(delta) < 4) return;
+    lastProgrammaticScrollTime = Date.now();
+    scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
   }
 
   function isChunkVisible(chunk) {
@@ -974,6 +1036,40 @@
   window.openPagedReader     = openView;
   window.closePagedReader    = closeView;
   window.disablePagedReader  = disablePagedReader;
+
+  // Hook invoked by the legacy reading-mode.js position handler on every
+  // audio cue change. Legacy already owns the BackgroundAudio 'position'
+  // listener and computes the active cue index against `abCues`; rather
+  // than register a second listener (which fought legacy for the same
+  // CSS.highlights 'cue-active' key and lost the race), we piggyback.
+  // Receives (idx, cue) — `cue` may be null when idx<0.
+  window.__onPagedCueUpdate = function (idx, cue) {
+    if (!viewEl || viewEl.style.display === 'none') return;
+    if (idx === lastHighlightedCue) return;
+    lastHighlightedCue = idx;
+    if (idx < 0 || !cue?.text) { clearCueHighlight(); return; }
+    // Locate the chunk by cue text. Reuse findChunkForText fallback so
+    // this works even when `loadAudiobookCues` hasn't populated our own
+    // pagedCueToChunk map yet.
+    let chunk = null;
+    if (pagedCueToChunk && pagedCueToChunk[idx] >= 0) {
+      chunk = chunks[pagedCueToChunk[idx]] || null;
+    }
+    if (!chunk) chunk = findChunkForText(cue.text);
+    if (!chunk) return;
+    const range = setCueRangeHighlight(chunk, cue.text);
+    if (!range || !scrollEl) return;
+    // Grace logic: honor the 5-second user-scroll window ONLY when the
+    // new cue intersects the viewport at all. If the user wandered far
+    // away and the new cue is completely off-screen, override the grace
+    // so the highlight finds its way back to them at the start of a new
+    // line of audio.
+    const rr = range.getBoundingClientRect();
+    const sr = scrollEl.getBoundingClientRect();
+    const fullyOffscreen = rr.right <= sr.left || rr.left >= sr.right;
+    if (!fullyOffscreen && Date.now() - lastUserScrollTime < 5000) return;
+    autoScrollForRange(range);
+  };
 
   // Boot-time setup. Each hook is wrapped in its own try/catch so a
   // failure in one doesn't break the others (and doesn't break the

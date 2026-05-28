@@ -2247,6 +2247,17 @@
 
     // Reading-mode highlight sync: chunk active class + cue-precise CSS
     // highlight. Done FIRST (synchronously) so it stays reliable.
+    //
+    // When the PAGED reader is the active view, skip our own highlight
+    // paint — both readers write to the same `cue-active` CSS highlight
+    // key, so painting onto the (hidden) legacy chunks would overwrite
+    // the paged reader's range and freeze its visible highlight mid-play.
+    // Instead, hand the cue off to the paged reader via a global hook so
+    // it can paint onto its own chunks. The legacy active-class tagging
+    // still runs above so cross-mode sync (chunk→card lookups) stays
+    // consistent.
+    const pagedView = document.getElementById('readingPagedView');
+    const pagedActive = !!(pagedView && pagedView.style.display !== 'none');
     if (abCueToChunk && idx >= 0) {
       let chunkIdx = abCueToChunk[idx];
       if (chunkIdx < 0) {
@@ -2268,11 +2279,16 @@
         setActive(chunkIdx);
         if (typeof window.currentCardIndex === 'number') tagChunkWithCard(chunkIdx, window.currentCardIndex);
       }
-      if (chunkIdx >= 0 && idx >= 0 && abCues[idx]) {
-        setCueHighlight(chunkIdx, abCues[idx].text);
-      } else {
-        clearCueHighlight();
+      if (!pagedActive) {
+        if (chunkIdx >= 0 && idx >= 0 && abCues[idx]) {
+          setCueHighlight(chunkIdx, abCues[idx].text);
+        } else {
+          clearCueHighlight();
+        }
       }
+    }
+    if (pagedActive && typeof window.__onPagedCueUpdate === 'function') {
+      try { window.__onPagedCueUpdate(idx, idx >= 0 ? abCues[idx] : null); } catch (e) {}
     }
 
     // Lock screen + audio view image — fire-and-forget. Any latency on
