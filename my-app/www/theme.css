@@ -106,9 +106,10 @@ html, body {
    tree (previously the DOM-wrap path triggered the "screen goes black"
    crash in vertical-rl). */
 ::highlight(reader-dict-lookup) {
-  background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.28));
-  text-decoration: underline solid var(--accent-read, #4caf50) 2px;
-  text-underline-offset: 3px;
+  background: color-mix(in srgb, var(--accent-read, #4caf50) 60%, transparent);
+  text-decoration: underline wavy var(--accent-read, #4caf50) 3px;
+  text-underline-offset: 5px;
+  text-decoration-skip-ink: none;
   border-radius: 2px;
 }
 

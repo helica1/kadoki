@@ -180,9 +180,14 @@
         const inReadMode  = document.body.classList.contains('mode-read');
         if (d.playing && inAudioMode) startMode('audio');
         else stopMode('audio');
-        // Starting playback while in read mode counts as active reading
-        // (the user is following along).
-        if (d.playing && inReadMode) bumpRead();
+        // Read-mode follows audio playback exactly: audio plays while
+        // the user is in read mode → start timer; audio pauses → stop
+        // timer. The user can still manually start it via the shell
+        // timer menu (window.toggleReadingTimer) for silent reading.
+        if (inReadMode) {
+          if (d.playing) bumpRead();
+          else stopMode('read');
+        }
       });
     } catch (e) {}
   }

@@ -11,8 +11,8 @@
     "start": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "cap:copy:ios": "npx cap copy ios && rm -rf ios/App/App/public/yomichan-audio ios/App/App/public/assets/dictionaries",
-    "cap:sync:ios": "npx cap sync ios && rm -rf ios/App/App/public/yomichan-audio ios/App/App/public/assets/dictionaries"
+    "cap:copy:ios": "npx cap copy ios && rm -rf ios/App/App/public/yomichan-audio && rm -f ios/App/App/public/assets/dictionaries/JMdict_english.json ios/App/App/public/assets/dictionaries/*.zip",
+    "cap:sync:ios": "npx cap sync ios && rm -rf ios/App/App/public/yomichan-audio && rm -f ios/App/App/public/assets/dictionaries/JMdict_english.json ios/App/App/public/assets/dictionaries/*.zip"
   },
   "dependencies": {
     "@capacitor/android": "^7.2.0",

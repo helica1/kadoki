@@ -11,6 +11,7 @@
     let dictionaryMetadata = new Map(); // Dictionary name -> metadata
     let currentLookupResults = []; // Current lookup results for navigation
     let currentResultIndex = 0; // Current result being displayed
+    let currentLookupToken = 0; // Cancellation token for performDictLookupAtPosition
     let dictLoaded = false;
     let rules = [];
     let rulesLoaded = false;
@@ -663,42 +664,64 @@
     }
 
     async function multiDictionaryLookup(term) {
-        // ----- Fast path -----
+        // Query BOTH paths and merge — the previous early-return on the
+        // dictStore path meant JMDict (still in the legacy in-memory
+        // `dictionaries` Map prior to migration) never got a chance to
+        // answer when dictStore had user-imported dicts but those dicts
+        // didn't happen to contain the looked-up base form. Result:
+        // common conjugated verbs/adjs (高かった → 高い) failed to resolve
+        // because the user's 2 monolingual dicts didn't have 高い but
+        // JMDict did. Merging guarantees coverage.
+        const results = [];
+        const seen = new Set(); // dedupe by `${dictName}::${term}`
+
+        // ----- Fast path: dictStore (IDB-indexed) -----
         if (await isDictStoreReady()) {
-            const meta = await window.dictStore.list();
-            const allNames = meta.map(m => m.dictName);
+            try {
+                const meta = await window.dictStore.list();
+                const allNames = meta.map(m => m.dictName);
+                const ordered = (window.dictPrefs?.orderedNames)
+                  ? window.dictPrefs.orderedNames(allNames)
+                  : allNames;
+                const enabled = enabledNameSet(allNames);
+                const records = await window.dictStore.lookup(term, { enabledDicts: enabled });
+                const orderIdx = new Map(ordered.map((n, i) => [n, i]));
+                records.sort((a, b) => (orderIdx.get(a.dictName) ?? 999) - (orderIdx.get(b.dictName) ?? 999));
+                for (const r of records) {
+                    const key = `${r.dictName}::${r.term}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    results.push({
+                        dictionary: r.dictName,
+                        term:       r.term,
+                        entry:      r.entry,
+                        type:       r.dictName === 'JMDict' ? 'jmdict' : 'yomitan'
+                    });
+                }
+            } catch (e) {
+                console.warn('dictStore lookup failed for', term, e);
+            }
+        }
+
+        // ----- Legacy path: in-memory `dictionaries` Map -----
+        // Try the in-memory map too. If JMDict was loaded into memory but
+        // not yet migrated to dictStore, this is the only place to find
+        // its entries. If a dict appears in BOTH paths, the seen-set
+        // ensures we don't duplicate.
+        if (dictionaries.size > 0) {
+            const allNames = Array.from(dictionaries.keys());
             const ordered = (window.dictPrefs?.orderedNames)
               ? window.dictPrefs.orderedNames(allNames)
               : allNames;
-            const enabled = enabledNameSet(allNames);
-            const records = await window.dictStore.lookup(term, { enabledDicts: enabled });
-            // dictStore doesn't preserve dict order; sort by user's ordering.
-            const orderIdx = new Map(ordered.map((n, i) => [n, i]));
-            records.sort((a, b) => (orderIdx.get(a.dictName) ?? 999) - (orderIdx.get(b.dictName) ?? 999));
-            const results = records.map(r => ({
-                dictionary: r.dictName,
-                term:       r.term,
-                entry:      r.entry,
-                type:       r.dictName === 'JMDict' ? 'jmdict' : 'yomitan'
-            }));
-            console.log(`🔍 [store] ${results.length} results for "${term}"`);
-            return results;
-        }
-
-        // ----- Legacy path -----
-        await ensureJM();
-        const results = [];
-        const allNames = Array.from(dictionaries.keys());
-        const ordered = (window.dictPrefs && typeof window.dictPrefs.orderedNames === 'function')
-          ? window.dictPrefs.orderedNames(allNames)
-          : allNames;
-        const isEnabled = (n) => window.dictPrefs?.isEnabled
-            ? window.dictPrefs.isEnabled(n) : true;
-
-        for (const dictName of ordered) {
-            if (!isEnabled(dictName)) continue;
-            const entries = dictionaries.get(dictName);
-            if (entries && entries.has(term)) {
+            const isEnabled = (n) => window.dictPrefs?.isEnabled
+                ? window.dictPrefs.isEnabled(n) : true;
+            for (const dictName of ordered) {
+                if (!isEnabled(dictName)) continue;
+                const entries = dictionaries.get(dictName);
+                if (!entries || !entries.has(term)) continue;
+                const key = `${dictName}::${term}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
                 const dictEntries = entries.get(term);
                 for (const entry of dictEntries) {
                     results.push({
@@ -709,13 +732,13 @@
                     });
                 }
             }
+            // Background-migrate so subsequent boots skip ensureJM. We
+            // still always query both paths regardless — migration is for
+            // load-time perf, not correctness.
+            Promise.resolve().then(migrateInMemoryToStore);
         }
-        console.log(`🔍 [mem] Found ${results.length} results for "${term}"`);
 
-        // Migrate to indexed store in the background. Next boot skips
-        // ensureJM() entirely.
-        Promise.resolve().then(migrateInMemoryToStore);
-
+        console.log(`🔍 Found ${results.length} results for "${term}" (store+mem)`);
         return results;
     }
 
@@ -1081,23 +1104,47 @@
         // Smaller width than before — was covering too much of the page.
         const w = Math.min(vw * 0.84, 460);
 
-        // Find the area to avoid. Prefer the highlighted dict-frag(s); fall
-        // back to the active reading-chunk; else just the touch-most-recent
-        // .dict-frag.highlight in the document.
+        // Find the area to avoid. In paged reader, the surest signal is
+        // the CSS Custom Highlight 'reader-dict-lookup' — its range's
+        // bounding rect is exactly where the looked-up word sits. Fall
+        // back to legacy reader's .dict-frag.highlight spans, then the
+        // active chunk, then nothing.
         let avoid = null;
-        const highlighted = document.querySelectorAll('#readingModeContent .dict-frag.highlight');
-        if (highlighted.length) {
-            const first = highlighted[0].getBoundingClientRect();
-            const last = highlighted[highlighted.length - 1].getBoundingClientRect();
-            avoid = {
-                top: Math.min(first.top, last.top),
-                bottom: Math.max(first.bottom, last.bottom),
-                left: Math.min(first.left, last.left),
-                right: Math.max(first.right, last.right)
-            };
-        } else {
-            const active = document.querySelector('#readingModeContent .reading-chunk.active');
-            if (active) avoid = active.getBoundingClientRect();
+        try {
+            const hl = window.CSS?.highlights?.get?.('reader-dict-lookup');
+            if (hl) {
+                let union = null;
+                // Highlight is iterable across its ranges.
+                for (const r of hl) {
+                    const rc = r.getBoundingClientRect?.();
+                    if (!rc || !rc.width || !rc.height) continue;
+                    if (!union) {
+                        union = { top: rc.top, bottom: rc.bottom, left: rc.left, right: rc.right };
+                    } else {
+                        union.top    = Math.min(union.top, rc.top);
+                        union.bottom = Math.max(union.bottom, rc.bottom);
+                        union.left   = Math.min(union.left, rc.left);
+                        union.right  = Math.max(union.right, rc.right);
+                    }
+                }
+                if (union) avoid = union;
+            }
+        } catch (e) {}
+        if (!avoid) {
+            const highlighted = document.querySelectorAll('#readingModeContent .dict-frag.highlight');
+            if (highlighted.length) {
+                const first = highlighted[0].getBoundingClientRect();
+                const last = highlighted[highlighted.length - 1].getBoundingClientRect();
+                avoid = {
+                    top: Math.min(first.top, last.top),
+                    bottom: Math.max(first.bottom, last.bottom),
+                    left: Math.min(first.left, last.left),
+                    right: Math.max(first.right, last.right)
+                };
+            } else {
+                const active = document.querySelector('#readingModeContent .reading-chunk.active');
+                if (active) avoid = active.getBoundingClientRect();
+            }
         }
 
         // Compute available space above and below the avoid rect.
@@ -1137,15 +1184,20 @@
                 maxWidth: '90%',
                 maxHeight: '80%',
                 width: '90%',
-                background: '#0a0a0a',
+                // Slightly tinted dark — visibly distinct from the
+                // pure-black reader background so the popup reads as a
+                // floating card, not a hole in the page.
+                background: '#15171a',
                 color: '#fff',
                 borderRadius: '14px',
                 padding: '18px 20px',
                 fontSize: '16px',
                 zIndex: 9999,
                 display: 'none',
-                boxShadow: '0 12px 40px rgba(0,0,0,.85)',
-                border: '1px solid #1a1a1a',
+                // Layered shadow — close-and-tight for the lift, plus a
+                // wider diffuse for the ambient "hovering" feel.
+                boxShadow: '0 4px 12px rgba(0,0,0,.45), 0 24px 60px rgba(0,0,0,.55)',
+                border: '1px solid #262a30',
                 overflow: 'auto',
                 overscrollBehavior: 'contain'
             });
@@ -1431,26 +1483,40 @@
     function setupNavigationHandlers() {
         const prevBtn = document.getElementById('prevResult');
         const nextBtn = document.getElementById('nextResult');
-        
-        if (prevBtn) {
-            prevBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (currentResultIndex > 0) {
-                    currentResultIndex--;
-                    updatePopupContent();
-                }
-            });
-        }
-        
-        if (nextBtn) {
-            nextBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (currentResultIndex < currentLookupResults.length - 1) {
-                    currentResultIndex++;
-                    updatePopupContent();
-                }
-            });
-        }
+
+        // Capacitor WKWebView drops the synthetic click after touchend
+        // on quick taps inside a popup overlay — wire BOTH events with a
+        // 500 ms debounce (same pattern as shell.js menu items). Without
+        // touchend, prev/next buttons appeared inert despite being
+        // visually un-disabled, which the user reported as "the arrows
+        // don't do anything."
+        const wire = (btn, advance) => {
+            if (!btn) return;
+            let firing = false;
+            const fire = (e) => {
+                if (firing) return;
+                firing = true;
+                try { e.stopPropagation(); } catch (_) {}
+                try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+                advance();
+                setTimeout(() => { firing = false; }, 400);
+            };
+            btn.addEventListener('click', fire);
+            btn.addEventListener('touchend', fire, { passive: false });
+        };
+
+        wire(prevBtn, () => {
+            if (currentResultIndex > 0) {
+                currentResultIndex--;
+                updatePopupContent();
+            }
+        });
+        wire(nextBtn, () => {
+            if (currentResultIndex < currentLookupResults.length - 1) {
+                currentResultIndex++;
+                updatePopupContent();
+            }
+        });
     }
     
     function updatePopupContent() {
@@ -1527,18 +1593,24 @@
                     const meaning = extractMeaningFromResult(result);
                     const reading = extractReadingFromResult(result);
                     
-                    // Pick context: reading-mode lookups carry the chunk's
-                    // matching card via window.lookupContext, so the Anki
-                    // sentence + audio come from where the WORD actually lives,
-                    // not from whatever card is currently playing in the deck.
+                    // Anki sentence + audio come from where the TAPPED WORD
+                    // actually lives, never from the currently-playing cue or
+                    // visible card. The caller that initiated the lookup is
+                    // responsible for binding window.lookupContext to the
+                    // right region (paged reader → cue containing tap; card
+                    // mode → active card; legacy reader → tapped chunk's
+                    // matched card). If a non-empty sentence is bound, ALWAYS
+                    // prefer it — earlier this branch was gated on `source ===
+                    // 'reading'` AND legacy reading view visibility, so paged
+                    // reader lookups (source: 'paged-reader') silently fell
+                    // through to the globals and pulled the playing cue's
+                    // text, producing the "Anki sent the wrong sentence and
+                    // audio" report.
                     const ctx = window.lookupContext;
-                    const readingView = document.getElementById('readingModeView');
-                    const inReadingMode = readingView && readingView.style.display !== 'none';
-
                     let currentCard, sentence;
-                    if (inReadingMode && ctx && ctx.source === 'reading') {
-                        currentCard = ctx.card;
-                        sentence = (ctx.sentence || '').trim() || result.term;
+                    if (ctx && typeof ctx.sentence === 'string' && ctx.sentence.trim()) {
+                        currentCard = ctx.card || null;
+                        sentence = ctx.sentence.trim();
                     } else {
                         currentCard = window.allNotes ? window.allNotes[window.currentCardIndex] : null;
                         const subtitleElement = document.querySelector('.subtitle-text');
@@ -1579,16 +1651,37 @@
                     if (!audioData && cueAudioPath &&
                         Number.isFinite(cueStartMs) && Number.isFinite(cueEndMs) &&
                         window.waveform?.edit && window.Capacitor?.Plugins?.AudioSlicer) {
+                      // Pass the tapped cue's text AS the title — the
+                      // editor uses this for its sentence preview AND as
+                      // the default value of `adjusted.text` when the
+                      // user just confirms. Without this, the editor's
+                      // own text computation would glob multiple cues'
+                      // text whose ranges overlapped the default
+                      // selection, producing the "Anki sent multiple
+                      // sentences" report.
                       const adjusted = await window.waveform.edit({
                         srcPath: cueAudioPath,
                         startMs: Math.round(cueStartMs),
                         endMs:   Math.round(cueEndMs),
                         title: sentence || result.term,
-                        cues: ctxCue?.cues,
-                        cueIndex: Number.isFinite(ctxCue?.cueIndex) ? ctxCue.cueIndex : -1
+                        // Force the editor to anchor on JUST this one
+                        // cue — pass it as a single-element cues array
+                        // so the editor's range/text computation can't
+                        // pull from neighbors.
+                        cues: [{ startMs: cueStartMs, endMs: cueEndMs, text: sentence || result.term }],
+                        cueIndex: 0
                       });
                       if (!adjusted) return; // user cancelled
-                      if (adjusted.text) finalSentence = adjusted.text;
+                      // Guard: only adopt the editor's text if the user
+                      // actually changed it. The editor sometimes returns
+                      // a string assembled from multiple SRT cues whose
+                      // time ranges overlap the default selection — that
+                      // was the source of "globbed sentences" in Anki.
+                      // Trust our caller-supplied sentence by default.
+                      if (adjusted.text && adjusted.text.trim() !== sentence.trim()) {
+                        // User edited it manually → respect their choice.
+                        finalSentence = adjusted.text.trim();
+                      }
                       try {
                         const slicer = window.Capacitor.Plugins.AudioSlicer;
                         const slice = await slicer.slice({
@@ -1907,7 +2000,18 @@
         console.log(`✅ Setting up handlers for ${spans.length} spans`);
 
         // Click-anywhere-to-close (legacy desktop / non-touch path).
+        // Skip when the paged reader is the active view — paged manages
+        // its own dismiss via touchstart/touchend, and this `click`
+        // listener fires synchronously AFTER touchend on the same tap.
+        // It was hiding the just-shown earlyPopup before the lookup
+        // could populate it, producing the "flash, then nothing"
+        // symptom in read mode but NOT in card mode (where the tap
+        // target carries the `.dict-frag` class, which this guard
+        // already excluded).
         document.addEventListener('click', (e) => {
+            const pagedView = document.getElementById('readingPagedView');
+            if (pagedView && pagedView.style.display !== 'none' &&
+                pagedView.contains(e.target)) return;
             const popup = document.getElementById('dictPopup');
             if (popup && !popup.contains(e.target) && !e.target.classList.contains('dict-frag')) {
                 hidePopup();
@@ -1919,7 +2023,18 @@
         // would toggle the chrome instead closes the popup, and the chrome
         // stays as-is. Without this, first tap toggled bars and only the
         // second tap closed the popup.
+        //
+        // Skip when the PAGED reader is the active view — paged reader
+        // has its own dismiss-on-touchstart that lets the SAME tap also
+        // trigger a new lookup on text. Letting this global handler
+        // dismiss too is harmless visually but stamps the dismissed-ts
+        // and (historically) prevented the paged reader's lookup from
+        // running on the same tap. The paged reader stamps the ts
+        // itself when appropriate, so this listener is redundant there.
         document.addEventListener('touchstart', (e) => {
+            const pagedView = document.getElementById('readingPagedView');
+            if (pagedView && pagedView.style.display !== 'none' &&
+                pagedView.contains(e.target)) return;
             const popup = document.getElementById('dictPopup');
             if (!popup || popup.style.display === 'none') return;
             const t = e.target;
@@ -2055,6 +2170,12 @@
     //   paintFn:     function(chunk, textNodes, charStart, length) — paints
     //                the highlight via CSS.highlights.set
     window.performDictLookupAtPosition = async function (chunk, textNodes, flatText, charIndex, paintFn) {
+        // Cancellation token — each call bumps the counter; a stale in-
+        // flight call sees its token mismatch and aborts before painting.
+        // Without this, rapid taps queued up so the popup flashed Loading
+        // for every tap and definitions from earlier taps would pop up
+        // seconds later in random order.
+        const token = ++currentLookupToken;
         const loadPromise = startGlobalDictionaryLoading();
         if (document.body.classList.contains('mode-read') && window.stats?.bumpRead) {
             window.stats.bumpRead();
@@ -2081,6 +2202,15 @@
                 try { await window.dictStore.buildTermSet(); } catch (e) {}
             }
 
+            // Cancellation: if another tap fired while we were awaiting
+            // dict load, abandon this stale lookup. The earlier "slow
+            // walk" fallback did dozens of async lookups per tap and
+            // every queued tap ran them all in series — produced the
+            // "Loading… flash then queued definitions pop up seconds
+            // later" symptom. Now: one fast greedyDeinflect + one
+            // lookup, and a token check so we never paint a stale result.
+            if (token !== currentLookupToken) return;
+
             const best = greedyDeinflect(flatText, charIndex);
             // Paint via CSS Custom Highlight API — no DOM mutation.
             if (typeof paintFn === 'function') {
@@ -2088,6 +2218,10 @@
             }
 
             const results = await multiDictionaryLookup(best.base);
+            // If a NEWER tap fired while we were awaiting, drop this
+            // result silently. Otherwise we'd race the newer tap and
+            // paint definitions out of order.
+            if (token !== currentLookupToken) return;
             currentLookupResults = results;
             currentResultIndex = 0;
 
@@ -2100,6 +2234,14 @@
                         <div style="color:#888;font-size:.85em;">No definition found.</div>
                         <div style="color:#666;font-size:.7em;margin-top:12px;">Tap anywhere to close</div>
                     </div>`;
+                // CRITICAL: explicit display='block'. The results branch
+                // below sets it; the empty branch was missing it, so when
+                // the earlyPopup got dismissed mid-lookup (by another tap
+                // or the global handler), the "No definition found"
+                // message never became visible. User saw "tap → flash →
+                // nothing" — actually the popup HAD updated, it was just
+                // stuck at display:none.
+                popup.style.display = 'block';
                 positionDictPopup(popup);
                 maybePauseForLookup();
                 return;
@@ -2107,6 +2249,11 @@
             popup.innerHTML = renderPopupContent(results, currentResultIndex);
             popup.style.display = 'block';
             positionDictPopup(popup);
+            // The previous build wired Anki + Audio but forgot Nav. Prev/Next
+            // appeared but did nothing — looked like the buttons were dead
+            // when really their handlers were never attached on the initial
+            // render (only after updatePopupContent fired internally).
+            setupNavigationHandlers();
             setupAnkiHandler(results);
             setupAudioHandler(results);
             maybePauseForLookup();

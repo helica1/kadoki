@@ -714,6 +714,7 @@
     }
   }
   function clearReaderDictHighlight() {
+    try { window._dictLookupHl?.clear?.(); } catch (e) {}
     try { CSS.highlights?.delete?.('reader-dict-lookup'); } catch (e) {}
   }
   // Expose so dict popup-close can clear it.

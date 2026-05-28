@@ -55,6 +55,8 @@
   // range set changes, instead of a fresh Highlight per cue (which left
   // ghost paints in iOS WKWebView during scroll animations).
   let activeCueHighlight = null;
+  let progressEl = null;
+  let totalChars = 0;
   // Auto-scroll grace period: don't yank the view back if the user
   // manually scrolled within the last 5 seconds.
   let lastUserScrollTime = 0;
@@ -94,6 +96,34 @@
         direction: ltr;
       }
       #readingPagedContent::-webkit-scrollbar { display: none; }
+      /* Tiny progress label that sits in the top safe-area strip, to
+         the LEFT of the Dynamic Island. Vertically centered in the band
+         between the top of the display and the appHeader (which starts
+         at env(safe-area-inset-top)), so the rounded display corner
+         doesn't clip it. */
+      #readingPagedProgress {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) / 2);
+        transform: translateY(-50%);
+        left: calc(env(safe-area-inset-left, 0px) + 12px);
+        padding: 10px 12px;
+        font: 10px/1 var(--font-sans, system-ui);
+        color: #aaa;
+        letter-spacing: .03em;
+        background: transparent;
+        z-index: 9001;
+        cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
+        direction: ltr;
+        white-space: nowrap;
+        transition: opacity .18s ease;
+      }
+      #readingPagedProgress:active { opacity: .55; }
+      body.chrome-hidden #readingPagedProgress {
+        opacity: 0;
+        pointer-events: none;
+      }
       #readingPagedInner {
         writing-mode: vertical-rl !important;
         -webkit-writing-mode: vertical-rl !important;
@@ -183,10 +213,18 @@
         break-inside: avoid;
       }
       /* Highlight for dict lookup — same key as the legacy reader so the
-         popup-close handler clears it via window._clearReaderDictHighlight. */
+         popup-close handler clears it via window._clearReaderDictHighlight.
+         Uses the user's READ-mode accent color (set via Preferences →
+         Mode colors). Heavy translucent fill + thick wavy underline so
+         it remains conspicuous even when sitting on top of cue-active
+         text. ::highlight() only supports background-color + text-
+         decoration; no borders, no box-shadow. Text color intentionally
+         NOT set so the underlying cue-active / normal text color stays. */
       ::highlight(reader-dict-lookup) {
-        background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.28));
-        text-decoration: underline solid var(--accent-read, #4caf50) 2px;
+        background: color-mix(in srgb, var(--accent-read, #4caf50) 60%, transparent);
+        text-decoration: underline wavy var(--accent-read, #4caf50) 3px;
+        text-underline-offset: 5px;
+        text-decoration-skip-ink: none;
       }
     `;
     document.head.appendChild(s);
@@ -228,6 +266,7 @@
 
     scrollEl = viewEl.querySelector('#readingPagedContent');
     innerEl  = viewEl.querySelector('#readingPagedInner');
+    ensureProgressStrip();
 
     setupTouch();
     setupScrollTracking();
@@ -272,18 +311,23 @@
   function setupTouch() {
     let sx = 0, sy = 0, tStart = 0, canTap = true;
     let touchStartTarget = null;
+    let dismissedPopupOnStart = false;
     scrollEl.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
       sx = e.touches[0].clientX; sy = e.touches[0].clientY;
       tStart = Date.now(); canTap = true;
       touchStartTarget = e.target;
-      // Outside-tap dismisses dict popup (always, even if it's a swipe).
+      // Track whether THIS tap dismissed an open popup so touchend can
+      // choose the right follow-up: tap on TEXT → run a new lookup
+      // (replace popup), tap on EMPTY space → just dismiss (no chrome
+      // toggle either, since the user's intent was clearly "close it").
+      dismissedPopupOnStart = false;
       const popup = document.getElementById('dictPopup');
       if (popup && popup.style.display !== 'none' && !popup.contains(e.target)) {
         popup.style.display = 'none';
         popup.innerHTML = '';
         try { window._clearReaderDictHighlight?.(); } catch (er) {}
-        canTap = false;
+        dismissedPopupOnStart = true;
       }
     }, { passive: true });
     scrollEl.addEventListener('touchmove', (e) => {
@@ -300,10 +344,23 @@
       // act on TAPS (no motion).
       if (!canTap) return;
       if (Date.now() - tStart > 400) return;
-      // Tap on text → dict lookup. Tap on empty space → toggle chrome.
       const chunk = chunkAtTapPoint(t.clientX, t.clientY);
-      if (chunk) lookupAt(t.clientX, t.clientY);
-      else       toggleChrome();
+      if (chunk) {
+        // Always look up text taps — even if this tap just dismissed an
+        // open popup. Without this, tapping a new word with an open
+        // popup only dismissed the popup and never ran a new lookup,
+        // forcing the user to tap-then-tap-again. That's what the
+        // "flashing, never shows definition" symptom traced back to.
+        lookupAt(t.clientX, t.clientY);
+      } else if (!dismissedPopupOnStart) {
+        // Empty-space tap with NO open popup → toggle chrome. If this
+        // tap dismissed a popup, the user's intent was "close" — don't
+        // also toggle the chrome.
+        toggleChrome();
+      }
+      // Also stamp the global so enhanced-dictionary's legacy reader
+      // dismiss path (which still listens) knows we just handled it.
+      if (dismissedPopupOnStart) window._dictPopupDismissedTs = Date.now();
     }, { passive: true });
   }
 
@@ -334,6 +391,86 @@
       cueEndMs: null
     };
     await window.sendToAnki({ expression: sentence, imageData });
+  }
+
+  // Find the SRT cue whose text covers the tapped charIndex inside `chunk`.
+  // Locates each candidate cue's normalized text inside the chunk's
+  // normalized text, picks the one whose range contains the tap. If no
+  // cue maps to this chunk, returns null.
+  function findCueForTap(chunk, flatText, charIndex) {
+    if (!pagedCues?.length || !chunks?.length) return null;
+    const chunkIdx = chunks.indexOf(chunk);
+    if (chunkIdx < 0) return null;
+    // Build the normalized version of the chunk text + a raw-to-norm
+    // position map. We need to translate the raw `charIndex` into a
+    // normalized index so we can compare against normalized cue text.
+    const STRIP = /[\s　「」『』、。・…！？!?,.;:""'']/;
+    let normIdx = 0;
+    for (let i = 0; i < charIndex && i < flatText.length; i++) {
+      if (!STRIP.test(flatText[i])) normIdx++;
+    }
+    const normFlat = normalizeJP(flatText);
+    // Look at every cue mapped to this chunk; if no map, fall back to
+    // scanning all cues for ones whose normalized text appears in the
+    // chunk (slower but works without prebuilt map).
+    const candidateIdxs = [];
+    if (pagedCueToChunk) {
+      for (let i = 0; i < pagedCueToChunk.length; i++) {
+        if (pagedCueToChunk[i] === chunkIdx) candidateIdxs.push(i);
+      }
+    }
+    if (!candidateIdxs.length) {
+      for (let i = 0; i < pagedCues.length; i++) candidateIdxs.push(i);
+    }
+    // Strict containment only — return the cue whose text range covers
+    // the tap. NO fallback to "closest cue", because that produced the
+    // "Anki got the wrong sentence" symptom: tap on a kanji in cue N,
+    // findCue returns cue N+1 because the tap landed on a normalized
+    // index that's slightly past N's end but close to N+1's start.
+    for (const ci of candidateIdxs) {
+      const cue = pagedCues[ci];
+      const normCue = normalizeJP(cue?.text || '');
+      if (!normCue) continue;
+      const start = normFlat.indexOf(normCue);
+      if (start < 0) continue;
+      const end = start + normCue.length;
+      if (normIdx >= start && normIdx < end) {
+        return { cue, idx: ci, normStart: start, normEnd: end };
+      }
+    }
+    return null;
+  }
+
+  function bindCueLookupContext(chunk, flatText, charIndex) {
+    try {
+      const sentence = chunk?.textContent?.trim?.() || flatText.trim();
+      const found = findCueForTap(chunk, flatText, charIndex);
+      if (found?.cue) {
+        const cueText = String(found.cue.text || '').trim();
+        window.lookupContext = {
+          source: 'paged-reader',
+          sentence: cueText || sentence,
+          card: null,
+          cueAudioPath: pagedAudioPath || null,
+          cueStartMs:   Number.isFinite(found.cue.startMs) ? found.cue.startMs : null,
+          cueEndMs:     Number.isFinite(found.cue.endMs)   ? found.cue.endMs   : null,
+          cueIndex:     found.idx,
+          cues:         null
+        };
+      } else {
+        // No cue mapping — still bind sentence so Anki gets the chunk's
+        // text. Audio fields stay null; sendToAnki will skip audio if
+        // nothing's there.
+        window.lookupContext = {
+          source: 'paged-reader',
+          sentence,
+          card: null,
+          cueAudioPath: null,
+          cueStartMs:   null,
+          cueEndMs:     null
+        };
+      }
+    } catch (e) { log('bindCueLookupContext error:', e.message); }
   }
 
   // Normalize Japanese text for fuzzy matching: NFKC + strip whitespace +
@@ -470,9 +607,90 @@
     updateProgress();
   }
 
-  // No-op: no custom chrome to update. Stats / progress (if needed
-  // later) would go through the shell header.
-  function updateProgress() {}
+  // Create the progress strip once and keep it as a sibling of body so
+  // it survives across paged-view rebuilds. Click AND touchend both
+  // trigger the jump prompt — Capacitor WKWebView sometimes drops the
+  // synthetic click after touchend, so wiring both is the reliable
+  // pattern (same one shell-menu items use).
+  function ensureProgressStrip() {
+    if (progressEl) return;
+    progressEl = document.createElement('div');
+    progressEl.id = 'readingPagedProgress';
+    progressEl.textContent = '–';
+    let firing = false;
+    const fire = (e) => {
+      if (firing) return;
+      firing = true;
+      try { e.stopPropagation(); } catch (_) {}
+      try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+      openJumpModal();
+      setTimeout(() => { firing = false; }, 500);
+    };
+    progressEl.addEventListener('click', fire);
+    progressEl.addEventListener('touchend', fire, { passive: false });
+    document.body.appendChild(progressEl);
+  }
+
+  // Custom in-app modal — Capacitor's WKWebView doesn't reliably show
+  // native window.prompt() dialogs (silently dropped), so we render a
+  // styled dialog inside the document instead.
+  function openJumpModal() {
+    if (!scrollEl || !totalChars) return;
+    const sw = scrollEl.scrollWidth - scrollEl.clientWidth;
+    if (sw <= 0) return;
+    if (document.getElementById('pagedJumpModal')) return;
+    const curFrac = Math.min(1, Math.max(0, Math.abs(scrollEl.scrollLeft) / sw));
+    const curPct = (curFrac * 100).toFixed(1);
+    const modal = document.createElement('div');
+    modal.id = 'pagedJumpModal';
+    modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;padding:24px;direction:ltr;';
+    modal.innerHTML = `
+      <div style="background:#161616;border:1px solid #333;border-radius:14px;padding:20px;width:100%;max-width:340px;box-shadow:0 12px 36px rgba(0,0,0,.6);">
+        <div style="font:600 13px/1.3 var(--font-sans,system-ui);color:#ddd;margin-bottom:6px;">Jump to location</div>
+        <div style="font:11px/1.4 var(--font-sans,system-ui);color:#888;margin-bottom:12px;">Percent (0–100) or character count. Currently ${curPct}%.</div>
+        <input id="pagedJumpInput" type="text" inputmode="decimal" autocomplete="off"
+          value="${curPct}"
+          style="width:100%;background:#0c0c0c;border:1px solid #333;border-radius:8px;padding:10px 12px;font:14px var(--font-sans,system-ui);color:#eee;box-sizing:border-box;" />
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;">
+          <button id="pagedJumpCancel" style="background:transparent;border:1px solid #444;color:#bbb;padding:8px 14px;border-radius:8px;font:600 12px var(--font-sans,system-ui);cursor:pointer;">Cancel</button>
+          <button id="pagedJumpGo" style="background:var(--accent-read,#4caf50);border:none;color:#000;padding:8px 16px;border-radius:8px;font:700 12px var(--font-sans,system-ui);cursor:pointer;">Go</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    const input = modal.querySelector('#pagedJumpInput');
+    const close = () => modal.remove();
+    const submit = () => {
+      const n = parseFloat(String(input.value || '').trim().replace(/[, %]/g, ''));
+      close();
+      if (!Number.isFinite(n) || n < 0) return;
+      const frac = Math.min(1, Math.max(0, n <= 100 ? n / 100 : n / totalChars));
+      const target = frac * sw;
+      const sign = scrollEl.scrollLeft < 0 ? -1 : 1;
+      lastUserScrollTime = Date.now();
+      scrollEl.scrollTo({ left: sign * target, behavior: 'smooth' });
+    };
+    modal.querySelector('#pagedJumpCancel').addEventListener('click', close);
+    modal.querySelector('#pagedJumpGo').addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    setTimeout(() => { try { input.focus(); input.select(); } catch (_) {} }, 60);
+  }
+
+  // Update the progress strip. Reads the scroll fraction and multiplies
+  // by totalChars. Cheap enough to run on every scroll event.
+  function updateProgress() {
+    if (!progressEl || !scrollEl || !totalChars) return;
+    const sw = scrollEl.scrollWidth - scrollEl.clientWidth;
+    if (sw <= 0) { progressEl.textContent = '–'; return; }
+    // scrollLeft can be negative (vertical-rl in some WebKit builds) or
+    // positive (with direction:rtl on the scroll container). Use the
+    // absolute value for the fraction.
+    const frac = Math.min(1, Math.max(0, Math.abs(scrollEl.scrollLeft) / sw));
+    const cur = Math.round(totalChars * frac);
+    const pct = Math.round(frac * 1000) / 10;
+    progressEl.textContent = `${cur.toLocaleString()} / ${totalChars.toLocaleString()} · ${pct}%`;
+  }
 
   // Dict lookup via caretRangeFromPoint + CSS Custom Highlight API. No
   // DOM mutation, no scroll-state corruption.
@@ -537,6 +755,14 @@
     }
     if (charIndex < 0 || charIndex >= flatText.length) charIndex = 0;
 
+    // Bind window.lookupContext to the cue containing the tapped position
+    // BEFORE handing off to performDictLookupAtPosition — the dict popup's
+    // "+ Anki" button reads from this. We want the SENTENCE field on the
+    // resulting Anki card to be the sentence the tapped word lives in,
+    // not the currently-playing cue or the legacy reader's stale state.
+    // Audio fields follow the same cue so they always match the sentence.
+    bindCueLookupContext(chunk, flatText, charIndex);
+
     const paintFn = (_ch, tns, start, len) => {
       if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
       let a = 0, sNode = null, sOff = 0, eNode = null, eOff = 0;
@@ -553,7 +779,16 @@
         const r = new Range();
         r.setStart(sNode, sOff);
         r.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
-        CSS.highlights.set('reader-dict-lookup', new Highlight(r));
+        // Mutate-in-place: reuse one Highlight via clear()+add(). With
+        // `new Highlight(r)` + set(), iOS WKWebView in vertical-rl leaks
+        // ghost paints from the previous range until the next layout
+        // pass — same bug class as the cue-active highlight. Forcing
+        // a layout read after add() flushes the invalidation.
+        if (!window._dictLookupHl) window._dictLookupHl = new Highlight();
+        window._dictLookupHl.clear();
+        window._dictLookupHl.add(r);
+        CSS.highlights.set('reader-dict-lookup', window._dictLookupHl);
+        if (scrollEl) void scrollEl.offsetWidth;
       } catch (e) {}
     };
 
@@ -621,15 +856,28 @@
       innerEl.innerHTML = sections.join('\n');
 
       // Tag block-level descendants as .reading-chunk for dict / scroll-snap.
+      // Also accumulate per-chunk char offsets for the bottom progress
+      // indicator (treat ruby <rt>/<rp> as zero-cost — count base text only).
       let chunkCount = 0;
+      let charAcc = 0;
       innerEl.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6').forEach(el => {
         if (el.textContent.trim().length < 2) return;
         const onlyBlockKids = Array.from(el.children).every(c =>
           ['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(c.tagName));
         if (onlyBlockKids && el.children.length > 0) return;
         el.classList.add('reading-chunk');
+        // Count visible text length (strip ruby readings).
+        let txt = el.textContent || '';
+        el.querySelectorAll('rt, rp').forEach(r => {
+          txt = txt.replace(r.textContent, '');
+        });
+        const len = txt.length;
+        el.dataset.charOffset = String(charAcc);
+        el.dataset.charLen = String(len);
+        charAcc += len;
         chunkCount++;
       });
+      totalChars = charAcc;
 
       currentName = name;
       log(`Loaded ${name}: ${sections.length} sections, ${chunkCount} chunks`);
@@ -939,6 +1187,7 @@
   async function openView() {
     ensureView();
     viewEl.style.display = 'flex';
+    document.body.classList.add('has-paged-progress');
     // CRITICAL: hide the LEGACY reader so it doesn't run audio sync
     // underneath us.
     const legacyView = document.getElementById('readingModeView');
@@ -963,7 +1212,10 @@
       }, 80);
     }
   }
-  function closeView() { if (viewEl) viewEl.style.display = 'none'; }
+  function closeView() {
+    if (viewEl) viewEl.style.display = 'none';
+    document.body.classList.remove('has-paged-progress');
+  }
 
   // Re-enable card-change sync: when the active card changes (via swipe
   // in card mode, or audio-driven cue→card mapping), update the reader's
@@ -989,12 +1241,13 @@
     window.addEventListener('shell:mode-change', (e) => {
       const mode = e?.detail?.mode;
       if (!viewEl) return;
+      const pagedShown = viewEl.style.display !== 'none';
       if (mode === 'read') {
-        // Only show if user has paged enabled (the route override
-        // already takes care of opening it; this is defensive).
-        // Don't re-show if user hasn't activated paged this session.
-      } else if (viewEl.style.display !== 'none') {
-        viewEl.style.display = 'none';
+        // Show progress strip only when paged reader is the active view.
+        if (pagedShown) document.body.classList.add('has-paged-progress');
+      } else {
+        if (pagedShown) viewEl.style.display = 'none';
+        document.body.classList.remove('has-paged-progress');
       }
     });
   }
