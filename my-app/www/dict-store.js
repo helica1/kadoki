@@ -272,49 +272,35 @@
     _termSetPromise = (async () => {
       const t0 = performance.now();
       const db = await openDb();
-      // openCursor (full records, not just keys) so we can pull both
-      // the `term` AND extract the kana reading from `entry`. Slower
-      // per iteration than openKeyCursor but absolutely necessary —
-      // without the reading map, deinflected kana base forms (うなずく)
-      // can never be matched to dict entries indexed by kanji (頷く).
+      // Fast path: openKeyCursor on the by_term INDEX. Each onsuccess
+      // gives us the index key (the term string). Read-only and
+      // returns nothing but keys, so iOS WKWebView serializes other
+      // IDB operations against this transaction for a much shorter
+      // window (~5 s for 405 k entries) than the old openCursor build
+      // (full records, ~45 s). That long lock was blocking every
+      // subsequent dictStore.lookup behind it — the user saw a 43 s
+      // delay on the second tap that ended up sitting in the queue.
+      //
+      // We lose the inline reading→canonical-term map here. Yomitan's
+      // deinflector still covers most inflection patterns directly
+      // against dict terms; the reading map is a separate concern and
+      // can be rebuilt later in a background-only fashion if needed.
       const set = new Set();
-      const r2t = new Map();
       await new Promise((resolve) => {
         try {
           const tx = db.transaction(ENTRIES, 'readonly');
-          const req = tx.objectStore(ENTRIES).openCursor();
+          const req = tx.objectStore(ENTRIES).index('by_term').openKeyCursor();
           req.onsuccess = (e) => {
             const c = e.target.result;
-            if (c) {
-              const rec = c.value;
-              if (rec?.term) set.add(rec.term);
-              // Yomitan entry: [term, reading, defTags, ruleTags, score, defs, ...]
-              // JMDict entry: { headwords: [...], sense: [...] } (no .reading at root)
-              const entry = rec?.entry;
-              let reading = null;
-              if (Array.isArray(entry) && entry.length >= 2 && typeof entry[1] === 'string') {
-                reading = entry[1];
-              } else if (entry && typeof entry === 'object' && Array.isArray(entry.headwords)) {
-                // JMDict-style: pull the first kana reading. We don't need
-                // all of them — the deinflector only ever produces one.
-                for (const h of entry.headwords) {
-                  if (h?.kana && typeof h.kana === 'string') { reading = h.kana; break; }
-                  if (h?.reading && typeof h.reading === 'string') { reading = h.reading; break; }
-                }
-              }
-              if (reading && reading !== rec.term && !r2t.has(reading)) {
-                r2t.set(reading, rec.term);
-              }
-              c.continue();
-            } else { resolve(); }
+            if (c) { set.add(c.key); c.continue(); }
+            else { resolve(); }
           };
           req.onerror = () => resolve();
         } catch (e) { resolve(); }
       });
       _termSet = set;
-      _readingToTerm = r2t;
       const ms = Math.round(performance.now() - t0);
-      console.log(`[dict-store] termSet built: ${set.size} terms, ${r2t.size} readings in ${ms}ms`);
+      console.log(`[dict-store] termSet built: ${set.size} headwords in ${ms}ms`);
       return set;
     })();
     return _termSetPromise;

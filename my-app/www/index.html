@@ -1220,6 +1220,12 @@ body.dimmed .card-image {
   <script src="title-store.js"></script>
   <script src="cover-extract.js"></script>
   <script src="stats.js"></script>
+  <!-- Yomitan deinflector port lives on disk but is NOT loaded — its
+       IIFE built a 834-rule descriptor at script-load (~2 s on iOS
+       JavaScriptCore) and per-tap iteration through Yomitan's rule set
+       made greedyDeinflect 14+ s per tap on uninflected nouns. The
+       local deinflect.json table in enhanced-dictionary.js covers the
+       same common inflections at <1 ms per call. -->
   <script src="enhanced-dictionary.js"></script>
   <script src="local-audio.js"></script>
   <script src="srt-parser.js"></script>

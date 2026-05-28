@@ -842,14 +842,13 @@
         rulesLoaded = true;
     }
 
-    let _deinflectDebugLogged = false;
-    function getDeinflections(surface, maxDepth = 3) {
-        // One-shot diagnostic: confirm rules array state on first call.
-        if (!_deinflectDebugLogged) {
-            _deinflectDebugLogged = true;
-            const sample = rules.slice(0, 3).map(r => `${r.in}→${r.out}`).join(', ');
-            console.log(`[deinflect] rules.length=${rules.length} sample=[${sample}] rulesLoaded=${rulesLoaded}`);
-        }
+    // Reverted to ONLY the deinflect.json-based table. The Yomitan port
+    // (yomitan-deinflect.js) is left on disk for future use but no
+    // longer in the call path — its 834 rules × per-tap-iteration was
+    // 14-43 s on iOS WKWebView; the 569-rule local table that powered
+    // the Android build is fast enough and accurate enough for most
+    // inflections we care about (〜た, 〜って, 〜せば, 〜ない, etc.).
+    function getDeinflections(surface, maxDepth = 2) {
         const results = new Map();
         results.set(surface, { word: surface, depth: 0, reason: null });
 
@@ -1308,16 +1307,19 @@
         console.log(`🎨 Highlighted ${lastHovered.length} spans`);
     }
 
-    // `hasTermAnywhere` — checks both the in-memory legacy dictionaries
-    // Map AND the dict-store term set (lazy-loaded via dictStore migration).
-    // The in-memory check stays for the legacy fallback path; dictStore is
-    // the primary source post-migration.
+    // `hasTermAnywhere` — checks both the dictStore term set AND the
+    // in-memory legacy dictionaries Map. termSet check is FIRST because
+    // it's a single O(1) Set.has, vs. iterating the legacy Map (which on
+    // iOS WKWebView has noticeable per-call overhead × many forms ×
+    // many surface lengths). termSet is populated from the same dicts
+    // post-migration, so the in-memory loop only matters for the brief
+    // window before migration completes.
     function hasTermAnywhere(word) {
-        for (const [, entries] of dictionaries) {
-            if (entries.has(word)) return true;
-        }
         if (window.dictStore?.termSetReady?.() && window.dictStore.hasTerm(word)) {
             return true;
+        }
+        for (const [, entries] of dictionaries) {
+            if (entries.has(word)) return true;
         }
         return false;
     }
@@ -1353,6 +1355,14 @@
         return word;
     }
 
+    // CLEAN RESET — this is the same simple algorithm the Android build
+    // ran fine. For each length from longest to shortest, get all
+    // deinflection forms (BFS depth 2 over the deinflect.json rules,
+    // ~569 rules) and pick the first length where ANY form is in any
+    // dict. The "fast path" experiment that pre-checked raw surfaces
+    // was wrong: it returned shorter literal matches (e.g., 渡し as a
+    // noun) before letting the deinflector find the verb base (渡す).
+    // No fast path here — trust the deinflector + termSet.
     function greedyDeinflect(text, start, maxLength = 12) {
         const fallback = { match: text[start], base: text[start], length: 1 };
         const searchLimit = Math.min(maxLength, text.length - start);
@@ -1367,10 +1377,7 @@
                 }
             }
             if (bestAtLen) {
-                // Translate kana base → canonical kanji headword if the
-                // term is only known via the reading map.
-                const base = canonicalLookupTerm(bestAtLen.word);
-                return { match: surface, base, length: len };
+                return { match: surface, base: bestAtLen.word, length: len };
             }
         }
         return fallback;
@@ -2196,8 +2203,35 @@
 
         dictionaryLoadingPromise = (async () => {
             try {
-                await Promise.all([loadDeinflectRules(), ensureJM()]);
-                console.log('✅ Global dictionary loading complete!');
+                // ALWAYS load the deinflect rules — small file, fast.
+                await loadDeinflectRules();
+                console.log('✅ Deinflect rules loaded');
+
+                // Check if dictStore is already populated. If so, the
+                // legacy ensureJM() path (which re-parses JMDict, re-
+                // loads Yomitan dicts, walks bundled archives) is pure
+                // duplication of data we already have on disk and pure
+                // wasted boot time. Skip it entirely and use dictStore
+                // as the authoritative source. termSet build is all we
+                // need to make lookups fast.
+                const t0 = performance.now();
+                let storePopulated = false;
+                try { storePopulated = !!(await window.dictStore?.isPopulated?.()); } catch (_) {}
+                if (storePopulated) {
+                    console.log(`✅ dictStore already populated — skipping ensureJM`);
+                } else {
+                    console.log('📚 dictStore empty — running ensureJM legacy load');
+                    await ensureJM();
+                }
+
+                // Build termSet AT BOOT (not lazily on first tap). The
+                // 405k-entry cursor scan takes ~5 s on iOS WKWebView;
+                // doing it inside performLookup's await chain made the
+                // first tap look like a 14-second deinflection bug.
+                if (window.dictStore?.buildTermSet) {
+                    try { await window.dictStore.buildTermSet(); } catch (_) {}
+                }
+                console.log(`✅ Global dictionary loading complete in ${Math.round(performance.now() - t0)}ms`);
                 return true;
             } catch (error) {
                 console.error('❌ Global dictionary loading failed:', error);
