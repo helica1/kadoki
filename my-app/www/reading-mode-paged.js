@@ -416,9 +416,23 @@
       dismissedSelectionOnStart = false;
       const popup = document.getElementById('dictPopup');
       if (popup && popup.style.display !== 'none' && !popup.contains(e.target)) {
-        popup.style.display = 'none';
-        popup.innerHTML = '';
-        try { window._clearReaderDictHighlight?.(); } catch (er) {}
+        // Route through enhanced-dictionary's hidePopup so its
+        // maybeResumeAfterLookup() hook fires — dismissing the popup
+        // by setting display:none directly skipped the resume-audio
+        // side-effect. Falls back to the inline nuke if the global
+        // helper isn't present (shouldn't happen, but safe).
+        try {
+          if (typeof window.hideDictPopup === 'function') {
+            window.hideDictPopup();
+          } else {
+            popup.style.display = 'none';
+            popup.innerHTML = '';
+            try { window._clearReaderDictHighlight?.(); } catch (er) {}
+          }
+        } catch (er) {
+          popup.style.display = 'none';
+          popup.innerHTML = '';
+        }
         dismissedPopupOnStart = true;
       }
       // If a sentence is selected and this tap is OUTSIDE the menu, clear
@@ -1122,8 +1136,10 @@
       const rangeOverflows = !!(range && rangeRect && sr &&
         (rangeRect.left < sr.left || rangeRect.right > sr.right));
       if (rangeOverflows) {
+        log('[scroll-trace] centerOnActiveCard rangeOverflows');
         autoScrollForRange(range);
       } else if (!isChunkVisible(chunk)) {
+        log('[scroll-trace] centerOnActiveCard chunkScroll');
         lastProgrammaticScrollTime = Date.now();
         scrollChunkIntoView(chunk);
       }
@@ -1796,6 +1812,7 @@
     const delta = rangeRect.right - targetX;
     if (Math.abs(delta) < 4) return;
     lastProgrammaticScrollTime = Date.now();
+    log('[scroll-trace] scrollBy delta=' + Math.round(delta));
     scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
   }
 
@@ -2049,6 +2066,22 @@
     // scroll regardless of grace. The grace check used to swallow new
     // cues that landed partially off-screen right after a manual pan,
     // which the user perceived as "doesn't snap until later."
+    //
+    // Short-cue guard: skip auto-scroll for cues with fewer than 10
+    // characters. Short cues ("うん", "そうか", "わかった") false-match
+    // the wrong chunk in findChunkForText (which returns the FIRST
+    // text-match in the book) — when the first occurrence is far from
+    // the user's reading position, the resulting scroll delta is huge
+    // (observed 243k pixels in round 188 logs), which causes the
+    // blank-viewport + jerk-back pattern. The highlight has already
+    // been painted above; skipping the scroll just leaves the user's
+    // position alone. Long cues stay snap-on, so legitimate
+    // "user-explored, snap back to playhead" still works.
+    if ((cue.text || '').trim().length < 10) {
+      log('[scroll-trace] __onPagedCueUpdate idx=' + idx + ' SKIP short cue len=' + (cue.text||'').length);
+      return;
+    }
+    log('[scroll-trace] __onPagedCueUpdate idx=' + idx);
     autoScrollForRange(range);
   };
 

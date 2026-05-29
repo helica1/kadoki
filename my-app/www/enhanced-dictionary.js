@@ -1290,24 +1290,37 @@
         return v === null || v === 'true';
     }
     async function maybePauseForLookup() {
-        if (!isLookupModeAutoPause()) return;
+        const gate = isLookupModeAutoPause();
         const bg = window.Capacitor?.Plugins?.BackgroundAudio;
-        if (!bg) return;
+        if (!gate) { console.log('[dict-pause] skip: pref off or wrong mode'); return; }
+        if (!bg)  { console.log('[dict-pause] skip: no BackgroundAudio'); return; }
         try {
             const s = await bg.getState();
+            console.log('[dict-pause] state.playing=' + !!s?.playing);
             if (s?.playing) {
                 _lookupPausedPlayback = true;
                 bg.pause();
+                console.log('[dict-pause] paused, flag set');
             }
-        } catch (e) {}
+        } catch (e) { console.log('[dict-pause] error: ' + e.message); }
     }
     function maybeResumeAfterLookup() {
+        console.log('[dict-resume] called, flag=' + _lookupPausedPlayback);
         if (!_lookupPausedPlayback) return;
         _lookupPausedPlayback = false;
         const bg = window.Capacitor?.Plugins?.BackgroundAudio;
-        try { bg?.resume?.(); } catch (e) {}
+        try {
+            const r = bg?.resume?.();
+            console.log('[dict-resume] bg.resume() invoked');
+            if (r?.catch) r.catch((err) => console.log('[dict-resume] resume err: ' + err?.message));
+        } catch (e) { console.log('[dict-resume] error: ' + e.message); }
     }
     window.maybePauseForLookup = maybePauseForLookup;
+    // Expose hidePopup so external dismiss paths (paged reader's
+    // touchstart) can route through it and trigger
+    // maybeResumeAfterLookup, instead of nuking popup.style.display
+    // directly and skipping the resume.
+    window.hideDictPopup = hidePopup;
 
     function hidePopup() {
         console.log('🚪 Hiding popup...');
