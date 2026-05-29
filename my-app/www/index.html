@@ -781,43 +781,11 @@ body.dimmed .card-image {
           </div>
         </details>
 
-        <!-- ===== DICTIONARIES ===== -->
-        <details class="prefs-section">
-          <summary class="prefs-heading">Paged reader (experimental)</summary>
-          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;">
-            Vertical-rl Japanese text with native horizontal scroll and
-            snap-to-paragraph. Built on TTU's continuous-vertical pattern.
-            Tap LEFT 25% = next page, RIGHT 25% = prev, middle = dict
-            lookup, UP-swipe = send to Anki.
-            <br><br>
-            Choice persists across launches: once you tap "Use paged
-            reader", the READ tab opens it automatically.
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <button onclick="(function(){
-                    if(window.openPagedReader) window.openPagedReader();
-                    var m=document.getElementById('preferencesModal'); if(m) m.style.display='none';
-                  })()"
-                    style="background:transparent;color:var(--accent-read,#4caf50);
-                           border:1px solid var(--accent-read,#4caf50);
-                           padding:10px 16px;border-radius:8px;font-weight:600;
-                           font-family:var(--font-sans);font-size:.88rem;
-                           cursor:pointer;">
-              Use paged reader
-            </button>
-            <button onclick="(function(){
-                    if(window.disablePagedReader) window.disablePagedReader();
-                    var m=document.getElementById('preferencesModal'); if(m) m.style.display='none';
-                  })()"
-                    style="background:transparent;color:var(--text-muted,#888);
-                           border:1px solid #555;
-                           padding:10px 16px;border-radius:8px;font-weight:600;
-                           font-family:var(--font-sans);font-size:.88rem;
-                           cursor:pointer;">
-              Switch to legacy reader
-            </button>
-          </div>
-        </details>
+        <!-- Paged-reader toggle removed — vertical paged is now the only
+             reader. Tap = dict lookup, swipe-UP = select cue (menu shows
+             COPY / + ANKI / ▶ PLAY), swipe-DOWN = play/stop from
+             selected cue (or toggle global play if none selected). -->
+
 
         <details class="prefs-section">
           <summary class="prefs-heading">Dictionaries</summary>

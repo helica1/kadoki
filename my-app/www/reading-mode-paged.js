@@ -55,6 +55,10 @@
   // range set changes, instead of a fresh Highlight per cue (which left
   // ghost paints in iOS WKWebView during scroll animations).
   let activeCueHighlight = null;
+  let selectionHighlight = null;  // shared Highlight for 'reader-selection'
+  let selectedCue = null;          // { cue, idx, chunk } when a swipe-up selected a sentence
+  let undoMs = null;               // previous playhead ms to revert to
+  let undoTimer = null;            // setTimeout handle to auto-hide undo chip
   let progressEl = null;
   let totalChars = 0;
   // Auto-scroll grace period: don't yank the view back if the user
@@ -220,6 +224,97 @@
          text. ::highlight() only supports background-color + text-
          decoration; no borders, no box-shadow. Text color intentionally
          NOT set so the underlying cue-active / normal text color stays. */
+      /* Cue selected by user swipe-up — clean mode-color tinted text,
+         NO background fill. Wins over cue-active because it's set after
+         cue-active in the stylesheet. */
+      ::highlight(reader-selection) {
+        color: var(--accent-read, #4caf50);
+      }
+      /* Floating action menu that appears next to the selected cue. */
+      #pagedSelectionMenu {
+        position: fixed;
+        z-index: 9100;
+        display: flex;
+        gap: 6px;
+        padding: 6px;
+        background: rgba(20, 22, 26, .96);
+        border: 1px solid #2a2f36;
+        border-radius: 10px;
+        box-shadow: 0 6px 22px rgba(0,0,0,.55);
+        font: 12px var(--font-sans, system-ui);
+      }
+      #pagedSelectionMenu button {
+        background: transparent;
+        color: #ddd;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        padding: 6px 10px;
+        font: 600 11px var(--font-sans, system-ui);
+        letter-spacing: .04em;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      #pagedSelectionMenu button:active { background: rgba(255,255,255,.07); }
+      /* Undo chip — top-right safe-area, mirrors the progress strip. */
+      #pagedUndoChip {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) / 2);
+        transform: translateY(-50%);
+        right: calc(env(safe-area-inset-right, 0px) + 12px);
+        padding: 8px 12px;
+        font: 600 10px var(--font-sans, system-ui);
+        color: var(--accent-read, #4caf50);
+        background: transparent;
+        border: 1px solid var(--accent-read, #4caf50);
+        border-radius: 999px;
+        z-index: 9001;
+        cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
+        white-space: nowrap;
+        transition: opacity .18s ease;
+      }
+      #pagedUndoChip:active { opacity: .55; }
+      body.chrome-hidden #pagedUndoChip {
+        opacity: 0;
+        pointer-events: none;
+      }
+      /* Play-from-here button — positioned ABOVE the shell's play/pause
+         icon, in the safe-area band right of the Dynamic Island. Top
+         offset is computed directly (no transform) because translateY
+         on iOS WKWebView can shift the hit-test region away from the
+         visual region for fixed elements. Horizontal left is set
+         imperatively in positionPlayheadBtn to track #shellPlayBtn. */
+      #pagedPlayheadBtn {
+        position: fixed !important;
+        top: calc(env(safe-area-inset-top, 0px) / 2 - 20px);
+        width: 40px !important;
+        height: 40px !important;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 !important;
+        margin: 0 !important;
+        color: var(--accent-read, #4caf50);
+        background: rgba(13, 13, 13, 0.94);
+        border: 1px solid var(--accent-read, #4caf50);
+        border-radius: 999px;
+        z-index: 99999 !important;
+        cursor: pointer;
+        user-select: none;
+        -webkit-user-select: none;
+        pointer-events: auto !important;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+        transition: opacity .18s ease;
+      }
+      #pagedPlayheadBtn:active { opacity: .55; }
+      #pagedPlayheadBtn svg { width: 20px; height: 20px; display: block; pointer-events: none; }
+      body.chrome-hidden #pagedPlayheadBtn,
+      body:not(.mode-read) #pagedPlayheadBtn {
+        opacity: 0;
+        pointer-events: none;
+      }
       ::highlight(reader-dict-lookup) {
         background: color-mix(in srgb, var(--accent-read, #4caf50) 60%, transparent);
         text-decoration: underline wavy var(--accent-read, #4caf50) 3px;
@@ -267,6 +362,7 @@
     scrollEl = viewEl.querySelector('#readingPagedContent');
     innerEl  = viewEl.querySelector('#readingPagedInner');
     ensureProgressStrip();
+    ensurePlayheadBtn();
 
     setupTouch();
     setupScrollTracking();
@@ -309,19 +405,15 @@
   }
 
   function setupTouch() {
-    let sx = 0, sy = 0, tStart = 0, canTap = true;
-    let touchStartTarget = null;
+    let sx = 0, sy = 0, tStart = 0;
     let dismissedPopupOnStart = false;
+    let dismissedSelectionOnStart = false;
     scrollEl.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
       sx = e.touches[0].clientX; sy = e.touches[0].clientY;
-      tStart = Date.now(); canTap = true;
-      touchStartTarget = e.target;
-      // Track whether THIS tap dismissed an open popup so touchend can
-      // choose the right follow-up: tap on TEXT → run a new lookup
-      // (replace popup), tap on EMPTY space → just dismiss (no chrome
-      // toggle either, since the user's intent was clearly "close it").
+      tStart = Date.now();
       dismissedPopupOnStart = false;
+      dismissedSelectionOnStart = false;
       const popup = document.getElementById('dictPopup');
       if (popup && popup.style.display !== 'none' && !popup.contains(e.target)) {
         popup.style.display = 'none';
@@ -329,46 +421,347 @@
         try { window._clearReaderDictHighlight?.(); } catch (er) {}
         dismissedPopupOnStart = true;
       }
-    }, { passive: true });
-    scrollEl.addEventListener('touchmove', (e) => {
-      if (!e.touches?.[0]) return;
-      const dx = Math.abs(e.touches[0].clientX - sx);
-      const dy = Math.abs(e.touches[0].clientY - sy);
-      if (dx > 14 || dy > 14) canTap = false;
+      // If a sentence is selected and this tap is OUTSIDE the menu, clear
+      // the selection (and don't also fire a lookup).
+      const menu = document.getElementById('pagedSelectionMenu');
+      if (selectedCue && (!menu || !menu.contains(e.target))) {
+        clearSelection();
+        dismissedSelectionOnStart = true;
+      }
+      // Long-press / swipe-up gestures removed — they conflicted with
+      // iOS system text selection (long-press is the OS handle for
+      // copy/translate) and with card-mode's up-swipe-to-Anki. The
+      // playhead-from-here button in the shell header is now the
+      // dedicated way to set the play position from the reader view.
     }, { passive: true });
     scrollEl.addEventListener('touchend', (e) => {
       const t = e.changedTouches?.[0];
       if (!t) return;
-      // Up-swipe-to-Anki removed — that gesture is for CARD mode only.
-      // Native horizontal scroll handles all page navigation. We only
-      // act on TAPS (no motion).
-      if (!canTap) return;
-      if (Date.now() - tStart > 400) return;
-      const chunk = chunkAtTapPoint(t.clientX, t.clientY);
-      if (chunk) {
-        // Always look up text taps — even if this tap just dismissed an
-        // open popup. Without this, tapping a new word with an open
-        // popup only dismissed the popup and never ran a new lookup,
-        // forcing the user to tap-then-tap-again. That's what the
-        // "flashing, never shows definition" symptom traced back to.
+      const dxRaw = t.clientX - sx, dyRaw = t.clientY - sy;
+      const adx = Math.abs(dxRaw), ady = Math.abs(dyRaw);
+      const elapsed = Date.now() - tStart;
+      // Treat motion-y gesture as scroll/abort.
+      if (ady > 14 || adx > 14) return;
+      if (elapsed > 400) return;
+      // Tap path. Check the caret at the tap point to know if we hit
+      // actual text. elementFromPoint returns the chunk container even
+      // for whitespace between glyphs, which produced the "dictionary
+      // looks up a blank result" bug. Use caretRangeFromPoint and
+      // inspect the character actually under the finger.
+      if (dismissedPopupOnStart || dismissedSelectionOnStart) {
+        if (dismissedPopupOnStart) window._dictPopupDismissedTs = Date.now();
+        return; // dismiss-only tap; no chrome toggle, no lookup
+      }
+      if (hitTextChar(t.clientX, t.clientY)) {
         lookupAt(t.clientX, t.clientY);
-      } else if (!dismissedPopupOnStart) {
-        // Empty-space tap with NO open popup → toggle chrome. If this
-        // tap dismissed a popup, the user's intent was "close" — don't
-        // also toggle the chrome.
+      } else {
         toggleChrome();
       }
-      // Also stamp the global so enhanced-dictionary's legacy reader
-      // dismiss path (which still listens) knows we just handled it.
-      if (dismissedPopupOnStart) window._dictPopupDismissedTs = Date.now();
     }, { passive: true });
   }
 
-  // "Add the touched sentence to Anki." Builds the same lookupContext the
-  // legacy reader uses, then calls window.sendToAnki. Without an audiobook
-  // cue mapping yet, we send the chunk's plain text as the sentence and
-  // omit audio range. Cover image still attaches via the existing
-  // window.sendToAnki pipeline (cover-extract.js).
+  // True when the caret at (x,y) lands on a non-whitespace/non-punctuation
+  // character inside a reading chunk. Used to reject empty-space taps
+  // before they trigger a dict lookup of "" or " " or "「".
+  function hitTextChar(x, y) {
+    let caret = document.caretRangeFromPoint?.(x, y) ||
+                document.caretPositionFromPoint?.(x, y);
+    if (!caret) return false;
+    const node = caret.startContainer || caret.offsetNode;
+    const off  = (caret.startContainer ? caret.startOffset : caret.offset) | 0;
+    if (!node || node.nodeType !== 3) return false;
+    if (!innerEl.contains(node)) return false;
+    // Confirm we're inside a chunk (rejects taps that fall on the
+    // padding region between chunks).
+    let cur = node.parentNode, inChunk = false;
+    while (cur && cur !== innerEl) {
+      if (cur.classList?.contains('reading-chunk')) { inChunk = true; break; }
+      cur = cur.parentNode;
+    }
+    if (!inChunk) return false;
+    // Check the character AT the caret position (or just before, for
+    // end-of-text-node caret positions).
+    const txt = node.nodeValue || '';
+    let ch = txt[off] || txt[off - 1] || '';
+    // Whitespace, full-width space, punctuation, brackets → not text.
+    return ch && !/[\s　「」『』、。・…！？!?,.;:""'']/u.test(ch);
+  }
+
+  // ---------- Swipe gestures ----------
+
+  function handleSwipeUp(x, y) {
+    log(`handleSwipeUp: cues=${pagedCues?.length || 0} mapsReady=${!!pagedCueToChunk}`);
+    // Select the cue under the swipe origin.
+    const caret = document.caretRangeFromPoint?.(x, y) ||
+                  document.caretPositionFromPoint?.(x, y);
+    if (!caret) { log('handleSwipeUp: no caret'); return; }
+    const node = caret.startContainer || caret.offsetNode;
+    if (!node || !innerEl.contains(node)) { log('handleSwipeUp: node not in innerEl'); return; }
+    let cur = node.parentNode, chunk = null;
+    while (cur && cur !== innerEl) {
+      if (cur.classList?.contains('reading-chunk')) { chunk = cur; break; }
+      cur = cur.parentNode;
+    }
+    if (!chunk) return;
+    const offset = (caret.startContainer ? caret.startOffset : caret.offset) | 0;
+    // Build flatText + charIndex for findCueForTap.
+    const tns = [];
+    let flat = '';
+    const walker = document.createTreeWalker(chunk, NodeFilter.SHOW_TEXT, null);
+    let n;
+    while ((n = walker.nextNode())) { tns.push(n); flat += n.nodeValue; }
+    let acc = 0, charIndex = -1;
+    for (const tn of tns) {
+      if (tn === node) { charIndex = acc + offset; break; }
+      acc += tn.nodeValue.length;
+    }
+    if (charIndex < 0) charIndex = 0;
+    const found = findCueForTap(chunk, flat, charIndex);
+    if (!found?.cue) {
+      log('handleSwipeUp: no cue at swipe point');
+      return;
+    }
+    selectCue(found.cue, found.idx, chunk);
+  }
+
+  function handleSwipeDown() {
+    if (selectedCue) {
+      playFromSelection();
+    } else {
+      togglePlayPause();
+    }
+  }
+
+  // ---------- Selection state + visual ----------
+
+  function selectCue(cue, idx, chunk) {
+    selectedCue = { cue, idx, chunk };
+    // Paint the cue's text in mode-color (no bg) via a separate highlight
+    // key from cue-active.
+    paintSelectionHighlight(chunk, cue.text);
+    showSelectionMenu();
+    // Stash the lookupContext so the global "+ Anki" path picks up the
+    // cue when the user taps the menu's Anki button (and so the down-
+    // swipe play-from-selection knows the cue).
+    try {
+      window.lookupContext = {
+        source: 'paged-reader',
+        sentence: String(cue.text || '').trim(),
+        card: null,
+        cueAudioPath: pagedAudioPath || null,
+        cueStartMs:   Number.isFinite(cue.startMs) ? cue.startMs : null,
+        cueEndMs:     Number.isFinite(cue.endMs)   ? cue.endMs   : null,
+        cueIndex:     idx
+      };
+    } catch (e) {}
+  }
+
+  function paintSelectionHighlight(chunk, text) {
+    if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
+    // Reuse setCueRangeHighlight's text-walk by inlining a similar mapping.
+    const textNodes = [];
+    let flat = '';
+    const walker = document.createTreeWalker(chunk, NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        let p = n.parentNode;
+        while (p && p !== chunk) {
+          if (p.tagName === 'RT' || p.tagName === 'RP') return NodeFilter.FILTER_REJECT;
+          p = p.parentNode;
+        }
+        return n.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      }
+    });
+    let n;
+    while ((n = walker.nextNode())) { textNodes.push(n); flat += n.nodeValue; }
+    if (!flat) return;
+    const normCue = normalizeJP(text);
+    if (!normCue) return;
+    const normFlat = normalizeJP(flat);
+    const normStart = normFlat.indexOf(normCue);
+    if (normStart < 0) return;
+    const normEnd = normStart + normCue.length;
+    const STRIP = /[\s　「」『』、。・…！？!?,.;:""'']/;
+    let rawStart = -1, rawEnd = flat.length, np = 0;
+    for (let i = 0; i < flat.length; i++) {
+      if (rawStart < 0 && np >= normStart && !STRIP.test(flat[i])) rawStart = i;
+      if (np >= normEnd) { rawEnd = i; break; }
+      if (!STRIP.test(flat[i])) np++;
+    }
+    if (rawStart < 0) return;
+    while (rawEnd < flat.length && STRIP.test(flat[rawEnd])) rawEnd++;
+    let acc = 0, sNode = null, sOff = 0, eNode = null, eOff = 0;
+    for (const tn of textNodes) {
+      const next = acc + tn.nodeValue.length;
+      if (sNode === null && rawStart < next) { sNode = tn; sOff = rawStart - acc; }
+      if (rawEnd <= next) { eNode = tn; eOff = rawEnd - acc; break; }
+      acc = next;
+    }
+    if (!sNode) return;
+    if (!eNode) { eNode = textNodes[textNodes.length - 1]; eOff = eNode.nodeValue.length; }
+    try {
+      const r = new Range();
+      r.setStart(sNode, sOff);
+      r.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
+      if (!selectionHighlight) selectionHighlight = new Highlight();
+      selectionHighlight.clear();
+      selectionHighlight.add(r);
+      CSS.highlights.set('reader-selection', selectionHighlight);
+      if (scrollEl) void scrollEl.offsetWidth;
+    } catch (e) {}
+  }
+
+  function clearSelection() {
+    selectedCue = null;
+    try { selectionHighlight?.clear?.(); } catch (_) {}
+    try { CSS.highlights?.delete?.('reader-selection'); } catch (_) {}
+    hideSelectionMenu();
+  }
+
+  // ---------- Selection menu (COPY / Anki / Play) ----------
+
+  function showSelectionMenu() {
+    if (!selectedCue) return;
+    let menu = document.getElementById('pagedSelectionMenu');
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'pagedSelectionMenu';
+      // ANKI button intentionally removed — the dict popup's "+ Anki"
+      // is the only correct path because that's where the waveform-
+      // editor → slice → send pipeline lives. Tap a word in the
+      // selected cue → dict popup → + Anki, and you get the same
+      // sentence + audio range as a Card-mode send.
+      menu.innerHTML = `
+        <button data-action="copy">COPY</button>
+        <button data-action="play">▶ PLAY</button>
+      `;
+      document.body.appendChild(menu);
+      menu.addEventListener('click', onSelectionMenuClick);
+      menu.addEventListener('touchend', onSelectionMenuClick, { passive: false });
+    }
+    // Position near the selected text — use the highlight's bbox.
+    const hl = window.CSS?.highlights?.get?.('reader-selection');
+    let rect = null;
+    if (hl) for (const r of hl) { rect = r.getBoundingClientRect(); break; }
+    const vw = window.innerWidth, vh = window.innerHeight;
+    menu.style.display = 'flex';
+    const mw = menu.offsetWidth || 220, mh = menu.offsetHeight || 36;
+    let left, top;
+    if (rect && rect.width) {
+      // Center horizontally on the rect; place above unless no room.
+      left = Math.max(8, Math.min(vw - mw - 8, rect.left + rect.width / 2 - mw / 2));
+      top = (rect.top - mh - 8 >= 8) ? rect.top - mh - 8 : Math.min(vh - mh - 8, rect.bottom + 8);
+    } else {
+      left = (vw - mw) / 2;
+      top = vh - mh - 32;
+    }
+    menu.style.left = left + 'px';
+    menu.style.top = top + 'px';
+  }
+
+  function hideSelectionMenu() {
+    const menu = document.getElementById('pagedSelectionMenu');
+    if (menu) menu.style.display = 'none';
+  }
+
+  let _menuFiring = false;
+  function onSelectionMenuClick(e) {
+    if (_menuFiring) return;
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    _menuFiring = true;
+    try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+    e.stopPropagation();
+    const action = btn.dataset.action;
+    const cue = selectedCue?.cue;
+    setTimeout(() => { _menuFiring = false; }, 400);
+    if (!cue) return;
+    if (action === 'copy') {
+      try { navigator.clipboard?.writeText?.(cue.text || ''); } catch (_) {}
+    } else if (action === 'anki') {
+      sendSelectionToAnki();
+    } else if (action === 'play') {
+      playFromSelection();
+    }
+  }
+
+  async function sendSelectionToAnki() {
+    if (!selectedCue || typeof window.sendToAnki !== 'function') return;
+    const cue = selectedCue.cue;
+    let imageData = '';
+    try {
+      if (window._activeTitleId && window.titleStore?.list) {
+        const titles = await window.titleStore.list();
+        const t = titles.find(x => x.id === window._activeTitleId);
+        if (t?.attachments?.cover?.dataUri) imageData = t.attachments.cover.dataUri;
+      }
+    } catch (_) {}
+    await window.sendToAnki({ expression: cue.text || '', imageData });
+  }
+
+  // ---------- Play from selection + undo ----------
+
+  async function getCurrentPlayMs() {
+    try {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      const s = await bg?.getState?.();
+      return Number.isFinite(s?.positionMs) ? s.positionMs : null;
+    } catch (_) { return null; }
+  }
+
+  async function playFromSelection() {
+    if (!selectedCue) return;
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bg) return;
+    const cue = selectedCue.cue;
+    if (!Number.isFinite(cue?.startMs)) return;
+    // Record the previous position for undo BEFORE we seek.
+    const oldMs = await getCurrentPlayMs();
+    if (Number.isFinite(oldMs)) recordUndo(oldMs);
+    try { await bg.seek({ ms: Math.round(cue.startMs) }); } catch (_) {}
+    try { await bg.play?.(); } catch (_) {}
+    // Selection is consumed.
+    clearSelection();
+  }
+
+  async function togglePlayPause() {
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bg) return;
+    try {
+      const s = await bg.getState?.();
+      if (s?.playing) await bg.pause?.();
+      else await bg.play?.();
+    } catch (_) {}
+  }
+
+  function recordUndo(ms) {
+    undoMs = ms;
+    let chip = document.getElementById('pagedUndoChip');
+    if (!chip) {
+      chip = document.createElement('div');
+      chip.id = 'pagedUndoChip';
+      chip.textContent = 'UNDO';
+      chip.addEventListener('click', revertUndo);
+      document.body.appendChild(chip);
+    }
+    chip.style.display = 'block';
+    if (undoTimer) clearTimeout(undoTimer);
+    undoTimer = setTimeout(hideUndo, 8000);
+  }
+
+  function hideUndo() {
+    const chip = document.getElementById('pagedUndoChip');
+    if (chip) chip.style.display = 'none';
+    undoMs = null;
+    if (undoTimer) { clearTimeout(undoTimer); undoTimer = null; }
+  }
+
+  async function revertUndo() {
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bg || undoMs == null) { hideUndo(); return; }
+    try { await bg.seek({ ms: Math.round(undoMs) }); } catch (_) {}
+    hideUndo();
+  }
+
   async function sendChunkToAnki(chunk) {
     if (!chunk || typeof window.sendToAnki !== 'function') return;
     const sentence = chunk.textContent.trim();
@@ -422,11 +815,8 @@
     if (!candidateIdxs.length) {
       for (let i = 0; i < pagedCues.length; i++) candidateIdxs.push(i);
     }
-    // Strict containment only — return the cue whose text range covers
-    // the tap. NO fallback to "closest cue", because that produced the
-    // "Anki got the wrong sentence" symptom: tap on a kanji in cue N,
-    // findCue returns cue N+1 because the tap landed on a normalized
-    // index that's slightly past N's end but close to N+1's start.
+    // Strict containment first.
+    let best = null, bestDist = Infinity;
     for (const ci of candidateIdxs) {
       const cue = pagedCues[ci];
       const normCue = normalizeJP(cue?.text || '');
@@ -437,40 +827,223 @@
       if (normIdx >= start && normIdx < end) {
         return { cue, idx: ci, normStart: start, normEnd: end };
       }
+      // Track nearest by distance for tight-window fallback.
+      const dist = Math.min(Math.abs(normIdx - start), Math.abs(normIdx - end - 1));
+      if (dist < bestDist) {
+        best = { cue, idx: ci, normStart: start, normEnd: end };
+        bestDist = dist;
+      }
     }
+    // Tight fallback: tap landed on punctuation/whitespace between cues.
+    // Within 6 normalized chars of a cue boundary → use it. Beyond that,
+    // give up — but caller will still get a one-sentence fallback (not
+    // the whole chunk) via bindCueLookupContext.
+    if (best && bestDist <= 6) return best;
     return null;
+  }
+
+  // Extract just the sentence around `charIndex` from `flatText`. Used as
+  // a last-ditch fallback when no cue can be matched: we'd rather send
+  // Anki one sentence than the whole multi-paragraph chunk.
+  function extractSentenceAround(text, idx) {
+    if (!text) return '';
+    const punct = /[。！？!?\n]/;
+    let start = 0, end = text.length;
+    for (let i = Math.min(idx, text.length) - 1; i >= 0; i--) {
+      if (punct.test(text[i])) { start = i + 1; break; }
+    }
+    for (let i = Math.max(idx, 0); i < text.length; i++) {
+      if (punct.test(text[i])) { end = i + 1; break; }
+    }
+    return text.slice(start, end).trim();
   }
 
   function bindCueLookupContext(chunk, flatText, charIndex) {
     try {
-      const sentence = chunk?.textContent?.trim?.() || flatText.trim();
       const found = findCueForTap(chunk, flatText, charIndex);
       if (found?.cue) {
         const cueText = String(found.cue.text || '').trim();
         window.lookupContext = {
           source: 'paged-reader',
-          sentence: cueText || sentence,
+          sentence: cueText,
           card: null,
-          cueAudioPath: pagedAudioPath || null,
+          cueAudioPath: pagedAudioPath || window.__abAudioPath || null,
           cueStartMs:   Number.isFinite(found.cue.startMs) ? found.cue.startMs : null,
           cueEndMs:     Number.isFinite(found.cue.endMs)   ? found.cue.endMs   : null,
           cueIndex:     found.idx,
           cues:         null
         };
+        log(`bindCueLookupContext: cue#${found.idx} "${cueText.slice(0,30)}…"`);
       } else {
-        // No cue mapping — still bind sentence so Anki gets the chunk's
-        // text. Audio fields stay null; sendToAnki will skip audio if
-        // nothing's there.
+        // No cue match by text containment. TEXT comes from sentence-
+        // around-tap so we don't glob a chunk. AUDIO comes from the
+        // nearest chunk-mapped cue so Anki still gets audio that lines
+        // up with what's visible. Without this, the global fallback
+        // (_currentReadingCueStartMs from the PLAYING cue) wins, giving
+        // the "Anki audio is from where the audiobook was last playing,
+        // not the tapped sentence" bug.
+        const sentence = extractSentenceAround(flatText, charIndex) ||
+                         (chunk?.textContent || '').slice(0, 200).trim();
+        const nearest = findNearestChunkCue(chunk, flatText, charIndex);
         window.lookupContext = {
           source: 'paged-reader',
           sentence,
           card: null,
-          cueAudioPath: null,
-          cueStartMs:   null,
-          cueEndMs:     null
+          cueAudioPath: nearest ? (pagedAudioPath || window.__abAudioPath || null) : null,
+          cueStartMs:   nearest?.startMs ?? null,
+          cueEndMs:     nearest?.endMs   ?? null
         };
+        log(`bindCueLookupContext: no cue — sentence-fallback "${sentence.slice(0,30)}…"` +
+            (nearest ? ` audio=cue${nearest.idx}` : ' audio=NONE'));
       }
     } catch (e) { log('bindCueLookupContext error:', e.message); }
+  }
+
+  // Best-effort cue for a chunk. NEVER returns null when we can reach
+  // ANY cue source — the waveform editor must open so the user can
+  // fine-tune. Strategy chain (BUILD MARKER: v4):
+  //   1. text search: any cue whose normalized text appears in chunk
+  //   2. pagedCueToChunk distance (when chunk is in chunks array)
+  //   3. proportional by chunk index in chunks
+  //   4. currently-playing cue (when audio is following)
+  //   5. first cue with finite times (last resort)
+  function findNearestChunkCue(chunk, flatText, charIndex) {
+    // Source of truth for cues: our own pagedCues, OR — when our load
+    // failed silently — the legacy reader's abCues exposed via window.
+    const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+    const cuesSource = (pagedCues?.length ? 'paged' : (cues.length ? 'legacy' : 'none'));
+    const hasTap = Number.isFinite(charIndex) && typeof flatText === 'string';
+    log('findNearestChunkCue v6 entered: pagedCues=' + (pagedCues?.length||0) +
+        ' abCues=' + (window.__abCues?.length||0) +
+        ' chunks=' + (chunks?.length||0) +
+        ' source=' + cuesSource +
+        ' charIndex=' + (hasTap ? charIndex : 'n/a'));
+    if (!cues.length) { log('findNearestChunkCue: NO cues from any source'); return null; }
+
+    // --- Strategy 1: best cue whose text appears in this chunk ---
+    // Algorithm (v6):
+    //   For each cue, find ALL its occurrences in the normalized chunk
+    //   text (a cue text like "そして" can appear many times). For each
+    //   (cue, occurrence) pair, compute distance to the tap. Then:
+    //     A. Among pairs that CONTAIN the tap (dist=0), prefer the one
+    //        whose cue text is LONGEST — that's the most-specific match.
+    //        A short common cue like "そう" trivially contains many
+    //        taps; a full-sentence cue containing the same tap is the
+    //        right answer.
+    //     B. If no pair contains the tap, pick the smallest distance.
+    const normChunk = chunk ? normalizeJP(chunk.textContent || '') : '';
+    if (normChunk) {
+      let tapNormIdx = -1;
+      if (hasTap) {
+        const STRIP = /[\s　「」『』、。・…！？!?,.;:""'']/;
+        tapNormIdx = 0;
+        for (let i = 0; i < charIndex && i < flatText.length; i++) {
+          if (!STRIP.test(flatText[i])) tapNormIdx++;
+        }
+      }
+      let bestContain = null, bestContainLen = -1;
+      let bestNearby  = null, bestNearbyDist = Infinity;
+      let matchCount = 0;
+      for (let i = 0; i < cues.length; i++) {
+        const c = cues[i];
+        if (!Number.isFinite(c?.startMs) || !Number.isFinite(c?.endMs)) continue;
+        const norm = normalizeJP(c?.text || '');
+        if (!norm || norm.length < 3) continue;
+        // Walk all occurrences of this cue's text in the chunk.
+        let from = 0;
+        while (from <= normChunk.length) {
+          const pos = normChunk.indexOf(norm, from);
+          if (pos < 0) break;
+          matchCount++;
+          if (!hasTap) {
+            log('findNearestChunkCue: text-match cue#' + i + ' (no tap, first match)');
+            return { idx: i, startMs: c.startMs, endMs: c.endMs };
+          }
+          const end = pos + norm.length;
+          if (tapNormIdx >= pos && tapNormIdx < end) {
+            // Contains tap — keep the longest cue text among contains.
+            if (norm.length > bestContainLen) {
+              bestContain = { idx: i, startMs: c.startMs, endMs: c.endMs, normLen: norm.length };
+              bestContainLen = norm.length;
+            }
+          } else {
+            const dist = Math.min(Math.abs(tapNormIdx - pos), Math.abs(tapNormIdx - end));
+            if (dist < bestNearbyDist) {
+              bestNearby = { idx: i, startMs: c.startMs, endMs: c.endMs };
+              bestNearbyDist = dist;
+            }
+          }
+          from = pos + 1; // next occurrence
+        }
+      }
+      const winner = bestContain || bestNearby;
+      if (winner) {
+        const kind = bestContain ? ('contains, len=' + bestContainLen) : ('nearby, dist=' + bestNearbyDist);
+        log('findNearestChunkCue: text-match cue#' + winner.idx +
+            ' (best of ' + matchCount + ' candidates, ' + kind + ')');
+        return winner;
+      }
+    }
+
+    // --- Strategy 2: pagedCueToChunk distance (only valid when paged source) ---
+    const targetIdx = (chunk && chunks) ? chunks.indexOf(chunk) : -1;
+    if (cuesSource === 'paged' && targetIdx >= 0 && pagedCueToChunk) {
+      let best = null, bestDist = Infinity;
+      for (let i = 0; i < pagedCueToChunk.length; i++) {
+        const ci = pagedCueToChunk[i];
+        if (ci == null || ci < 0) continue;
+        const c = cues[i];
+        if (!Number.isFinite(c?.startMs) || !Number.isFinite(c?.endMs)) continue;
+        const dist = Math.abs(ci - targetIdx);
+        if (dist < bestDist) {
+          best = { idx: i, startMs: c.startMs, endMs: c.endMs };
+          bestDist = dist;
+          if (dist === 0) break;
+        }
+      }
+      if (best) { log('findNearestChunkCue: cueToChunk cue#' + best.idx + ' dist=' + bestDist); return best; }
+    }
+
+    // --- Strategy 3: proportional ---
+    if (targetIdx >= 0 && chunks?.length) {
+      const ratio = targetIdx / Math.max(1, chunks.length);
+      const guessIdx = Math.min(cues.length - 1, Math.max(0, Math.round(ratio * cues.length)));
+      for (let off = 0; off < cues.length; off++) {
+        for (const sign of [1, -1]) {
+          const idx = guessIdx + sign * off;
+          if (idx < 0 || idx >= cues.length) continue;
+          const c = cues[idx];
+          if (Number.isFinite(c?.startMs) && Number.isFinite(c?.endMs)) {
+            log('findNearestChunkCue: proportional cue#' + idx);
+            return { idx, startMs: c.startMs, endMs: c.endMs };
+          }
+        }
+      }
+    }
+
+    // --- Strategy 4: currently-playing cue ---
+    const playStart = window._currentReadingCueStartMs;
+    if (Number.isFinite(playStart)) {
+      for (let i = 0; i < cues.length; i++) {
+        const c = cues[i];
+        if (Number.isFinite(c?.startMs) && Number.isFinite(c?.endMs) &&
+            playStart >= c.startMs && playStart < c.endMs) {
+          log('findNearestChunkCue: playing cue#' + i);
+          return { idx: i, startMs: c.startMs, endMs: c.endMs };
+        }
+      }
+    }
+
+    // --- Strategy 5: first cue with finite times ---
+    for (let i = 0; i < cues.length; i++) {
+      const c = cues[i];
+      if (Number.isFinite(c?.startMs) && Number.isFinite(c?.endMs)) {
+        log('findNearestChunkCue: first-cue fallback cue#' + i);
+        return { idx: i, startMs: c.startMs, endMs: c.endMs };
+      }
+    }
+    log('findNearestChunkCue: ALL strategies failed (no finite cues at all)');
+    return null;
   }
 
   // Normalize Japanese text for fuzzy matching: NFKC + strip whitespace +
@@ -629,6 +1202,79 @@
     progressEl.addEventListener('click', fire);
     progressEl.addEventListener('touchend', fire, { passive: false });
     document.body.appendChild(progressEl);
+  }
+
+  // Top-right safe-area button — sets audio playhead to the cue under
+  // the right edge of the viewport (the cue the user is currently
+  // reading in vertical-rl). Horizontally aligned with #shellPlayBtn so
+  // it sits visually directly above the play/pause icon.
+  function ensurePlayheadBtn() {
+    if (document.getElementById('pagedPlayheadBtn')) return;
+    const btn = document.createElement('button');
+    btn.id = 'pagedPlayheadBtn';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', 'Play from here');
+    // Skip-to-next glyph (▶▌).
+    btn.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">' +
+      '<path d="M6 5v14l9-7L6 5zm10 0h2v14h-2V5z"/></svg>';
+    let firing = false;
+    const fire = (e) => {
+      if (firing) return;
+      firing = true;
+      // Triple-channel proof of tap: log line, console.log, and a toast.
+      // If NONE of these surface, the button isn't receiving the event
+      // at all (z-index / pointer-events / OS layer issue) — distinct
+      // from "event fires but handler returns early."
+      const msg = 'pagedPlayheadBtn fired (' + e.type + ')';
+      log(msg);
+      try { console.log('[reader-paged] ' + msg); } catch (_) {}
+      try { window.showToast?.('▶▌', 700); } catch (_) {}
+      try { e.stopPropagation(); } catch (_) {}
+      try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+      Promise.resolve()
+        .then(() => window.pagedSetPlayheadFromView?.())
+        .catch((err) => {
+          const m = 'pagedSetPlayheadFromView error: ' + (err?.message || err);
+          log(m);
+          try { console.warn('[reader-paged] ' + m); } catch (_) {}
+          try { window.showToast?.('✗ ' + (err?.message || err), 2200); } catch (_) {}
+        })
+        .finally(() => { setTimeout(() => { firing = false; }, 400); });
+    };
+    // Cover every mobile-safari path. pointerup is the canonical iOS
+    // tap event; click can be eaten by 300ms delay or scroll cancel;
+    // touchend can fire even on a quick swipe but we already gated with
+    // the `firing` flag. Capture phase so no descendant can swallow it.
+    btn.addEventListener('pointerup',  fire, { capture: true });
+    btn.addEventListener('click',      fire, { capture: true });
+    btn.addEventListener('touchend',   fire, { capture: true, passive: false });
+    document.body.appendChild(btn);
+    positionPlayheadBtn();
+    window.addEventListener('resize', positionPlayheadBtn);
+    window.addEventListener('orientationchange', positionPlayheadBtn);
+    setTimeout(positionPlayheadBtn, 0);
+    setTimeout(positionPlayheadBtn, 300);
+  }
+
+  // Place the floating button so its horizontal center matches
+  // #shellPlayBtn's center. Falls back to a right-edge offset if the
+  // shell button isn't rendered yet.
+  function positionPlayheadBtn() {
+    const btn = document.getElementById('pagedPlayheadBtn');
+    if (!btn) return;
+    const play = document.getElementById('shellPlayBtn');
+    if (play) {
+      const r = play.getBoundingClientRect();
+      if (r.width > 0) {
+        const center = r.left + r.width / 2;
+        btn.style.left = (center - 20) + 'px'; // 20 = half of 40px width
+        btn.style.right = 'auto';
+        return;
+      }
+    }
+    btn.style.right = 'calc(env(safe-area-inset-right, 0px) + 60px)';
+    btn.style.left = 'auto';
   }
 
   // Custom in-app modal — Capacitor's WKWebView doesn't reliably show
@@ -1188,6 +1834,8 @@
     ensureView();
     viewEl.style.display = 'flex';
     document.body.classList.add('has-paged-progress');
+    positionPlayheadBtn();
+    setTimeout(positionPlayheadBtn, 200);
     // CRITICAL: hide the LEGACY reader so it doesn't run audio sync
     // underneath us.
     const legacyView = document.getElementById('readingModeView');
@@ -1269,12 +1917,12 @@
   }
 
   async function maybeInstallReadingRouteOverride() {
-    if (!PREF) return;
-    try {
-      const r = await PREF.get({ key: KEY_USE_PAGED });
-      if (r?.value !== '1') return;
-      installReadingRouteOverride();
-    } catch (e) {}
+    // Paged reader is now the ONLY reader. The KEY_USE_PAGED toggle has
+    // been removed from Preferences; we install the route override
+    // unconditionally at boot. The legacy horizontal reader is dead
+    // code path-wise but its source stays on disk for fallback.
+    installReadingRouteOverride();
+    try { if (PREF) await setPref(KEY_USE_PAGED, '1'); } catch (_) {}
   }
 
   // Allow Preferences to flip the switch back to the legacy reader.
@@ -1285,6 +1933,87 @@
     }
     closeView();
   }
+
+  // Find the cue under the RIGHTMOST visible chunk, paint it green
+  // (reader-selection highlight), and play from its startMs. If the
+  // audiobook isn't already loaded into BackgroundAudio, bg.play({url})
+  // loads it as part of the same call — bg.seek() alone is a no-op
+  // until audio is loaded, which was the "toast but no audio" symptom.
+  window.pagedSetPlayheadFromView = async function () {
+    const note = (m) => { log(m); try { console.log('[reader-paged] ' + m); } catch (_) {} };
+    note('pagedSetPlayheadFromView invoked');
+    if (!viewEl || viewEl.style.display === 'none') {
+      try { window.showToast?.('Reader not open', 1800); } catch (_) {}
+      return;
+    }
+    if (!scrollEl || !chunks?.length) {
+      try { window.showToast?.('No content loaded', 1800); } catch (_) {}
+      return;
+    }
+    const sr = scrollEl.getBoundingClientRect();
+    let chosen = null, chosenRight = -Infinity, visibleCount = 0;
+    for (const ch of chunks) {
+      const r = ch.getBoundingClientRect();
+      if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
+      if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
+      visibleCount++;
+      if (r.right > chosenRight) { chosen = ch; chosenRight = r.right; }
+    }
+    note('setPlayhead: ' + visibleCount + ' visible chunks');
+    if (!chosen) {
+      try { window.showToast?.('No visible text', 1800); } catch (_) {}
+      return;
+    }
+    const nearest = findNearestChunkCue(chosen);
+    if (!nearest) {
+      try { window.showToast?.('No audio cue here', 1800); } catch (_) {}
+      return;
+    }
+    // Recover the full cue object from whichever cues source matched.
+    const cuesSrc = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+    const fullCue = cuesSrc[nearest.idx];
+    if (!fullCue) {
+      try { window.showToast?.('Cue data missing', 1800); } catch (_) {}
+      return;
+    }
+    // Paint the cue text GREEN via the existing reader-selection highlight.
+    // This is the same machinery the old swipe-up gesture used.
+    paintSelectionHighlight(chosen, fullCue.text || '');
+    selectedCue = { cue: fullCue, idx: nearest.idx, chunk: chosen };
+    note('setPlayhead → cue#' + nearest.idx + ' "' + (fullCue.text||'').slice(0,30) +
+         '" at ' + Math.round(nearest.startMs) + 'ms');
+    // Resolve the audio file path + URL. Must come from somewhere even
+    // when the user hasn't opened audio mode yet — otherwise bg.play has
+    // no source and silently does nothing.
+    const audioPath = pagedAudioPath || window.__abAudioPath || null;
+    if (!audioPath) {
+      try { window.showToast?.('No audio paired', 1800); } catch (_) {}
+      return;
+    }
+    // BackgroundAudio's native player takes a raw file:// URL, NOT
+    // Capacitor.convertFileSrc (which produces a capacitor:// webview
+    // URL that AVPlayer can't open — OSStatus 2003334207 = 'what').
+    const url = audioPath.startsWith('file://') ? audioPath : ('file://' + audioPath);
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bg) {
+      try { window.showToast?.('Audio plugin missing', 1800); } catch (_) {}
+      return;
+    }
+    const oldMs = await getCurrentPlayMs();
+    if (Number.isFinite(oldMs)) recordUndo(oldMs);
+    try {
+      await bg.play({
+        url,
+        startMs: Math.round(nearest.startMs),
+        rate: window.audioPlaybackRate || 1
+      });
+    } catch (e) {
+      note('bg.play error: ' + e.message);
+      try { window.showToast?.('Play error: ' + e.message, 2200); } catch (_) {}
+      return;
+    }
+    try { window.showToast?.('▶ cue ' + nearest.idx, 1400); } catch (_) {}
+  };
 
   window.openPagedReader     = openView;
   window.closePagedReader    = closeView;

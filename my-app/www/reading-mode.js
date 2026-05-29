@@ -1932,6 +1932,14 @@
   let abScrubbing = false;
   let abPositionRef = { ms: 0, durMs: 0 };
 
+  // Expose abCues + abAudioPath to the paged reader as a fallback —
+  // its own loadAudiobookCues can fail silently (title-store missing
+  // SRT attachment, deck-pairing miss), leaving pagedCues=0 and
+  // breaking Anki audio. The legacy reader, which loads SRT via
+  // audio-mode pairing, is the source of truth in those cases.
+  Object.defineProperty(window, '__abCues', { get() { return abCues; }, configurable: true });
+  Object.defineProperty(window, '__abAudioPath', { get() { return abAudioPath; }, configurable: true });
+
   function abFmtMs(ms) {
     if (!Number.isFinite(ms) || ms < 0) return '–:––';
     const s = Math.floor(ms / 1000);

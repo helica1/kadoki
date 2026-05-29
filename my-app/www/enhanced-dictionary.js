@@ -1111,7 +1111,42 @@
             popup.style.top       = `${top}px`;
             return;
         }
-        // Reading-mode fallback: keep the popup out of the active chunk so the
+        // PAGED-READER fast path: text flows in vertical columns, so
+        // "above/below the highlight" still covers the same column the
+        // user wants to read. Instead, snap the popup to the LEFT or
+        // RIGHT edge of the screen — whichever side is farther from
+        // the highlighted word's column — with a compact width that
+        // leaves the highlight column clearly visible.
+        const pagedView = document.getElementById('readingPagedView');
+        const pagedActive = pagedView && pagedView.style.display !== 'none';
+        if (pagedActive) {
+            const hl = window.CSS?.highlights?.get?.('reader-dict-lookup');
+            let hlRect = null;
+            if (hl) for (const r of hl) {
+                const rc = r.getBoundingClientRect?.();
+                if (rc && rc.width && rc.height) { hlRect = rc; break; }
+            }
+            const pw = Math.min(360, vw * 0.5);
+            const safeTop = (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--app-header-h')) || 64);
+            const ptop = safeTop + margin;
+            const pmaxH = vh - ptop - margin * 2;
+            let pleft;
+            if (hlRect) {
+                const center = hlRect.left + hlRect.width / 2;
+                // Put popup on the OPPOSITE edge from the highlight.
+                pleft = (center > vw / 2) ? margin : (vw - pw - margin);
+            } else {
+                pleft = (vw - pw) / 2;
+            }
+            popup.style.width = `${pw}px`;
+            popup.style.height = 'auto';
+            popup.style.maxHeight = `${pmaxH}px`;
+            popup.style.left = `${pleft}px`;
+            popup.style.top = `${ptop}px`;
+            return;
+        }
+
+        // Legacy reader fallback: keep the popup out of the active chunk so the
         // user can still see the highlighted word being looked up.
         // Smaller width than before — was covering too much of the page.
         const w = Math.min(vw * 0.84, 460);
@@ -1712,9 +1747,33 @@
                     // long as it has the cue fields — covers 'reading',
                     // 'card', and 'audiobook' equally.
                     const ctxCue = (ctx && Number.isFinite(ctx.cueStartMs)) ? ctx : null;
+                    const isPagedReader = ctx?.source === 'paged-reader';
+                    // PATH can fall back to the global — there's only ONE
+                    // audiobook file per title, so the global path is the
+                    // same file the paged reader uses. Without this
+                    // fallback, the waveform gate fails and Anki gets no
+                    // audio at all (skip-the-editor symptom).
                     const cueAudioPath = ctxCue?.cueAudioPath || window._currentReadingAudiobookPath || null;
-                    const cueStartMs   = Number.isFinite(ctxCue?.cueStartMs) ? ctxCue.cueStartMs : window._currentReadingCueStartMs;
-                    const cueEndMs     = Number.isFinite(ctxCue?.cueEndMs)   ? ctxCue.cueEndMs   : window._currentReadingCueEndMs;
+                    // START/END must come from the TAPPED cue for paged-
+                    // reader. The globals track the currently-PLAYING cue,
+                    // not the tapped one, which produced the "Anki audio
+                    // is from where I was just playing, not the tapped
+                    // sentence" symptom.
+                    const cueStartMs = isPagedReader
+                        ? (Number.isFinite(ctxCue?.cueStartMs) ? ctxCue.cueStartMs : null)
+                        : (Number.isFinite(ctxCue?.cueStartMs) ? ctxCue.cueStartMs : window._currentReadingCueStartMs);
+                    const cueEndMs = isPagedReader
+                        ? (Number.isFinite(ctxCue?.cueEndMs) ? ctxCue.cueEndMs : null)
+                        : (Number.isFinite(ctxCue?.cueEndMs) ? ctxCue.cueEndMs : window._currentReadingCueEndMs);
+                    // Diagnostic — why did/didn't the waveform editor open?
+                    console.log('[anki] waveform gate:',
+                      'audioData=' + (audioData ? `len${audioData.length}` : 'none'),
+                      'cueAudioPath=' + (cueAudioPath ? '✓' : 'MISSING'),
+                      'cueStartMs=' + cueStartMs,
+                      'cueEndMs=' + cueEndMs,
+                      'waveform.edit=' + (window.waveform?.edit ? '✓' : 'MISSING'),
+                      'AudioSlicer=' + (window.Capacitor?.Plugins?.AudioSlicer ? '✓' : 'MISSING'),
+                      'ctx.source=' + (ctx?.source || 'none'));
                     let finalSentence = sentence;
                     if (!audioData && cueAudioPath &&
                         Number.isFinite(cueStartMs) && Number.isFinite(cueEndMs) &&
@@ -1740,14 +1799,19 @@
                         cueIndex: 0
                       });
                       if (!adjusted) return; // user cancelled
-                      // Guard: only adopt the editor's text if the user
-                      // actually changed it. The editor sometimes returns
-                      // a string assembled from multiple SRT cues whose
-                      // time ranges overlap the default selection — that
-                      // was the source of "globbed sentences" in Anki.
-                      // Trust our caller-supplied sentence by default.
-                      if (adjusted.text && adjusted.text.trim() !== sentence.trim()) {
-                        // User edited it manually → respect their choice.
+                      // The waveform editor's `adjusted.text` is generated
+                      // from SRT cues whose time ranges overlap the
+                      // selected window, so even with a single-cue input
+                      // it can still glob adjacent cues. For reader-mode
+                      // sends we ALWAYS use the lookupContext sentence
+                      // (which is the exact cue text containing the
+                      // looked-up word). User can still tune the AUDIO
+                      // range freely in the editor — that's its real
+                      // purpose.
+                      const isReader = ctx?.source === 'paged-reader' || ctx?.source === 'reading';
+                      if (isReader) {
+                        finalSentence = sentence; // keep cue text verbatim
+                      } else if (adjusted.text && adjusted.text.trim() !== sentence.trim()) {
                         finalSentence = adjusted.text.trim();
                       }
                       try {
