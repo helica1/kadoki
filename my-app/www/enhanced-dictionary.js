@@ -972,8 +972,36 @@
     }
     
     function renderPopupContent(results, currentIndex = 0) {
+        // Reader-mode-only "Set playhead" section, above the dictionary
+        // header. Tapping it jumps audio playback to the start of the
+        // cue containing the looked-up word — same logic the floating
+        // playhead button used to provide. lookupContext.cueStartMs +
+        // cueAudioPath are populated by the reader's tap-binding code
+        // before this render runs. Only renders when:
+        //   - body is in mode-read (not card / audio mode)
+        //   - lookupContext has a valid cue + audio path
+        // so the section is absent in non-reader popups.
+        const inReadMode = document.body.classList.contains('mode-read');
+        const ctx = window.lookupContext || {};
+        const hasCue = inReadMode &&
+                       !!ctx.cueAudioPath &&
+                       Number.isFinite(ctx.cueStartMs);
+        let playheadSection = '';
+        if (hasCue) {
+            const mmss = _formatMs(ctx.cueStartMs);
+            playheadSection = `
+                <div class="manatan-playhead-section">
+                    <button id="setPlayheadBtn" type="button" class="manatan-playhead-btn">
+                        <span class="manatan-playhead-icon">▶▌</span>
+                        <span class="manatan-playhead-label">Set playhead</span>
+                        <span class="manatan-playhead-time">${mmss}</span>
+                    </button>
+                </div>
+            `;
+        }
+
         if (!results || results.length === 0) {
-            return `<div class="manatan-empty">No dictionary entries found
+            return playheadSection + `<div class="manatan-empty">No dictionary entries found
                 <div class="manatan-hint">Tap anywhere to close</div></div>`;
         }
         const result = results[currentIndex];
@@ -983,7 +1011,7 @@
             : (result.entry[1] && result.entry[1] !== result.term ? result.entry[1] : '');
         const dictTag = result.dictionary || (isJmdict ? 'JMdict' : '');
 
-        let content = `
+        let content = playheadSection + `
             <div class="manatan-header">
                 <div class="manatan-title-block">
                     ${reading ? `<div class="manatan-reading">${reading}</div>` : ''}
@@ -1120,29 +1148,125 @@
         const pagedView = document.getElementById('readingPagedView');
         const pagedActive = pagedView && pagedView.style.display !== 'none';
         if (pagedActive) {
-            const hl = window.CSS?.highlights?.get?.('reader-dict-lookup');
+            // The paged reader's paintFn stashes the source Range on
+            // window._dictLookupRange. Reading getBoundingClientRect
+            // off that Range is dramatically more reliable than
+            // iterating Highlight registry entries on iOS WKWebView
+            // (Highlight iteration silently returns no items on some
+            // iOS versions, which is why the popup was always landing
+            // in the centered fallback).
             let hlRect = null;
-            if (hl) for (const r of hl) {
-                const rc = r.getBoundingClientRect?.();
-                if (rc && rc.width && rc.height) { hlRect = rc; break; }
+            try {
+                const r = window._dictLookupRange;
+                if (r) {
+                    const rc = r.getBoundingClientRect();
+                    if (rc && rc.width && rc.height) hlRect = rc;
+                }
+            } catch (_) {}
+            // Secondary path: CSS.highlights iteration (legacy / non-iOS).
+            if (!hlRect) {
+                try {
+                    const hl = window.CSS?.highlights?.get?.('reader-dict-lookup') ||
+                               window._dictLookupHl;
+                    if (hl) for (const r of hl) {
+                        const rc = r.getBoundingClientRect?.();
+                        if (rc && rc.width && rc.height) { hlRect = rc; break; }
+                    }
+                } catch (_) {}
             }
-            const pw = Math.min(360, vw * 0.5);
+            // Diagnostic for Safari Inspector.
+            try { popup.dataset.posSrc = hlRect ? 'paged-hl' : 'paged-fallback'; } catch (_) {}
             const safeTop = (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--app-header-h')) || 64);
-            const ptop = safeTop + margin;
-            const pmaxH = vh - ptop - margin * 2;
-            let pleft;
-            if (hlRect) {
-                const center = hlRect.left + hlRect.width / 2;
-                // Put popup on the OPPOSITE edge from the highlight.
-                pleft = (center > vw / 2) ? margin : (vw - pw - margin);
-            } else {
-                pleft = (vw - pw) / 2;
+            // Reserve a margin around the highlight rect so the popup
+            // doesn't sit flush against the looked-up character. Lifts
+            // the "almost touching" feel without breaking the picker.
+            const gap = 14;
+            // Fallback when there's no highlight rect — center.
+            if (!hlRect) {
+                const fw = Math.min(420, vw * 0.7);
+                popup.style.width  = `${fw}px`;
+                popup.style.height = 'auto';
+                popup.style.maxHeight = `${vh - safeTop - margin * 2}px`;
+                popup.style.left = `${(vw - fw) / 2}px`;
+                popup.style.top  = `${safeTop + margin}px`;
+                return;
             }
-            popup.style.width = `${pw}px`;
+            // Compute the four candidate placements and pick the one
+            // whose available area best fits the popup. Each candidate
+            // reports its anchor rect (the empty zone the popup will
+            // occupy) so we can clamp the popup's width/height.
+            const minTop = safeTop + margin;
+            const candidates = [
+                { // ABOVE — full width strip from minTop to highlight top
+                    side: 'above',
+                    left: margin, top: minTop,
+                    width: vw - margin * 2,
+                    height: Math.max(0, hlRect.top - gap - minTop),
+                },
+                { // BELOW — full width strip from highlight bottom to viewport
+                    side: 'below',
+                    left: margin, top: hlRect.bottom + gap,
+                    width: vw - margin * 2,
+                    height: Math.max(0, vh - margin - (hlRect.bottom + gap)),
+                },
+                { // LEFT — column from viewport left to highlight left
+                    side: 'left',
+                    left: margin, top: minTop,
+                    width: Math.max(0, hlRect.left - gap - margin),
+                    height: vh - minTop - margin,
+                },
+                { // RIGHT — column from highlight right to viewport right
+                    side: 'right',
+                    left: hlRect.right + gap, top: minTop,
+                    width: Math.max(0, vw - margin - (hlRect.right + gap)),
+                    height: vh - minTop - margin,
+                },
+            ];
+            // Popup size targets — within bounds, prefer larger so the
+            // dict content has breathing room. Each candidate gets
+            // clamped to its available space.
+            const targetW = Math.min(420, vw * 0.7);
+            const targetH = Math.min(520, vh * 0.7);
+            const minW = 240, minH = 200;
+            // Score each candidate by visible area (clamped to its
+            // available rect). Reject any whose available area is
+            // smaller than minW * minH.
+            let best = null;
+            for (const c of candidates) {
+                const w = Math.min(targetW, c.width);
+                const h = Math.min(targetH, c.height);
+                if (w < minW || h < minH) continue;
+                // Score = clamped area. Larger = better.
+                const score = w * h;
+                if (!best || score > best.score) {
+                    best = Object.assign({}, c, { w, h, score });
+                }
+            }
+            // Fallback: no candidate fits comfortably — pick the one
+            // with the largest raw area regardless.
+            if (!best) {
+                for (const c of candidates) {
+                    const score = c.width * c.height;
+                    if (!best || score > best.score) {
+                        best = Object.assign({}, c, {
+                            w: Math.max(minW, Math.min(targetW, c.width)),
+                            h: Math.max(minH, Math.min(targetH, c.height)),
+                            score
+                        });
+                    }
+                }
+            }
+            // Center the popup within the chosen candidate's
+            // available rect so it doesn't sit jammed against the
+            // viewport edge.
+            const finalW = best.w, finalH = best.h;
+            const finalLeft = best.left + Math.max(0, (best.width - finalW) / 2);
+            const finalTop  = best.top  + Math.max(0, (best.height - finalH) / 2);
+            popup.style.width = `${finalW}px`;
             popup.style.height = 'auto';
-            popup.style.maxHeight = `${pmaxH}px`;
-            popup.style.left = `${pleft}px`;
-            popup.style.top = `${ptop}px`;
+            popup.style.maxHeight = `${finalH}px`;
+            popup.style.left = `${finalLeft}px`;
+            popup.style.top  = `${finalTop}px`;
             return;
         }
 
@@ -1321,6 +1445,13 @@
     // maybeResumeAfterLookup, instead of nuking popup.style.display
     // directly and skipping the resume.
     window.hideDictPopup = hidePopup;
+    // Lets external callers (e.g., the Set-playhead button) suppress
+    // the post-hide bg.resume() so a fresh bg.play({startMs}) they
+    // just initiated isn't immediately overridden by the resume
+    // racing back to the old pre-pause position. Without this, the
+    // Set-playhead button "sometimes starts from a random place" —
+    // resume won the race against the new play call's startMs.
+    window._clearLookupPauseFlag = () => { _lookupPausedPlayback = false; };
 
     function hidePopup() {
         console.log('🚪 Hiding popup...');
@@ -1559,9 +1690,12 @@
                     const popup = document.getElementById('dictPopup');
                     if (popup) {
                         popup.innerHTML = renderPopupContent(results, currentResultIndex);
+                        positionDictPopup(popup);
+                        requestAnimationFrame(() => positionDictPopup(popup));
                         setupNavigationHandlers();
                         setupAnkiHandler(results);
                         setupAudioHandler(results);
+                        setupPlayheadHandler();
                     }
                 }, 500);
             } else {
@@ -1571,11 +1705,15 @@
                 // Position BEFORE display:block so no flash at default bounds.
                 positionDictPopup(popup);
                 popup.style.display = 'block';
+                // Re-position once layout settles so the smart-quadrant
+                // logic has a real highlight rect to read.
+                requestAnimationFrame(() => positionDictPopup(popup));
                 maybePauseForLookup();
 
                 setupNavigationHandlers();
                 setupAnkiHandler(results);
                 setupAudioHandler(results);
+                setupPlayheadHandler();
             }
             
             console.log(`✅ Multi-dictionary lookup complete for "${best.match}" -> "${best.base}"`);
@@ -1596,6 +1734,76 @@
         }
     }
     
+    // Compact m:ss formatter used in the Set-playhead button label.
+    function _formatMs(ms) {
+        if (!Number.isFinite(ms) || ms < 0) return '—';
+        const total = Math.floor(ms / 1000);
+        const m = Math.floor(total / 60);
+        const s = String(total % 60).padStart(2, '0');
+        return m + ':' + s;
+    }
+
+    // Reader-mode "Set playhead" button handler. Delegates the actual
+    // play to window.pagedPlayFromCue(cueIdx) which lives in
+    // reading-mode-paged.js — that helper paints the cue green,
+    // resets the cue-highlight gate (so the next cue lands
+    // properly), records undo, and plays from the cue's startMs.
+    // BEFORE invoking it we clear the dict-lookup pause flag so the
+    // popup's hide path doesn't fire a racing bg.resume() that
+    // overrides our fresh bg.play({startMs}) and bounces audio back
+    // to the pre-pause position. That race was the "starts in a
+    // random place" pattern.
+    function setupPlayheadHandler() {
+        const btn = document.getElementById('setPlayheadBtn');
+        if (!btn) return;
+        const ctx = window.lookupContext || {};
+        if (!Number.isFinite(ctx.cueIndex) && !Number.isFinite(ctx.cueStartMs)) {
+            btn.disabled = true;
+            return;
+        }
+        let firing = false;
+        const fire = async (e) => {
+            if (firing) return;
+            firing = true;
+            try { e.stopPropagation(); } catch (_) {}
+            try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+            try {
+                // CRITICAL: suppress the resume that hideDictPopup
+                // would otherwise fire on its way out. The resume
+                // races our fresh bg.play({startMs}) on iOS and
+                // sometimes wins, planting playback at the pre-pause
+                // position instead of the cue start.
+                try { window._clearLookupPauseFlag?.(); } catch (_) {}
+                let ok = false;
+                if (typeof window.pagedPlayFromCue === 'function' &&
+                    Number.isFinite(ctx.cueIndex)) {
+                    ok = await window.pagedPlayFromCue(ctx.cueIndex);
+                }
+                // Fallback: direct bg.play if the helper isn't loaded
+                // (e.g., paged reader not active for some reason).
+                if (!ok && ctx.cueAudioPath && Number.isFinite(ctx.cueStartMs)) {
+                    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+                    if (bg) {
+                        const audioPath = ctx.cueAudioPath;
+                        const url = audioPath.startsWith('file://') ? audioPath : 'file://' + audioPath;
+                        const startMs = Math.max(0, Math.round(ctx.cueStartMs) -
+                                                    (window.AUDIO_START_OFFSET_MS || 0));
+                        await bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
+                    }
+                }
+                try { window.showToast?.('▶ cue', 1200); } catch (_) {}
+                // Dismiss the popup so the reader is visible.
+                try { window.hideDictPopup?.(); } catch (_) {}
+            } catch (err) {
+                try { window.showToast?.('Play error: ' + (err?.message || err), 2200); } catch (_) {}
+            } finally {
+                setTimeout(() => { firing = false; }, 400);
+            }
+        };
+        btn.addEventListener('click', fire);
+        btn.addEventListener('touchend', fire, { passive: false });
+    }
+
     function setupNavigationHandlers() {
         const prevBtn = document.getElementById('prevResult');
         const nextBtn = document.getElementById('nextResult');
@@ -1642,6 +1850,7 @@
             setupNavigationHandlers();
             setupAnkiHandler(currentLookupResults);
             setupAudioHandler(currentLookupResults);
+            setupPlayheadHandler();
         }
     }
     
@@ -1829,6 +2038,10 @@
                       }
                       try {
                         const slicer = window.Capacitor.Plugins.AudioSlicer;
+                        // Anki audio export contract: always 1.0x.
+                        // AudioSlicer.slice does raw frame copy (MP3) or
+                        // MediaMuxer remux (M4A) at native speed,
+                        // regardless of the user's listening rate.
                         const slice = await slicer.slice({
                           srcPath: cueAudioPath,
                           startMs: Math.round(adjusted.startMs),
@@ -2019,18 +2232,37 @@
                         field:      cfg.fields.image
                     }];
                 }
+                // Mark the anki round-trip BEFORE the addNote handoff so
+                // stats.js suspends its background-stop. Otherwise the
+                // iOS URL-scheme hop to AnkiMobile would halt the
+                // read-mode timer mid-dict-send.
+                try { window.stats?.markAnkiRoundtripActive?.(); } catch (_) {}
                 const r = await ab.addNote(params);
                 console.log('✅ AnkiBridge.addNote ->', r);
+                if (r?.mediaServerRestartedThisSend) {
+                    console.log('AnkiBridge: media server was restarted to complete this send');
+                }
                 if (typeof window.showToast === 'function') {
                     window.showToast(`✓ Added to ${cfg.deck}`, 2200);
                 }
                 return r;
             } catch (err) {
                 console.error('❌ AnkiBridge.addNote error:', err);
+                // Drop the cached availability handle so the next send
+                // re-verifies. Same rationale as the swipe-up send path —
+                // covers "AnkiDroid was killed" (Android) and "media server
+                // restart failed" (iOS) without requiring the user to
+                // figure out which platform-specific symptom they hit.
+                try { window.invalidateAnkiBridgeCache?.(); } catch (e) {}
+                const msg = err?.message || String(err);
+                const isServerDown = /media server is unreachable/i.test(msg);
+                const display = isServerDown
+                    ? '✗ Anki media server stuck — restart the app to recover'
+                    : `✗ Anki: ${msg}`;
                 if (typeof window.showToast === 'function') {
-                    window.showToast(`✗ Anki: ${err?.message || err}`, 4000);
+                    window.showToast(display, 4000);
                 }
-                throw new Error(err?.message || String(err));
+                throw new Error(msg);
             }
         }
 
@@ -2423,13 +2655,16 @@
             popup.innerHTML = renderPopupContent(results, currentResultIndex);
             popup.style.display = 'block';
             positionDictPopup(popup);
-            // The previous build wired Anki + Audio but forgot Nav. Prev/Next
-            // appeared but did nothing — looked like the buttons were dead
-            // when really their handlers were never attached on the initial
-            // render (only after updatePopupContent fired internally).
+            // Re-position one frame later so the CSS Custom Highlight
+            // has finished its layout pass — the first call can hit
+            // the no-hlRect fallback (centered) because the Highlight
+            // registry update is sync but the rendered rect lags by
+            // a frame on iOS WKWebView.
+            requestAnimationFrame(() => positionDictPopup(popup));
             setupNavigationHandlers();
             setupAnkiHandler(results);
             setupAudioHandler(results);
+            setupPlayheadHandler();
             maybePauseForLookup();
         } catch (e) {
             console.error('performDictLookupAtPosition error:', e);
@@ -2564,6 +2799,37 @@
            cards with a numbered head row. */
         #dictPopup {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+        }
+        .manatan-playhead-section {
+            margin: -4px 0 12px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #2a2a2a;
+        }
+        .manatan-playhead-btn {
+            width: 100%;
+            background: rgba(76, 175, 80, 0.10);
+            border: 1px solid rgba(76, 175, 80, 0.45);
+            color: var(--accent-read, #4caf50);
+            padding: 10px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Helvetica Neue", system-ui, sans-serif;
+            letter-spacing: 0.02em;
+        }
+        .manatan-playhead-btn:active { background: rgba(76, 175, 80, 0.18); }
+        .manatan-playhead-btn[disabled] {
+            opacity: 0.4;
+            cursor: default;
+        }
+        .manatan-playhead-icon { font-size: 14px; }
+        .manatan-playhead-label { flex: 1; text-align: left; }
+        .manatan-playhead-time {
+            font-variant-numeric: tabular-nums;
+            font-size: 12px;
+            color: #b0b0b0;
         }
         .manatan-header {
             display: flex; justify-content: space-between; align-items: flex-start;

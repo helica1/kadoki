@@ -229,26 +229,49 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("Failed to construct anki:// URL")
             return
         }
-        // Verify the media server is actually reachable before handing the
-        // URL to AnkiMobile. If our server isn't responding, AnkiMobile will
-        // show "connection timed out" when it fetches the http:// media URLs.
-        let pingOk = AnkiMediaServer.shared.selfPing(timeoutSeconds: 0.5)
-        // Log the full URL via NSLog using %@ (the {public}@ syntax is for
-        // os_log unified logging, NOT classic NSLog — passing it via NSLog
-        // emits the literal "{public}@" in the log). Replace any % in the
-        // URL with %% so the URL's own URL-escapes don't get interpreted
-        // as printf specifiers.
+        // Log payload summary before the server health check so we have a
+        // useful breadcrumb even if the request bails out below.
         let fullURL = url.absoluteString
         let safeURL = fullURL.replacingOccurrences(of: "%", with: "%%")
-        NSLog("[AnkiBridge] open(len=\(fullURL.count) serverPing=\(pingOk ? 1 : 0)): \(safeURL)")
+        NSLog("[AnkiBridge] addNote prep: len=\(fullURL.count) url=\(safeURL)")
         NSLog("[AnkiBridge] deck=\(deckName) model=\(modelName) audioFiles=\(savedAudioRefs) picFiles=\(savedPictureRefs)")
-        // Also log the field keys so we can verify the JS payload reached
-        // us. Helps diagnose "field came in empty" cases (e.g. Sentence
-        // Audio appearing blank in the final card).
         let fieldSummary = fieldsObj.map { "\($0.key)=\(String(describing: $0.value).prefix(40))" }.joined(separator: " | ")
         NSLog("[AnkiBridge] fields: \(fieldSummary)")
 
+        // Health-check + open URL. Both steps need the main thread:
+        //   - forceRestart() asserts main (GCDWebServer.startWithOptions
+        //     internal NSAssert)
+        //   - UIApplication.open is documented as main-thread only.
+        // Hop once, do everything inside.
         DispatchQueue.main.async {
+            let server = AnkiMediaServer.shared
+            // First-pass ping. If the server is healthy we can open the URL
+            // immediately. If not, attempt a forced restart and re-ping.
+            // A stale listening socket on iOS doesn't surface as a stop
+            // event, so isRunning may still be true while the socket is
+            // dead — that's exactly the "Could not connect to server"
+            // failure mode users hit after long backgrounding.
+            var pingOk = server.selfPing(timeoutSeconds: 0.5)
+            var didRestart = false
+            if !pingOk {
+                NSLog("[AnkiBridge] media server ping FAILED before send — forcing restart")
+                let restarted = server.forceRestart()
+                didRestart = true
+                if restarted {
+                    pingOk = server.selfPing(timeoutSeconds: 1.5)
+                }
+                NSLog("[AnkiBridge] post-restart: restarted=\(restarted) ping=\(pingOk ? 1 : 0)")
+            }
+            if !pingOk {
+                // Server is genuinely dead. Don't hand the URL to AnkiMobile —
+                // it would just time out and show its own "Could not connect"
+                // message, which is what the user has been seeing. Surface a
+                // clear actionable error instead.
+                call.reject("Anki media server is unreachable on port \(server.port). Restart the app and try again.")
+                return
+            }
+
+            NSLog("[AnkiBridge] opening URL (didRestart=\(didRestart))")
             UIApplication.shared.open(url, options: [:]) { ok in
                 if ok {
                     let info: [String: Any] = [
@@ -257,8 +280,9 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
                         "pictureFilenames":  savedPictureRefs,
                         "mediaFolderLinked": mediaLinked,
                         "mediaServerActive": serverStarted,
-                        "mediaServerPort":   AnkiMediaServer.shared.port,
-                        "mediaServerPingOk": pingOk
+                        "mediaServerPort":   server.port,
+                        "mediaServerPingOk": pingOk,
+                        "mediaServerRestartedThisSend": didRestart
                     ]
                     call.resolve(info)
                 } else {

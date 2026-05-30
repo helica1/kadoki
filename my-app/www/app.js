@@ -872,21 +872,32 @@ function showToast(message, duration = 3000) {
   const toast = document.createElement('div');
   toast.id = 'toast';
   toast.textContent = message;
+  // Center-of-screen so toasts can't hide behind chrome:
+  //   - Top placement was the original spot, but it sits exactly where
+  //     the shell header (#appHeader, z-index 3500) lives on iOS, and
+  //     a z-index of 3000 left toasts invisible behind the header on
+  //     iPhone — diagnosed 2026-05-29 when the down-swipe gesture
+  //     diagnostics silently disappeared. See
+  //     [[reference-toast-hidden-by-shell-header]].
+  //   - z-index 9500 puts toasts above the header (3500), the shell
+  //     menus (3600), the dict popup, etc. — anything not at
+  //     "showProgress modal" level (cue-alignment overlay is 99999).
   toast.style.cssText = `
     position: fixed;
-    top: calc(20px + env(safe-area-inset-top, 0px));
+    top: 50%;
     left: 50%;
-    transform: translateX(-50%);
+    transform: translate(-50%, -50%);
     background: rgba(0, 0, 0, 0.9);
     color: white;
-    padding: 12px 20px;
-    border-radius: 6px;
+    padding: 14px 22px;
+    border-radius: 8px;
     font-size: 14px;
-    z-index: 3000;
+    z-index: 9500;
     border: 1px solid #00ffcc;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
     max-width: 80%;
     text-align: center;
+    pointer-events: none;
   `;
   
   document.body.appendChild(toast);
@@ -2454,6 +2465,14 @@ function setupSwipe() {
           ));
         };
 
+        // True when the current gesture started inside a subtitle that
+        // is actually scrollable RIGHT NOW (scrollHeight > clientHeight).
+        // Set in touchstart, consumed in touchend to suppress vertical
+        // swipes (Anki / replay) so the user can scroll long subtitles
+        // without accidentally sending the card. Horizontal swipes
+        // (next/prev) still fire because they don't conflict with
+        // vertical scroll.
+        let inSubtitleSafeZone = false;
         const touchStartHandler = (e) => {
           if (libraryOpen()) return;
           if (inReadingView(e.target)) return;
@@ -2462,6 +2481,14 @@ function setupSwipe() {
           if (e.touches && e.touches[0]) {
             touchStartY = e.touches[0].clientY;
             touchStartX = e.touches[0].clientX;
+          }
+          // Detect the safe-scroll zone at touchstart, not touchend —
+          // the user can scroll within the subtitle and lift their
+          // finger anywhere; what matters is where the gesture STARTED.
+          inSubtitleSafeZone = false;
+          const sub = e.target?.closest?.('.subtitle-text');
+          if (sub && sub.scrollHeight > sub.clientHeight + 1) {
+            inSubtitleSafeZone = true;
           }
         };
 
@@ -2477,12 +2504,29 @@ function setupSwipe() {
           const deltaY = e.changedTouches[0].clientY - touchStartY;
           const deltaX = e.changedTouches[0].clientX - touchStartX;
 
+          // Card-mode interaction signal — fires for any swipe past the
+          // ~30px threshold even if we end up declining the action
+          // (e.g. an up-swipe in the bottom 1/5 system-gesture zone).
+          // Stray taps (both deltas < 30) intentionally do NOT count;
+          // the timer stays stopped per the user's "swipe to restart"
+          // rule. See stats.js bumpCard() docs.
+          const isSwipe = Math.abs(deltaX) > 30 || Math.abs(deltaY) > 30;
+          if (isSwipe && window.stats?.bumpCard) {
+            try { window.stats.bumpCard(); } catch (_) {}
+          }
+
           if (Math.abs(deltaX) > Math.abs(deltaY)) {
             if (deltaX < -30 && currentCardIndex < allNotes.length - 1) {
               updateCardIndex(currentCardIndex + 1);
             } else if (deltaX > 30 && currentCardIndex > 0) {
               updateCardIndex(currentCardIndex - 1);
             }
+          } else if (inSubtitleSafeZone) {
+            // Vertical motion inside a scrollable subtitle — the user
+            // is scrolling subtitle text, not invoking Anki / replay.
+            // Native scroll has already handled the motion; we just
+            // skip the swipe-actions branch.
+            return;
           } else {
             if (deltaY > 30) {
               const card = allNotes[currentCardIndex];
@@ -2569,6 +2613,9 @@ function setupSwipe() {
                     console.log('[card-anki] slicing srcPath=' + card.audiobookPath +
                       ' finalStart=' + finalStart + ' finalEnd=' + finalEnd +
                       ' duration=' + (finalEnd - finalStart) + 'ms');
+                    // Anki audio export contract: always 1.0x. AudioSlicer.slice
+                    // does raw frame copy (MP3) or MediaMuxer remux (M4A) at
+                    // native speed regardless of the user's playback rate.
                     const slice = await slicer.slice({
                       srcPath: card.audiobookPath,
                       startMs: finalStart,

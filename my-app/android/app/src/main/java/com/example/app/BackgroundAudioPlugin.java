@@ -133,11 +133,14 @@ public class BackgroundAudioPlugin extends Plugin {
         Double startD = call.getDouble("startMs");
         int startMs = (startD != null) ? startD.intValue() : 0;
         Float rate = call.getFloat("rate", 1.0f);
+        // Optional fade override — defaults applied service-side.
+        Integer fadeMsOverride = call.getInt("fadeMs");
         Intent i = new Intent(getContext(), BackgroundAudioService.class);
         i.setAction(BackgroundAudioService.ACTION_PLAY);
         i.putExtra(BackgroundAudioService.EXTRA_URL, url);
         i.putExtra(BackgroundAudioService.EXTRA_START_MS, startMs);
         i.putExtra(BackgroundAudioService.EXTRA_RATE, rate);
+        if (fadeMsOverride != null) i.putExtra(BackgroundAudioService.EXTRA_FADE_MS, fadeMsOverride);
         startServiceCompat(i);
         // Service.onCreate sets the instance; tight retry-attach because cached
         // MP3s prepare in <100 ms and would otherwise drop the playing-state
@@ -147,10 +150,24 @@ public class BackgroundAudioPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void pause(PluginCall call) { send(BackgroundAudioService.ACTION_PAUSE); call.resolve(); }
+    public void pause(PluginCall call) {
+        Integer fadeMsOverride = call.getInt("fadeMs");
+        Intent i = new Intent(getContext(), BackgroundAudioService.class);
+        i.setAction(BackgroundAudioService.ACTION_PAUSE);
+        if (fadeMsOverride != null) i.putExtra(BackgroundAudioService.EXTRA_FADE_MS, fadeMsOverride);
+        startServiceCompat(i);
+        call.resolve();
+    }
 
     @PluginMethod
-    public void resume(PluginCall call) { send(BackgroundAudioService.ACTION_RESUME); call.resolve(); }
+    public void resume(PluginCall call) {
+        Integer fadeMsOverride = call.getInt("fadeMs");
+        Intent i = new Intent(getContext(), BackgroundAudioService.class);
+        i.setAction(BackgroundAudioService.ACTION_RESUME);
+        if (fadeMsOverride != null) i.putExtra(BackgroundAudioService.EXTRA_FADE_MS, fadeMsOverride);
+        startServiceCompat(i);
+        call.resolve();
+    }
 
     @PluginMethod
     public void stop(PluginCall call) {

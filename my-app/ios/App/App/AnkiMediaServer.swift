@@ -136,6 +136,29 @@ final class AnkiMediaServer {
         return (filename: filename, url: url)
     }
 
+    /// Tear down the server and re-boot it. iOS sometimes invalidates a
+    /// loopback listening socket after long backgrounding (memory pressure,
+    /// network condition changes) even when AutomaticallySuspendInBackground
+    /// is NO. `isRunning` stays true because we never observed a stop event
+    /// — so `start()` short-circuits and returns success while the socket
+    /// is actually dead. That's the "Could not connect to server" path
+    /// AnkiMobile reports. This method blows away the stale state and
+    /// re-runs the boot sequence. Main-thread only (same constraint as
+    /// `start()`).
+    @discardableResult
+    func forceRestart() -> Bool {
+        guard Thread.isMainThread else {
+            NSLog("[AnkiMediaServer] forceRestart called off-main — refusing")
+            return false
+        }
+        if server.isRunning { server.stop() }
+        // Even if isRunning was true but the socket was actually dead,
+        // calling stop() is the only safe way to get GCDWebServer back
+        // into a re-startable state. Reset the flag either way.
+        isRunning = false
+        return start()
+    }
+
     /// Block-wait until the server responds to `/__ping` (or timeout).
     /// Returns true on success. Useful as a sanity check from addNote —
     /// if this fails, opening anki:// will produce AnkiMobile's "connection

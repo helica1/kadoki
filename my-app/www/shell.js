@@ -203,9 +203,18 @@
     // taps feel instant: the user sees the new tab go active and the
     // new view appear immediately, even if mode-open setup hasn't
     // finished yet. The async setup runs in the background.
+    //
+    // CRITICAL: for read mode, show the PAGED reader view, not the
+    // legacy #readingModeView. The legacy reader is deprecated but its
+    // DOM element still exists. Previously this code unhid it briefly
+    // before openReadingMode (paged) hid it again — visible behind the
+    // audio→read modal as a "faint legacy reader" the user reported.
+    // Hide the legacy view defensively each switch.
+    const legacyReaderView = document.getElementById('readingModeView');
+    if (legacyReaderView) legacyReaderView.style.display = 'none';
     if (mode === 'read') {
-      const rv = document.getElementById('readingModeView');
-      if (rv) rv.style.display = 'flex';
+      const pv = document.getElementById('readingPagedView');
+      if (pv) pv.style.display = 'flex';
     } else if (mode === 'audio') {
       const av = document.getElementById('audiobookModeView');
       if (av) av.style.display = 'flex';
@@ -214,8 +223,8 @@
       const av = document.getElementById('audiobookModeView');
       if (av && mode !== 'audio') av.style.display = 'none';
     } else if (currentMode === 'read') {
-      const rv = document.getElementById('readingModeView');
-      if (rv && mode !== 'read') rv.style.display = 'none';
+      const pv = document.getElementById('readingPagedView');
+      if (pv && mode !== 'read') pv.style.display = 'none';
     }
     const prevMode = currentMode;
     currentMode = mode;
@@ -228,7 +237,7 @@
       try {
         if (prevMode === 'audio' && (mode === 'card' || mode === 'read')) {
           if (typeof window.maybeShowAudioReentryDialog === 'function') {
-            try { await window.maybeShowAudioReentryDialog(); } catch (e) {}
+            try { await window.maybeShowAudioReentryDialog(mode); } catch (e) {}
           }
         }
         if (prevMode === 'audio' && typeof window.closeAudiobookMode === 'function') {
@@ -351,28 +360,54 @@
   // Two click handlers (inline onclick + JS-attached) BOTH fire on the same
   // tap → toggle then untoggle → looks like nothing happened. Debounce.
   let _shellPlayFiring = false;
+  // Optimistic-state pin. When the user taps PLAY/PAUSE we predict
+  // the post-toggle state and flip the label immediately. But audio
+  // start-up (especially the FIRST play, before the source is loaded)
+  // can take 200-800 ms, during which refreshShellPlayLabel reads
+  // the "still not playing" actual state and would revert the label
+  // — producing the PLAY → PAUSE → PLAY → PAUSE flicker on first
+  // press. While `_shellPlayOptimistic.until` hasn't expired we hold
+  // the predicted state and ignore disagreeing refreshes. Once the
+  // actual state matches the prediction (audio finally started), we
+  // clear the pin so subsequent refreshes flow normally.
+  let _shellPlayOptimistic = null;
+  // 2 s should cover even slow first-play audio prepare. After that
+  // the actual state takes over so a genuinely-failed play eventually
+  // reverts.
+  const SHELL_PLAY_OPTIMISTIC_MS = 2000;
 
   window.shellTogglePlay = function () {
     if (_shellPlayFiring) return;
     _shellPlayFiring = true;
     setTimeout(() => { _shellPlayFiring = false; }, 300);
 
+    // Optimistic label flip: compute the predicted post-toggle state
+    // and update the button NOW, before firing the async toggle. The
+    // 800 ms refresh interval and the bg state listener correct it
+    // back if the actual playback disagrees (e.g., play failed
+    // silently). Without this the label lagged the action by ~50 ms
+    // because refreshShellPlayLabel waits on bg.getState() / the
+    // listener to roundtrip — the audio itself responds instantly,
+    // but the user perceived "press → wait → label updates" as the
+    // play button being laggy.
+    const btn = el('shellPlayBtn');
+
     if (currentMode === 'audio') {
+      const willPlay = !window._lastBgPlaying;
+      window._lastBgPlaying = willPlay;
+      _shellPlayOptimistic = { playing: willPlay, until: Date.now() + SHELL_PLAY_OPTIMISTIC_MS };
+      if (btn) setPlayBtnState(btn, willPlay);
       if (typeof window.audiobookTogglePlay === 'function') window.audiobookTogglePlay();
-      refreshShellPlayLabel();
       return;
     }
     // Card + Read modes: PLAY = "play and auto-advance through cards".
     // PAUSE = stop continuous play AND disable auto-advance.
-    const playing = typeof window.isReadingPlaying === 'function' && window.isReadingPlaying();
-    if (playing) {
-      window.audioAutoAdvance = false;
-      if (typeof window.toggleReadingPlayback === 'function') window.toggleReadingPlayback();
-    } else {
-      window.audioAutoAdvance = true;
-      if (typeof window.toggleReadingPlayback === 'function') window.toggleReadingPlayback();
-    }
-    refreshShellPlayLabel();
+    const wasPlaying = typeof window.isReadingPlaying === 'function' && window.isReadingPlaying();
+    const willPlay = !wasPlaying;
+    _shellPlayOptimistic = { playing: willPlay, until: Date.now() + SHELL_PLAY_OPTIMISTIC_MS };
+    if (btn) setPlayBtnState(btn, willPlay);
+    window.audioAutoAdvance = willPlay;
+    if (typeof window.toggleReadingPlayback === 'function') window.toggleReadingPlayback();
   };
 
   function setPlayBtnState(btn, playing) {
@@ -383,6 +418,26 @@
     pauseSvg.style.display = playing ? 'block' : 'none';
   }
 
+  // Helper: decide whether to honor an actual-state report given the
+  // current optimistic pin. Returns true if the caller should apply
+  // the actual state; false if the pin is still active and disagrees
+  // (caller should leave the label alone).
+  function _shouldApplyActualState(actualPlaying) {
+    if (!_shellPlayOptimistic) return true;
+    if (Date.now() > _shellPlayOptimistic.until) {
+      _shellPlayOptimistic = null; // grace expired
+      return true;
+    }
+    if (actualPlaying === _shellPlayOptimistic.playing) {
+      // Actual state caught up — clear pin and let normal flow resume.
+      _shellPlayOptimistic = null;
+      return true;
+    }
+    // Within grace window and actual disagrees with prediction —
+    // keep the optimistic label.
+    return false;
+  }
+
   function refreshShellPlayLabel() {
     const btn = el('shellPlayBtn');
     if (!btn) return;
@@ -390,15 +445,18 @@
       const bg = window.Capacitor?.Plugins?.BackgroundAudio;
       if (bg && typeof bg.getState === 'function') {
         bg.getState().then(s => {
-          if (window._lastBgPlaying !== !!s.playing) {
-            window._lastBgPlaying = !!s.playing;
-            setPlayBtnState(btn, !!s.playing);
+          const actual = !!s.playing;
+          if (!_shouldApplyActualState(actual)) return;
+          if (window._lastBgPlaying !== actual) {
+            window._lastBgPlaying = actual;
+            setPlayBtnState(btn, actual);
           }
         }).catch(() => {});
         return;
       }
     }
     const playing = typeof window.isReadingPlaying === 'function' && window.isReadingPlaying();
+    if (!_shouldApplyActualState(playing)) return;
     setPlayBtnState(btn, playing);
   }
 

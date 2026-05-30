@@ -48,6 +48,17 @@
   let pagedCues = [];        // SRT cues for the active book's audiobook
   let pagedAudioPath = null;
   let pagedCueToChunk = null;// cue index → paged chunk index
+  // True when the current pagedCueToChunk came from the preprocessing
+  // module (cue-alignment.js). When true, an unmatched cue (idx -1)
+  // is treated as "no painting, no scrolling" instead of falling back
+  // to findChunkForText — see __onPagedCueUpdate below for why that
+  // matters. False = legacy srtParser.buildCueChunkMaps was used, so
+  // the conservative fallback chain stays active for safety.
+  let pagedCueMapFromAlignment = false;
+  // True once the initial alignment-based scroll-to-first-match has
+  // happened for the active book. Prevents repeated overrides if the
+  // alignment is rebuilt mid-session (e.g., audio/srt repaired).
+  let pagedInitialScrollDone = false;
   let lastHighlightedCue = -1;
   let bgListenerHandle = null;
   // Shared Highlight instance for the 'cue-active' key. Reused across
@@ -147,7 +158,11 @@
         flex: 0 0 auto !important;
         display: block !important;
         color: #e8e8e8;
-        font-size: var(--reader-font-size, 1.5rem);
+        /* Prefer the appearance-system var (--font-size-read) so the
+           preferences slider takes effect; fall back to the older
+           --reader-font-size var which earlier builds set, then to a
+           literal default. */
+        font-size: var(--font-size-read, var(--reader-font-size, 1.5rem));
         line-height: 1.8;
         padding: 16px 24px;
         box-sizing: border-box;
@@ -362,11 +377,18 @@
     scrollEl = viewEl.querySelector('#readingPagedContent');
     innerEl  = viewEl.querySelector('#readingPagedInner');
     ensureProgressStrip();
-    ensurePlayheadBtn();
+    // ensurePlayheadBtn() removed 2026-05-29 — replaced by the dict
+    // popup's "Set playhead" section.
 
     setupTouch();
     setupScrollTracking();
     setupResize();
+    // Floating playhead button removed 2026-05-29 — its functionality
+    // now lives in the dict popup's "Set playhead" section in reader
+    // mode (see setupPlayheadHandler in enhanced-dictionary.js).
+    // Tearing down any prior instance in case a hot-reload leaves one
+    // behind in the DOM.
+    document.getElementById('pagedPlayheadBtn')?.remove();
     return viewEl;
   }
 
@@ -408,12 +430,22 @@
     let sx = 0, sy = 0, tStart = 0;
     let dismissedPopupOnStart = false;
     let dismissedSelectionOnStart = false;
+    // iOS WKWebView with `-webkit-overflow-scrolling: touch` on a
+    // horizontal-scroll container consumes vertical drag gestures —
+    // the native scroll engine takes the touch and touchend never
+    // fires for the gesture (only touchstart + bouncy touchmoves).
+    // So we can't detect down-swipes in touchend; we have to spot
+    // them mid-gesture in touchmove and act immediately. swipeFired
+    // is a per-gesture latch so a single down-swipe doesn't fire
+    // togglePlayPause N times across consecutive touchmove events.
+    let swipeFired = false;
     scrollEl.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
       sx = e.touches[0].clientX; sy = e.touches[0].clientY;
       tStart = Date.now();
       dismissedPopupOnStart = false;
       dismissedSelectionOnStart = false;
+      swipeFired = false;
       const popup = document.getElementById('dictPopup');
       if (popup && popup.style.display !== 'none' && !popup.contains(e.target)) {
         // Route through enhanced-dictionary's hidePopup so its
@@ -448,13 +480,35 @@
       // playhead-from-here button in the shell header is now the
       // dedicated way to set the play position from the reader view.
     }, { passive: true });
+    // Mid-gesture down-swipe detection. On Android this fires
+    // reliably; on iOS WKWebView the legacy scroll engine consumes
+    // touchmove on horizontally-scrollable containers before JS
+    // sees it (confirmed 2026-05-29 — touch-action: pan-x,
+    // removing -webkit-overflow-scrolling: touch, and a document
+    // capture-phase fallback all failed to engage). Leaving the
+    // detection in place for Android + future iOS WebKit
+    // improvements; iOS users use the header PLAY button.
+    scrollEl.addEventListener('touchmove', (e) => {
+      if (swipeFired) return;
+      const t = e.touches?.[0];
+      if (!t) return;
+      const dxRaw = t.clientX - sx, dyRaw = t.clientY - sy;
+      const adx = Math.abs(dxRaw), ady = Math.abs(dyRaw);
+      if (dyRaw > 30 && ady > adx * 1.5 && adx < 50) {
+        swipeFired = true;
+        log('[swipe] down dy=' + Math.round(dyRaw) + ' dx=' + Math.round(dxRaw));
+        try { handleSwipeDown(); } catch (err) { log('[swipe] handler error:', err?.message); }
+      }
+    }, { passive: true });
+
     scrollEl.addEventListener('touchend', (e) => {
+      if (swipeFired) return; // swipe already handled in touchmove
       const t = e.changedTouches?.[0];
       if (!t) return;
       const dxRaw = t.clientX - sx, dyRaw = t.clientY - sy;
       const adx = Math.abs(dxRaw), ady = Math.abs(dyRaw);
       const elapsed = Date.now() - tStart;
-      // Treat motion-y gesture as scroll/abort.
+      // Treat any motion as scroll/abort the tap path below.
       if (ady > 14 || adx > 14) return;
       if (elapsed > 400) return;
       // Tap path. Check the caret at the tap point to know if we hit
@@ -541,9 +595,22 @@
   function handleSwipeDown() {
     if (selectedCue) {
       playFromSelection();
-    } else {
-      togglePlayPause();
+      return;
     }
+    // Match the shell PLAY button exactly. shellTogglePlay → in read
+    // mode → toggleReadingPlayback, which has the full fallback chain
+    // for audiobook source + startMs + state-based pause/resume/play.
+    // Don't duplicate that logic here — any drift between the two
+    // paths becomes "play button works but down-swipe doesn't".
+    if (typeof window.shellTogglePlay === 'function') {
+      try { window.shellTogglePlay(); return; } catch (_) {}
+    }
+    if (typeof window.toggleReadingPlayback === 'function') {
+      try { window.toggleReadingPlayback(); return; } catch (_) {}
+    }
+    // Last-resort local fallback in case the shell helpers aren't
+    // loaded for some reason.
+    togglePlayPause();
   }
 
   // ---------- Selection state + visual ----------
@@ -737,6 +804,11 @@
     clearSelection();
   }
 
+  // Last-resort local fallback used by handleSwipeDown if the shell
+  // helpers (window.shellTogglePlay / window.toggleReadingPlayback)
+  // somehow aren't loaded. The shell path is the canonical one — it
+  // knows about audiobook source resolution, cue startMs, and the
+  // pause/resume/fresh-play branching that the PLAY button uses.
   async function togglePlayPause() {
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (!bg) return;
@@ -1112,7 +1184,23 @@
         clearCueHighlight();
         return;
       }
-      const chunk = findChunkForText(card.expression);
+      // Resolve the (chunk, cueText) for the active card. The alignment
+      // map (cue→chunk) is the reliable path when available — short
+      // common card text like "うん" would false-match the wrong chunk
+      // via findChunkForText (which returns the FIRST chunk whose
+      // normalized text contains the target). When the active card IS
+      // a cue (SRT-only titles, currentCardIndex IS the cue index),
+      // the map lands exactly. For deck-derived cards whose expression
+      // isn't a cue, fall back to text search.
+      let chunk = null;
+      let highlightText = card.expression;
+      if (pagedCueMapFromAlignment && pagedCueToChunk &&
+          Number.isFinite(idx) && idx < pagedCueToChunk.length &&
+          pagedCueToChunk[idx] >= 0 && pagedCues[idx]?.text) {
+        chunk = chunks[pagedCueToChunk[idx]] || null;
+        if (chunk) highlightText = pagedCues[idx].text;
+      }
+      if (!chunk) chunk = findChunkForText(card.expression);
       if (!chunk) {
         log(`centerOnActiveCard: no chunk match for "${card.expression.slice(0, 20)}..."`);
         clearCueHighlight();
@@ -1121,7 +1209,7 @@
       log(`centerOnActiveCard: card ${idx}, chunk found, highlighting`);
       // Paint the highlight FIRST so the user sees the new active sentence
       // immediately, even before any scroll animation completes.
-      const range = setCueRangeHighlight(chunk, card.expression);
+      const range = setCueRangeHighlight(chunk, highlightText);
       // Then scroll if any part of the highlight overflows the viewport,
       // respecting the user-scroll grace period (5 s = "they're reading
       // independently, don't yank back"). openView resets
@@ -1154,6 +1242,11 @@
       // counts as the user actively reading.
       if (Date.now() - lastProgrammaticScrollTime > 800) {
         lastUserScrollTime = Date.now();
+        // User-driven scroll IS reading activity — kick the read timer
+        // alive. Cheap call; if the timer is already running it just
+        // refreshes lastInteraction. If it had been stopped by the
+        // inactivity timeout, a small jiggle is enough to restart it.
+        try { window.stats?.bumpRead?.(); } catch (_) {}
       }
       updateProgress();
       if (suppressScrollSave) return;
@@ -1450,6 +1543,12 @@
         window._dictLookupHl.clear();
         window._dictLookupHl.add(r);
         CSS.highlights.set('reader-dict-lookup', window._dictLookupHl);
+        // Stash the Range itself so the dict popup positioner can
+        // read its bounding rect directly — iterating a Highlight
+        // object on iOS WKWebView is unreliable across versions, so
+        // we cache the source Range globally and the positioner
+        // reads from here first.
+        window._dictLookupRange = r;
         if (scrollEl) void scrollEl.offsetWidth;
       } catch (e) {}
     };
@@ -1541,7 +1640,9 @@
       });
       totalChars = charAcc;
 
+      const isFreshBookLoad = currentName !== name;
       currentName = name;
+      if (isFreshBookLoad) pagedInitialScrollDone = false;
       log(`Loaded ${name}: ${sections.length} sections, ${chunkCount} chunks`);
 
       // Layout settles over 2 RAFs on iOS.
@@ -1585,6 +1686,7 @@
 
   async function loadAudiobookCues() {
     pagedCues = []; pagedCueToChunk = null; pagedAudioPath = null;
+    pagedCueMapFromAlignment = false;
     if (!window.srtParser?.parseSrt) { log('srtParser missing'); return false; }
 
     // Get audio + SRT paths. Try title-store first (newer), fall back to
@@ -1619,17 +1721,125 @@
       log(`Loaded ${pagedCues.length} SRT cues for paged reader`);
     } catch (e) { log('SRT load failed:', e.message); return false; }
 
-    // Build cue→chunk mapping using srtParser's helper. Each chunk needs
-    // a `dataset.norm` containing normalized text — buildCueChunkMaps
-    // reads it.
+    // Build cue→chunk mapping. Preferred path: the new preprocessing
+    // module (cue-alignment.js) builds a stable cue→char-range
+    // alignment via forward-cursor + bounded-window match, caches it
+    // per title, and we derive a local cue→chunk by looking up each
+    // cue's char range against chunk `dataset.charOffset`. Fallback:
+    // srtParser.buildCueChunkMaps (the old in-line matcher) if the
+    // module is missing or returns a suspiciously low match rate.
+    // dataset.norm is still populated because findChunkForText and the
+    // dict tap-handler search rely on it.
     for (const c of chunks) c.dataset.norm = normalizeJP(c.textContent);
-    if (chunks.length && pagedCues.length && window.srtParser?.buildCueChunkMaps) {
+    if (!chunks.length || !pagedCues.length) return true;
+
+    let used = 'none';
+    let freshAlignment = false; // true → this run computed a fresh alignment (not cached)
+    if (window.cueAlignment?.loadOrBuild) {
+      // Peek for a cached alignment first so we only show the blocking
+      // overlay when we actually have to run the matcher. The check
+      // mirrors loadOrBuild's fingerprint logic; on cache hit, no UI.
+      let progress = null;
+      try {
+        const titleId = window._activeTitleId || null;
+        const epubName = currentName || '';
+        const srtName  = srt?.name || '';
+        const peekFp = window.cueAlignment.computeFingerprint({
+          epubName, srtName,
+          cueCount: pagedCues.length,
+          totalChars: window.cueAlignment.extractFlatText(chunks).length
+        });
+        const peekHit = titleId
+          ? await window.cueAlignment.loadAlignment(titleId, peekFp)
+          : null;
+        if (!peekHit && window.cueAlignment.showProgress) {
+          progress = window.cueAlignment.showProgress({
+            title: 'Preparing book',
+            sub:   'Aligning subtitles to text…'
+          });
+        }
+        const t0 = performance.now();
+        const { alignment, cached } =
+          await window.cueAlignment.loadOrBuild({
+            titleId, epubName, srtName, chunks, cues: pagedCues,
+            onProgress: progress ? (p) => progress.update(p) : null
+          });
+        const dt = Math.round(performance.now() - t0);
+        const ratio = alignment.matchedRatio;
+        freshAlignment = !cached;
+        log(`Paged alignment: ${alignment.matched}/${alignment.cueCount}` +
+            ` (ratio=${ratio.toFixed(2)}, ${cached ? 'cache' : 'fresh'}, ${dt}ms)`);
+        if (ratio >= window.cueAlignment.MIN_MATCHED_RATIO) {
+          const maps = window.cueAlignment.buildCueToChunk(alignment, chunks);
+          pagedCueToChunk = maps.cueToChunk;
+          pagedCueMapFromAlignment = true;
+          used = cached ? 'align-cache' : 'align-fresh';
+        } else {
+          log(`Paged alignment ratio too low (${ratio.toFixed(2)} < ${window.cueAlignment.MIN_MATCHED_RATIO}); falling back to legacy matcher`);
+          try { await window.cueAlignment.clearAlignment(titleId); } catch (e) {}
+        }
+      } catch (e) {
+        log('Paged alignment error; falling back:', e.message);
+      } finally {
+        if (progress) { try { progress.close(); } catch (e) {} }
+      }
+    }
+    if (used === 'none' && window.srtParser?.buildCueChunkMaps) {
       const maps = window.srtParser.buildCueChunkMaps(pagedCues, chunks, normalizeJP);
       pagedCueToChunk = maps.cueToChunk;
       let matched = 0;
       for (let i = 0; i < pagedCueToChunk.length; i++) if (pagedCueToChunk[i] >= 0) matched++;
-      log(`Paged cue→chunk: ${matched}/${pagedCues.length} mapped`);
+      log(`Paged cue→chunk (legacy fallback): ${matched}/${pagedCues.length} mapped`);
+      used = 'legacy';
     }
+    log(`Paged matcher used: ${used}`);
+
+    // Initial-position jump for fresh book loads. Without this, opening
+    // a never-seen-before title parks the reader at scrollLeft=0 which
+    // for most EPUBs is cover / copyright / TOC — looks blank until the
+    // user advances a card and triggers a sync. With this, the first
+    // matched chunk (i.e., where the audiobook actually starts in the
+    // text) becomes the reader's starting view, so the user sees real
+    // content immediately. Only runs once per book, only when no saved
+    // scroll position exists, only when we have a trustworthy alignment
+    // map to consult. See [[reference-cue-alignment]].
+    if (pagedCueMapFromAlignment && !pagedInitialScrollDone &&
+        scrollEl && Math.abs(scrollEl.scrollLeft || 0) < 5) {
+      let targetChunk = null;
+      const cardIdx = window.currentCardIndex;
+      if (Number.isFinite(cardIdx) && pagedCueToChunk &&
+          pagedCueToChunk[cardIdx] >= 0) {
+        targetChunk = chunks[pagedCueToChunk[cardIdx]] || null;
+      }
+      if (!targetChunk && pagedCueToChunk) {
+        const startFrom = Math.max(0, cardIdx | 0);
+        for (let i = startFrom; i < pagedCueToChunk.length; i++) {
+          if (pagedCueToChunk[i] >= 0) { targetChunk = chunks[pagedCueToChunk[i]]; break; }
+        }
+      }
+      if (!targetChunk && pagedCueToChunk) {
+        for (let i = 0; i < pagedCueToChunk.length; i++) {
+          if (pagedCueToChunk[i] >= 0) { targetChunk = chunks[pagedCueToChunk[i]]; break; }
+        }
+      }
+      if (targetChunk) {
+        log('Initial scroll: jumping to first matched chunk');
+        lastProgrammaticScrollTime = Date.now();
+        try { scrollChunkIntoView(targetChunk); } catch (e) {}
+      }
+      pagedInitialScrollDone = true;
+    }
+    // ALWAYS re-paint the active-card highlight after alignment is
+    // ready, regardless of whether we did the initial-position jump.
+    // The first centerOnActiveCard call in openView's setTimeout ran
+    // BEFORE the alignment was built, so it had to fall back to
+    // findChunkForText (which fails on short common card text). Now
+    // that pagedCueToChunk is populated, re-running centerOnActiveCard
+    // uses the reliable alignment-map path and paints the highlight
+    // even on a non-fresh reader open. Without this, the user has to
+    // wait for the first audio cue to fire before seeing any reader
+    // highlight at all.
+    try { centerOnActiveCard(); } catch (e) {}
     return true;
   }
 
@@ -2036,6 +2246,78 @@
   window.closePagedReader    = closeView;
   window.disablePagedReader  = disablePagedReader;
 
+  // Externally-callable: jump audio to a specific cue and paint it
+  // green. Used by the dict popup's "Set playhead" button so the
+  // behavior matches exactly what the floating playhead button used
+  // to do. Validates the cue index, paints the selection highlight
+  // immediately so the user sees a result before audio starts, and
+  // resets lastHighlightedCue so the subsequent cue-active updates
+  // from the position listener fire reliably (avoids the "next cue
+  // plays but isn't highlighted" pattern).
+  window.pagedPlayFromCue = async function (cueIdx) {
+    log('pagedPlayFromCue cueIdx=' + cueIdx);
+    if (!Number.isFinite(cueIdx)) {
+      log('pagedPlayFromCue: invalid cueIdx');
+      return false;
+    }
+    const cuesSrc = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+    const cue = cuesSrc[cueIdx];
+    if (!cue || !Number.isFinite(cue.startMs)) {
+      log('pagedPlayFromCue: cue not found or no startMs');
+      try { window.showToast?.('Cue not found', 1600); } catch (_) {}
+      return false;
+    }
+    const audioPath = pagedAudioPath || window.__abAudioPath || null;
+    if (!audioPath) {
+      try { window.showToast?.('No audio paired', 1600); } catch (_) {}
+      return false;
+    }
+    // Find the chunk for the cue (paged map first, then text search
+    // fallback). Paint the green selection highlight FIRST so the
+    // user sees the result immediately, even before audio actually
+    // starts playing.
+    let chunk = null;
+    if (pagedCueToChunk && pagedCueToChunk[cueIdx] >= 0) {
+      chunk = chunks[pagedCueToChunk[cueIdx]] || null;
+    }
+    if (!chunk) chunk = findChunkForText(cue.text);
+    if (chunk) {
+      try { paintSelectionHighlight(chunk, cue.text || ''); } catch (e) {}
+    }
+    // Reset the highlight-cue gate so the position listener WILL
+    // fire __onPagedCueUpdate when the new cue lands — without this
+    // reset, if lastHighlightedCue happens to already equal cueIdx
+    // (or the cue we land on right after), the listener's
+    // `idx === lastHighlightedCue` early return swallows the paint
+    // and the cue plays unhighlighted.
+    lastHighlightedCue = -1;
+    // Construct play URL + adjusted startMs (AUDIO_START_OFFSET_MS
+    // compensates MP3 frame alignment + SRT-imprecision so the first
+    // word of the cue isn't clipped).
+    const url = audioPath.startsWith('file://') ? audioPath : 'file://' + audioPath;
+    const startMs = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bg) {
+      try { window.showToast?.('Audio plugin missing', 1600); } catch (_) {}
+      return false;
+    }
+    // Record undo (if the helper exists, it captures current position
+    // before the jump).
+    try {
+      const s = await bg.getState?.();
+      if (s && Number.isFinite(s.positionMs)) recordUndo(s.positionMs);
+    } catch (_) {}
+    try {
+      await bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
+      log('pagedPlayFromCue: bg.play resolved startMs=' + startMs);
+      return true;
+    } catch (e) {
+      log('pagedPlayFromCue: bg.play failed ' + e?.message);
+      try { window.showToast?.('Play error: ' + e?.message, 2000); } catch (_) {}
+      return false;
+    }
+  };
+
   // Hook invoked by the legacy reading-mode.js position handler on every
   // audio cue change. Legacy already owns the BackgroundAudio 'position'
   // listener and computes the active cue index against `abCues`; rather
@@ -2047,12 +2329,25 @@
     if (idx === lastHighlightedCue) return;
     lastHighlightedCue = idx;
     if (idx < 0 || !cue?.text) { clearCueHighlight(); return; }
-    // Locate the chunk by cue text. Reuse findChunkForText fallback so
-    // this works even when `loadAudiobookCues` hasn't populated our own
-    // pagedCueToChunk map yet.
+    // Locate the chunk via the preprocessed cue→chunk map. When that
+    // map came from cue-alignment (pagedCueMapFromAlignment = true)
+    // we TRUST a negative result: an unmatched cue means the
+    // preprocessing window-search couldn't place it, so painting
+    // anything would be guessing — exactly the failure mode that
+    // produced the 243k-pixel scrolls (findChunkForText returns the
+    // FIRST text match in book order, often a chapter away from where
+    // the user is). Skip the paint instead.
+    //
+    // When the map came from the legacy buildCueChunkMaps fallback,
+    // the old findChunkForText safety net stays active.
     let chunk = null;
     if (pagedCueToChunk && pagedCueToChunk[idx] >= 0) {
       chunk = chunks[pagedCueToChunk[idx]] || null;
+    } else if (pagedCueMapFromAlignment) {
+      // Trustworthy "unmatched" — leave whatever highlight is up alone,
+      // don't risk a wrong scroll.
+      log('[scroll-trace] __onPagedCueUpdate idx=' + idx + ' SKIP unmatched (alignment)');
+      return;
     }
     if (!chunk) chunk = findChunkForText(cue.text);
     if (!chunk) return;

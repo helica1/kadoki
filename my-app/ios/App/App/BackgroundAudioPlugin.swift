@@ -50,6 +50,16 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setMetadata", returnType: CAPPluginReturnPromise),
     ]
 
+    // MARK: - Constants
+
+    /// Default fade duration in ms for play / pause / resume. 5 ms —
+    /// below the threshold of perception for "delay" and enough to
+    /// take the edge off the amplitude-discontinuity click. The
+    /// originally-tested 50 ms felt laggy because the asyncAfter
+    /// delay before pause was visible; 5 ms is not. Callers can
+    /// override via `fadeMs` in the call (0 disables entirely).
+    static let defaultFadeMs: Double = 5
+
     // MARK: - State
 
     private var player: AVAudioPlayer?
@@ -183,7 +193,22 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             // currentTime in seconds. Clamp to [0, duration].
             let startSec = max(0, min(p.duration, startMs / 1000.0))
             p.currentTime = startSec
-            p.play()
+            // Fade-in (opt-in via fadeMs param, default off). When
+            // fadeMs > 0 we start muted and ramp via
+            // AVAudioPlayer.setVolume(_:fadeDuration:) which does the
+            // ramp on a private dispatch source so it survives the
+            // play() handoff. When fadeMs == 0 (current default) we
+            // just play at full volume — the audio buffer was empty
+            // so there's no amplitude discontinuity to click on.
+            let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
+            if fadeMs > 0 {
+                p.volume = 0.0
+                p.play()
+                p.setVolume(1.0, fadeDuration: fadeMs / 1000.0)
+            } else {
+                p.volume = 1.0
+                p.play()
+            }
 
             self.player = p
             self.currentRate = rate
@@ -197,16 +222,50 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func pause(_ call: CAPPluginCall) {
-        player?.pause()
-        stopPositionTimer()
-        emitState(playing: false)
-        updateNowPlaying()
+        // 50 ms fade-out then pause. setVolume(_:fadeDuration:) returns
+        // immediately and schedules the ramp; we asyncAfter the
+        // actual pause() so the fade audibly completes first. Without
+        // this the source clipped on the pause boundary.
+        let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
+        if let p = player, fadeMs > 0 {
+            p.setVolume(0.0, fadeDuration: fadeMs / 1000.0)
+            DispatchQueue.main.asyncAfter(deadline: .now() + fadeMs / 1000.0) { [weak self] in
+                guard let self = self else { return }
+                self.player?.pause()
+                self.player?.volume = 1.0 // restore for next play
+                self.stopPositionTimer()
+                self.emitState(playing: false)
+                self.updateNowPlaying()
+            }
+        } else {
+            // No fade — but still silence the player right before
+            // pause so the buffer flushes with zero amplitude,
+            // suppressing the click. The setter may not take effect
+            // for all samples already in the hardware buffer, so a
+            // very faint click can still slip through; that's the
+            // trade for instant response. Restore volume so the next
+            // play / resume starts at full level.
+            player?.volume = 0.0
+            player?.pause()
+            player?.volume = 1.0
+            stopPositionTimer()
+            emitState(playing: false)
+            updateNowPlaying()
+        }
         call.resolve()
     }
 
     @objc func resume(_ call: CAPPluginCall) {
         guard let p = player else { call.resolve(); return }
-        p.play()
+        let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
+        if fadeMs > 0 {
+            p.volume = 0.0
+            p.play()
+            p.setVolume(1.0, fadeDuration: fadeMs / 1000.0)
+        } else {
+            p.volume = 1.0
+            p.play()
+        }
         startPositionTimer()
         emitState(playing: true)
         updateNowPlaying()

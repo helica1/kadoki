@@ -631,6 +631,11 @@
       if (!adjusted) return;
       if (adjusted.text) finalText = adjusted.text;
       try {
+        // Anki audio export contract: ALWAYS 1.0x. AudioSlicer.slice does
+        // raw frame copy (MP3) or MediaMuxer remux (M4A) from the source
+        // file at native speed — it ignores window.audioPlaybackRate by
+        // design. The user's listening speed only affects in-app playback
+        // (bg.play({rate})), never the file written for Anki.
         const slice = await window.Capacitor.Plugins.AudioSlicer.slice({
           srcPath: abAudioPath,
           startMs: Math.round(adjusted.startMs),
@@ -1694,9 +1699,26 @@
     if (!el.dataset.counted) {
       const len = textWithoutRuby(el).length;
       if (len > 0) {
-        cumulativeChars += len;
+        // Only credit cumulativeChars when the user is actually in
+        // reader mode. setActive is called by the audio cue listener
+        // (abUpdateCueDisplay) on every cue advance regardless of
+        // which mode is active — so without this gate, pure audio-
+        // mode listening with no reader visible would inflate the
+        // "characters read" stat. Reading-while-listening (mode-read
+        // + audio playing) IS counted, which is the intended
+        // definition of reading.
+        //
+        // We mark dataset.counted regardless so the chunk isn't
+        // re-evaluated later. That handles the "user listened in
+        // audio mode, switched to reader, the catchup-scroll lands
+        // on these same chunks" giant-swoop case — those chunks
+        // are already marked from their original audio-mode pass,
+        // so the swoop doesn't retroactively credit them.
+        if (document.body.classList.contains('mode-read')) {
+          cumulativeChars += len;
+          setPref(KEYS.CHARS, Math.floor(cumulativeChars));
+        }
         el.dataset.counted = '1';
-        setPref(KEYS.CHARS, Math.floor(cumulativeChars));
       }
     }
     // Mirror the CURRENT POSITION (chunk's char offset + length) to
@@ -1928,6 +1950,7 @@
   let abCurrentCueIdx = -1;
   let abAudioPath = null;
   let abAudioName = '';
+  let abLastSrtName = ''; // name of the SRT used to build the current maps — fingerprint input for cue-alignment cache
   let abListenersAttached = false;
   let abScrubbing = false;
   let abPositionRef = { ms: 0, durMs: 0 };
@@ -2023,6 +2046,68 @@
     abAttachListenersOnce();
   };
 
+  // Build cue↔chunk maps via the preprocessing module (cue-alignment.js)
+  // when available, with the legacy srtParser.buildCueChunkMaps as fallback.
+  // Returns the matched count for logging.
+  async function _buildAbCueMaps(srtName) {
+    if (!chunks.length || !abCues.length) {
+      abCueToChunk = null;
+      abChunkToCue = null;
+      return 0;
+    }
+    // Try the new preprocessing first.
+    if (window.cueAlignment?.loadOrBuild) {
+      let progress = null;
+      try {
+        const titleId = window._activeTitleId || null;
+        const epubName = currentEpubName || '';
+        // Peek for cache hit so the overlay only appears on fresh builds.
+        const peekFp = window.cueAlignment.computeFingerprint({
+          epubName, srtName: srtName || '',
+          cueCount: abCues.length,
+          totalChars: window.cueAlignment.extractFlatText(chunks).length
+        });
+        const peekHit = titleId
+          ? await window.cueAlignment.loadAlignment(titleId, peekFp)
+          : null;
+        if (!peekHit && window.cueAlignment.showProgress) {
+          progress = window.cueAlignment.showProgress({
+            title: 'Preparing book',
+            sub:   'Aligning subtitles to text…'
+          });
+        }
+        const t0 = performance.now();
+        const { alignment, cached } = await window.cueAlignment.loadOrBuild({
+          titleId, epubName, srtName: srtName || '', chunks, cues: abCues,
+          onProgress: progress ? (p) => progress.update(p) : null
+        });
+        const dt = Math.round(performance.now() - t0);
+        const ratio = alignment.matchedRatio;
+        rlog(`Legacy alignment: ${alignment.matched}/${alignment.cueCount}` +
+             ` (ratio=${ratio.toFixed(2)}, ${cached ? 'cache' : 'fresh'}, ${dt}ms)`);
+        if (ratio >= window.cueAlignment.MIN_MATCHED_RATIO) {
+          const maps = window.cueAlignment.buildCueToChunk(alignment, chunks);
+          abCueToChunk = maps.cueToChunk;
+          abChunkToCue = maps.chunkToCue;
+          return alignment.matched;
+        }
+        rlog(`Legacy alignment ratio too low; falling back to legacy matcher`);
+        try { await window.cueAlignment.clearAlignment(titleId); } catch (e) {}
+      } catch (e) {
+        rlog('Legacy alignment error; falling back:', e.message);
+      } finally {
+        if (progress) { try { progress.close(); } catch (e) {} }
+      }
+    }
+    // Legacy fallback path.
+    const maps = window.srtParser.buildCueChunkMaps(abCues, chunks, (s) => normalizeText(s));
+    abCueToChunk = maps.cueToChunk;
+    abChunkToCue = maps.chunkToCue;
+    let matched = 0;
+    for (let i = 0; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) matched++;
+    return matched;
+  }
+
   // Data-only cue context loader — pulls the SRT into abCues and builds
   // cue↔chunk maps without showing any UI. Used by loadEpubFromUri so the
   // reading-mode highlight can follow audio even when the user never opens
@@ -2034,12 +2119,8 @@
     if (abCues.length) {
       const needsMaps = chunks.length &&
         (!abCueToChunk || abCueToChunk.length !== abCues.length);
-      if (needsMaps && window.srtParser?.buildCueChunkMaps) {
-        const maps = window.srtParser.buildCueChunkMaps(abCues, chunks, (s) => normalizeText(s));
-        abCueToChunk = maps.cueToChunk;
-        abChunkToCue = maps.chunkToCue;
-        let matched = 0;
-        for (let i = 0; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) matched++;
+      if (needsMaps) {
+        const matched = await _buildAbCueMaps(abLastSrtName);
         rlog(`Rebuilt cue maps post-chunks: ${matched}/${abCues.length} cues mapped`);
       }
       return true;
@@ -2059,12 +2140,9 @@
       if (!res.ok) return false;
       const text = await res.text();
       abCues = window.srtParser.parseSrt(text);
+      abLastSrtName = srt.name || '';
     } catch (e) { return false; }
-    if (chunks.length && abCues.length && window.srtParser?.buildCueChunkMaps) {
-      const maps = window.srtParser.buildCueChunkMaps(abCues, chunks, (s) => normalizeText(s));
-      abCueToChunk = maps.cueToChunk;
-      abChunkToCue = maps.chunkToCue;
-    }
+    await _buildAbCueMaps(abLastSrtName);
     // Mark pre-warm successful so a later openAudiobookMode skips re-loading.
     abContextLoadedForDeck = deck;
     return true;
@@ -2116,6 +2194,7 @@
       if (!res.ok) throw new Error(`fetch status ${res.status}`);
       const text = await res.text();
       abCues = window.srtParser.parseSrt(text);
+      abLastSrtName = srt.name || '';
       rlog(`SRT: ${abCues.length} cues from ${srt.name}`);
     } catch (e) {
       alert('Failed to read SRT: ' + (e?.message || e));
@@ -2123,11 +2202,7 @@
     }
     // Build cue↔chunk maps (uses already-loaded EPUB chunks).
     if (chunks.length && abCues.length) {
-      const maps = window.srtParser.buildCueChunkMaps(abCues, chunks, (s) => normalizeText(s));
-      abCueToChunk = maps.cueToChunk;
-      abChunkToCue = maps.chunkToCue;
-      let matched = 0;
-      for (let i = 0; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) matched++;
+      const matched = await _buildAbCueMaps(abLastSrtName);
       rlog(`Cue↔chunk: ${matched}/${abCues.length} cues mapped`);
     } else {
       abCueToChunk = null;
@@ -2467,6 +2542,12 @@
       const url = abAudioPath.startsWith('file://') ? abAudioPath : 'file://' + abAudioPath;
       const rate = parseFloat(window.audioPlaybackRate) || 1.0;
       const adjStart = Math.max(0, Math.round(startMs) - (window.AUDIO_START_OFFSET_MS || 0));
+      // Remember where this audiobook session started — used by the
+      // mode-switch dialog (Forward to audiobook vs Stay) and later
+      // by an AI summary feature that summarizes everything from
+      // startMs → current bg position.
+      window._audiobookSessionStartMs = adjStart;
+      window._audiobookSessionStartedAt = Date.now();
       await bg.play({ url, startMs: adjStart, rate });
       bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: '' }).catch(() => {});
       // Force an immediate cue update so the subtitle appears before the
@@ -2526,16 +2607,31 @@
   // audiobook drifted far from the reading cursor (>2 chunks), ask whether to
   // keep the cursor, jump to where audio is, or jump + summarize.
 
-  // Master playhead threshold: prompt only if audio has drifted >60 s from
-  // the cursor. Time-based (not chunk-count-based) so it works for both
-  // EPUB chunks (uneven length) and SRT-cards.
-  const REENTRY_THRESHOLD_MS = 60 * 1000;
+  // Master playhead threshold: prompt only when positions differ by
+  // at least 1 cue. Smaller drifts (audio just started, cursor is
+  // already there) auto-resolve as "Stay" silently.
+  const REENTRY_THRESHOLD_MS = 1500;
   let reentryPendingAudioChunk = -1;
   let _reentryResolve = null;
 
-  // Returns a promise that resolves to 'cursor' | 'audio' | 'summary' | null
-  // ('null' when no dialog was needed, i.e. positions are close enough).
-  window.maybeShowAudioReentryDialog = function () {
+  // Format ms → "m:ss" for the modal position labels.
+  function _fmtMmss(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '—';
+    const total = Math.floor(ms / 1000);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = String(total % 60).padStart(2, '0');
+    if (h > 0) return h + ':' + String(m).padStart(2, '0') + ':' + s;
+    return m + ':' + s;
+  }
+
+  // Returns a promise that resolves to 'cursor' | 'audio' | null.
+  // The prompt fires on every audio → card/read switch when audio
+  // and cursor have meaningfully diverged. Both positions are shown
+  // on the buttons in the format appropriate to the destination
+  // mode (card numbers for card mode, character positions for
+  // read mode).
+  window.maybeShowAudioReentryDialog = function (targetMode) {
     return new Promise((resolve) => {
       let audioChunk = -1, cursor = -1;
       let audioMs = abPositionRef.ms || 0;
@@ -2543,7 +2639,6 @@
       if (abCueToChunk && abCurrentCueIdx >= 0) {
         audioChunk = abCueToChunk[abCurrentCueIdx];
         cursor = lastMatchedIdx;
-        // Cursor → cue time via the chunk→cue map.
         if (cursor >= 0 && abChunkToCue) {
           const cueIdxForCursor = abChunkToCue[cursor];
           if (cueIdxForCursor >= 0 && abCues[cueIdxForCursor]) {
@@ -2556,16 +2651,54 @@
         cursor = typeof window.currentCardIndex === 'number' ? window.currentCardIndex : -1;
         if (cursor >= 0 && abCues[cursor]) cursorMs = abCues[cursor].startMs;
       }
+      // No audio context at all (audio mode never opened, audiobook
+      // not paired) → no prompt needed.
       if (audioChunk < 0 || cursor < 0) { resolve(null); return; }
       const deltaMs = Math.abs(audioMs - cursorMs);
       if (deltaMs < REENTRY_THRESHOLD_MS) { resolve(null); return; }
       reentryPendingAudioChunk = audioChunk;
       const modal = document.getElementById('audiobookReentryModal');
-      const txt = document.getElementById('audiobookReentryText');
-      if (txt) {
-        const dir = audioMs > cursorMs ? 'ahead of' : 'behind';
-        const minutes = (deltaMs / 60000).toFixed(1);
-        txt.textContent = `Audio is ${minutes} minute${minutes === '1.0' ? '' : 's'} ${dir} your last position. Jump or stay?`;
+      const cursorPosEl = document.getElementById('reentryCursorPos');
+      const audioPosEl  = document.getElementById('reentryAudioPos');
+      // Format per destination mode:
+      //   card mode → "current card 532, audio card 598"
+      //   read mode → "current character position 45,092, audio position 48,201"
+      // Falls back to mm:ss when neither dataset is available (e.g.,
+      // tap was on a freshly-loaded title before chunk metadata
+      // settled).
+      if (cursorPosEl && audioPosEl) {
+        if (targetMode === 'card') {
+          // Card index: cursor==current card (the user's last opened
+          // card), audioChunk==card matching the audio cue.
+          const curCardNum = (cursor + 1).toLocaleString();
+          const audCardNum = (audioChunk + 1).toLocaleString();
+          cursorPosEl.textContent = 'current card ' + curCardNum;
+          audioPosEl.textContent  = 'audio card '   + audCardNum;
+        } else if (targetMode === 'read') {
+          // Character offset within the EPUB. chunks[i].dataset.charOffset
+          // + charLen give the END position of the chunk; using END so
+          // the displayed number tracks "how far you've read".
+          const charAt = (idx) => {
+            if (!chunks[idx]) return null;
+            const off = parseInt(chunks[idx].dataset.charOffset) || 0;
+            const len = parseInt(chunks[idx].dataset.charLen) || 0;
+            return off + len;
+          };
+          const curChar = charAt(cursor);
+          const audChar = charAt(audioChunk);
+          if (Number.isFinite(curChar) && Number.isFinite(audChar)) {
+            cursorPosEl.textContent = 'current character position ' +
+              curChar.toLocaleString();
+            audioPosEl.textContent  = 'audio position ' +
+              audChar.toLocaleString();
+          } else {
+            cursorPosEl.textContent = 'cursor @ ' + _fmtMmss(cursorMs);
+            audioPosEl.textContent  = 'audio @ '  + _fmtMmss(audioMs);
+          }
+        } else {
+          cursorPosEl.textContent = 'cursor @ ' + _fmtMmss(cursorMs);
+          audioPosEl.textContent  = 'audio @ '  + _fmtMmss(audioMs);
+        }
       }
       if (!modal) { resolve(null); return; }
       _reentryResolve = resolve;
@@ -2577,7 +2710,7 @@
     const modal = document.getElementById('audiobookReentryModal');
     if (modal) modal.style.display = 'none';
     const target = reentryPendingAudioChunk;
-    if (choice === 'audio' || choice === 'summary') {
+    if (choice === 'audio') {
       const isSrtCardsMode = Array.isArray(window.allNotes) && window.allNotes[0]?.isSrtCard;
       if (isSrtCardsMode && typeof window.updateCardIndex === 'function' && target >= 0) {
         // In SRT-cards mode the chunk index IS the card index.
@@ -2586,11 +2719,8 @@
         // EPUB chunk-based: highlight the matching chunk in reading mode.
         setActive(target);
       }
-      if (choice === 'summary') {
-        alert('AI summary not yet implemented — jumped to the audio position instead.');
-      }
     }
-    // 'cursor' → no-op
+    // 'cursor' → no-op (user wants to stay where reader currently is)
     const r = _reentryResolve;
     _reentryResolve = null;
     reentryPendingAudioChunk = -1;
@@ -2817,7 +2947,13 @@
           if (!ch.dataset.counted) {
             const len = textWithoutRuby(ch).length;
             if (len > 0) {
-              cumulativeChars += len;
+              // Same gating as setActive — credit only when actually
+              // in reader mode. Mark counted regardless so audio-mode
+              // pre-passes don't get retroactively credited if the
+              // user later scrolls past them in reader.
+              if (document.body.classList.contains('mode-read')) {
+                cumulativeChars += len;
+              }
               ch.dataset.counted = '1';
             }
           }
@@ -3160,7 +3296,17 @@
     const autoToggle = document.getElementById('readerAutoAdvanceToggle');
     const hiInput = document.getElementById('readerHighlightColor');
     const savedFont = (await getPref(KEYS.FONT)) || 'serif';
-    const savedSize = parseFloat(await getPref(KEYS.FONT_SIZE)) || 1.1;
+    // Font size now comes from the appearance system (the paged reader
+    // reads --font-size-read which appearance.js writes), not the
+    // legacy KEYS.FONT_SIZE pref. Slider oninput writes back through
+    // window.appearance.set('read', {fontSize: ...}).
+    let savedSize = 1.875; // matches appearance.js DEFAULTS.read.fontSize
+    try {
+      const appearanceRead = window.appearance?.get?.('read');
+      const remStr = appearanceRead?.fontSize || '';
+      const parsed = parseFloat(remStr);
+      if (Number.isFinite(parsed) && parsed > 0) savedSize = parsed;
+    } catch (_) {}
     fontSelect.value = savedFont;
     if (fontSelect.value !== savedFont) {
       const opt = document.createElement('option');

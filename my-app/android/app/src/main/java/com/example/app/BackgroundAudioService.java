@@ -14,7 +14,9 @@ import android.media.MediaPlayer;
 import android.media.PlaybackParams;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
@@ -47,6 +49,20 @@ public class BackgroundAudioService extends Service {
     public static final String EXTRA_URL = "url";
     public static final String EXTRA_START_MS = "startMs";
     public static final String EXTRA_RATE = "rate";
+    public static final String EXTRA_FADE_MS = "fadeMs";
+
+    // Default fade duration for play / pause / resume. 5 ms — below
+    // the threshold of perception for delay, enough to take the edge
+    // off the amplitude-discontinuity click. Originally tested 50 ms
+    // felt laggy because the asyncAfter delay before pause was
+    // visible; 5 ms is not. iOS uses the same default via
+    // BackgroundAudioPlugin.swift's defaultFadeMs.
+    private static final int DEFAULT_FADE_MS = 5;
+    // Volume ramp max step granularity. The actual step size adapts:
+    // rampVolume computes steps and step-interval so the ramp
+    // ALWAYS fits inside durationMs. For 5 ms = ~3 steps at ~1.5 ms
+    // each; for 50 ms = 5 steps at 10 ms each.
+    private static final int FADE_MAX_STEP_MS = 10;
 
     public interface OnStateChangeListener {
         void onPlayingStateChanged(boolean playing);
@@ -95,8 +111,8 @@ public class BackgroundAudioService extends Service {
         } else if (ACTION_PAUSE.equals(action)) {
             tryRun(() -> {
                 if (player != null && player.isPlaying()) {
-                    player.pause();
-                    if (listener != null) listener.onPlayingStateChanged(false);
+                    int fadeMs = intent.getIntExtra(EXTRA_FADE_MS, DEFAULT_FADE_MS);
+                    fadeOutThenPause(fadeMs);
                 }
             });
             updateNotification("Paused");
@@ -104,8 +120,8 @@ public class BackgroundAudioService extends Service {
         } else if (ACTION_RESUME.equals(action)) {
             tryRun(() -> {
                 if (player != null && prepared) {
-                    player.start();
-                    if (listener != null) listener.onPlayingStateChanged(true);
+                    int fadeMs = intent.getIntExtra(EXTRA_FADE_MS, DEFAULT_FADE_MS);
+                    fadeInOnResume(fadeMs);
                 }
             });
             updateNotification("Playing");
@@ -136,7 +152,17 @@ public class BackgroundAudioService extends Service {
                 Log.d(TAG, "prepared; dur=" + mp.getDuration() + " startMs=" + pendingStartMs);
                 if (pendingStartMs > 0) mp.seekTo(pendingStartMs);
                 applyRate(pendingRate);
-                mp.start();
+                // First play: only fade in if DEFAULT_FADE_MS > 0.
+                // With the current default of 0, just start at full
+                // volume. The audio buffer was empty so there's no
+                // amplitude discontinuity to click on.
+                if (DEFAULT_FADE_MS > 0) {
+                    try { mp.setVolume(0f, 0f); } catch (Exception ignored) {}
+                    mp.start();
+                    rampVolume(mp, 0f, 1f, DEFAULT_FADE_MS);
+                } else {
+                    mp.start();
+                }
                 updateNotification("Playing");
                 updatePlaybackState();
                 if (listener != null) {
@@ -177,12 +203,106 @@ public class BackgroundAudioService extends Service {
 
     private void stopPlayback() {
         prepared = false;
+        cancelFade();
         if (player != null) {
             try { player.stop(); } catch (Exception ignored) {}
             try { player.release(); } catch (Exception ignored) {}
             player = null;
             if (listener != null) listener.onPlayingStateChanged(false);
         }
+    }
+
+    // ---- Volume ramp helpers (P2 roadmap) ----
+    //
+    // MediaPlayer.setVolume is instant — no native fade like iOS
+    // AVAudioPlayer.setVolume(_:fadeDuration:). We schedule a sequence
+    // of setVolume calls via a main-thread Handler to approximate a
+    // linear ramp over `durationMs`. Step granularity is FADE_STEP_MS
+    // (~10 ms) which is smooth enough for the 50 ms default without
+    // being CPU-heavy.
+    //
+    // Outstanding ramps are cancelled if a new ramp / pause / stop
+    // arrives so we never have two ramps fighting over the same
+    // setVolume.
+    private final Handler fadeHandler = new Handler(Looper.getMainLooper());
+    private Runnable pendingPauseAfterFade = null;
+
+    private void cancelFade() {
+        fadeHandler.removeCallbacksAndMessages(null);
+        pendingPauseAfterFade = null;
+    }
+
+    private void rampVolume(MediaPlayer mp, float from, float to, int durationMs) {
+        cancelFade();
+        if (mp == null) return;
+        if (durationMs <= 0) {
+            try { mp.setVolume(to, to); } catch (Exception ignored) {}
+            return;
+        }
+        // Step count adapts to fit inside durationMs so a 5 ms fade
+        // actually delivers volume changes within those 5 ms, not at
+        // 10 ms+ as the old fixed FADE_STEP_MS grid would have done.
+        int steps = Math.max(1, Math.min(10, durationMs / Math.max(1, FADE_MAX_STEP_MS / 2)));
+        if (steps > durationMs) steps = durationMs; // at most one step per ms
+        int stepIntervalMs = Math.max(1, durationMs / steps);
+        for (int i = 1; i <= steps; i++) {
+            final int step = i;
+            final int total = steps;
+            final MediaPlayer target = mp;
+            fadeHandler.postDelayed(() -> {
+                float v = from + (to - from) * ((float) step / (float) total);
+                try { target.setVolume(v, v); } catch (Exception ignored) {}
+            }, (long) step * stepIntervalMs);
+        }
+    }
+
+    private void fadeOutThenPause(int fadeMs) {
+        if (player == null) return;
+        if (fadeMs <= 0) {
+            // No fade — set volume to 0 first so pause doesn't click on
+            // a non-zero waveform, then pause, then restore for the
+            // next play.
+            try {
+                player.setVolume(0f, 0f);
+                player.pause();
+                player.setVolume(1f, 1f);
+                if (listener != null) listener.onPlayingStateChanged(false);
+            } catch (Exception ignored) {}
+            return;
+        }
+        final MediaPlayer mp = player;
+        rampVolume(mp, 1f, 0f, fadeMs);
+        // Schedule the actual pause AFTER the ramp completes.
+        // Belt-and-suspenders: also set volume to 0 inside the runnable
+        // so if the ramp didn't quite finish before this fires (handler
+        // ordering across same-tick callbacks isn't guaranteed), pause
+        // still happens at zero amplitude.
+        pendingPauseAfterFade = () -> {
+            try {
+                try { mp.setVolume(0f, 0f); } catch (Exception ignored) {}
+                if (mp.isPlaying()) mp.pause();
+                try { mp.setVolume(1f, 1f); } catch (Exception ignored) {} // reset for next play
+                if (listener != null) listener.onPlayingStateChanged(false);
+            } catch (Exception ignored) {}
+            pendingPauseAfterFade = null;
+        };
+        fadeHandler.postDelayed(pendingPauseAfterFade, fadeMs);
+    }
+
+    private void fadeInOnResume(int fadeMs) {
+        if (player == null) return;
+        if (fadeMs <= 0) {
+            // No fade — just start at full volume. (Volume was reset
+            // to 1 inside the pause runnable, so we don't need to
+            // reset here.)
+            try { player.start(); } catch (Exception ignored) {}
+            if (listener != null) listener.onPlayingStateChanged(true);
+            return;
+        }
+        try { player.setVolume(0f, 0f); } catch (Exception ignored) {}
+        try { player.start(); } catch (Exception ignored) {}
+        if (listener != null) listener.onPlayingStateChanged(true);
+        rampVolume(player, 0f, 1f, fadeMs);
     }
 
     // ----- Public API for direct calls from BackgroundAudioPlugin -----

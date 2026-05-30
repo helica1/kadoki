@@ -53,7 +53,16 @@ async function setPref(key, value) {
 // permission hasn't been granted yet, surfaces the system prompt and waits
 // for the user's decision before returning. Null = AnkiDroid not installed
 // or user denied permission.
+//
+// Cache: `_bridgeAvailableCached === true` skips the isAvailable round-trip
+// on subsequent calls. The cache is INVALIDATED any time an actual addNote
+// (or any verb) fails — the catch blocks below call `invalidateBridgeCache`.
+// That handles the "AnkiDroid was killed in the background" case: next send
+// re-runs isAvailable and can surface the permission prompt again instead of
+// failing silently with a stale handle.
 let _bridgeAvailableCached = null;
+function invalidateBridgeCache() { _bridgeAvailableCached = null; }
+window.invalidateAnkiBridgeCache = invalidateBridgeCache;
 async function viaBridge(opts) {
   const ab = window.Capacitor?.Plugins?.AnkiBridge;
   if (!ab) return null;
@@ -245,18 +254,41 @@ async function sendToAnki({ expression, imageData, audioData }) {
           field:      cfg.fields.image
         }];
       }
+      // Mark the anki round-trip BEFORE the addNote handoff. On iOS,
+      // the URL scheme call backgrounds us briefly; stats.js suspends
+      // its background-stop while this flag is set so the running
+      // card/read timer isn't halted just because the user added a
+      // card. Harmless no-op on Android (no handoff happens).
+      try { window.stats?.markAnkiRoundtripActive?.(); } catch (_) {}
       const r = await ab.addNote(params);
       console.log('AnkiBridge.addNote ->', r);
+      if (r?.mediaServerRestartedThisSend) {
+        console.log('AnkiBridge: media server was restarted to complete this send');
+      }
       if (typeof window.showToast === 'function') {
         window.showToast(`✓ Added to ${cfg.deck}`, 2200);
       }
       return;
     } catch (err) {
       console.error('AnkiBridge.addNote error:', err);
+      // Clear the availability cache so the NEXT send re-runs isAvailable +
+      // requestPermission. Handles "AnkiDroid was killed in background" on
+      // Android and "media server is genuinely dead" on iOS — both surface
+      // here as a reject. User can swipe-up again and we'll re-validate.
+      invalidateBridgeCache();
+      const msg = err?.message || String(err);
+      // The iOS plugin already attempts a forceRestart before this error
+      // surfaces. So a "media server is unreachable" reject here means
+      // the restart itself failed — the user needs to relaunch the app
+      // rather than just retry the send.
+      const isServerDown = /media server is unreachable/i.test(msg);
+      const display = isServerDown
+        ? '✗ Anki media server stuck — restart the app to recover'
+        : `✗ Anki: ${msg}`;
       if (typeof window.showToast === 'function') {
-        window.showToast(`✗ Anki: ${err?.message || err}`, 4000);
+        window.showToast(display, 4000);
       } else {
-        alert('Failed to add note to AnkiDroid: ' + (err?.message || err));
+        alert(display);
       }
       return;
     }
