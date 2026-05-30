@@ -191,12 +191,42 @@
   // this window are ignored so a double-tap can't race the first call
   // (which used to produce the "tap twice to switch" UX).
   let _switchInFlight = false;
+  // Generation counter so a tab tap during the audio-reentry dialog
+  // can SUPERSEDE the prior switch's async block. Without this the
+  // old block would resume after the dialog dismiss and override the
+  // new tab's view flips — the user reported "tap audio while dialog
+  // open shows read viewport instead of audio." Each setShellMode
+  // bumps the counter; the async block captures the gen at start and
+  // bails out if it no longer matches.
+  let _switchGen = 0;
 
   window.setShellMode = function (mode) {
+    // If the audio→other reentry modal is up, treat a tab tap as
+    // "dismiss without changing position" AND supersede the prior
+    // switch's async block (its closeAudio/openRead steps would
+    // otherwise undo this new switch). Also set a flag so the NEXT
+    // openAudiobookMode (if user is heading back to audio) RESUMES
+    // playback from where it was paused rather than restarting from
+    // the card/cursor position — user explicitly didn't choose a
+    // position, so audio should continue where it left off.
+    const reentry = document.getElementById('audiobookReentryModal');
+    if (reentry && reentry.style.display === 'flex' &&
+        typeof window.reentryChoose === 'function') {
+      _switchGen++;  // invalidate the prior switch's async tail
+      // Pass unresolved:true so the divergence flag stays set —
+      // the next mode switch into card/read re-shows the dialog in
+      // the appropriate target-mode flavor (Card Number vs Reading
+      // Position) until the user explicitly picks a button.
+      try { window.reentryChoose('cursor', { unresolved: true }); } catch (_) {}
+      _switchInFlight = false;
+      window._reentryDismissedByTab = true;
+    }
     if (_switchInFlight) return;
     currentMode = inferActiveMode();
     if (mode === currentMode) return;
     _switchInFlight = true;
+    _switchGen++;
+    const myGen = _switchGen;
 
     // === SYNCHRONOUS visibility flip ===
     // Flip views + tab UI THIS frame, before any await. That makes tab
@@ -230,30 +260,111 @@
     currentMode = mode;
     updateTabsUI(mode);
 
+    // Save the reader cursor BEFORE audio mode takes over and starts
+    // auto-scrolling the reader along with playback. The audio→read
+    // reentry modal uses this saved value as the "prior reading
+    // position" so the two displayed positions actually differ —
+    // without this capture, both ended up identical because
+    // lastMatchedIdx had advanced with audio-driven setActive calls.
+    //
+    // Capture on ANY transition INTO audio so the next return-from-audio
+    // has a meaningful prior. Use lastMatchedIdx as the chunk index
+    // and let the modal compute the character position from
+    // chunks[idx].dataset.charOffset.
+    if (mode === 'audio' && prevMode !== 'audio') {
+      try {
+        const lmi = window._readingLastMatchedIdx;
+        if (Number.isFinite(lmi) && lmi >= 0) {
+          window._priorReaderCursorIdx = lmi;
+          window._priorReaderCursorAtMs = Date.now();
+        }
+        // Card-mode snapshot for SRT-cards titles where the modal
+        // shows card numbers instead of character positions.
+        const ci = window.currentCardIndex;
+        if (Number.isFinite(ci) && ci >= 0) {
+          window._priorCardIdx = ci;
+          window._priorCardIdxAtMs = Date.now();
+          console.log('[shell] saved _priorCardIdx=' + ci + ' (display ' + (ci+1) + ')' +
+                      ' from prevMode=' + prevMode);
+        }
+      } catch (_) {}
+    }
+
     // === ASYNCHRONOUS setup (background) ===
     // Run open/close + position sync without blocking the switch. Errors
     // here only affect mode-specific behavior, not the visible state.
+    //
+    // Generation check after each await: if a tab tap during the
+    // reentry dialog superseded this switch, _switchGen has advanced
+    // past myGen and we bail out — the new switch's async block owns
+    // the view-flip + position-sync from this point on.
     (async () => {
       try {
-        if (prevMode === 'audio' && (mode === 'card' || mode === 'read')) {
+        // Reentry dialog appears ONLY on audio→card/read AND only
+        // when audio is AHEAD of the card/reader cursor. Rationale
+        // (per user clarification):
+        //   - card and read share one logical cursor — they're
+        //     always in sync. Transitioning between them never
+        //     needs a "where to go" dialog.
+        //   - audio is a separate, optional cursor that can run
+        //     ahead of the user's position. The user might let
+        //     audio play past where they read; coming back to
+        //     read/card, they want to know "audio went further,
+        //     do you want to follow?"
+        //   - audio behind (user seeked back to review): no dialog.
+        //     The user explicitly didn't want to be there; don't
+        //     pester them about it.
+        // Trigger the reentry dialog when:
+        //   - Coming from audio mode (classic case), OR
+        //   - The unresolved-divergence flag is set because the user
+        //     dismissed a prior dialog via tab tap without picking
+        //     a button. The flag persists across mode switches
+        //     until they explicitly choose; the dialog re-appears
+        //     in the target mode's flavor each time.
+        const triggerDialog = (mode === 'card' || mode === 'read') &&
+                              (prevMode === 'audio' || window._audioPositionUnresolved);
+        if (triggerDialog) {
+          try {
+            const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+            if (bg?.pause && window._bgPlaying) await bg.pause();
+          } catch (_) {}
           if (typeof window.maybeShowAudioReentryDialog === 'function') {
             try { await window.maybeShowAudioReentryDialog(mode); } catch (e) {}
           }
+          if (myGen !== _switchGen) return;
         }
         if (prevMode === 'audio' && typeof window.closeAudiobookMode === 'function') {
           await window.closeAudiobookMode();
+          if (myGen !== _switchGen) return;
         } else if (prevMode === 'read' && typeof window.closeReadingMode === 'function') {
           await window.closeReadingMode();
+          if (myGen !== _switchGen) return;
         }
         if (mode === 'audio' && typeof window.openAudiobookMode === 'function') {
-          await window.openAudiobookMode({ seekToCurrentPosition: prevMode === 'card' || prevMode === 'read' });
+          // resumeOnly: when the prior switch's reentry dialog was
+          // dismissed by tapping a tab (no explicit position choice),
+          // we should NOT seek audio back to the card/cursor position —
+          // user wants it to continue from where it was paused. The
+          // flag is one-shot; openAudiobookMode consumes + clears it.
+          const resumeOnly = !!window._reentryDismissedByTab;
+          await window.openAudiobookMode({
+            seekToCurrentPosition: (prevMode === 'card' || prevMode === 'read') && !resumeOnly,
+            resumeOnly
+          });
+          window._reentryDismissedByTab = false;
         } else if (mode === 'read' && typeof window.openReadingMode === 'function') {
           await window.openReadingMode();
-        } else if (mode === 'card' && prevMode !== 'card') {
+        } else if (mode === 'card' && prevMode === 'read') {
+          // read → card: re-sync the card index to the reader cursor
+          // (read and card share the same logical position). For
+          // audio → card, we deliberately DON'T sync — the dialog
+          // already handles "follow audio" vs "stay" and we don't
+          // want syncCardToCurrentCue silently snapping the card
+          // index to the audio cue.
           if (typeof window.syncCardToCurrentCue === 'function') window.syncCardToCurrentCue();
         }
       } finally {
-        _switchInFlight = false;
+        if (myGen === _switchGen) _switchInFlight = false;
       }
     })();
   };
@@ -489,8 +600,21 @@
       return b;
     };
 
-    menu.appendChild(mkItem('Library',     () => { if (typeof openLibrary === 'function') openLibrary(); }));
-    menu.appendChild(mkItem('Preferences', () => { if (typeof openPreferences === 'function') openPreferences(); }));
+    // Visual separator between menu groups — keeps the items
+    // physically separated so they're easier to pick on a small
+    // touch target.
+    const mkDivider = () => {
+      const d = document.createElement('div');
+      d.className = 'menu-divider';
+      d.style.cssText = 'height:1px;background:#2a2a2a;margin:6px 8px;pointer-events:none;';
+      return d;
+    };
+
+    menu.appendChild(mkItem('Library',         () => { if (typeof openLibrary === 'function') openLibrary(); }));
+    menu.appendChild(mkDivider());
+    menu.appendChild(mkItem('Playback speed',  () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
+    menu.appendChild(mkDivider());
+    menu.appendChild(mkItem('Preferences',     () => { if (typeof openPreferences === 'function') openPreferences(); }));
 
     document.body.appendChild(menu);
     const trigger = ev?.currentTarget || el('shellMoreBtn');

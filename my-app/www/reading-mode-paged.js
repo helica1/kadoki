@@ -1215,22 +1215,14 @@
       // independently, don't yank back"). openView resets
       // lastUserScrollTime so the initial enter always centers correctly.
       if (Date.now() - lastUserScrollTime < 5000) return;
-      // For the initial center-on-card we want full-on centering even if
-      // the chunk itself is partly off-screen with no highlight overflow
-      // yet. Fall back to chunk-based scroll if range overflow is zero
-      // but the chunk isn't visible.
-      const rangeRect = range?.getBoundingClientRect();
-      const sr = scrollEl?.getBoundingClientRect();
-      const rangeOverflows = !!(range && rangeRect && sr &&
-        (rangeRect.left < sr.left || rangeRect.right > sr.right));
-      if (rangeOverflows) {
-        log('[scroll-trace] centerOnActiveCard rangeOverflows');
-        autoScrollForRange(range);
-      } else if (!isChunkVisible(chunk)) {
-        log('[scroll-trace] centerOnActiveCard chunkScroll');
-        lastProgrammaticScrollTime = Date.now();
-        scrollChunkIntoView(chunk);
-      }
+      // Use the near-right-with-context positioning so the user
+      // always opens the reader oriented: active chunk near the
+      // right edge, ~3 lines of previously-read text visible.
+      // Replaces the old "autoScrollForRange or scrollChunkIntoView
+      // fallback" pair — those produced the "highlight slightly
+      // off-screen" cases the user reported.
+      log('[scroll-trace] centerOnActiveCard → scrollChunkNearRightWithContext');
+      scrollChunkNearRightWithContext(chunk);
     } catch (e) { log('centerOnActiveCard error:', e.message); }
   }
 
@@ -1298,14 +1290,23 @@
     if (progressEl) return;
     progressEl = document.createElement('div');
     progressEl.id = 'readingPagedProgress';
-    progressEl.textContent = '–';
+    progressEl.textContent = '—';
     let firing = false;
     const fire = (e) => {
       if (firing) return;
       firing = true;
       try { e.stopPropagation(); } catch (_) {}
       try { if (e.cancelable) e.preventDefault(); } catch (_) {}
-      openJumpModal();
+      // Route by mode so the strip behaves like the bottom bar in
+      // each mode: audio→seek modal, card→jump-to-card, read→
+      // percent-jump. window.onProgressBarTap is the existing
+      // mode-aware dispatcher in app.js. Fallback to the local
+      // openJumpModal if the dispatcher isn't loaded.
+      if (typeof window.onProgressBarTap === 'function') {
+        try { window.onProgressBarTap(e); } catch (_) { openJumpModal(); }
+      } else {
+        openJumpModal();
+      }
       setTimeout(() => { firing = false; }, 500);
     };
     progressEl.addEventListener('click', fire);
@@ -1434,18 +1435,98 @@
 
   // Update the progress strip. Reads the scroll fraction and multiplies
   // by totalChars. Cheap enough to run on every scroll event.
-  function updateProgress() {
-    if (!progressEl || !scrollEl || !totalChars) return;
-    const sw = scrollEl.scrollWidth - scrollEl.clientWidth;
-    if (sw <= 0) { progressEl.textContent = '–'; return; }
-    // scrollLeft can be negative (vertical-rl in some WebKit builds) or
-    // positive (with direction:rtl on the scroll container). Use the
-    // absolute value for the fraction.
-    const frac = Math.min(1, Math.max(0, Math.abs(scrollEl.scrollLeft) / sw));
-    const cur = Math.round(totalChars * frac);
-    const pct = Math.round(frac * 1000) / 10;
-    progressEl.textContent = `${cur.toLocaleString()} / ${totalChars.toLocaleString()} · ${pct}%`;
+  // Mode-aware progress strip. Accepts an optional `opts.cueIdx` so
+  // callers in card / audio modes (where scrollEl isn't being scrolled
+  // by the user) can drive the display from the active cue's
+  // character offset. Without this, the strip stayed static in
+  // non-read modes — user reported "the top-left counter only works
+  // in read mode."
+  //
+  //   updateProgress()              — default: derive from scrollLeft
+  //   updateProgress({cueIdx: n})   — derive from chunks[pagedCueToChunk[n]]
+  //                                  .dataset.charOffset + charLen
+  // Compact h:mm:ss / m:ss formatter.
+  function _fmtHms(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '—:——';
+    const total = Math.floor(ms / 1000);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = String(total % 60).padStart(2, '0');
+    return h > 0
+      ? h + ':' + String(m).padStart(2, '0') + ':' + s
+      : m + ':' + s;
   }
+
+  function _activeMode() {
+    const b = document.body;
+    if (b.classList.contains('mode-audio')) return 'audio';
+    if (b.classList.contains('mode-read'))  return 'read';
+    if (b.classList.contains('mode-card'))  return 'card';
+    return 'card'; // safe default
+  }
+
+  // Mode-aware top-left progress strip.
+  //   audio mode → "h:mm:ss / h:mm:ss"  (current / total audio time)
+  //   card mode  → "N / total"          (1-indexed card / total cards)
+  //   read mode  → "chars / total · pct%" (EPUB char position)
+  //
+  // opts.cueIdx is honored for read mode (paints the char position
+  // for that cue's chunk) and as a fallback for the others.
+  function updateProgress(opts) {
+    if (!progressEl) return;
+    const mode = _activeMode();
+
+    // --- AUDIO MODE: current / total audio time ---
+    if (mode === 'audio' && typeof window.getAudioProgress === 'function') {
+      const a = window.getAudioProgress();
+      if (a && Number.isFinite(a.dur) && a.dur > 0) {
+        progressEl.textContent = _fmtHms(a.ms) + ' / ' + _fmtHms(a.dur);
+        return;
+      }
+      // No duration yet — fall through to default.
+    }
+
+    // --- CARD MODE: card / total ---
+    if (mode === 'card' && Array.isArray(window.allNotes) && window.allNotes.length) {
+      const ci = Number.isFinite(window.currentCardIndex) ? window.currentCardIndex : 0;
+      progressEl.textContent = (ci + 1).toLocaleString() + ' / ' +
+                               window.allNotes.length.toLocaleString();
+      return;
+    }
+
+    // --- READ MODE (or any mode with EPUB loaded): char position ---
+    if (totalChars) {
+      let cur = -1;
+      if (opts && Number.isFinite(opts.cueIdx)) {
+        if (pagedCueToChunk && pagedCueToChunk[opts.cueIdx] >= 0) {
+          const chunk = chunks[pagedCueToChunk[opts.cueIdx]];
+          if (chunk) {
+            const off = parseInt(chunk.dataset.charOffset) || 0;
+            const len = parseInt(chunk.dataset.charLen) || 0;
+            cur = off + len;
+          }
+        }
+      } else if (scrollEl) {
+        const sw = scrollEl.scrollWidth - scrollEl.clientWidth;
+        if (sw > 0) {
+          const frac = Math.min(1, Math.max(0, Math.abs(scrollEl.scrollLeft) / sw));
+          cur = Math.round(totalChars * frac);
+        }
+      }
+      if (cur >= 0) {
+        const pct = Math.round((cur / totalChars) * 1000) / 10;
+        progressEl.textContent = `${cur.toLocaleString()} / ${totalChars.toLocaleString()} · ${pct}%`;
+        return;
+      }
+    }
+
+    progressEl.textContent = '—';
+  }
+  // Externally callable from card / audio mode so the progress strip
+  // tracks the current playhead even when the reader view is hidden.
+  window.pagedUpdateProgressForCue = function (cueIdx) {
+    try { updateProgress({ cueIdx }); } catch (_) {}
+  };
 
   // Dict lookup via caretRangeFromPoint + CSS Custom Highlight API. No
   // DOM mutation, no scroll-state corruption.
@@ -1517,6 +1598,10 @@
     // not the currently-playing cue or the legacy reader's stale state.
     // Audio fields follow the same cue so they always match the sentence.
     bindCueLookupContext(chunk, flatText, charIndex);
+
+    // Stash the chunk DOM node so positionDictPopup can fall back to
+    // its bounding rect when Range-based lookup fails on iOS WKWebView.
+    try { window._dictLookupChunk = chunk; } catch (_) {}
 
     const paintFn = (_ch, tns, start, len) => {
       if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
@@ -2084,6 +2169,20 @@
         centerOnActiveCard();
         await loadAudiobookCues();
         attachBgListener();
+        // Consume a pending audio-reentry centering set by
+        // reentryChoose('audio'). One-shot — clear after use so a
+        // later openView doesn't re-trigger.
+        try {
+          const jumpCue = window._reentryAudioJumpCueIdx;
+          if (Number.isFinite(jumpCue)) {
+            window._reentryAudioJumpCueIdx = null;
+            // Small extra delay so loadAudiobookCues' alignment-map
+            // setup is fully done before we read pagedCueToChunk.
+            setTimeout(() => {
+              try { window.pagedCenterOnCue?.(jumpCue); } catch (_) {}
+            }, 60);
+          }
+        } catch (_) {}
       }, 80);
     }
   }
@@ -2115,6 +2214,11 @@
   function hookModeSwitch() {
     window.addEventListener('shell:mode-change', (e) => {
       const mode = e?.detail?.mode;
+      // Refresh the progress strip on EVERY mode change so the format
+      // flips immediately (card N/total → audio mm:ss/mm:ss → read
+      // chars/total). updateProgress's mode detection reads body
+      // classes; shell sets those before firing this event.
+      try { updateProgress({ cueIdx: window._lastAudioCueIdx ?? -1 }); } catch (_) {}
       if (!viewEl) return;
       const pagedShown = viewEl.style.display !== 'none';
       if (mode === 'read') {
@@ -2254,6 +2358,126 @@
   // resets lastHighlightedCue so the subsequent cue-active updates
   // from the position listener fire reliably (avoids the "next cue
   // plays but isn't highlighted" pattern).
+  // Centered-scroll variant for explicit jumps (audio→read reentry
+  // "Keep current audiobook position" choice, future jump-to-percent
+  // flows). Unlike autoScrollForRange which right-justifies the cue
+  // at the viewport's reading edge, this centers the chunk in the
+  // viewport so the user can read forward AND back without the cue
+  // hugging an edge. Also paints the cue-active highlight on the
+  // chunk so the user can immediately see WHERE the playhead is.
+  window.pagedCenterOnCue = function (cueIdx) {
+    if (!Number.isFinite(cueIdx)) return false;
+    if (!viewEl || viewEl.style.display === 'none') return false;
+    const cuesSrc = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+    const cue = cuesSrc[cueIdx];
+    if (!cue) return false;
+    let chunk = null;
+    if (pagedCueToChunk && pagedCueToChunk[cueIdx] >= 0) {
+      chunk = chunks[pagedCueToChunk[cueIdx]] || null;
+    }
+    if (!chunk) chunk = findChunkForText(cue.text || '');
+    if (!chunk) {
+      log('pagedCenterOnCue: no chunk for cue ' + cueIdx);
+      return false;
+    }
+    // Paint the cue-active highlight so the user sees a clear marker
+    // exactly at the new playhead. setCueRangeHighlight is the same
+    // helper __onPagedCueUpdate uses, so the visual matches the
+    // auto-follow look.
+    try { setCueRangeHighlight(chunk, cue.text); } catch (_) {}
+    // Reset the highlight-cue gate so the next position event (when
+    // user resumes audio from here) actually paints — without this,
+    // the listener's idx === lastHighlightedCue early return can
+    // swallow the first cue advance.
+    lastHighlightedCue = cueIdx;
+    try { scrollChunkNearRightWithContext(chunk); } catch (e) {
+      log('pagedCenterOnCue scroll err: ' + e.message);
+    }
+    return true;
+  };
+
+  // Scroll the chunk into "near-right" position with ~3 line-widths
+  // of previously-read text visible to the right of it. In vertical-rl
+  // the reading direction is right→left across columns, so the right
+  // side of the viewport holds OLDER text. Putting the active chunk
+  // near (but not flush against) the right edge anchors the user with
+  // a tiny strip of "what I just read" context.
+  //
+  // Hardened against the vertical-rl scroll-blackout bug class:
+  //   1. behavior: 'smooth' — the only safe scroll mode in vertical-rl
+  //      (see [[reference-paged-reader-scroll-blackout]] memory).
+  //   2. Sanity-check the computed delta — if it's absurdly large
+  //      (>200k px, the symptom of a stale chunk reference or short-
+  //      cue false match), bail out instead of scrolling into the
+  //      void.
+  //   3. After the smooth scroll, schedule a verification pass at
+  //      ~600 ms: if the chunk STILL isn't visible (the scroll
+  //      animation got eaten by some race), re-issue the scroll.
+  function scrollChunkNearRightWithContext(chunk, contextLines) {
+    if (!chunk || !scrollEl) return;
+    if (typeof contextLines !== 'number') contextLines = 3;
+    const cr = chunk.getBoundingClientRect();
+    const sr = scrollEl.getBoundingClientRect();
+    if (!cr.width || !sr.width) return;
+    // In vertical-rl each "line" is actually one COLUMN of text. The
+    // chunk's own width approximates one column for single-paragraph
+    // cues; for multi-line chunks computedStyle.lineHeight is more
+    // accurate. Try lineHeight first, fall back to chunk width.
+    let lineHeightPx = 0;
+    try {
+      const cs = getComputedStyle(innerEl);
+      lineHeightPx = parseFloat(cs.lineHeight);
+      if (!Number.isFinite(lineHeightPx) || lineHeightPx <= 0) {
+        const fs = parseFloat(cs.fontSize) || 18;
+        lineHeightPx = fs * 1.8; // matches the CSS rule for innerEl
+      }
+    } catch (_) { lineHeightPx = 40; }
+    const contextPx = lineHeightPx * contextLines;
+    const pad = Math.min(16, sr.width * 0.04);
+    const targetRightX = sr.right - pad - contextPx;
+    const idealDelta = cr.right - targetRightX;
+    // Clamp so the chunk's LEFT edge stays at least pad inside the
+    // viewport — a multi-line chunk wider than (viewport - context)
+    // would otherwise be partially pushed off-screen to the left,
+    // which is the "highlight slightly off the screen" symptom the
+    // user reported. Trade context for visibility when forced.
+    const minDelta = cr.right - sr.right + pad;
+    const maxDelta = cr.left - sr.left - pad;
+    let delta = idealDelta;
+    if (delta > maxDelta) delta = maxDelta; // chunk too wide; clamp to keep left visible
+    if (delta < minDelta) delta = minDelta; // chunk already fits; just align right edge
+    // Bail on absurd deltas — symptom of stale chunk refs or a
+    // findChunkForText false match. Don't scroll into the void.
+    if (Math.abs(delta) > 200000) {
+      log('scrollChunkNearRightWithContext: absurd delta=' + Math.round(delta) + ' — aborting');
+      return;
+    }
+    if (Math.abs(delta) < 4) return; // already there
+    lastProgrammaticScrollTime = Date.now();
+    log('[scroll-trace] scrollChunkNearRightWithContext delta=' + Math.round(delta));
+    scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
+    // Verification pass: if the chunk still isn't visible 600 ms
+    // later (smooth scroll should complete in ~400 ms), re-issue
+    // a one-shot direct scrollLeft set to force the position. This
+    // recovers from the "black viewport" case where the smooth
+    // animation got swallowed.
+    setTimeout(() => {
+      try {
+        const cr2 = chunk.getBoundingClientRect();
+        const sr2 = scrollEl.getBoundingClientRect();
+        const visible = cr2.right > sr2.left && cr2.left < sr2.right;
+        if (!visible) {
+          log('[scroll-trace] verification failed — forcing scrollLeft');
+          // Direct scrollLeft set — NOT scrollBy({behavior:'instant'})
+          // which blanks the viewport. Setting scrollLeft directly
+          // is safer per the same memory.
+          const fixDelta = cr2.right - (sr2.right - pad - contextPx);
+          scrollEl.scrollLeft += fixDelta;
+        }
+      } catch (_) {}
+    }, 600);
+  }
+
   window.pagedPlayFromCue = async function (cueIdx) {
     log('pagedPlayFromCue cueIdx=' + cueIdx);
     if (!Number.isFinite(cueIdx)) {
@@ -2325,6 +2549,15 @@
   // CSS.highlights 'cue-active' key and lost the race), we piggyback.
   // Receives (idx, cue) — `cue` may be null when idx<0.
   window.__onPagedCueUpdate = function (idx, cue) {
+    // Update the top-left progress strip regardless of whether the
+    // paged reader view is visible — the strip lives at body level
+    // and is visible across all modes (card / read / audio). User
+    // wanted the counter to track current playhead position even
+    // outside read mode.
+    if (Number.isFinite(idx) && idx >= 0) {
+      window._lastAudioCueIdx = idx;
+      try { updateProgress({ cueIdx: idx }); } catch (_) {}
+    }
     if (!viewEl || viewEl.style.display === 'none') return;
     if (idx === lastHighlightedCue) return;
     lastHighlightedCue = idx;

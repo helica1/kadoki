@@ -463,12 +463,17 @@ body.mode-audio #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-a
   background: transparent;
   border: none;
   color: var(--text);
-  padding: 10px 14px;
+  padding: 14px 18px;            /* roomier — easier touch target */
   font-size: var(--type-sm);
   cursor: pointer;
 }
-.shell-menu .menu-item:hover { background: var(--panel-elev); }
-.shell-menu .menu-divider { height: 1px; background: var(--border); margin: 4px 0; }
+.shell-menu .menu-item:hover  { background: var(--panel-elev); }
+.shell-menu .menu-item:active { background: var(--panel-elev); }
+.shell-menu .menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 8px;               /* visible gap on either side of the divider */
+}
 
 /* =====================================================================
  * Coexistence with legacy chrome
@@ -530,18 +535,12 @@ body.chrome-hidden #cardCopyBtn {
   pointer-events: none;
 }
 
-/* Unified bottom bar — shown in all three modes with mode-specific content.
-   z-index sits ABOVE the reading + audiobook mode views (2700 / 2750) so
-   it stays visible and tappable. The COPY pill follows the same rule. */
+/* #progressBar removed 2026-05-30 — the top-left position strip
+   now serves as the single mode-aware position display + tap
+   target. Force-hidden here in CSS too since the prior rule had
+   `display: block !important` which clobbered inline display:none. */
 #progressBar {
-  display: block !important;
-  position: fixed !important;
-  bottom: 0 !important;
-  left: 0 !important;
-  right: 0 !important;
-  height: 28px !important;
-  z-index: 2800 !important;
-  transition: transform 0.22s ease, opacity 0.18s ease;
+  display: none !important;
 }
 /* Per-mode fill color follows the mode accent. */
 body.mode-card  #progressFill { background: var(--accent-card)  !important; }

@@ -922,6 +922,16 @@ function updateCardIndex(newIndex) {
     if (typeof window.notifyCardIndexChanged === 'function') {
       try { window.notifyCardIndexChanged(newIndex); } catch (e) {}
     }
+    // Refresh the top-left progress strip so card-mode swipes track
+    // playhead position. SRT-cards titles map currentCardIndex 1:1
+    // to cue index, so this just hands the index straight to the
+    // paged reader's progress updater. Deck-card titles don't have a
+    // clean card→cue mapping; we skip them (audio-driven cue updates
+    // still drive the strip when audio is playing).
+    if (Array.isArray(allNotes) && allNotes[0]?.isSrtCard &&
+        typeof window.pagedUpdateProgressForCue === 'function') {
+      try { window.pagedUpdateProgressForCue(newIndex); } catch (_) {}
+    }
 
     // Save state whenever card changes
     saveDeckState();
@@ -1106,12 +1116,49 @@ window.copyCurrentCardText = function () {
 // the value prompt (precise input).
 window.onProgressBarTap = function (e) {
   const mode = _currentShellMode();
-  if (mode === 'audio' && typeof window.getAudioProgress === 'function') {
-    openAudioSeekDialog();
+  if (mode === 'audio') {
+    // Direct seek in audiobook removed 2026-05-30 — too easy to
+    // accidentally lose your spot. Audiobook position can only be
+    // moved via the card/read modes (their dialogs handle the
+    // jump cleanly via "Jump to audiobook position"). Show a
+    // simple info modal explaining this.
+    _showAudioSeekRedirectInfo();
     return;
   }
   promptCardJump();
 };
+
+function _showAudioSeekRedirectInfo() {
+  const old = document.getElementById('audioSeekInfoModal');
+  if (old) old.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'audioSeekInfoModal';
+  overlay.style.cssText = `
+    position:fixed; inset:0; background:rgba(0,0,0,0.72);
+    display:flex; align-items:center; justify-content:center;
+    z-index:9700; padding:20px; box-sizing:border-box;
+  `;
+  const panel = document.createElement('div');
+  panel.style.cssText = `
+    background:#161616; border:1px solid #303030; border-radius:14px;
+    padding:24px; max-width:380px; width:100%;
+    box-shadow:0 16px 40px rgba(0,0,0,0.6);
+    color:#e8e8e8; text-align:center;
+    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",system-ui,sans-serif;
+  `;
+  panel.innerHTML = `
+    <h3 style="margin:0 0 10px 0;font-size:15px;font-weight:600;color:var(--accent-audio,#b794f6);letter-spacing:0.04em;">CHANGE PLAYHEAD</h3>
+    <p style="margin:0 0 18px 0;font-size:14px;color:#bbb;line-height:1.5;">
+      Please change playhead position in Card or Read modes only.
+    </p>
+    <button id="audioSeekInfoOk" style="background:var(--accent-audio,#b794f6);color:#0a0a0a;border:none;padding:10px 22px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;letter-spacing:0.04em;">OK</button>
+  `;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+  panel.querySelector('#audioSeekInfoOk').addEventListener('click', close);
+}
 
 function openAudioSeekDialog() {
   if (typeof window.getAudioProgress !== 'function') return;
@@ -1124,14 +1171,15 @@ function openAudioSeekDialog() {
   overlay.id = 'audioSeekModal';
   overlay.style.cssText = `
     position:fixed; inset:0; background:rgba(0,0,0,0.82);
-    display:flex; align-items:flex-end; justify-content:center;
-    z-index:3200; touch-action:none;
+    display:flex; align-items:center; justify-content:center;
+    z-index:3200; touch-action:none; padding:20px; box-sizing:border-box;
   `;
   const panel = document.createElement('div');
   panel.style.cssText = `
     background:var(--bg,#0c0c0c); border:1px solid var(--border,#2a2a2a);
-    border-radius:14px 14px 0 0; width:100%; max-width:520px;
-    padding:18px 18px 26px;
+    border-radius:14px; width:100%; max-width:520px;
+    padding:22px;
+    box-shadow:0 16px 40px rgba(0,0,0,0.6);
   `;
   panel.innerHTML = `
     <div class="label-cap" style="text-align:center;margin-bottom:10px;color:var(--text,#e8e8e8);">Seek</div>
@@ -1161,45 +1209,326 @@ function openAudioSeekDialog() {
   overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
 }
 
-// Global playback-rate setter. Used by:
-//   - Audiobook transport speed buttons
-//   - Preferences → Playback → Audio speed slider
-// Affects all three modes by updating window.audioPlaybackRate, telling
-// the BackgroundAudio plugin (for audiobook + SRT card playback), and
-// the currently-active HTMLAudioElement (deck-card per-card audio).
-// Persisted via Preferences so the choice survives launches.
-window.setGlobalPlaybackRate = async function (rate) {
-  const r = Math.max(0.25, Math.min(3.0, parseFloat(rate) || 1));
+// Playback rate state model.
+//
+//   _playbackRates.global = single rate used when per-mode is off
+//   _playbackRates.card / .read / .audio = per-mode rates when on
+//   _playbackPerMode      = boolean flag
+//
+// window.audioPlaybackRate is the LIVE rate that downstream callers
+// (bg.play({rate}), <audio>.playbackRate, etc.) read. It's updated
+// whenever the speed changes OR the mode changes — so a single
+// global setting is enough at the call sites.
+window._playbackRates = window._playbackRates || {
+  global: 1.0, card: 1.0, read: 1.0, audio: 1.0
+};
+window._playbackPerMode = !!window._playbackPerMode;
+
+function _currentModeForSpeed() {
+  const b = document.body;
+  if (b.classList.contains('mode-audio')) return 'audio';
+  if (b.classList.contains('mode-read'))  return 'read';
+  return 'card';
+}
+
+window.getActivePlaybackRate = function () {
+  if (window._playbackPerMode) {
+    return window._playbackRates[_currentModeForSpeed()] || 1.0;
+  }
+  return window._playbackRates.global || 1.0;
+};
+
+// Apply the active rate to live playback engines AND mirror to
+// window.audioPlaybackRate so existing call sites that read that
+// variable see the right value.
+window.applyActivePlaybackRate = async function () {
+  const r = window.getActivePlaybackRate();
   window.audioPlaybackRate = r;
   try {
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (bg?.setRate) await bg.setRate({ rate: r });
-  } catch (e) {}
-  try { if (currentAudio) currentAudio.playbackRate = r; } catch (e) {}
-  // Persist (best-effort).
-  try {
-    if (window.Capacitor?.Plugins?.Preferences) {
-      await window.Capacitor.Plugins.Preferences.set({ key: 'AUDIO_SPEED', value: String(r) });
-    } else {
-      localStorage.setItem('AUDIO_SPEED', String(r));
-    }
-  } catch (e) {}
-  // Reflect the new rate in the audiobook slider (no oninput recursion —
-  // setting .value programmatically doesn't fire `input`).
-  const slider = document.getElementById('audiobookSpeed');
-  const label  = document.getElementById('audiobookSpeedLabel');
-  if (slider) slider.value = r;
-  if (label)  label.textContent = r.toFixed(2) + '×';
+  } catch (_) {}
+  try { if (currentAudio) currentAudio.playbackRate = r; } catch (_) {}
 };
 
-// Slider-input handler — wired to #audiobookSpeed.
+// Persist all four rate slots + the per-mode flag.
+async function _persistPlaybackRates() {
+  const obj = {
+    perMode: !!window._playbackPerMode,
+    global: window._playbackRates.global,
+    card:   window._playbackRates.card,
+    read:   window._playbackRates.read,
+    audio:  window._playbackRates.audio
+  };
+  try {
+    const blob = JSON.stringify(obj);
+    if (window.Capacitor?.Plugins?.Preferences) {
+      await window.Capacitor.Plugins.Preferences.set({ key: 'PLAYBACK_RATES_V1', value: blob });
+    } else {
+      localStorage.setItem('PLAYBACK_RATES_V1', blob);
+    }
+    // Mirror to the legacy AUDIO_SPEED key so any code still reading
+    // it picks up the current effective rate.
+    const eff = window.getActivePlaybackRate();
+    if (window.Capacitor?.Plugins?.Preferences) {
+      await window.Capacitor.Plugins.Preferences.set({ key: 'AUDIO_SPEED', value: String(eff) });
+    } else {
+      localStorage.setItem('AUDIO_SPEED', String(eff));
+    }
+  } catch (_) {}
+}
+
+async function _restorePlaybackRates() {
+  try {
+    let raw = null;
+    if (window.Capacitor?.Plugins?.Preferences) {
+      const r = await window.Capacitor.Plugins.Preferences.get({ key: 'PLAYBACK_RATES_V1' });
+      raw = r.value;
+    } else {
+      raw = localStorage.getItem('PLAYBACK_RATES_V1');
+    }
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj) {
+        window._playbackPerMode = !!obj.perMode;
+        if (Number.isFinite(obj.global)) window._playbackRates.global = obj.global;
+        if (Number.isFinite(obj.card))   window._playbackRates.card   = obj.card;
+        if (Number.isFinite(obj.read))   window._playbackRates.read   = obj.read;
+        if (Number.isFinite(obj.audio))  window._playbackRates.audio  = obj.audio;
+      }
+    } else {
+      // Legacy fallback: AUDIO_SPEED single value.
+      let legacy = null;
+      if (window.Capacitor?.Plugins?.Preferences) {
+        const r = await window.Capacitor.Plugins.Preferences.get({ key: 'AUDIO_SPEED' });
+        legacy = parseFloat(r.value);
+      } else {
+        legacy = parseFloat(localStorage.getItem('AUDIO_SPEED'));
+      }
+      if (Number.isFinite(legacy) && legacy > 0) {
+        window._playbackRates.global = legacy;
+        window._playbackRates.card = legacy;
+        window._playbackRates.read = legacy;
+        window._playbackRates.audio = legacy;
+      }
+    }
+  } catch (_) {}
+  await window.applyActivePlaybackRate();
+}
+_restorePlaybackRates();
+
+// Refresh the active rate whenever the shell mode changes — for
+// per-mode this swaps in the new rate.
+window.addEventListener('shell:mode-change', () => {
+  try { window.applyActivePlaybackRate(); } catch (_) {}
+});
+
+// Back-compat shim. The old single-setter used to write AUDIO_SPEED;
+// new flow uses _playbackRates.global. Routes through the new state
+// so old call sites stay correct.
+window.setGlobalPlaybackRate = async function (rate) {
+  const r = Math.max(0.25, Math.min(3.0, parseFloat(rate) || 1));
+  window._playbackRates.global = r;
+  if (!window._playbackPerMode) {
+    // When per-mode is OFF, the single global rate is what's used.
+    // Also normalize the per-mode slots so flipping per-mode ON later
+    // doesn't reveal stale values.
+    window._playbackRates.card = r;
+    window._playbackRates.read = r;
+    window._playbackRates.audio = r;
+  }
+  await window.applyActivePlaybackRate();
+  await _persistPlaybackRates();
+};
+
+// Legacy slider handler (the bottom audiobook speed slider was
+// removed 2026-05-30, but kept here for any reference that survived
+// the DOM cleanup).
 window.onAudiobookSpeedInput = function (v) {
   const r = parseFloat(v) || 1;
-  const label = document.getElementById('audiobookSpeedLabel');
-  if (label) label.textContent = r.toFixed(2) + '×';
-  // Coalesce rapid drags via a tiny debounce so we don't spam bg.setRate.
   if (window._speedDebounce) clearTimeout(window._speedDebounce);
   window._speedDebounce = setTimeout(() => window.setGlobalPlaybackRate(r), 80);
+};
+
+// ===================== PLAYBACK SPEED DIALOG =====================
+//
+// Opened from the MORE menu. Shows either a single global +/- card
+// or three per-mode cards (color-coded) when "per mode" is checked.
+window.openPlaybackSpeedDialog = function () {
+  // Clean up any prior instance.
+  const old = document.getElementById('playbackSpeedModal');
+  if (old) old.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'playbackSpeedModal';
+  overlay.style.cssText = `
+    position:fixed; inset:0; background:rgba(0,0,0,0.78);
+    display:flex; align-items:center; justify-content:center;
+    z-index:9700; padding:20px; box-sizing:border-box;
+  `;
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+  const panel = document.createElement('div');
+  panel.style.cssText = `
+    background:#161616; border:1px solid #303030; border-radius:14px;
+    padding:22px; max-width:420px; width:100%;
+    box-shadow:0 16px 40px rgba(0,0,0,0.6);
+    color:#e8e8e8;
+    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",system-ui,sans-serif;
+  `;
+
+  const STEP = 0.05;
+  const MIN = 0.5, MAX = 3.0;
+
+  // One row factory: title + −/+ buttons + 1.0× preset + current value
+  // display. Accent color tints the value + the 1.0× preset chip.
+  function mkRow(label, accent, getter, setter) {
+    const row = document.createElement('div');
+    row.style.cssText = `
+      display:flex; align-items:center; gap:10px;
+      padding:14px 0; border-bottom:1px solid #2a2a2a;
+    `;
+    const lab = document.createElement('div');
+    lab.textContent = label;
+    lab.style.cssText = `
+      flex:0 0 auto; min-width:60px; font-weight:600; font-size:14px;
+      color:${accent};
+      letter-spacing:0.04em;
+    `;
+    const minus = document.createElement('button');
+    minus.textContent = '−';
+    minus.style.cssText = `
+      width:42px; height:42px; border-radius:10px;
+      background:#222; color:#fff; border:1px solid #3a3a3a;
+      font-size:20px; font-weight:600; cursor:pointer;
+    `;
+    const valDisplay = document.createElement('div');
+    valDisplay.style.cssText = `
+      flex:1; text-align:center;
+      font-family:var(--font-mono,monospace);
+      font-size:18px; font-weight:600;
+      color:${accent}; font-variant-numeric:tabular-nums;
+    `;
+    const plus = document.createElement('button');
+    plus.textContent = '+';
+    plus.style.cssText = minus.style.cssText.replace('−', '+');
+    const reset = document.createElement('button');
+    reset.textContent = '1.0×';
+    reset.style.cssText = `
+      flex:0 0 auto;
+      padding:0 12px; height:42px; border-radius:10px;
+      background:transparent; color:${accent};
+      border:1px solid ${accent};
+      font-size:13px; font-weight:600; cursor:pointer;
+      letter-spacing:0.04em;
+    `;
+
+    const render = () => { valDisplay.textContent = getter().toFixed(2) + '×'; };
+    render();
+    const clamp = (r) => Math.max(MIN, Math.min(MAX, Math.round(r / STEP) * STEP));
+    minus.addEventListener('click', async () => { setter(clamp(getter() - STEP)); render(); await window.applyActivePlaybackRate?.(); await _persistPlaybackRates(); });
+    plus.addEventListener('click',  async () => { setter(clamp(getter() + STEP)); render(); await window.applyActivePlaybackRate?.(); await _persistPlaybackRates(); });
+    reset.addEventListener('click', async () => { setter(1.0); render(); await window.applyActivePlaybackRate?.(); await _persistPlaybackRates(); });
+
+    row.appendChild(lab);
+    row.appendChild(minus);
+    row.appendChild(valDisplay);
+    row.appendChild(plus);
+    row.appendChild(reset);
+    return { row, refresh: render };
+  }
+
+  const body = document.createElement('div');
+  body.style.cssText = `margin-bottom:16px;`;
+
+  const header = document.createElement('h3');
+  header.textContent = 'Playback Speed';
+  header.style.cssText = `
+    margin:0 0 4px 0; font-size:16px; font-weight:600;
+    letter-spacing:0.02em;
+  `;
+  const sub = document.createElement('p');
+  sub.style.cssText = `margin:0 0 12px 0; font-size:12px; color:#888;`;
+  body.appendChild(header);
+  body.appendChild(sub);
+
+  // Re-render rows based on per-mode state.
+  const rowsContainer = document.createElement('div');
+  body.appendChild(rowsContainer);
+
+  function renderRows() {
+    rowsContainer.innerHTML = '';
+    if (window._playbackPerMode) {
+      sub.textContent = 'Per-mode speed enabled. Each mode keeps its own rate.';
+      const cardRow = mkRow('CARD',  'var(--accent-card, #ff9550)',
+        () => window._playbackRates.card,
+        (v) => { window._playbackRates.card = v; });
+      const readRow = mkRow('READ',  'var(--accent-read, #4caf50)',
+        () => window._playbackRates.read,
+        (v) => { window._playbackRates.read = v; });
+      const audioRow = mkRow('AUDIO', 'var(--accent-audio, #b794f6)',
+        () => window._playbackRates.audio,
+        (v) => { window._playbackRates.audio = v; });
+      rowsContainer.appendChild(cardRow.row);
+      rowsContainer.appendChild(readRow.row);
+      rowsContainer.appendChild(audioRow.row);
+    } else {
+      sub.textContent = 'Applies to all three modes (card, read, audio).';
+      const globalRow = mkRow('SPEED', '#00ffcc',
+        () => window._playbackRates.global,
+        (v) => {
+          window._playbackRates.global = v;
+          // Also keep per-mode slots aligned so flipping per-mode ON
+          // later starts from the same baseline.
+          window._playbackRates.card = v;
+          window._playbackRates.read = v;
+          window._playbackRates.audio = v;
+        });
+      rowsContainer.appendChild(globalRow.row);
+    }
+  }
+  renderRows();
+
+  // "Per mode" checkbox.
+  const checkRow = document.createElement('label');
+  checkRow.style.cssText = `
+    display:flex; align-items:center; gap:10px;
+    padding-top:14px; cursor:pointer;
+    font-size:13px; color:#bbb;
+  `;
+  const check = document.createElement('input');
+  check.type = 'checkbox';
+  check.checked = !!window._playbackPerMode;
+  check.style.cssText = `width:18px; height:18px; cursor:pointer;`;
+  const checkLab = document.createElement('span');
+  checkLab.textContent = 'Playback speed per mode';
+  checkRow.appendChild(check);
+  checkRow.appendChild(checkLab);
+  check.addEventListener('change', async () => {
+    window._playbackPerMode = !!check.checked;
+    renderRows();
+    await window.applyActivePlaybackRate?.();
+    await _persistPlaybackRates();
+  });
+
+  // Close row.
+  const closeRow = document.createElement('div');
+  closeRow.style.cssText = `display:flex; justify-content:flex-end; margin-top:16px;`;
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = 'Close';
+  closeBtn.style.cssText = `
+    background:#2a2a2a; color:#fff; border:1px solid #3a3a3a;
+    padding:8px 16px; border-radius:8px;
+    font-size:14px; cursor:pointer;
+  `;
+  closeBtn.addEventListener('click', () => overlay.remove());
+  closeRow.appendChild(closeBtn);
+
+  panel.appendChild(body);
+  panel.appendChild(checkRow);
+  panel.appendChild(closeRow);
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
 };
 
 // H:MM:SS (drops the hour segment when < 1 h so short clips read nicely).
@@ -2455,6 +2784,15 @@ function setupSwipe() {
           return !!(lib && lib.classList.contains('visible'));
         };
         const inWaveform = (target) => !!(target?.closest && target.closest('#srtCardWaveform'));
+        // Audio mode owns its own touch handlers (the audiobookModeView's
+        // own touchend does play/pause on down-swipe). Without this
+        // guard, the document-level card handler ALSO fired for those
+        // touches and replayed the SRT card audio → the "down-swipe
+        // in audio replays instead of pausing" report.
+        const inAudioView = (target) => {
+          const av = document.getElementById('audiobookModeView');
+          return !!(av && av.style.display !== 'none' && av.contains(target));
+        };
         // Block card swipes whenever a modal is up (preferences / edit title /
         // reentry / etc.) so vertical scroll inside the modal doesn't fire
         // card-mode replay or send-to-Anki.
@@ -2477,6 +2815,7 @@ function setupSwipe() {
           if (libraryOpen()) return;
           if (inReadingView(e.target)) return;
           if (inWaveform(e.target)) return;
+          if (inAudioView(e.target)) return;
           if (inModal(e.target)) return;
           if (e.touches && e.touches[0]) {
             touchStartY = e.touches[0].clientY;
@@ -2496,6 +2835,7 @@ function setupSwipe() {
           if (libraryOpen()) return;
           if (inReadingView(e.target)) return;
           if (inWaveform(e.target)) return;
+          if (inAudioView(e.target)) return;
           if (inModal(e.target)) return;
           if (!e.changedTouches || !e.changedTouches[0] || !allNotes || allNotes.length === 0) {
             return;
@@ -2806,8 +3146,22 @@ function _ensureBgListenersForSrtCards() {
   const bg = window.Capacitor?.Plugins?.BackgroundAudio;
   if (!bg) return;
   _srtEndListenerAttached = true;
-  bg.addListener('state', (d) => { window._bgPlaying = !!d.playing; });
+  bg.addListener('state', (d) => {
+    window._bgPlaying = !!d.playing;
+    // Trigger a strip refresh on play/pause so the top-left counter
+    // reflects the latest state immediately (mode-aware: audio shows
+    // mm:ss / mm:ss which depends on the current ms).
+    try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
+  });
   bg.addListener('position', (d) => {
+    // Drive the top-left strip in audio mode (current time / total
+    // time). Throttled to ~3 Hz via a timestamp so we don't repaint
+    // on every position event (which can fire 10+ Hz).
+    const now = Date.now();
+    if (!window._lastStripUpdateAt || (now - window._lastStripUpdateAt) > 300) {
+      window._lastStripUpdateAt = now;
+      try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
+    }
     if (!_srtCardEndMs) return;
     // Auto-pause / auto-advance is only for CARD mode. In read or audio
     // mode the user expects audio to flow past cue boundaries.

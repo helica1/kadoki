@@ -1148,34 +1148,76 @@
         const pagedView = document.getElementById('readingPagedView');
         const pagedActive = pagedView && pagedView.style.display !== 'none';
         if (pagedActive) {
-            // The paged reader's paintFn stashes the source Range on
-            // window._dictLookupRange. Reading getBoundingClientRect
-            // off that Range is dramatically more reliable than
-            // iterating Highlight registry entries on iOS WKWebView
-            // (Highlight iteration silently returns no items on some
-            // iOS versions, which is why the popup was always landing
-            // in the centered fallback).
+            // Find a hlRect via increasingly-loose fallbacks. iOS WKWebView
+            // is uneven across versions about what's actually available:
+            //   1. The source Range stashed by the paged reader's paintFn
+            //      (window._dictLookupRange). gBCR works on most iOS
+            //      versions; falls back to getClientRects()[0] which
+            //      sometimes returns a valid rect when gBCR returns zero
+            //      in vertical-rl (the known WKWebView quirk).
+            //   2. CSS.highlights registry iteration. Empty on some iOS.
+            //   3. The looked-up chunk's bounding rect — coarse but
+            //      ALWAYS available because chunks are regular DOM nodes.
+            //      Used as last resort so the popup at least positions
+            //      relative to the right column.
             let hlRect = null;
+            let hlSrc = 'none';
             try {
                 const r = window._dictLookupRange;
                 if (r) {
-                    const rc = r.getBoundingClientRect();
-                    if (rc && rc.width && rc.height) hlRect = rc;
+                    let rc = r.getBoundingClientRect();
+                    if (!rc || !rc.width || !rc.height) {
+                        // gBCR returns zero on iOS vertical-rl sometimes;
+                        // getClientRects() returns one rect per line box
+                        // and the first is usually non-empty.
+                        try {
+                            const list = r.getClientRects();
+                            if (list && list.length) {
+                                for (let i = 0; i < list.length; i++) {
+                                    const c = list[i];
+                                    if (c && c.width && c.height) { rc = c; break; }
+                                }
+                            }
+                        } catch (_) {}
+                    }
+                    if (rc && rc.width && rc.height) { hlRect = rc; hlSrc = 'range-gBCR'; }
                 }
             } catch (_) {}
-            // Secondary path: CSS.highlights iteration (legacy / non-iOS).
             if (!hlRect) {
                 try {
                     const hl = window.CSS?.highlights?.get?.('reader-dict-lookup') ||
                                window._dictLookupHl;
                     if (hl) for (const r of hl) {
                         const rc = r.getBoundingClientRect?.();
-                        if (rc && rc.width && rc.height) { hlRect = rc; break; }
+                        if (rc && rc.width && rc.height) {
+                            hlRect = rc; hlSrc = 'hl-iter'; break;
+                        }
                     }
                 } catch (_) {}
             }
-            // Diagnostic for Safari Inspector.
-            try { popup.dataset.posSrc = hlRect ? 'paged-hl' : 'paged-fallback'; } catch (_) {}
+            if (!hlRect) {
+                // Last resort: use the chunk containing the lookup.
+                // The paged reader stashes it on window._dictLookupChunk.
+                // Coarse but always available.
+                try {
+                    const ch = window._dictLookupChunk;
+                    if (ch) {
+                        const rc = ch.getBoundingClientRect();
+                        if (rc && rc.width && rc.height) {
+                            hlRect = rc; hlSrc = 'chunk';
+                        }
+                    }
+                } catch (_) {}
+            }
+            // Diagnostics for Safari Inspector — read via dataset.
+            try {
+                popup.dataset.posSrc = hlRect ? ('paged-' + hlSrc) : 'paged-fallback';
+                if (hlRect) {
+                    popup.dataset.posRect =
+                        Math.round(hlRect.left) + ',' + Math.round(hlRect.top) +
+                        ',' + Math.round(hlRect.width) + ',' + Math.round(hlRect.height);
+                }
+            } catch (_) {}
             const safeTop = (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--app-header-h')) || 64);
             // Reserve a margin around the highlight rect so the popup
             // doesn't sit flush against the looked-up character. Lifts
@@ -1224,10 +1266,13 @@
             ];
             // Popup size targets — within bounds, prefer larger so the
             // dict content has breathing room. Each candidate gets
-            // clamped to its available space.
+            // clamped to its available space. minW lowered to 180 so
+            // LEFT/RIGHT quadrants in vertical-rl (where each column
+            // is narrow) can win more often — picking LEFT/RIGHT
+            // keeps the user's current reading column unobstructed.
             const targetW = Math.min(420, vw * 0.7);
             const targetH = Math.min(520, vh * 0.7);
-            const minW = 240, minH = 200;
+            const minW = 180, minH = 180;
             // Score each candidate by visible area (clamped to its
             // available rect). Reject any whose available area is
             // smaller than minW * minH.

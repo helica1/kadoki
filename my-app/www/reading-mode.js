@@ -1690,6 +1690,11 @@
   function setActive(idx, opts) {
     clearActiveHighlight();
     lastMatchedIdx = idx;
+    // Mirror to a global so shell.js can capture this snapshot when
+    // the user enters audio mode (used by the audio→read reentry
+    // modal's "prior reading position" display). Module-local var
+    // would otherwise be invisible.
+    try { window._readingLastMatchedIdx = idx; } catch (_) {}
     publishChunkCueRange(idx);
     const el = chunks[idx];
     if (!el) return;
@@ -2371,7 +2376,13 @@
         }
       }
     }
-    if (pagedActive && typeof window.__onPagedCueUpdate === 'function') {
+    // Call __onPagedCueUpdate REGARDLESS of paged-reader visibility —
+    // even when the paged reader view is hidden (audio mode, card mode),
+    // the hook still needs to fire so the top-left progress strip
+    // updates. The hook itself early-returns from the highlight-paint
+    // path when viewEl is hidden; the progress update happens before
+    // that return.
+    if (typeof window.__onPagedCueUpdate === 'function') {
       try { window.__onPagedCueUpdate(idx, idx >= 0 ? abCues[idx] : null); } catch (e) {}
     }
 
@@ -2426,6 +2437,12 @@
         }
       }
       abUpdateCueDisplay(abPositionRef.ms);
+      // Drive the top-left progress strip from the audiobook position
+      // events too. Listener attaches the moment audio mode opens so
+      // the strip updates immediately on first audio-mode entry —
+      // without this, the strip stayed at "—" until a mode switch
+      // round-trip re-fired the cue-update path.
+      try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
     });
     bg.addListener('state', (d) => {
       const btn = document.getElementById('audiobookPlayPause');
@@ -2548,7 +2565,24 @@
       // startMs → current bg position.
       window._audiobookSessionStartMs = adjStart;
       window._audiobookSessionStartedAt = Date.now();
-      await bg.play({ url, startMs: adjStart, rate });
+      // resumeOnly path: user came back to audio after dismissing the
+      // reentry dialog via tab tap (no position choice). Don't reset
+      // startMs — just resume from wherever the BG plugin paused. If
+      // BG has no current position (cold start), fall through to a
+      // regular bg.play() so playback still happens.
+      let didResume = false;
+      if (opts.resumeOnly) {
+        try {
+          const s = await bg.getState();
+          if (s && (s.ready || s.positionMs > 0)) {
+            await bg.resume();
+            didResume = true;
+          }
+        } catch (_) {}
+      }
+      if (!didResume) {
+        await bg.play({ url, startMs: adjStart, rate });
+      }
       bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: '' }).catch(() => {});
       // Force an immediate cue update so the subtitle appears before the
       // first periodic position event arrives (saves user a play/pause toggle).
@@ -2636,30 +2670,116 @@
       let audioChunk = -1, cursor = -1;
       let audioMs = abPositionRef.ms || 0;
       let cursorMs = 0;
-      if (abCueToChunk && abCurrentCueIdx >= 0) {
+      // SRT-cards titles take PRIORITY over the EPUB-chunks branch
+      // (which runs only for deck-card titles that have a paired
+      // EPUB but cards-via-deck not cards-via-SRT). For SRT-cards,
+      // cue index = card index = chunk index in 1:1 alignment, but
+      // the data we want to surface in the modal — and pass to
+      // updateCardIndex on user choice — is the CUE INDEX. Going
+      // through abCueToChunk would have remapped to chunk index
+      // and then updateCardIndex(chunkIdx) would have planted the
+      // user on the wrong card (the chunk-index ≠ cue-index for
+      // many alignments).
+      const isSrtCardsTitle = Array.isArray(window.allNotes) &&
+                              window.allNotes[0]?.isSrtCard;
+      if (isSrtCardsTitle && abCurrentCueIdx >= 0) {
+        audioChunk = abCurrentCueIdx;
+        // For SRT-cards titles: read currentCardIndex LIVE rather
+        // than from a saved snapshot. With syncCardToCurrentCue no
+        // longer running on audio→card (only on read→card),
+        // currentCardIndex stays stable through audio playback and
+        // is the same value the card-view bottom bar displays. Using
+        // it here guarantees the dialog's "prior card N" line
+        // matches the visible card-view exactly.
+        cursor = (typeof window.currentCardIndex === 'number' && window.currentCardIndex >= 0)
+          ? window.currentCardIndex
+          : -1;
+        if (cursor >= 0 && abCues[cursor]) cursorMs = abCues[cursor].startMs;
+      } else if (abCueToChunk && abCurrentCueIdx >= 0) {
+        // Deck-card titles with paired EPUB: cards come from the
+        // deck, but the reader/audio cursor maps via cue→chunk.
         audioChunk = abCueToChunk[abCurrentCueIdx];
-        cursor = lastMatchedIdx;
+        // Snapshot from shell on audio entry (where the reader was
+        // before audio).
+        const priorCursor = window._priorReaderCursorIdx;
+        const hasPrior = Number.isFinite(priorCursor) && priorCursor >= 0;
+        cursor = hasPrior ? priorCursor : lastMatchedIdx;
         if (cursor >= 0 && abChunkToCue) {
           const cueIdxForCursor = abChunkToCue[cursor];
           if (cueIdxForCursor >= 0 && abCues[cueIdxForCursor]) {
             cursorMs = abCues[cueIdxForCursor].startMs;
           }
         }
-      } else if (abCurrentCueIdx >= 0 &&
-                 Array.isArray(window.allNotes) && window.allNotes[0]?.isSrtCard) {
-        audioChunk = abCurrentCueIdx;
-        cursor = typeof window.currentCardIndex === 'number' ? window.currentCardIndex : -1;
-        if (cursor >= 0 && abCues[cursor]) cursorMs = abCues[cursor].startMs;
       }
       // No audio context at all (audio mode never opened, audiobook
       // not paired) → no prompt needed.
-      if (audioChunk < 0 || cursor < 0) { resolve(null); return; }
-      const deltaMs = Math.abs(audioMs - cursorMs);
-      if (deltaMs < REENTRY_THRESHOLD_MS) { resolve(null); return; }
+      if (audioChunk < 0 || cursor < 0) {
+        window._audioPositionUnresolved = false;
+        resolve(null); return;
+      }
+      // ONLY prompt when audio is AHEAD of the user's cursor. If
+      // audio caught up or user moved, the divergence is resolved
+      // implicitly — clear the unresolved flag so future mode
+      // switches don't re-prompt.
+      if (audioChunk <= cursor) {
+        window._audioPositionUnresolved = false;
+        resolve(null); return;
+      }
+      // Belt-and-suspenders: also require a meaningful time delta
+      // so a "1 cue ahead" by 100 ms doesn't pop a dialog.
+      const deltaMs = audioMs - cursorMs;
+      if (deltaMs < REENTRY_THRESHOLD_MS) {
+        window._audioPositionUnresolved = false;
+        resolve(null); return;
+      }
+      // Mark divergence as unresolved so subsequent mode switches
+      // re-show the dialog (in the appropriate target-mode flavor)
+      // until the user explicitly picks one of the two positions.
+      window._audioPositionUnresolved = true;
       reentryPendingAudioChunk = audioChunk;
       const modal = document.getElementById('audiobookReentryModal');
       const cursorPosEl = document.getElementById('reentryCursorPos');
       const audioPosEl  = document.getElementById('reentryAudioPos');
+      const titleEl     = document.getElementById('reentryTitle');
+      const stayLabelEl = document.getElementById('reentryStayBtnLabel');
+      const jumpLabelEl = document.getElementById('reentryJumpBtnLabel');
+      // Title + primary button text + title COLOR varies by
+      // destination mode. Title color matches the mode's highlight
+      // color (orange for card, green for read) so the dialog
+      // immediately reads as "this is about your CARD/READ
+      // position." For read mode we use the exact tinted-green
+      // formula from the cue-active highlight in theme.css so the
+      // visual match is precise, not "near".
+      if (targetMode === 'card') {
+        if (titleEl) {
+          titleEl.textContent = 'Card Number';
+          titleEl.style.color = 'var(--accent-card, #ff9550)';
+          titleEl.style.letterSpacing = '0';
+          titleEl.style.textTransform = 'none';
+        }
+        if (stayLabelEl) stayLabelEl.textContent = 'Return to prior card';
+        if (jumpLabelEl) jumpLabelEl.textContent = 'Jump to audiobook card';
+      } else if (targetMode === 'read') {
+        if (titleEl) {
+          titleEl.textContent = 'Reading Position';
+          // Same tinted-green as ::highlight(cue-active) in theme.css.
+          titleEl.style.color =
+            'color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%)';
+          titleEl.style.letterSpacing = '0';
+          titleEl.style.textTransform = 'none';
+        }
+        if (stayLabelEl) stayLabelEl.textContent = 'Return to prior reading position';
+        if (jumpLabelEl) jumpLabelEl.textContent = 'Jump to audiobook position';
+      } else {
+        if (titleEl) {
+          titleEl.textContent = 'Position';
+          titleEl.style.color = '#00ffcc';
+          titleEl.style.letterSpacing = '0';
+          titleEl.style.textTransform = 'none';
+        }
+        if (stayLabelEl) stayLabelEl.textContent = 'Return to prior position';
+        if (jumpLabelEl) jumpLabelEl.textContent = 'Keep audiobook position';
+      }
       // Format per destination mode:
       //   card mode → "current card 532, audio card 598"
       //   read mode → "current character position 45,092, audio position 48,201"
@@ -2668,16 +2788,15 @@
       // settled).
       if (cursorPosEl && audioPosEl) {
         if (targetMode === 'card') {
-          // Card index: cursor==current card (the user's last opened
-          // card), audioChunk==card matching the audio cue.
+          // The cursor field sits under the "Return to prior reading
+          // position" button — label it "prior" so the data line
+          // matches the button text. (Previously labeled "current"
+          // which read as confusingly contradictory.)
           const curCardNum = (cursor + 1).toLocaleString();
           const audCardNum = (audioChunk + 1).toLocaleString();
-          cursorPosEl.textContent = 'current card ' + curCardNum;
-          audioPosEl.textContent  = 'audio card '   + audCardNum;
+          cursorPosEl.textContent = 'prior card ' + curCardNum;
+          audioPosEl.textContent  = 'audio card ' + audCardNum;
         } else if (targetMode === 'read') {
-          // Character offset within the EPUB. chunks[i].dataset.charOffset
-          // + charLen give the END position of the chunk; using END so
-          // the displayed number tracks "how far you've read".
           const charAt = (idx) => {
             if (!chunks[idx]) return null;
             const off = parseInt(chunks[idx].dataset.charOffset) || 0;
@@ -2687,17 +2806,17 @@
           const curChar = charAt(cursor);
           const audChar = charAt(audioChunk);
           if (Number.isFinite(curChar) && Number.isFinite(audChar)) {
-            cursorPosEl.textContent = 'current character position ' +
+            cursorPosEl.textContent = 'prior character position ' +
               curChar.toLocaleString();
             audioPosEl.textContent  = 'audio position ' +
               audChar.toLocaleString();
           } else {
-            cursorPosEl.textContent = 'cursor @ ' + _fmtMmss(cursorMs);
-            audioPosEl.textContent  = 'audio @ '  + _fmtMmss(audioMs);
+            cursorPosEl.textContent = 'prior position @ ' + _fmtMmss(cursorMs);
+            audioPosEl.textContent  = 'audio position @ ' + _fmtMmss(audioMs);
           }
         } else {
-          cursorPosEl.textContent = 'cursor @ ' + _fmtMmss(cursorMs);
-          audioPosEl.textContent  = 'audio @ '  + _fmtMmss(audioMs);
+          cursorPosEl.textContent = 'prior position @ ' + _fmtMmss(cursorMs);
+          audioPosEl.textContent  = 'audio position @ ' + _fmtMmss(audioMs);
         }
       }
       if (!modal) { resolve(null); return; }
@@ -2706,10 +2825,16 @@
     });
   };
 
-  window.reentryChoose = function (choice) {
+  window.reentryChoose = function (choice, opts) {
     const modal = document.getElementById('audiobookReentryModal');
     if (modal) modal.style.display = 'none';
     const target = reentryPendingAudioChunk;
+    // Tab-tap dismiss passes { unresolved: true } — modal hides and
+    // promise resolves so shell's await can continue, BUT the
+    // divergence stays "unresolved" so the dialog re-shows on the
+    // next mode switch into card/read. Button clicks pass no opts
+    // and fully resolve.
+    const unresolved = !!opts?.unresolved;
     if (choice === 'audio') {
       const isSrtCardsMode = Array.isArray(window.allNotes) && window.allNotes[0]?.isSrtCard;
       if (isSrtCardsMode && typeof window.updateCardIndex === 'function' && target >= 0) {
@@ -2719,8 +2844,32 @@
         // EPUB chunk-based: highlight the matching chunk in reading mode.
         setActive(target);
       }
+      // Stash the audio cue index so the paged reader's openView can
+      // CENTER on the matching chunk once it's mounted. Without this
+      // the user picks "Keep current audiobook position" and sees the
+      // chunk highlighted but off-screen — autoScrollForRange
+      // right-justifies the cue at the viewport edge, not the center.
+      // pagedCenterOnCue in reading-mode-paged.js consumes this flag.
+      try {
+        if (Number.isFinite(abCurrentCueIdx) && abCurrentCueIdx >= 0) {
+          window._reentryAudioJumpCueIdx = abCurrentCueIdx;
+        }
+      } catch (_) {}
     }
     // 'cursor' → no-op (user wants to stay where reader currently is)
+    // Resolve the unresolved-flag + clear prior snapshots ONLY when
+    // the user explicitly picked a button (no `unresolved` flag).
+    // Tab-tap dismiss leaves the flag set so the next mode switch
+    // re-shows the dialog.
+    if (!unresolved && (choice === 'cursor' || choice === 'audio')) {
+      try {
+        window._audioPositionUnresolved = false;
+        window._priorCardIdx = null;
+        window._priorCardIdxAtMs = 0;
+        window._priorReaderCursorIdx = null;
+        window._priorReaderCursorAtMs = 0;
+      } catch (_) {}
+    }
     const r = _reentryResolve;
     _reentryResolve = null;
     reentryPendingAudioChunk = -1;
