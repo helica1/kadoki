@@ -33,9 +33,9 @@ For an Anki deck, or for an SRT used as line-by-line cards.
 Vertical Japanese text; reading flows **right-to-left**.
 - **Quick horizontal flick** → turn the page (whole columns; no line is ever cut in half).
 - **Slow horizontal drag** → "peek" ahead/back with a rubber-band that **springs back** to your spot when you let go.
-- **Tap a word** → dictionary popup.
-- **Swipe up on a line** → set the audiobook playhead to that line and play from there.
-- **Tap an empty area** → toggle the top bar.
+- **Tap a word** → dictionary popup (its **Set playhead** button jumps the audiobook to that line).
+- **Swipe down** → play / pause the audiobook.
+- **Tap an empty margin** → toggle the top bar.
 - While audio plays, the current line is **highlighted green** and the page follows along automatically.
 
 ### 🎧 Audio mode — listen
