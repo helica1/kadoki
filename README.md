@@ -1,34 +1,43 @@
-# AnkiDeckViewer Android App (Capacitor Scaffold)
+# Kadoki
 
-## Requirements:
-- Node.js (https://nodejs.org)
-- Android Studio
-- An Android device with AnkiDroid installed
+A sideload reader for Japanese learners. Read EPUBs with a synced audiobook + subtitles (SRT), tap any word for an instant dictionary lookup, and send sentence + audio cards to Anki. Built with [Capacitor](https://capacitorjs.com/) for Android and iOS.
 
-## Setup Instructions:
+> Personal project, shared for anyone who finds it useful. The Android build below is a **debug** build — fine for sideloading, not from the Play Store.
 
-1. Unzip this project.
-2. Run the following commands in terminal:
+## Features
 
-   npm install --global @capacitor/cli
-   npm init @capacitor/app
-   (Choose 'None' for framework when prompted)
+- **Three modes over one position** — Card, Read, and Audio modes share the same place in the story.
+- **Paged reader** — vertical-rl (tategaki) with furigana, satisfying page-turn physics, and clean column rendering (no half-shown lines).
+- **Synced audiobook** — SRT ↔ EPUB alignment; the current line follows the narrator (and vice-versa).
+- **Tap-to-lookup dictionary** — JMdict / Yomitan dictionaries with deinflection.
+- **Anki export** — sentence + sliced audio to AnkiDroid (Android) or AnkiMobile (iOS).
+- **In-app audio dictionary import** — point it at a `.tar` / `.tar.gz` / `.tar.xz` of pronunciation audio.
 
-3. Replace the generated 'www/' folder with the one from this zip.
+## Install (Android)
 
-4. From the project root directory:
+1. Download the latest `Kadoki-*.apk` from the [**Releases**](../../releases) page.
+2. On your phone, allow installing from your browser/files app (Settings → Apps → *your browser* → **Install unknown apps**).
+3. Open the downloaded APK and install.
+4. For Anki export: open **AnkiDroid → Settings → Advanced → Enable API**, then restart AnkiDroid.
 
-   npx cap add android
-   npx cap copy
-   npx cap open android
+## Install (iOS)
 
-5. Android Studio will open. Click "Run" ▶️ to install on your phone.
+iOS isn't sideloadable the same way. It's distributed via **TestFlight** (invite only) or built from source in Xcode with your own Apple Developer account.
 
-6. On your phone:
-   - Open AnkiDroid
-   - Enable API access via Settings > Advanced > API
-   - Restart AnkiDroid
+## Build from source
 
-## Notes:
-- sql.js (WASM) placeholders included
-- Integrate proper `sql.js` and deck parser to finalize
+```sh
+cd my-app
+npm install
+# Android:
+npm run cap:copy:android          # copies web assets + strips the bundled audio/dicts
+cd android && ./gradlew installDebug
+# iOS:
+npm run cap:copy:ios              # then open my-app/ios/App in Xcode and Run
+```
+
+Requirements: Node.js, and Android Studio (Android) / Xcode (iOS). The big pronunciation-audio archive is **not** bundled — import it in-app (Preferences → Audio archive).
+
+## License
+
+No license granted yet — all rights reserved by the author. Ask before redistributing.
