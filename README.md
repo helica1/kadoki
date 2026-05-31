@@ -241,3 +241,11 @@ Kadoki would not be possible without the work of many projects in the Japanese l
 - [Hoshi Reader](https://github.com/Manhhao/Hoshi-Reader)
 - [Manatan](https://github.com/KolbyML/Manatan)
 - [SubPlz](https://github.com/kanjieater/SubPlz)
+
+---
+
+## License
+
+Kadoki is released under the [GNU General Public License v3.0](LICENSE).
+
+Copyright © 2026 helica1. This is free software: you may redistribute and modify it under the terms of the GPLv3. It comes with **no warranty**. Any distributed derivative work must also be licensed under the GPLv3.
