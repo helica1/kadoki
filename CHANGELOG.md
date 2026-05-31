@@ -2,6 +2,12 @@
 
 All notable changes to Kadoki are documented here. Newest first.
 
+<!-- Keep a running list here as changes are made. At release time, rename this
+     heading to the version number and start a fresh empty Unreleased section. -->
+## Unreleased
+
+_Nothing yet._
+
 ## v1.0.1
 
 ### Fixed
