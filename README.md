@@ -1,7 +1,7 @@
 <h1 align="center">Kadoki</h1>
 
 <p align="center">
-  A Japanese learning app for <strong>narrated reading</strong>, <strong>audiobook immersion</strong>, <strong>dictionary lookup</strong>, and <strong>Anki integration</strong>.
+  A cross-platform app for <strong>narrated reading with epub/audiobook/SRT</strong>, <strong>viewing subs2srs-generated anki decks</strong>, with <strong>dictionary lookup</strong>, and <strong>Anki integration</strong>.
 </p>
 
 <p align="center">
