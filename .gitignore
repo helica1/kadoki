@@ -84,7 +84,8 @@ my-app/ios/App/App.xcworkspace/xcuserdata/
 *.xcuserstate
 
 # Local Word working files for the README (edit locally, publish via README.md)
-Kadoki-README.docx
+*.docx
+*.doc
 Kadoki-README.html
-~$*.docx
+~$*
 *.tmp
