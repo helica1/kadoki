@@ -3312,9 +3312,8 @@ async function enterSafeBoot(reason, crashed) {
   }
   const deckEl = document.getElementById('deckName');
   if (deckEl) { deckEl.textContent = 'No file chosen'; deckEl.className = 'file-name'; }
-  try {
-    window.showToast?.('Recovered from a crash — open a title from your Library to continue', 5000);
-  } catch (e) {}
+  // (crash-recovery toast removed per user request — it fired on ordinary cold
+  // starts and read as alarming; safe-boot still quarantines the crasher silently.)
 }
 
 // Called by loadDeckFromFile around the heavy load. start() arms the crash

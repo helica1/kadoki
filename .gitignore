@@ -82,3 +82,9 @@ my-app/ios/DerivedData/
 my-app/ios/App/App.xcodeproj/xcuserdata/
 my-app/ios/App/App.xcworkspace/xcuserdata/
 *.xcuserstate
+
+# Local Word working files for the README (edit locally, publish via README.md)
+Kadoki-README.docx
+Kadoki-README.html
+~$*.docx
+*.tmp

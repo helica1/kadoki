@@ -2895,10 +2895,25 @@
             const popup = document.getElementById('dictPopup');
             if (!popup) return;
             if (!results || results.length === 0) {
+                // Distinguish "word genuinely not in any dictionary" from "no
+                // dictionaries are installed at all" — the latter is a setup
+                // problem the user can fix, so point them at Preferences instead
+                // of the misleading "No definition found." Check BOTH sources:
+                // the legacy in-memory `dictionaries` Map (sync, in scope) AND
+                // dictStore.isPopulated() (the IDB store — some users have dicts
+                // ONLY there). It's "no dictionaries" only when both are empty.
+                let noDicts = dictionaries.size === 0;
+                if (noDicts && window.dictStore?.isPopulated) {
+                    try { noDicts = !(await window.dictStore.isPopulated()); } catch (_) {}
+                }
+                if (token !== currentLookupToken) return; // a newer tap superseded us during the async check
+                const emptyMsg = noDicts
+                    ? 'No dictionaries loaded — add one in Preferences.'
+                    : 'No definition found.';
                 popup.innerHTML = `
                     <div style="padding:20px;text-align:center;">
                         <div style="font-size:1.1em;font-weight:700;margin-bottom:8px;">${best.base}</div>
-                        <div style="color:#888;font-size:.85em;">No definition found.</div>
+                        <div style="color:#888;font-size:.85em;">${emptyMsg}</div>
                         <div style="color:#666;font-size:.7em;margin-top:12px;">Tap anywhere to close</div>
                     </div>`;
                 // CRITICAL: explicit display='block'. The results branch
