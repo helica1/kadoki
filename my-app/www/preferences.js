@@ -107,27 +107,62 @@
       return div;
     };
 
+    // Font size control: -/+ buttons + numeric label. Replaces the
+    // earlier <input type=range> which was very laggy on iOS WKWebView
+    // (each input event repainted the entire mode view + dict popup
+    // CSS variables, queuing a backlog of style recalc).
     const fontSizeRange = (mode, getCurrent) => {
-      const px = parseFloat(getCurrent().replace('rem','')) * 16;
-      const slider = document.createElement('input');
-      slider.type = 'range';
-      slider.min = '12';
-      slider.max = '48';
-      slider.step = '1';
-      slider.value = String(Math.round(px));
-      slider.style.flex = '1';
-      slider.style.minWidth = '0';
+      const FONT_MIN_PX = 12;
+      const FONT_MAX_PX = 64;
+      const FONT_STEP_PX = 1;
+      const startPx = Math.round(parseFloat(getCurrent().replace('rem', '')) * 16);
+      let currentPx = Math.max(FONT_MIN_PX, Math.min(FONT_MAX_PX, startPx));
+
+      const btnStyle =
+        'width:34px;height:34px;background:#1a1a1a;color:var(--text,#e8e8e8);' +
+        'border:1px solid #333;border-radius:6px;font-size:1.1rem;font-weight:700;' +
+        'cursor:pointer;touch-action:manipulation;display:flex;align-items:center;' +
+        'justify-content:center;-webkit-tap-highlight-color:transparent;';
+      const minus = document.createElement('button');
+      minus.type = 'button';
+      minus.textContent = '−';
+      minus.style.cssText = btnStyle;
+      const plus = document.createElement('button');
+      plus.type = 'button';
+      plus.textContent = '+';
+      plus.style.cssText = btnStyle;
       const label = document.createElement('span');
-      label.style.cssText = 'min-width:48px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;padding-right:4px;';
-      label.textContent = px.toFixed(0) + 'px';
-      slider.addEventListener('input', () => {
-        const rem = (parseFloat(slider.value) / 16).toFixed(3) + 'rem';
-        label.textContent = slider.value + 'px';
+      label.style.cssText = 'min-width:54px;text-align:center;color:#fff;font-weight:600;font-size:.85rem;font-variant-numeric:tabular-nums;';
+      label.textContent = currentPx + 'px';
+
+      const updateBounds = () => {
+        minus.disabled = currentPx <= FONT_MIN_PX;
+        plus.disabled  = currentPx >= FONT_MAX_PX;
+        minus.style.opacity = minus.disabled ? '0.4' : '1';
+        plus.style.opacity  = plus.disabled  ? '0.4' : '1';
+      };
+      updateBounds();
+
+      const writeSize = () => {
+        label.textContent = currentPx + 'px';
+        const rem = (currentPx / 16).toFixed(3) + 'rem';
         apply(mode, { fontSize: rem });
-      });
+        updateBounds();
+      };
+      const step = (dir) => {
+        const next = currentPx + dir * FONT_STEP_PX;
+        if (next < FONT_MIN_PX || next > FONT_MAX_PX) return;
+        currentPx = next;
+        writeSize();
+      };
+      minus.addEventListener('click', () => step(-1));
+      plus .addEventListener('click', () => step(+1));
+
       const wrap = document.createElement('div');
-      wrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;min-width:0;';
-      wrap.appendChild(slider); wrap.appendChild(label);
+      wrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;min-width:0;justify-content:flex-end;';
+      wrap.appendChild(minus);
+      wrap.appendChild(label);
+      wrap.appendChild(plus);
       return wrap;
     };
 
@@ -160,7 +195,49 @@
       return r;
     };
 
-    const modeBlock = (mode, hasImage) => {
+    // Card-only: subtitle vertical offset + stopwatch timeout (moved here
+    // from a deleted standalone Card mode prefs section).
+    const subtitleOffsetRow = () => {
+      const slider = document.createElement('input');
+      slider.type = 'range'; slider.min = '0'; slider.max = '150'; slider.step = '1';
+      const saved = parseInt(localStorage.getItem('SUBTITLE_OFFSET')) || 65;
+      slider.value = String(saved);
+      slider.style.flex = '1'; slider.style.minWidth = '0';
+      const label = document.createElement('span');
+      label.style.cssText = 'min-width:48px;text-align:right;color:#fff;font-weight:600;font-size:.78rem;padding-right:4px;';
+      label.textContent = slider.value + 'px';
+      slider.addEventListener('input', () => {
+        label.textContent = slider.value + 'px';
+        document.documentElement.style.setProperty('--subtitle-offset', slider.value + 'px');
+        // Mirror to the hidden slider the save handler reads.
+        const hidden = document.getElementById('subtitleOffsetSlider');
+        if (hidden) hidden.value = slider.value;
+        const hiddenLabel = document.getElementById('subtitleOffsetLabel');
+        if (hiddenLabel) hiddenLabel.textContent = slider.value + 'px';
+      });
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex;align-items:center;gap:8px;flex:1;min-width:0;';
+      wrap.appendChild(slider); wrap.appendChild(label);
+      return wrap;
+    };
+    const stopwatchTimeoutRow = () => {
+      const input = document.createElement('input');
+      input.type = 'number'; input.min = '5'; input.max = '600';
+      input.style.cssText = 'width:90px;background:#0c0c0c;color:#e8e8e8;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+      const saved = parseInt(localStorage.getItem('STOPWATCH_TIMEOUT')) || 60;
+      input.value = String(saved);
+      input.addEventListener('input', () => {
+        const v = parseInt(input.value);
+        if (Number.isFinite(v)) {
+          window.stopwatchTimeout = v;
+          const hidden = document.getElementById('timeoutInput');
+          if (hidden) hidden.value = input.value;
+        }
+      });
+      return input;
+    };
+
+    const modeBlock = (mode) => {
       const block = document.createElement('div');
       block.className = 'appearance-mode';
       const lbl = document.createElement('div');
@@ -171,58 +248,38 @@
 
       const get = () => window.appearance?.get?.(mode) || window.appearance?.defaults?.()[mode];
 
-      // Font family dropdown.
-      const FONT_OPTIONS = [
-        ['System',         'system'],
-        ['Sans-serif',     'sans'],
-        ['Serif',          'serif'],
-        ['Monospace',      'mono'],
-        ['Japanese sans',  'jpSans'],
-        ['Japanese serif', 'jpSerif']
-      ];
-      const fontSelect = document.createElement('select');
-      FONT_OPTIONS.forEach(([label, key]) => {
-        const opt = document.createElement('option');
-        opt.value = key; opt.textContent = label;
-        if (get().fontFamily === key) opt.selected = true;
-        fontSelect.appendChild(opt);
-      });
-      fontSelect.addEventListener('change', () => apply(mode, { fontFamily: fontSelect.value }));
-      block.appendChild(row('Font family', fontSelect));
+      // Font family — only Serif / Sans-serif, and only for Card + Audio.
+      // Read mode is locked to Serif per user request.
+      if (mode === 'card' || mode === 'audio') {
+        const FONT_OPTIONS = [
+          ['Serif',      'serif'],
+          ['Sans-serif', 'sans']
+        ];
+        const fontSelect = document.createElement('select');
+        FONT_OPTIONS.forEach(([label, key]) => {
+          const opt = document.createElement('option');
+          opt.value = key; opt.textContent = label;
+          if (get().fontFamily === key) opt.selected = true;
+          fontSelect.appendChild(opt);
+        });
+        fontSelect.addEventListener('change', () => apply(mode, { fontFamily: fontSelect.value }));
+        block.appendChild(row('Font family', fontSelect));
+      }
 
       block.appendChild(row('Font size', fontSizeRange(mode, () => get().fontSize)));
 
-      if (mode === 'card' || mode === 'audio' || mode === 'read') {
-        block.appendChild(row('Align', SEG(mode, 'align',
-          [['Left','left'], ['Center','center'], ['Right','right']],
-          () => get().align)));
-      }
-
-      // Read-mode only: choose how the currently-playing SRT cue is
-      // marked. Text-recoloring avoids the overlap artefacts a translucent
-      // bg can produce on tight line spacing.
-      if (mode === 'read') {
-        block.appendChild(row('Cue highlight', SEG(mode, 'highlightStyle',
-          [['Text color','text'], ['Background','bg']],
-          () => get().highlightStyle || 'text')));
-      }
-
-      if (hasImage) {
-        block.appendChild(row('Image', SEG(mode, 'imageDisplay',
-          [['Show','block'], ['Hide','none']],
-          () => get().imageDisplay)));
-        block.appendChild(row('Image opacity', opacityRange(mode, () => get().imageOpacity)));
-        block.appendChild(row('Image position', SEG(mode, 'imageAlign',
-          [['Top','flex-start'], ['Center','center'], ['Bottom','flex-end']],
-          () => get().imageAlign)));
+      // Card-only extras (moved from the deleted Card mode prefs section).
+      if (mode === 'card') {
+        block.appendChild(row('Subtitle vertical offset', subtitleOffsetRow()));
+        block.appendChild(row('Stopwatch inactivity timeout (s)', stopwatchTimeoutRow()));
       }
       return block;
     };
 
     host.innerHTML = '';
-    host.appendChild(modeBlock('card',  true));
-    host.appendChild(modeBlock('read',  false));
-    host.appendChild(modeBlock('audio', true));
+    host.appendChild(modeBlock('card'));
+    host.appendChild(modeBlock('read'));
+    host.appendChild(modeBlock('audio'));
   }
 
   function populateDeckSelect(select, decks, value) {
@@ -305,14 +362,15 @@
     row.innerHTML = `
       <label style="flex:0 0 45%;line-height:1.35;">Media folder
         <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
-          Files → On My iPhone → AnkiMobile → <i>collection.media</i>
+          Optional fallback. Primary delivery uses the in-app HTTP server — no linking required.
         </span>
       </label>
       <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px;">
         <div data-role="status" style="font-size:.78rem;color:var(--text-muted,#888);">Checking…</div>
-        <div style="display:flex;gap:6px;">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <button data-role="link" class="btn" style="flex:1;background:transparent;color:var(--accent-cyan,#00ffcc);border:1px solid var(--accent-cyan,#00ffcc);padding:6px 10px;border-radius:6px;font-size:.78rem;">Link folder</button>
           <button data-role="unlink" class="btn" style="background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#2a2a2a);padding:6px 10px;border-radius:6px;font-size:.78rem;display:none;">Unlink</button>
+          <button data-role="test-anki" class="btn" style="flex:1;background:transparent;color:var(--accent-warn,#ffd54a);border:1px solid var(--accent-warn,#ffd54a);padding:6px 10px;border-radius:6px;font-size:.78rem;">Send test card</button>
         </div>
       </div>
     `;
@@ -321,6 +379,7 @@
     const status = row.querySelector('[data-role="status"]');
     const linkBtn = row.querySelector('[data-role="link"]');
     const unlinkBtn = row.querySelector('[data-role="unlink"]');
+    const testBtn = row.querySelector('[data-role="test-anki"]');
 
     async function refresh() {
       try {
@@ -331,8 +390,8 @@
           linkBtn.textContent = 'Re-link';
           unlinkBtn.style.display = 'inline-block';
         } else {
-          status.textContent = 'Not linked — audio/image won\'t deliver to AnkiMobile';
-          status.style.color = 'var(--accent-warn,#ffd54a)';
+          status.textContent = 'Not linked (fallback only — not required)';
+          status.style.color = 'var(--text-muted,#888)';
           linkBtn.textContent = 'Link folder';
           unlinkBtn.style.display = 'none';
         }
@@ -353,6 +412,73 @@
     unlinkBtn.addEventListener('click', async () => {
       await ab.unlinkMediaFolder();
       refresh();
+    });
+
+    // Minimal-card diagnostic — bypasses media, sentence, image and
+    // sends a single Term="anki-bridge-test-<timestamp>". If the test
+    // card lands in AnkiMobile but real sends don't, the model name
+    // and deck are fine — the issue is media/HTTP server / large URL.
+    // If the test card ALSO doesn't land, model name or deck name
+    // is wrong in Preferences.
+    testBtn.addEventListener('click', async () => {
+      try {
+        const cfg = (typeof window.getAnkiSettings === 'function')
+          ? await window.getAnkiSettings('dict')
+          : null;
+        if (!cfg) { alert('Anki settings unavailable'); return; }
+        const fields = {};
+        fields[cfg.fields.term] = `anki-bridge-test-${Date.now()}`;
+        const cbPromise = (typeof window.waitForAnkiCallback === 'function')
+          ? window.waitForAnkiCallback(8000)
+          : Promise.resolve('unknown');
+        const r = await ab.addNote({
+          deckName: cfg.deck,
+          modelName: cfg.model,
+          fields,
+          tags: ['anki-bridge-test'],
+        });
+        const constructedUrl = r?.constructedUrl || '(unknown)';
+        console.log('[anki-test] sent URL:', constructedUrl);
+        console.log('[anki-test] addNote ->', r);
+        const cbResult = await cbPromise;
+        console.log('[anki-test] callback result:', cbResult,
+                    'lastCallbackUrl:', window._lastAnkiCallbackUrl);
+
+        // Show outcome + offer to copy the URL to clipboard so user can
+        // paste it directly into Safari. If Safari also fails to create a
+        // card, the URL itself (model/deck/profile) is wrong. If Safari
+        // succeeds but our plugin fails, it's a UIApplication.open issue.
+        const verdict = (cbResult === 'success')
+          ? `✓ TEST OK — model/deck names work. If real sends fail, the issue is media-related.`
+          : (cbResult === 'error')
+          ? `✗ TEST REJECTED by AnkiMobile (model "${cfg.model}" invalid). Tap OK to copy the URL.`
+          : `? TEST: no reply from AnkiMobile.\n\nSent: model="${cfg.model}" deck="${cfg.deck}"\nLast callback URL seen: ${window._lastAnkiCallbackUrl || '(none)'}\n\nTap OK to copy the URL for manual Safari testing.`;
+        const confirmed = window.confirm(verdict + '\n\n— URL —\n' + constructedUrl);
+        if (confirmed && constructedUrl !== '(unknown)') {
+          try {
+            await navigator.clipboard.writeText(constructedUrl);
+            if (typeof window.showToast === 'function') {
+              window.showToast('URL copied. Paste in Safari to test AnkiMobile directly.', 5000);
+            }
+          } catch (clipErr) {
+            // Fallback: textarea hack
+            const ta = document.createElement('textarea');
+            ta.value = constructedUrl;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (_) {}
+            document.body.removeChild(ta);
+            if (typeof window.showToast === 'function') {
+              window.showToast('URL copied (fallback). Paste in Safari to test.', 5000);
+            }
+          }
+        }
+      } catch (e) {
+        console.error('[anki-test] failed:', e);
+        if (typeof window.showToast === 'function') {
+          window.showToast(`✗ Test failed: ${e?.message || e}`, 5000);
+        }
+      }
     });
   }
 
@@ -478,7 +604,17 @@
     } catch (e) {}
     const seen = new Set();
     const names = [];
+    const storeNameSet = new Set(storeNames);
     for (const n of [...memNames, ...storeNames]) {
+      // Hide ONLY the legacy bundled JMDict — the one that's loaded
+      // into the in-memory `dictionaries` Map at boot from the
+      // assets/dictionaries/JMdict_english.json file. A user-imported
+      // JMDict (via the Yomitan zip import) shows up in dictStore as
+      // well, and we want THAT one visible/toggleable. The legacy
+      // path appears in memNames but not in storeNames.
+      const isLegacyOnly = (n === 'JMDict' || n === 'JMdict') &&
+                           !storeNameSet.has(n);
+      if (isLegacyOnly) continue;
       if (!seen.has(n)) { seen.add(n); names.push(n); }
     }
     const ordered = window.dictPrefs ? window.dictPrefs.orderedNames(names) : names;
@@ -813,7 +949,7 @@
     if (initialSubtitleOffset != null && initialSubtitleOffset !== '') {
       applySubtitleOffset(initialSubtitleOffset);
     } else {
-      applySubtitleOffset(30);
+      applySubtitleOffset(65);
     }
   }
 

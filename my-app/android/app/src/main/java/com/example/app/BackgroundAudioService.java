@@ -51,17 +51,16 @@ public class BackgroundAudioService extends Service {
     public static final String EXTRA_RATE = "rate";
     public static final String EXTRA_FADE_MS = "fadeMs";
 
-    // Default fade duration for play / pause / resume. 5 ms — below
-    // the threshold of perception for delay, enough to take the edge
-    // off the amplitude-discontinuity click. Originally tested 50 ms
-    // felt laggy because the asyncAfter delay before pause was
-    // visible; 5 ms is not. iOS uses the same default via
-    // BackgroundAudioPlugin.swift's defaultFadeMs.
-    private static final int DEFAULT_FADE_MS = 5;
-    // Volume ramp max step granularity. The actual step size adapts:
-    // rampVolume computes steps and step-interval so the ramp
-    // ALWAYS fits inside durationMs. For 5 ms = ~3 steps at ~1.5 ms
-    // each; for 50 ms = 5 steps at 10 ms each.
+    // Default fade duration for play / pause / resume. 20 ms — long
+    // enough to fully mask the amplitude-discontinuity click (5 ms
+    // collapsed to a single hard step here, which still clicked), yet
+    // below a perceptible delay. Also governs the dictionary
+    // pause/resume (it calls pause()/resume() with no fadeMs). iOS uses
+    // the same default via BackgroundAudioPlugin.swift's defaultFadeMs.
+    private static final int DEFAULT_FADE_MS = 20;
+    // Volume ramp max step granularity (kept for reference). rampVolume
+    // targets ~2 ms per step (capped at 12 steps) so the ramp ALWAYS
+    // fits inside durationMs: 20 ms = ~10 steps, 5 ms = ~2 steps.
     private static final int FADE_MAX_STEP_MS = 10;
 
     public interface OnStateChangeListener {
@@ -69,6 +68,11 @@ public class BackgroundAudioService extends Service {
         void onPositionUpdate(int positionMs, int durationMs);
         void onEnded();
         void onError(String message);
+        // Lock-screen / media-button transport commands the user pressed.
+        // action ∈ {"play", "nextCue", "prevCue"}. JS uses "play" to force
+        // AUDIO mode (so lock-screen play always starts the audiobook + audio
+        // timer, never card/reader), and nextCue/prevCue to jump by subtitle.
+        void onRemoteCommand(String action);
     }
 
     private static BackgroundAudioService instance;
@@ -83,6 +87,7 @@ public class BackgroundAudioService extends Service {
     private MediaSessionCompat mediaSession;
     private String metaTitle = "Anki Deck Reader";
     private String metaSubtitle = "";
+    private android.graphics.Bitmap metaArt;   // lock-screen cover art (persists across cue updates)
 
     @Override
     public void onCreate() {
@@ -242,7 +247,7 @@ public class BackgroundAudioService extends Service {
         // Step count adapts to fit inside durationMs so a 5 ms fade
         // actually delivers volume changes within those 5 ms, not at
         // 10 ms+ as the old fixed FADE_STEP_MS grid would have done.
-        int steps = Math.max(1, Math.min(10, durationMs / Math.max(1, FADE_MAX_STEP_MS / 2)));
+        int steps = Math.max(1, Math.min(12, durationMs / 2));
         if (steps > durationMs) steps = durationMs; // at most one step per ms
         int stepIntervalMs = Math.max(1, durationMs / steps);
         for (int i = 1; i <= steps; i++) {
@@ -349,19 +354,46 @@ public class BackgroundAudioService extends Service {
     }
 
     public void setMetadata(String title, String subtitle) {
+        setMetadata(title, subtitle, null); // keep existing artwork
+    }
+
+    // artwork: a data-URI ("data:image/...;base64,XXXX") or raw base64. null =
+    // leave the current cover art untouched (per-cue subtitle updates pass
+    // null); "" = clear it. Cover art is set once on audio-mode entry and
+    // persists across the per-cue subtitle updates.
+    public void setMetadata(String title, String subtitle, String artwork) {
         if (title != null && !title.isEmpty()) metaTitle = title;
         if (subtitle != null) metaSubtitle = subtitle;
+        if (artwork != null) metaArt = artwork.isEmpty() ? null : decodeArtwork(artwork);
+        String display = (metaSubtitle != null && !metaSubtitle.isEmpty()) ? metaSubtitle : metaTitle;
         if (mediaSession != null) {
-            MediaMetadataCompat md = new MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, metaSubtitle != null && !metaSubtitle.isEmpty() ? metaSubtitle : metaTitle)
+            MediaMetadataCompat.Builder b = new MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, display)
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, metaTitle)
-                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, metaSubtitle != null && !metaSubtitle.isEmpty() ? metaSubtitle : metaTitle)
-                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, metaTitle)
-                .build();
-            mediaSession.setMetadata(md);
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, display)
+                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, metaTitle);
+            if (metaArt != null) {
+                b.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, metaArt);
+                b.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, metaArt);
+            }
+            mediaSession.setMetadata(b.build());
             updatePlaybackState();
         }
-        updateNotification(metaSubtitle != null && !metaSubtitle.isEmpty() ? metaSubtitle : metaTitle);
+        updateNotification(display);
+    }
+
+    private android.graphics.Bitmap decodeArtwork(String s) {
+        if (s == null || s.isEmpty()) return null;
+        String b64 = s;
+        int comma = s.indexOf(',');
+        if (s.startsWith("data:") && comma >= 0) b64 = s.substring(comma + 1);
+        try {
+            byte[] bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT);
+            return android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+        } catch (Exception e) {
+            Log.w(TAG, "decodeArtwork failed", e);
+            return null; // keep whatever art we had
+        }
     }
 
     // ----- MediaSession + lock screen -----
@@ -376,6 +408,11 @@ public class BackgroundAudioService extends Service {
                     if (listener != null) listener.onPlayingStateChanged(true);
                     updatePlaybackState();
                 }
+                // Tell JS this play came from the lock screen / media controls
+                // so it forces AUDIO mode (audiobook + audio timer), never
+                // card/reader. Fire even if the player wasn't ready yet — JS
+                // will switch to audio mode and (re)start playback there.
+                if (listener != null) listener.onRemoteCommand("play");
             }
             @Override public void onPause() {
                 if (player != null && player.isPlaying()) {
@@ -387,6 +424,14 @@ public class BackgroundAudioService extends Service {
             @Override public void onSeekTo(long pos) {
                 seekToMs((int) pos);
                 updatePlaybackState();
+            }
+            // ⏮ / ⏭ jump by SUBTITLE CUE. JS owns cue boundaries, so we just
+            // notify it (mirrors the iOS nextTrack/previousTrack handlers).
+            @Override public void onSkipToNext() {
+                if (listener != null) listener.onRemoteCommand("nextCue");
+            }
+            @Override public void onSkipToPrevious() {
+                if (listener != null) listener.onRemoteCommand("prevCue");
             }
             @Override public void onStop() {
                 stopPlayback();
@@ -408,6 +453,8 @@ public class BackgroundAudioService extends Service {
                 | PlaybackStateCompat.ACTION_PAUSE
                 | PlaybackStateCompat.ACTION_PLAY_PAUSE
                 | PlaybackStateCompat.ACTION_SEEK_TO
+                | PlaybackStateCompat.ACTION_SKIP_TO_NEXT
+                | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
                 | PlaybackStateCompat.ACTION_STOP)
             .setState(state, pos, pendingRate)
             .build();
@@ -447,6 +494,7 @@ public class BackgroundAudioService extends Service {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+        if (metaArt != null) b.setLargeIcon(metaArt); // lock-screen cover art
         if (mediaSession != null) {
             b.setStyle(new MediaStyle()
                 .setMediaSession(mediaSession.getSessionToken())

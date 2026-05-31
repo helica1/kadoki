@@ -16,6 +16,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(BackgroundAudioPlugin.class);
         registerPlugin(AudioSlicerPlugin.class);
         registerPlugin(AnkiBridgePlugin.class);
+        registerPlugin(ArchiveExtractorPlugin.class);
         super.onCreate(savedInstanceState);
         enableImmersiveMode();
     }

@@ -12,7 +12,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "cap:copy:ios": "npx cap copy ios && rm -rf ios/App/App/public/yomichan-audio && rm -f ios/App/App/public/assets/dictionaries/JMdict_english.json ios/App/App/public/assets/dictionaries/*.zip",
-    "cap:sync:ios": "npx cap sync ios && rm -rf ios/App/App/public/yomichan-audio && rm -f ios/App/App/public/assets/dictionaries/JMdict_english.json ios/App/App/public/assets/dictionaries/*.zip"
+    "cap:sync:ios": "npx cap sync ios && rm -rf ios/App/App/public/yomichan-audio && rm -f ios/App/App/public/assets/dictionaries/JMdict_english.json ios/App/App/public/assets/dictionaries/*.zip",
+    "cap:copy:android": "npx cap copy android && rm -rf android/app/src/main/assets/public/yomichan-audio && rm -f android/app/src/main/assets/public/assets/dictionaries/JMdict_english.json android/app/src/main/assets/public/assets/dictionaries/*.zip",
+    "cap:sync:android": "npx cap sync android && rm -rf android/app/src/main/assets/public/yomichan-audio && rm -f android/app/src/main/assets/public/assets/dictionaries/JMdict_english.json android/app/src/main/assets/public/assets/dictionaries/*.zip"
   },
   "dependencies": {
     "@capacitor/android": "^7.2.0",
@@ -25,6 +27,7 @@
     "file-access": "file:../file-access"
   },
   "devDependencies": {
+    "@capacitor/assets": "^3.0.5",
     "@capacitor/cli": "latest",
     "vite": "^5.4.2"
   },

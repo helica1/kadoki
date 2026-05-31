@@ -55,6 +55,14 @@ public class BackgroundAudioPlugin extends Plugin {
                 d.put("message", message != null ? message : "unknown");
                 notifyListeners("error", d);
             }
+            @Override public void onRemoteCommand(String action) {
+                // Lock-screen / media-button transport. JS listens for
+                // {action:"play"} to force AUDIO mode, "nextCue"/"prevCue" to
+                // jump by subtitle. Matches the iOS "remoteCommand" event.
+                JSObject d = new JSObject();
+                d.put("action", action);
+                notifyListeners("remoteCommand", d);
+            }
         };
 
     @Override
@@ -184,8 +192,12 @@ public class BackgroundAudioPlugin extends Plugin {
     public void setMetadata(PluginCall call) {
         String title = call.getString("title");
         String subtitle = call.getString("subtitle");
+        // artwork (data-URI or base64) is optional; null when not provided so
+        // the per-cue subtitle updates don't clobber the cover art set once on
+        // audio-mode entry.
+        String artwork = call.getString("artwork");
         BackgroundAudioService s = BackgroundAudioService.getInstance();
-        if (s != null) s.setMetadata(title, subtitle);
+        if (s != null) s.setMetadata(title, subtitle, artwork);
         call.resolve();
     }
 

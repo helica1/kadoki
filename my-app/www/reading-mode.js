@@ -298,6 +298,7 @@
   }
 
   async function applyFontPrefs() {
+   try {
     ensureFontOverrideStyle();
     // Parallelize the 5 prefs reads. Capacitor's Preferences plugin does a
     // JNI hop per call (~50–100 ms on Android), so sequencing 5 of them
@@ -326,6 +327,12 @@
     // Default to STOP at cue end. User must explicitly enable
     // auto-advance via the Preferences toggle (auto === 'true').
     window.readingAutoAdvance = auto === 'true';
+   } catch (e) {
+    // Never let font-pref application bubble an unhandled rejection — under
+    // extreme memory pressure (e.g. a huge deck loading) this path has thrown
+    // "Maximum call stack size exceeded", which would otherwise brick boot.
+    try { rlog && rlog('applyFontPrefs failed: ' + (e?.message || e)); } catch (_) {}
+   }
   }
 
   function hexToRgba(hex, alpha) {
@@ -1100,7 +1107,10 @@
       //     intent.)
       const isVertical = content.classList.contains('vertical');
       if (isVertical) {
-        if (dt < SWIPE_MAX_TIME && ady > SWIPE_MIN_DELTA && ady > adx * 2 && adx < 24) {
+        // Skip vertical swipes that began in the OS edge zones (notification
+        // shade up top / app switcher at the bottom).
+        if (dt < SWIPE_MAX_TIME && ady > SWIPE_MIN_DELTA && ady > adx * 2 && adx < 24
+            && !window._inSystemGestureZone?.(yStart)) {
           if (dy < 0) { if (targetChunk) handleUpSwipe(targetChunk); }
           else        { handleDownSwipe(); }
           return;
@@ -1175,15 +1185,28 @@
     setRunning('statsCard', s.isRunning('card'));
 
     setText('statsReadTime',  formatSec(readSec));
-    setText('statsReadChars', cumulativeChars.toLocaleString());
-    if (readSec < 1 || cumulativeChars === 0) {
+    // Live chars from stats.js (chunk-based, persisted across orientations).
+    // Falls back to the legacy cumulativeChars only if the new tracker
+    // isn't exposed yet.
+    const readChars = (typeof s.getReadChars === 'function')
+      ? s.getReadChars()
+      : cumulativeChars;
+    setText('statsReadChars', readChars.toLocaleString());
+    if (readSec < 1 || readChars === 0) {
       setText('statsReadRate', '—');
     } else {
-      setText('statsReadRate', Math.round(cumulativeChars / (readSec / 3600)).toLocaleString());
+      setText('statsReadRate', Math.round(readChars / (readSec / 3600)).toLocaleString());
     }
     setRunning('statsRead', s.isRunning('read'));
 
     setText('statsAudioTime', formatSec(audioSec));
+    const audioChars = (typeof s.getAudioChars === 'function') ? s.getAudioChars() : 0;
+    setText('statsAudioChars', audioChars.toLocaleString());
+    if (audioSec < 1 || audioChars === 0) {
+      setText('statsAudioRate', '—');
+    } else {
+      setText('statsAudioRate', Math.round(audioChars / (audioSec / 3600)).toLocaleString());
+    }
     setRunning('statsAudio', s.isRunning('audio'));
   }
 
@@ -1370,6 +1393,15 @@
     refreshStatsModal();
     const label = document.getElementById('readingTimerLabel');
     if (label && timerStart !== null) label.textContent = formatSec(0);
+  };
+
+  // Reset a single mode's stats (card / read / audio). Wired to the
+  // per-section "Reset" buttons in the stats modal.
+  window.resetReadingTimerFor = function (mode) {
+    if (!mode) return;
+    if (mode === 'read') { cumulativeChars = 0; cumulativeSec = 0; }
+    if (window.stats?.resetMode) window.stats.resetMode(mode);
+    refreshStatsModal();
   };
 
   window.readingAnkiCount = window.readingAnkiCount || 0;
@@ -1953,6 +1985,12 @@
   let abCueToChunk = null;
   let abChunkToCue = null;
   let abCurrentCueIdx = -1;
+  // Let the paged reader's Set-Playhead jump force the NEXT position event to
+  // re-render and re-fire __onPagedCueUpdate, even when the audio lands on the
+  // SAME cue index that was already current. Without this, abUpdateCueDisplay's
+  // `idx === abCurrentCueIdx` early return swallows the update upstream of the
+  // paged green-paint hook — the "Set Playhead → line not highlighted green" bug.
+  window._resetAbCueGate = function () { abCurrentCueIdx = -2; };
   let abAudioPath = null;
   let abAudioName = '';
   let abLastSrtName = ''; // name of the SRT used to build the current maps — fingerprint input for cue-alignment cache
@@ -1967,6 +2005,25 @@
   // audio-mode pairing, is the source of truth in those cases.
   Object.defineProperty(window, '__abCues', { get() { return abCues; }, configurable: true });
   Object.defineProperty(window, '__abAudioPath', { get() { return abAudioPath; }, configurable: true });
+
+  // Clear the legacy audiobook context so a title WITHOUT audio (EPUB-only)
+  // can't leak the PREVIOUS audio title's cues into the paged reader. The paged
+  // reader's cue lookups fall back to window.__abCues when its own pagedCues is
+  // empty (`pagedCues?.length ? pagedCues : window.__abCues`), so without this a
+  // stale __abCues made findNearestChunkCue bind a phantom "Set playhead" that
+  // played the old title's audio, and made ensureGreenOnEnter scroll to a stale
+  // cue — clobbering the restored EPUB scroll position. Called by the paged
+  // reader's loadAudiobookCues the moment it confirms the title has no audio/SRT.
+  window._clearLegacyAudioContext = function () {
+    abCues = [];
+    abCueToChunk = null;
+    abChunkToCue = null;
+    abCurrentCueIdx = -1;
+    abAudioPath = null;
+    abAudioName = '';
+    abLastSrtName = '';
+    abContextLoadedForDeck = null;
+  };
 
   function abFmtMs(ms) {
     if (!Number.isFinite(ms) || ms < 0) return '–:––';
@@ -2266,8 +2323,27 @@
       if (!t) return;
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
-      // Down-swipe: > 50 px vertical, mostly vertical.
-      if (dy > 50 && Math.abs(dy) > Math.abs(dx) * 1.5) {
+      const ax = Math.abs(dx), ay = Math.abs(dy);
+      // Horizontal swipe (>30 px, mostly horizontal) → prev/next cue.
+      // Mirrors the card-mode swipe contract: swipe-LEFT advances
+      // (deltaX is negative), swipe-RIGHT goes back. For SRT-cards
+      // titles `currentCardIndex` IS the cue index, so updateCardIndex
+      // handles the seek/audio restart in one call.
+      if (ax > 30 && ax > ay * 1.5) {
+        if (typeof window.updateCardIndex === 'function' &&
+            Array.isArray(window.allNotes) && window.allNotes.length) {
+          const cur = window.currentCardIndex ?? 0;
+          if (dx < 0 && cur < window.allNotes.length - 1) {
+            window.updateCardIndex(cur + 1);
+          } else if (dx > 0 && cur > 0) {
+            window.updateCardIndex(cur - 1);
+          }
+        }
+        return;
+      }
+      // Down-swipe (> 50 px vertical, mostly vertical) → play/pause toggle.
+      // Skip if it began in the OS notification-shade / app-switcher edge zone.
+      if (dy > 50 && ay > ax * 1.5 && !window._inSystemGestureZone?.(startY)) {
         const bg = window.Capacitor?.Plugins?.BackgroundAudio;
         if (!bg) return;
         bg.getState().then(s => {
@@ -2383,7 +2459,11 @@
     // path when viewEl is hidden; the progress update happens before
     // that return.
     if (typeof window.__onPagedCueUpdate === 'function') {
-      try { window.__onPagedCueUpdate(idx, idx >= 0 ? abCues[idx] : null); } catch (e) {}
+      // Pass positionMs so the hook can tell a CONTINUOUS listen from a
+      // SEEK by comparing playhead advance to wall-clock (rate-aware),
+      // instead of the old cue-start-time gap which dropped every cue
+      // longer than 3 s and under-counted listening by ~half.
+      try { window.__onPagedCueUpdate(idx, idx >= 0 ? abCues[idx] : null, positionMs); } catch (e) {}
     }
 
     // Lock screen + audio view image — fire-and-forget. Any latency on
@@ -2527,6 +2607,11 @@
     installAudiobookCueTapHandler();
     installAudiobookSwipeHandler();
     window.audiobookActive = true;
+    // Fresh audio-chars baseline for this listening session, so re-entering at
+    // an earlier position credits cleanly (and the first cue is never dumped).
+    window._lastAudioCueIdxForStats = -1;
+    window._audioStatsLastWallMs = 0;   // continuity baseline (see __onPagedCueUpdate)
+    window._audioStatsLastPosMs = -1;
     if (typeof window.stopCardAudio === 'function') window.stopCardAudio();
     const cueEl = document.getElementById('audiobookCueText');
     if (cueEl) cueEl.textContent = '…';
@@ -2583,7 +2668,16 @@
       if (!didResume) {
         await bg.play({ url, startMs: adjStart, rate });
       }
-      bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: '' }).catch(() => {});
+      // Lock-screen / Control Center metadata, now with cover art pulled from
+      // the active title (data URI → native decodes to MPMediaItemArtwork).
+      let coverArt = '';
+      try {
+        if (window.titleStore && window._activeTitleId) {
+          const t = await window.titleStore.get(window._activeTitleId);
+          coverArt = t?.attachments?.cover?.dataUri || '';
+        }
+      } catch (_) {}
+      bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: '', artwork: coverArt }).catch(() => {});
       // Force an immediate cue update so the subtitle appears before the
       // first periodic position event arrives (saves user a play/pause toggle).
       const initialPoll = async (delay) => {

@@ -48,6 +48,9 @@
   let pagedCues = [];        // SRT cues for the active book's audiobook
   let pagedAudioPath = null;
   let pagedCueToChunk = null;// cue index → paged chunk index
+  let pagedChunkToCue = null;// paged chunk index → first cue index (for read-position tracking)
+  let lastReadCueIdx = -1;   // current reading location as a cue (reset per book in loadAudiobookCues)
+  let savedReadScrollLeft = null; // cached saved scrollLeft for the current book (sync restore)
   // True when the current pagedCueToChunk came from the preprocessing
   // module (cue-alignment.js). When true, an unmatched cue (idx -1)
   // is treated as "no painting, no scrolling" instead of falling back
@@ -60,6 +63,10 @@
   // alignment is rebuilt mid-session (e.g., audio/srt repaired).
   let pagedInitialScrollDone = false;
   let lastHighlightedCue = -1;
+  // Index in chunks[] of the chunk currently painted green — the anchor for
+  // bounded local searches when a cue isn't in the alignment map, so the
+  // highlight keeps following the subtitle locally instead of skipping lines.
+  let lastHighlightedChunkIdx = -1;
   let bgListenerHandle = null;
   // Shared Highlight instance for the 'cue-active' key. Reused across
   // every paint so WebKit's invalidator sees a single object whose
@@ -136,6 +143,21 @@
       }
       #readingPagedProgress:active { opacity: .55; }
       body.chrome-hidden #readingPagedProgress {
+        opacity: 0;
+        pointer-events: none;
+      }
+      /* Wide layouts — landscape, OR a wide foldable/tablet (≥600px) in any
+         orientation: the standalone top-left strip wastes the extra horizontal
+         room (and in landscape gets cut off by the rotated Dynamic Island), so
+         swap to the inline copy injected inside #appHeader between the mode
+         tabs and the timer. Mirrors the iPhone landscape position. Narrow
+         phones keep the top-left strip. */
+      #readingPagedProgressInline { display: none; }
+      @media (orientation: landscape), (min-width: 600px) {
+        #readingPagedProgress { display: none !important; }
+        #readingPagedProgressInline { display: inline-block !important; }
+      }
+      body.chrome-hidden #readingPagedProgressInline {
         opacity: 0;
         pointer-events: none;
       }
@@ -489,12 +511,14 @@
     // detection in place for Android + future iOS WebKit
     // improvements; iOS users use the header PLAY button.
     scrollEl.addEventListener('touchmove', (e) => {
-      if (swipeFired) return;
+      if (swipeFired || physDragging) return;
       const t = e.touches?.[0];
       if (!t) return;
       const dxRaw = t.clientX - sx, dyRaw = t.clientY - sy;
       const adx = Math.abs(dxRaw), ady = Math.abs(dyRaw);
-      if (dyRaw > 30 && ady > adx * 1.5 && adx < 50) {
+      // Ignore down-swipes that BEGAN in the OS notification-shade zone (top
+      // edge) so pulling down the shade doesn't also toggle playback.
+      if (dyRaw > 30 && ady > adx * 1.5 && adx < 50 && !window._inSystemGestureZone?.(sy)) {
         swipeFired = true;
         log('[swipe] down dy=' + Math.round(dyRaw) + ' dx=' + Math.round(dxRaw));
         try { handleSwipeDown(); } catch (err) { log('[swipe] handler error:', err?.message); }
@@ -502,7 +526,7 @@
     }, { passive: true });
 
     scrollEl.addEventListener('touchend', (e) => {
-      if (swipeFired) return; // swipe already handled in touchmove
+      if (swipeFired || physDragging) return; // swipe / physics drag owns the gesture
       const t = e.changedTouches?.[0];
       if (!t) return;
       const dxRaw = t.clientX - sx, dyRaw = t.clientY - sy;
@@ -1152,6 +1176,135 @@
     return null;
   }
 
+  // Bounded local search: find the cue text within ±radius chunks of an
+  // anchor, preferring the chunk closest to the anchor (forward ties win,
+  // since cues advance forward). This avoids findChunkForText's book-wide
+  // first-match far-jumps while still tracking the line locally — the fix
+  // for the "highlight skips a line or two" symptom on unmatched cues.
+  function findChunkForTextNear(target, anchorIdx, radius) {
+    const t = normalizeJP(target);
+    if (!t || !chunks.length) return null;
+    if (!Number.isFinite(anchorIdx) || anchorIdx < 0) anchorIdx = 0;
+    const lo = Math.max(0, anchorIdx - radius);
+    const hi = Math.min(chunks.length - 1, anchorIdx + radius);
+    let best = null, bestDist = Infinity;
+    for (let i = lo; i <= hi; i++) {
+      if (normalizeJP(chunks[i].textContent).includes(t)) {
+        const d = (i >= anchorIdx) ? (i - anchorIdx) : (anchorIdx - i) + 0.5;
+        if (d < bestDist) { bestDist = d; best = chunks[i]; }
+      }
+    }
+    return best;
+  }
+
+  // Resolve the chunk for a cue: alignment map → bounded local search around
+  // the current green chunk → (only if allowGlobal) a book-wide search.
+  // allowGlobal is FALSE for passive audio-follow (a book-wide first-match
+  // could fling the view a chapter away) and TRUE for deliberate navigation
+  // (reader enter, explicit jumps) where showing SOMETHING beats showing
+  // nothing.
+  function resolveCueChunk(cueIdx, cueText, allowGlobal) {
+    if (pagedCueToChunk && cueIdx >= 0 && cueIdx < pagedCueToChunk.length &&
+        pagedCueToChunk[cueIdx] >= 0) {
+      const c = chunks[pagedCueToChunk[cueIdx]];
+      if (c) return c;
+    }
+    const near = findChunkForTextNear(cueText, lastHighlightedChunkIdx, 8);
+    if (near) return near;
+    return allowGlobal ? findChunkForText(cueText) : null;
+  }
+
+  // Nearest cue index to `target` whose alignment entry is MATCHED (has a
+  // real chunk), so setCueRangeHighlight can paint its exact text green.
+  // Searches outward by index, biased BACKWARD first — in vertical-rl older
+  // text sits to the right, so landing on a matched line at-or-before the
+  // intended cue keeps unread content to the left and never reveals
+  // upcoming text as "already here". Returns -1 if no cue is matched at all.
+  function nearestMatchedCue(target) {
+    if (!pagedCueToChunk || !pagedCueToChunk.length) return -1;
+    const n = pagedCueToChunk.length;
+    if (!Number.isFinite(target)) target = 0;
+    target = Math.max(0, Math.min(n - 1, target));
+    if (pagedCueToChunk[target] >= 0) return target;
+    for (let d = 1; d < n; d++) {
+      const lo = target - d, hi = target + d;
+      if (lo >= 0 && pagedCueToChunk[lo] >= 0) return lo;
+      if (hi < n && pagedCueToChunk[hi] >= 0) return hi;
+    }
+    return -1;
+  }
+
+  // GUARANTEE a green, right-justified highlight whenever the user enters /
+  // switches into the reader. The user's hard requirement: NEVER a blank
+  // viewport and NEVER white text with nothing colored — there must always
+  // be a green line near the right edge with 2-3 lines of prior context.
+  //
+  // Intended "current" cue priority: explicit reentry jump → synced
+  // _lastAudioCueIdx (audio playhead) → last-read cue → active card's cue →
+  // first cue. We then snap to the nearest MATCHED cue (so the exact text
+  // paints green even if the intended cue happens to be alignment-unmatched)
+  // and scroll it near-right-with-context. Falls back to a book-wide text
+  // resolve if the alignment map is empty (legacy matcher), so SOMETHING
+  // always shows. Returns true if a highlight was painted.
+  function ensureGreenOnEnter(preferredCueIdx) {
+    try {
+      // Only act while the paged reader is actually the visible view. openView
+      // schedules this on untracked 60ms/260ms timeouts; a fast READ→AUDIO
+      // switch could otherwise let a leftover pass run against the hidden view
+      // and clobber the shared _lastAudioCueIdx (corrupting lock-screen
+      // cue-jump's relative base). Mirrors pagedCenterOnCue's guard.
+      if (!viewEl || viewEl.style.display === 'none') return false;
+      const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+      if (!cues.length || !chunks.length) return false;
+      // 1. choose the intended current cue
+      let want = (Number.isFinite(preferredCueIdx) && preferredCueIdx >= 0) ? preferredCueIdx : -1;
+      if (want < 0 && Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) {
+        want = window._lastAudioCueIdx;
+      }
+      if (want < 0 && Number.isFinite(lastReadCueIdx) && lastReadCueIdx >= 0) {
+        want = lastReadCueIdx;
+      }
+      if (want < 0) {
+        const ci = window.currentCardIndex;
+        if (Number.isFinite(ci) && ci >= 0 && cues[ci]?.text &&
+            window.allNotes?.[ci]?.expression === cues[ci].text) want = ci;
+      }
+      if (want < 0) want = 0;
+      // 2. snap to nearest matched cue so we can paint exact green text
+      const matchCue = nearestMatchedCue(want);
+      let chunk = (matchCue >= 0) ? chunks[pagedCueToChunk[matchCue]] : null;
+      let paintText = (matchCue >= 0) ? cues[matchCue].text : (cues[want]?.text || '');
+      // 3. absolute fallback — no matched cue (alignment empty / legacy map):
+      //    resolve via book-wide text search so the viewport is never blank.
+      if (!chunk) {
+        chunk = resolveCueChunk(want, cues[want]?.text || '', true);
+        paintText = cues[want]?.text || '';
+      }
+      if (!chunk) { log('ensureGreenOnEnter: no chunk for want=' + want); return false; }
+      // Paint. setCueRangeHighlight now spans paragraph boundaries, so a
+      // matched cue should always paint; but if it still comes back falsy
+      // (e.g. the nearest matched cue's text genuinely isn't locatable),
+      // try a book-wide resolve of the INTENDED cue before giving up, so we
+      // never leave the viewport uncolored.
+      let r = setCueRangeHighlight(chunk, paintText);
+      if (!r) {
+        const alt = resolveCueChunk(want, cues[want]?.text || '', true);
+        if (alt && alt !== chunk) {
+          const r2 = setCueRangeHighlight(alt, cues[want]?.text || '');
+          if (r2) { chunk = alt; r = r2; }
+        }
+      }
+      if (!r) { log('ensureGreenOnEnter: paint failed want=' + want); return false; }
+      lastHighlightedCue = -1;             // let the next live audio-follow paint fire
+      window._lastAudioCueIdx = want;      // keep the shared cursor at the intended cue
+      lastProgrammaticScrollTime = Date.now();
+      try { scrollChunkNearRightWithContext(chunk); } catch (_) {}
+      log('[scroll-trace] ensureGreenOnEnter want=' + want + ' matchCue=' + matchCue + ' painted=' + !!r);
+      return !!r;
+    } catch (e) { log('ensureGreenOnEnter err: ' + e.message); return false; }
+  }
+  window.pagedEnsureGreenOnEnter = ensureGreenOnEnter;
+
   // Scroll the chunk into view. In vertical-rl, that means aligning the
   // chunk's right edge with the viewport's right edge (where new content
   // appears in our scroll model). scrollIntoView({block: 'start'}) honors
@@ -1174,14 +1327,36 @@
   // key (cue-active) the legacy reader uses, so the existing
   // ::highlight(cue-active) rule in theme.css recolors the text green
   // without us writing any extra CSS.
+  // Re-apply the saved per-book scroll position for EPUB-only titles (no card
+  // to anchor to). Fire-and-forget; skips while the user is actively scrolling
+  // so it never yanks them mid-read.
+  // SYNCHRONOUS (uses the value cached by loadEpub, not an async getPref) so it
+  // can't lose a race with the prewarm's own scroll save.
+  function restoreReadScrollIfNoCard() {
+    if (!scrollEl) return;
+    if (Array.isArray(window.allNotes) && window.allNotes.length > 0) return; // has cards → centerOnActiveCard handles it
+    if (Date.now() - lastUserScrollTime < 5000) return; // actively reading — don't yank
+    const sl = savedReadScrollLeft;
+    if (Number.isFinite(sl) && Math.abs(sl) > 1 && Math.abs(scrollEl.scrollLeft - sl) > 2) {
+      suppressScrollSave = true;
+      lastProgrammaticScrollTime = Date.now(); // don't let this restore count as reading
+      scrollEl.scrollTo({ left: sl, behavior: 'instant' });
+      setTimeout(() => { suppressScrollSave = false; }, 200);
+      log('restoreReadScrollIfNoCard → ' + sl);
+    }
+  }
+
   function centerOnActiveCard() {
     try {
       const idx = window.currentCardIndex;
-      if (!Number.isFinite(idx) || !Array.isArray(window.allNotes)) return;
-      const card = window.allNotes[idx];
+      const card = (Number.isFinite(idx) && Array.isArray(window.allNotes)) ? window.allNotes[idx] : null;
       if (!card?.expression) {
-        // No active card to highlight; clear any stale highlight.
+        // EPUB-only (or no active card): there's no card to anchor to, so
+        // instead of leaving the reader at the start, re-apply the user's
+        // saved scroll position. loadEpub's initial scrollTo runs before
+        // vertical-rl layout settles and snaps back to 0; this restores it.
         clearCueHighlight();
+        restoreReadScrollIfNoCard();
         return;
       }
       // Resolve the (chunk, cueText) for the active card. The alignment
@@ -1194,13 +1369,20 @@
       // isn't a cue, fall back to text search.
       let chunk = null;
       let highlightText = card.expression;
-      if (pagedCueMapFromAlignment && pagedCueToChunk &&
-          Number.isFinite(idx) && idx < pagedCueToChunk.length &&
-          pagedCueToChunk[idx] >= 0 && pagedCues[idx]?.text) {
-        chunk = chunks[pagedCueToChunk[idx]] || null;
+      // SRT-cards titles: the active card IS a cue (card index === cue index).
+      // Use the robust resolver (map → bounded local → book-wide) so short
+      // common text doesn't false-match a far chunk and the highlight is
+      // always placed.
+      if (pagedCues[idx]?.text && pagedCues[idx].text === card.expression) {
+        chunk = resolveCueChunk(idx, pagedCues[idx].text, true);
         if (chunk) highlightText = pagedCues[idx].text;
       }
-      if (!chunk) chunk = findChunkForText(card.expression);
+      // Deck-derived card whose expression isn't a cue → search near the
+      // current position first, then book-wide.
+      if (!chunk) {
+        chunk = findChunkForTextNear(card.expression, lastHighlightedChunkIdx, 12) ||
+                findChunkForText(card.expression);
+      }
       if (!chunk) {
         log(`centerOnActiveCard: no chunk match for "${card.expression.slice(0, 20)}..."`);
         clearCueHighlight();
@@ -1226,9 +1408,259 @@
     } catch (e) { log('centerOnActiveCard error:', e.message); }
   }
 
+  // ===================== PAGED SCROLL PHYSICS (experimental) =====================
+  // Gives the free-scroll reader a "paged" feel. A slow horizontal drag rubber-
+  // bands (resistance grows the further you pull) and SNAPS BACK to where you
+  // started on release — so you can peek around the current spot/playhead
+  // without losing it. If the same gesture goes sideways THEN UP, the rubber
+  // band UNLOCKS and you can browse freely (no snap-back). A quick horizontal
+  // swipe turns one page. We drive scrollLeft directly (touch-action:none takes
+  // touch off the native scroller); programmatic scrolls (cue-follow, restore)
+  // still work because scrollLeft is unchanged as the source of truth.
+  // Kill switch: localStorage.PAGED_PHYSICS = '0'. All feel constants are here.
+  const PHYS = {
+    COMMIT_PX: 10,   // finger travel before a drag is "ours" (below = tap, handled elsewhere)
+    RUBBER_C: 0.55,  // rubber-band stiffness (lower = stiffer / more pushback)
+    PEEK_FRAC: 0.85, // max peek distance as a fraction of viewport width (asymptote)
+    FLING_V: 0.45,   // px/ms swipe velocity that turns a page
+    SNAP_MS: 340,    // snap-back animation duration
+    TURN_MS: 300,    // page-turn animation duration
+    DIR: 1,          // flip to -1 if drag/turn direction feels reversed on device
+  };
+  // Column width in vertical-rl = the line-height (horizontal extent of one
+  // vertical text line). Used to advance pages by WHOLE columns so no line is
+  // partially rendered at a page boundary. Falls back when line-height is
+  // 'normal'. Measured off a real chunk (chunks may override innerEl's line-height).
+  function _columnWidth() {
+    try {
+      const el = (chunks && chunks[0]) || innerEl;
+      const cs = getComputedStyle(el);
+      let lh = parseFloat(cs.lineHeight);
+      if (!Number.isFinite(lh) || lh <= 0) lh = (parseFloat(cs.fontSize) || 18) * 1.7;
+      return Math.max(12, lh);
+    } catch (_) { return 36; }
+  }
+  let physDragging = false; // true while OUR drag owns the gesture (existing tap/swipe handlers bail)
+  let _physAnim = null;
+  let _edgeMaskL = null, _edgeMaskR = null; // black strips hiding partial columns at the two edges
+  let _maskLW = 0, _maskRW = 0;             // their current widths (px) — autoscroll excludes them from "visible"
+  let _edgeMaskRafPending = false;
+  function _physEnabled() {
+    try { return localStorage.getItem('PAGED_PHYSICS') !== '0'; } catch (_) { return true; }
+  }
+  function _cancelPhysAnim() { if (_physAnim) { cancelAnimationFrame(_physAnim); _physAnim = null; } }
+  // iOS-style rubber band: displacement asymptotes to PEEK_FRAC*dim as the raw
+  // finger delta grows, so the further you pull the more it resists.
+  function _rubber(d, dim) {
+    const max = PHYS.PEEK_FRAC * dim;
+    const s = d < 0 ? -1 : 1;
+    const a = Math.abs(d);
+    return s * (1 - 1 / (a * PHYS.RUBBER_C / max + 1)) * max;
+  }
+  function _physAnimateTo(target, ms, onDone) {
+    _cancelPhysAnim();
+    const from = scrollEl.scrollLeft;
+    const delta = target - from;
+    if (Math.abs(delta) < 0.5) { if (onDone) onDone(); return; }
+    const t0 = performance.now();
+    const ease = (p) => 1 - Math.pow(1 - p, 3); // ease-out cubic
+    const step = (now) => {
+      const p = Math.min(1, (now - t0) / ms);
+      lastProgrammaticScrollTime = Date.now();
+      scrollEl.scrollLeft = from + delta * ease(p); // browser clamps to scroll bounds
+      if (p < 1) _physAnim = requestAnimationFrame(step);
+      else { _physAnim = null; if (onDone) onDone(); }
+    };
+    _physAnim = requestAnimationFrame(step);
+  }
+  // Settle the reading (right) edge exactly onto a column boundary so no
+  // vertical line is ever partially rendered. This is the SAME alignment
+  // autoScrollForRange uses for cues — align a line-box right edge to
+  // (sr.right - pad), where `pad` reserves room for the furigana that sits to
+  // the right of the base column — but applied to the NEAREST column on any
+  // settle (swipe page-turn, snap-back, post-autoscroll). Two robustness
+  // choices matter for cross-platform correctness:
+  //   • INSTANT scrollBy (no behavior:'smooth') — WKWebView's smooth-scroll
+  //     easing lands a few px off the boundary, which is exactly why iOS
+  //     autoscroll looked un-clean while Android's did; an instant scrollBy
+  //     lands precisely on both.
+  //   • the MEDIAN residual over every visible column (the grid is one
+  //     continuous pitch since the CSS zeroes all chunk margins/padding) — so
+  //     a stray glyph rect can't skew the alignment.
+  function _snapToColumn() {
+    if (!scrollEl || physDragging || !_physEnabled()) return;
+    if (!document.body.classList.contains('mode-read')) return;
+    const sr = scrollEl.getBoundingClientRect();
+    if (sr.width < 40) return;
+    const W = _columnWidth();
+    const pad = Math.min(24, sr.width * 0.05);
+    const targetX = sr.right - pad;            // reading edge, furigana room reserved
+    const list = (chunks && chunks.length) ? chunks : (innerEl ? [innerEl] : []);
+    const res = [];
+    for (const ch of list) {
+      let cb; try { cb = ch.getBoundingClientRect(); } catch (_) { continue; }
+      if (cb.width < 1 || cb.height < 1) continue;
+      if (cb.right < sr.left - W || cb.left > sr.right + W) continue; // not near viewport
+      // A chunk's bounding-box RIGHT edge IS a true column boundary — furigana
+      // included (it's the element's full extent) and free of the per-glyph
+      // noise that getClientRects gives (ruby annotations emit their own rects
+      // offset from the base column, which skewed the old median by ~a column).
+      // Chunks are contiguous (CSS zeroes their margins) so they share one
+      // continuous column grid of pitch W.
+      let d = cb.right - targetX;               // residual to this chunk's leading column edge
+      d -= W * Math.round(d / W);               // fold to nearest boundary, [-W/2, W/2]
+      res.push(d);
+    }
+    if (!res.length) return;
+    res.sort((a, b) => a - b);
+    const off = res[Math.floor(res.length / 2)]; // median over chunks (robust)
+    if (Math.abs(off) < 4) return;               // already on a boundary (autoscroll's own tolerance)
+    lastProgrammaticScrollTime = Date.now();
+    scrollEl.scrollBy({ left: off });            // same sign convention as autoScrollForRange
+  }
+  function _ensureEdgeMasks() {
+    const mk = (id) => {
+      const d = document.createElement('div');
+      d.id = id;
+      d.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;background:#000;z-index:2700;pointer-events:none;';
+      (viewEl || document.body).appendChild(d);
+      return d;
+    };
+    if (!_edgeMaskL || !_edgeMaskL.isConnected) _edgeMaskL = mk('pagedEdgeMaskL');
+    if (!_edgeMaskR || !_edgeMaskR.isConnected) _edgeMaskR = mk('pagedEdgeMaskR');
+  }
+  // Hide the PARTIAL column at BOTH edges so no vertical line is ever shown
+  // half-rendered (furigana included). The far (left / unread) edge gets the
+  // large `viewport mod columnWidth` leftover; the reading (right) edge gets the
+  // thin sliver of the PREVIOUS column that peeks past the reading column — the
+  // "few pixels on the right" on iPhone, and the ~1px that appears after a font
+  // change on Android. Both strips match the reader background so they read as
+  // page margins. Display-only: it never scrolls, so it can't disturb autoscroll
+  // or jiggle, and `_columnWidth()` is recomputed each call so font changes
+  // (which change the column pitch) are tracked immediately.
+  function _updateEdgeMask() {
+    if (!scrollEl) return;
+    _ensureEdgeMasks();
+    const on = _physEnabled() && document.body.classList.contains('mode-read') &&
+               viewEl && viewEl.style.display !== 'none';
+    if (!on) { _edgeMaskL.style.width = '0'; _edgeMaskR.style.width = '0'; _maskLW = 0; _maskRW = 0; return; }
+    const sr = scrollEl.getBoundingClientRect();
+    if (sr.width < 40) { _edgeMaskL.style.width = '0'; _edgeMaskR.style.width = '0'; _maskLW = 0; _maskRW = 0; return; }
+    const W = _columnWidth();
+    const list = (chunks && chunks.length) ? chunks : (innerEl ? [innerEl] : []);
+    const lefts = [], rights = [];
+    for (const ch of list) {
+      let cb; try { cb = ch.getBoundingClientRect(); } catch (_) { continue; }
+      if (cb.width < 1 || cb.height < 1) continue;
+      if (cb.right < sr.left - W || cb.left > sr.right + W) continue;
+      // cb.right is a true column boundary; the grid has uniform pitch W.
+      // Left: from sr.left to the leftmost grid boundary still >= sr.left.
+      lefts.push(cb.right + Math.ceil((sr.left - cb.right) / W) * W - sr.left);   // in [0, W)
+      // Right: from the rightmost grid boundary still <= sr.right to sr.right.
+      rights.push(sr.right - (cb.right + Math.floor((sr.right - cb.right) / W) * W)); // in [0, W)
+    }
+    let bg = '#000';
+    try {
+      bg = getComputedStyle(scrollEl).backgroundColor;
+      if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') bg = getComputedStyle(document.body).backgroundColor || '#000';
+    } catch (_) {}
+    const med = (a) => { if (!a.length) return 0; a.sort((x, y) => x - y); return a[Math.floor(a.length / 2)]; };
+    const effW = (raw) => (raw > 1.5 ? Math.min(raw, W) : 0);
+    _maskLW = effW(med(lefts));
+    _maskRW = effW(med(rights));
+    const apply = (m, w, side) => {
+      if (!(w > 0)) { m.style.width = '0'; return; }
+      m.style.background = bg;
+      m.style.top = sr.top + 'px';
+      m.style.height = (sr.bottom - sr.top) + 'px';
+      m.style.width = w + 'px';
+      m.style.left = (side === 'right' ? (sr.right - w) : sr.left) + 'px';
+    };
+    apply(_edgeMaskL, _maskLW, 'left');
+    apply(_edgeMaskR, _maskRW, 'right');
+  }
+  function _scheduleEdgeMask() {
+    if (_edgeMaskRafPending) return;
+    _edgeMaskRafPending = true;
+    requestAnimationFrame(() => { _edgeMaskRafPending = false; try { _updateEdgeMask(); } catch (_) {} });
+  }
+  function installPagedPhysics() {
+    if (!scrollEl || scrollEl._physWired || !_physEnabled()) return;
+    scrollEl._physWired = true;
+    scrollEl.style.touchAction = 'none'; // take touch off the native scroller
+    let sx = 0, sy = 0, anchor = 0;
+    let committed = false;
+    let lastX = 0, lastT = 0, vel = 0;
+    let anchorMaskTotal = 0; // mask widths at the page we're turning FROM (for the page step)
+    scrollEl.addEventListener('touchstart', (e) => {
+      const t = e.touches?.[0]; if (!t) return;
+      _cancelPhysAnim();
+      sx = t.clientX; sy = t.clientY; anchor = scrollEl.scrollLeft;
+      committed = false; physDragging = false;
+      // Captured NOW (page settled at the anchor) — during the drag the masks
+      // update to the peeked position, which would skew the page step.
+      anchorMaskTotal = (_maskLW || 0) + (_maskRW || 0);
+      lastX = t.clientX; lastT = Date.now(); vel = 0;
+    }, { passive: true });
+    scrollEl.addEventListener('touchmove', (e) => {
+      const t = e.touches?.[0]; if (!t) return;
+      const dx = t.clientX - sx, dy = t.clientY - sy;
+      const adx = Math.abs(dx), ady = Math.abs(dy);
+      if (!committed) {
+        if (adx > PHYS.COMMIT_PX && adx > ady) { committed = true; physDragging = true; }
+        else return; // vertical-first or still a tap → leave it to the other handlers
+      }
+      if (e.cancelable) e.preventDefault();
+      const now = Date.now();
+      vel = (t.clientX - lastX) / Math.max(1, now - lastT);
+      lastX = t.clientX; lastT = now;
+      const dim = scrollEl.clientWidth || cw || 360;
+      // Rubber-band the drag (resistance grows with distance); a slow drag is
+      // always a "peek" — release snaps back to the column-aligned page.
+      const disp = _rubber(dx, dim);
+      lastUserScrollTime = Date.now();
+      lastProgrammaticScrollTime = Date.now();
+      scrollEl.scrollLeft = anchor - PHYS.DIR * disp;
+    }, { passive: false });
+    const onEnd = () => {
+      if (!committed) { physDragging = false; return; }
+      const W = _columnWidth();
+      const dim = scrollEl.clientWidth || cw || 360;
+      // Advance by the columns actually VISIBLE BETWEEN the edge masks. Plain
+      // floor(dim/W) counts the masked partial columns too, so when the two
+      // partials sum to ≥ one column the page-turn jumps a column too far and
+      // EATS the blacked-out line (manual reading / EPUB-only, where there's no
+      // autoscroll to re-justify it). dim − anchorMaskTotal == N_visible × W, so
+      // round() recovers the exact visible-column count. Masks off → plain fit.
+      const cols = anchorMaskTotal > 0.5
+        ? Math.max(1, Math.round((dim - anchorMaskTotal) / W))
+        : Math.max(1, Math.floor(dim / W));
+      if (Math.abs(vel) > PHYS.FLING_V) {
+        // Quick swipe → advance one page of WHOLE columns, then settle the
+        // reading edge precisely onto a column boundary (no partial line).
+        const sign = vel < 0 ? -1 : 1;
+        // No post-turn column snap: the smooth animation stops where it lands
+        // and the edge masks hide any leftover partial column. (The snap's
+        // instant scrollBy was the "rough, unnatural stop" on iPhone — and
+        // since each turn advances by WHOLE columns, an already-aligned page
+        // stays aligned without it; the next autoscroll re-aligns regardless.)
+        _physAnimateTo(anchor - PHYS.DIR * sign * cols * W, PHYS.TURN_MS, () => _scheduleEdgeMask());
+      } else {
+        // Slow drag → spring back to where you started.
+        _physAnimateTo(anchor, PHYS.SNAP_MS, () => _scheduleEdgeMask());
+      }
+      // Keep physDragging true through the settle so the tap handler doesn't
+      // fire a dict lookup; clear shortly after.
+      setTimeout(() => { physDragging = false; }, 60);
+    };
+    scrollEl.addEventListener('touchend', onEnd, { passive: true });
+    scrollEl.addEventListener('touchcancel', onEnd, { passive: true });
+  }
+
   function setupScrollTracking() {
     let pendingSave = null;
     scrollEl.addEventListener('scroll', () => {
+      _scheduleEdgeMask(); // keep the far-edge partial-column mask in sync (rAF-throttled, never scrolls)
       // Distinguish user-initiated scroll from programmatic (audio-follow)
       // scroll. Anything not within 800ms of our last programmatic call
       // counts as the user actively reading.
@@ -1239,6 +1671,42 @@
         // refreshes lastInteraction. If it had been stopped by the
         // inactivity timeout, a small jiggle is enough to restart it.
         try { window.stats?.bumpRead?.(); } catch (_) {}
+        // Feed the read stats char tracker with whatever forward
+        // progress the user has just made. noteReadPosition is a
+        // monotonic max + delta — scrolling back is a no-op.
+        try {
+          if (document.body.classList.contains('mode-read') &&
+              window.stats?.noteReadPosition && chunks?.length) {
+            const sr = scrollEl.getBoundingClientRect();
+            let chosen = null;
+            let chosenLeft = Infinity;
+            for (const ch of chunks) {
+              const r = ch.getBoundingClientRect();
+              if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
+              if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
+              if (r.left < chosenLeft) { chosen = ch; chosenLeft = r.left; }
+            }
+            if (chosen) {
+              const off = parseInt(chosen.dataset.charOffset) || 0;
+              const len = parseInt(chosen.dataset.charLen) || 0;
+              // Credit chars up through the END of the leftmost visible
+              // chunk so the running total advances as the user enters
+              // new territory, even when their "current cursor" lands
+              // mid-chunk.
+              window.stats.noteReadPosition(off + len);
+              // Track the reading location as a CUE so the shared position
+              // (and restore-on-launch) follows reading, not just audio. Maps
+              // the leftmost visible chunk → its first cue via the alignment.
+              if (pagedChunkToCue) {
+                const ci = chunks.indexOf(chosen);
+                if (ci >= 0 && ci < pagedChunkToCue.length && pagedChunkToCue[ci] >= 0) {
+                  lastReadCueIdx = pagedChunkToCue[ci];
+                  window._lastAudioCueIdx = lastReadCueIdx;
+                }
+              }
+            }
+          }
+        } catch (_) {}
       }
       updateProgress();
       if (suppressScrollSave) return;
@@ -1247,8 +1715,48 @@
         if (currentName) {
           setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft);
         }
+        // Persist the read location as the title's card index for SRT-cards
+        // titles (card index === cue index), so a restart restores the
+        // last-read line instead of a stale card position.
+        if (lastReadCueIdx >= 0 && typeof window.persistReadCue === 'function') {
+          window.persistReadCue(lastReadCueIdx);
+        }
       }, 400);
     }, { passive: true });
+
+    // Flush the latest read position the instant the app is backgrounded /
+    // closed. The 400ms debounce above can otherwise lose it if the user swipes
+    // the app away right after scrolling — a real "position isn't saved" cause
+    // (esp. for EPUB-only titles). Only while the reader is the active view.
+    if (!window._pagedVisFlushWired) {
+      window._pagedVisFlushWired = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'hidden') return;
+        if (!currentName || !scrollEl || !viewEl || viewEl.style.display === 'none') return;
+        try { setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft); } catch (_) {}
+        if (lastReadCueIdx >= 0 && typeof window.persistReadCue === 'function') {
+          try { window.persistReadCue(lastReadCueIdx); } catch (_) {}
+        }
+      });
+    }
+
+    // Paged scroll physics (rubber-band peek / snap-back / page-turn). Idempotent
+    // (guarded by scrollEl._physWired); no-op when localStorage.PAGED_PHYSICS==='0'.
+    try { installPagedPhysics(); } catch (e) { log('installPagedPhysics failed: ' + e.message); }
+
+    // Refresh the edge masks on a font-size change. The reader font slider only
+    // writes the --font-size-read CSS var on :root (re-flowing the vertical-rl
+    // columns to a new pitch) and fires NO scroll/resize event, so the masks
+    // would otherwise keep the old column width — the "1px of the previous line
+    // after a font change" report. Observe :root's style attribute; the handler
+    // is rAF-throttled, so the (rare) extra :root style mutations are cheap.
+    if (!window._pagedFontObsWired) {
+      window._pagedFontObsWired = true;
+      try {
+        new MutationObserver(() => _scheduleEdgeMask())
+          .observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
+      } catch (_) {}
+    }
   }
 
   function setupResize() {
@@ -1265,9 +1773,26 @@
         const newW = scrollEl.clientWidth;
         if (newW === lastWidth || newW === cw) return;
         lastWidth = newW;
-        const frac = sw > 0 ? Math.abs(scrollEl.scrollLeft) / sw : 0;
         recompute();
-        scrollEl.scrollTo({ left: Math.round(frac * sw), behavior: 'instant' });
+        // Wait one more frame for vertical-rl layout to settle at the
+        // new orientation before computing chunk positions.
+        requestAnimationFrame(() => {
+          // Snap to the active card. The previous scrollLeft-fraction
+          // math (frac × sw) sent the user to the start of the book on
+          // rotation because vertical-rl + direction:rtl scrollLeft
+          // semantics flip mid-rotation on iOS WKWebView — same
+          // fraction at the new sw lands at a totally different
+          // location. centerOnActiveCard uses the chunk's
+          // getBoundingClientRect, which is rotation-stable.
+          // Bypass the user-scroll grace period (lastUserScrollTime
+          // check inside centerOnActiveCard) — rotation is a deliberate
+          // event, not "the user is reading independently."
+          const savedUserScroll = lastUserScrollTime;
+          lastUserScrollTime = 0;
+          try { centerOnActiveCard(); } catch (_) {}
+          lastUserScrollTime = savedUserScroll;
+          _scheduleEdgeMask(); // viewport width changed → recompute the leftover mask
+        });
       }, 220);
     });
   }
@@ -1279,6 +1804,7 @@
     chunks = Array.from(innerEl.querySelectorAll('.reading-chunk'));
     log(`recompute: clientW=${cw}, scrollW=${sw}, chunks=${chunks.length}`);
     updateProgress();
+    _scheduleEdgeMask(); // column pitch may have changed (font/orientation) → refresh masks
   }
 
   // Create the progress strip once and keep it as a sibling of body so
@@ -1286,7 +1812,38 @@
   // trigger the jump prompt — Capacitor WKWebView sometimes drops the
   // synthetic click after touchend, so wiring both is the reliable
   // pattern (same one shell-menu items use).
+  // In landscape, the standalone fixed strip gets clipped behind the
+  // notch/Dynamic Island. Mirror it into the appHeader (between mode
+  // tabs and the timer) so it stays visible. CSS swaps which copy is
+  // displayed based on orientation.
+  let progressInlineEl = null;
+  function ensureProgressInline() {
+    if (progressInlineEl) return progressInlineEl;
+    const header = document.getElementById('appHeader');
+    const tabs = document.getElementById('shellModeTabs');
+    if (!header || !tabs) return null;
+    progressInlineEl = document.createElement('div');
+    progressInlineEl.id = 'readingPagedProgressInline';
+    progressInlineEl.textContent = '—';
+    progressInlineEl.style.cssText =
+      'font:11px/1 var(--font-sans,system-ui);color:#aaa;letter-spacing:.03em;' +
+      'padding:0 10px;white-space:nowrap;cursor:pointer;user-select:none;' +
+      '-webkit-user-select:none;align-self:center;';
+    tabs.parentNode.insertBefore(progressInlineEl, tabs.nextSibling);
+    progressInlineEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof window.onProgressBarTap === 'function') {
+        try { window.onProgressBarTap(e); } catch (_) {}
+      }
+    });
+    return progressInlineEl;
+  }
+
   function ensureProgressStrip() {
+    // Header clone is cheap to set up here so card-only mode (which calls
+    // ensureProgressStrip from window.pagedEnsureProgressStrip) also gets
+    // the landscape-friendly placement.
+    ensureProgressInline();
     if (progressEl) return;
     progressEl = document.createElement('div');
     progressEl.id = 'readingPagedProgress';
@@ -1432,6 +1989,9 @@
     modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
     setTimeout(() => { try { input.focus(); input.select(); } catch (_) {} }, 60);
   }
+  // Exposed so the top-left progress-strip tap (routed through
+  // app.js onProgressBarTap) can open the read-mode percent/char jump.
+  window.pagedOpenJumpModal = openJumpModal;
 
   // Update the progress strip. Reads the scroll fraction and multiplies
   // by totalChars. Cheap enough to run on every scroll event.
@@ -1472,15 +2032,23 @@
   //
   // opts.cueIdx is honored for read mode (paints the char position
   // for that cue's chunk) and as a fallback for the others.
+  // Single point of truth for what text the strip displays. Writes to
+  // both copies (standalone fixed + header inline) so a CSS-driven swap
+  // between orientations doesn't drop a frame.
+  function writeStripText(text) {
+    if (progressEl) progressEl.textContent = text;
+    if (progressInlineEl) progressInlineEl.textContent = text;
+  }
+
   function updateProgress(opts) {
-    if (!progressEl) return;
+    if (!progressEl && !progressInlineEl) return;
     const mode = _activeMode();
 
     // --- AUDIO MODE: current / total audio time ---
     if (mode === 'audio' && typeof window.getAudioProgress === 'function') {
       const a = window.getAudioProgress();
       if (a && Number.isFinite(a.dur) && a.dur > 0) {
-        progressEl.textContent = _fmtHms(a.ms) + ' / ' + _fmtHms(a.dur);
+        writeStripText(_fmtHms(a.ms) + ' / ' + _fmtHms(a.dur));
         return;
       }
       // No duration yet — fall through to default.
@@ -1489,15 +2057,23 @@
     // --- CARD MODE: card / total ---
     if (mode === 'card' && Array.isArray(window.allNotes) && window.allNotes.length) {
       const ci = Number.isFinite(window.currentCardIndex) ? window.currentCardIndex : 0;
-      progressEl.textContent = (ci + 1).toLocaleString() + ' / ' +
-                               window.allNotes.length.toLocaleString();
+      writeStripText((ci + 1).toLocaleString() + ' / ' +
+                     window.allNotes.length.toLocaleString());
       return;
     }
 
     // --- READ MODE (or any mode with EPUB loaded): char position ---
     if (totalChars) {
       let cur = -1;
-      if (opts && Number.isFinite(opts.cueIdx)) {
+      // Prefer the explicit cueIdx ONLY when in audio mode — that's
+      // where "show me where the audio cue is in the text" actually
+      // matches the user's mental model. In read mode we always want
+      // the SCROLL position (where the reader is looking) — falling
+      // back to scroll when cueIdx is unavailable used to leave the
+      // strip stuck on '—' for new titles whose audio cue index was
+      // stale or -1, and flicker between scroll-chars and '—' as
+      // stray audio events came in.
+      if (mode === 'audio' && opts && Number.isFinite(opts.cueIdx) && opts.cueIdx >= 0) {
         if (pagedCueToChunk && pagedCueToChunk[opts.cueIdx] >= 0) {
           const chunk = chunks[pagedCueToChunk[opts.cueIdx]];
           if (chunk) {
@@ -1506,26 +2082,176 @@
             cur = off + len;
           }
         }
-      } else if (scrollEl) {
-        const sw = scrollEl.scrollWidth - scrollEl.clientWidth;
-        if (sw > 0) {
-          const frac = Math.min(1, Math.max(0, Math.abs(scrollEl.scrollLeft) / sw));
-          cur = Math.round(totalChars * frac);
+      }
+      if (cur < 0 && scrollEl) {
+        // Pick the LEFTMOST visible chunk. In vertical-rl content
+        // flows right-to-left across columns; the leftmost on-screen
+        // chunk is the NEWEST text the user is currently focused on.
+        // Earlier we used the rightmost — that's the oldest visible
+        // text, which in landscape (more columns per page) sits many
+        // columns BEHIND the user's actual position. So the 33k →
+        // 16k mismatch on rotation was the rightmost chunk falling
+        // back N columns when the screen widened. Leftmost is
+        // approximately the same regardless of how many columns
+        // fit per page.
+        let chosen = null;
+        let chosenLeft = Infinity;
+        if (chunks?.length) {
+          const sr = scrollEl.getBoundingClientRect();
+          for (const ch of chunks) {
+            const r = ch.getBoundingClientRect();
+            if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
+            if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
+            if (r.left < chosenLeft) { chosen = ch; chosenLeft = r.left; }
+          }
+        }
+        if (chosen) {
+          const off = parseInt(chosen.dataset.charOffset) || 0;
+          const len = parseInt(chosen.dataset.charLen) || 0;
+          // Use the chunk's start offset (not end). The user is
+          // CURRENTLY reading this chunk's first lines, so off ≈
+          // their position. off+len would put them past it.
+          cur = off;
+        } else {
+          // No visible chunks yet (fresh title, layout in flight).
+          // Show "0 / N · 0%" instead of "—" — less alarming than a
+          // dash on the position strip while the user waits.
+          cur = 0;
         }
       }
       if (cur >= 0) {
         const pct = Math.round((cur / totalChars) * 1000) / 10;
-        progressEl.textContent = `${cur.toLocaleString()} / ${totalChars.toLocaleString()} · ${pct}%`;
+        writeStripText(`${cur.toLocaleString()} / ${totalChars.toLocaleString()} · ${pct}%`);
         return;
       }
     }
 
-    progressEl.textContent = '—';
+    writeStripText('—');
   }
   // Externally callable from card / audio mode so the progress strip
   // tracks the current playhead even when the reader view is hidden.
   window.pagedUpdateProgressForCue = function (cueIdx) {
     try { updateProgress({ cueIdx }); } catch (_) {}
+  };
+  // Public hook so card-only mode (Anki deck loaded, no EPUB, no
+  // audiobook) can still see the top-left "N / total" counter without
+  // ever opening the reader. Without this the strip was created lazily
+  // inside the first openView() call — so Anki-only users got NO strip
+  // at all. This idempotently creates the strip DOM and triggers an
+  // initial paint based on the current mode.
+  window.pagedEnsureProgressStrip = function () {
+    try {
+      // CRITICAL: the strip's CSS (position:fixed, z-index:9001, top, left)
+      // lives inside the paged-reader stylesheet that ensureView() injects.
+      // When this hook is the FIRST entry into the paged reader (Anki-only
+      // titles never call openView/ensureView), the stylesheet wasn't yet
+      // in the DOM, so the bare <div> rendered inline with browser defaults
+      // — visually nowhere. Inject the stylesheet first.
+      ensureStylesheet();
+      ensureProgressStrip();
+      updateProgress();
+    } catch (_) {}
+  };
+
+  // Wait for the vertical-rl layout to settle. iOS WKWebView frequently
+  // needs more than the canonical "2 RAFs" before innerEl has a real
+  // scrollWidth — especially for big EPUBs with many sections. Polls
+  // until scrollWidth exceeds clientWidth (i.e. content has overflowed
+  // horizontally as expected) or the timeout elapses.
+  async function _waitForPagedLayout(maxMs) {
+    const start = Date.now();
+    while (Date.now() - start < (maxMs || 2000)) {
+      if (scrollEl && innerEl &&
+          scrollEl.scrollWidth > scrollEl.clientWidth + 10) {
+        return true;
+      }
+      await new Promise(r => requestAnimationFrame(r));
+    }
+    return false;
+  }
+
+  // Silently load + lay out + center the reader at app boot, while the
+  // user is still in card mode. The "blank reader on first switch"
+  // symptom traces back to: chunks land in DOM, but layout hasn't
+  // settled when openView's setTimeout fires recompute/centerOnActiveCard
+  // — so scrollLeft ends up at a position that points at empty space.
+  // Playing a card through reliably fixed it because the audio cue
+  // events kept re-triggering scroll long after layout had stabilized.
+  // The prewarm does the same work up front: visibility:hidden + no
+  // pointer events while we mount, lay out, recompute, and position.
+  // User stays in card mode the whole time.
+  // Override the legacy reading-mode.js's prewarmReader so the existing
+  // app.js call sites (autoRestoreFromTitles) trigger the paged reader's
+  // silent layout-warm instead of the now-deprecated legacy parser.
+  // Defer the override until the IIFE finishes — at module-load time the
+  // legacy prewarmReader hasn't been assigned yet (reading-mode.js runs
+  // its IIFE, then this file's IIFE; both export window functions during
+  // their respective inits).
+  setTimeout(() => {
+    if (typeof window.pagedPrewarm === 'function') {
+      window.prewarmReader = window.pagedPrewarm;
+      log('window.prewarmReader → pagedPrewarm');
+    }
+  }, 0);
+
+  window.pagedPrewarm = async function () {
+    if (window._pagedPrewarmInFlight || window._pagedPrewarmDone) return;
+    // If we're ALREADY in read mode, openView owns the visible load. Prewarm
+    // would set visibility:hidden on the live reader AND kick a second
+    // concurrent EPUB load — that's the black-screen-on-open-to-read race.
+    // Skip; openView handles the load + paint. (Prewarm is only useful to
+    // preload while in another mode for a later switch into read.)
+    if (document.body.classList.contains('mode-read')) return;
+    window._pagedPrewarmInFlight = true;
+    try {
+      ensureView();
+      // Render-but-don't-paint: visibility:hidden so layout computes,
+      // pointer-events:none so any touch the user makes goes straight
+      // through to whatever's behind. Stays "display:flex" the whole
+      // time so we don't trigger another layout pass on the way out.
+      const prevDisplay    = viewEl.style.display;
+      const prevVisibility = viewEl.style.visibility;
+      const prevPointer    = viewEl.style.pointerEvents;
+      viewEl.style.visibility = 'hidden';
+      viewEl.style.pointerEvents = 'none';
+      viewEl.style.display = 'flex';
+      try {
+        const loaded = await tryLoadFromActiveTitle();
+        if (innerEl.querySelector('.reading-chunk')) {
+          // Wait for vertical-rl layout to materialize. Without this,
+          // recompute reads scrollWidth=0 and centerOnActiveCard does
+          // nothing useful.
+          await _waitForPagedLayout(2500);
+          recompute();
+          centerOnActiveCard();
+          try { await loadAudiobookCues(); } catch (_) {}
+          try { attachBgListener(); } catch (_) {}
+          // Persist the centered position so the FIRST visible openView
+          // restores it deterministically. ONLY for card-bearing titles —
+          // for EPUB-only there's no card, so scrollLeft here may still be the
+          // snapped-to-0 value (centerOnActiveCard → restoreReadScrollIfNoCard
+          // re-applies the real position asynchronously); saving now would
+          // clobber the user's saved spot back to 0.
+          try {
+            if (currentName && Array.isArray(window.allNotes) && window.allNotes.length) {
+              setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft);
+            }
+          } catch (_) {}
+          log('prewarm complete (chunks=' + chunks.length + ' scrollLeft=' + scrollEl.scrollLeft + ')');
+        } else {
+          log('prewarm: no chunks after tryLoadFromActiveTitle (no EPUB attached?)');
+        }
+      } finally {
+        viewEl.style.display = prevDisplay || 'none';
+        viewEl.style.visibility = prevVisibility || '';
+        viewEl.style.pointerEvents = prevPointer || '';
+      }
+      window._pagedPrewarmDone = true;
+    } catch (e) {
+      log('prewarm error:', e?.message || e);
+    } finally {
+      window._pagedPrewarmInFlight = false;
+    }
   };
 
   // Dict lookup via caretRangeFromPoint + CSS Custom Highlight API. No
@@ -1743,13 +2469,17 @@
         } catch (e) {}
       });
 
-      // Restore scrollLeft if same book; otherwise start at page 0.
-      const savedName = await getPref(KEY_LAST_NAME);
+      // Restore THIS book's saved scroll position. The key is per-book
+      // (KEY_LAST_SCROLL_PREFIX + name), so it's always the right book's spot —
+      // the old `savedName === name` gate only restored when this was ALSO the
+      // globally last-opened book, so an EPUB-only title silently lost its
+      // position the moment any other title was opened in between. (This is the
+      // "position isn't saved for EPUB-only" bug.) A never-opened book has no
+      // key → resumeLeft stays 0 → starts at the beginning.
       let resumeLeft = 0;
-      if (savedName === name) {
-        const sl = parseFloat(await getPref(KEY_LAST_SCROLL_PREFIX + name) || '0');
-        if (Number.isFinite(sl)) resumeLeft = sl;
-      }
+      const sl = parseFloat(await getPref(KEY_LAST_SCROLL_PREFIX + name) || '0');
+      if (Number.isFinite(sl)) resumeLeft = sl;
+      savedReadScrollLeft = resumeLeft; // cache for the post-layout sync re-apply (restoreReadScrollIfNoCard)
       await setPref(KEY_LAST_NAME, name);
       suppressScrollSave = true;
       scrollEl.scrollTo({ left: resumeLeft, behavior: 'instant' });
@@ -1770,17 +2500,21 @@
   // chunk is off-screen.
 
   async function loadAudiobookCues() {
-    pagedCues = []; pagedCueToChunk = null; pagedAudioPath = null;
+    pagedCues = []; pagedCueToChunk = null; pagedChunkToCue = null; pagedAudioPath = null;
+    window._pagedAudioPath = null; // expose for read-mode PLAY (toggleReadingPlayback)
     pagedCueMapFromAlignment = false;
+    lastReadCueIdx = -1; // new book/title → drop any stale read-cue from the prior one
     if (!window.srtParser?.parseSrt) { log('srtParser missing'); return false; }
 
     // Get audio + SRT paths. Try title-store first (newer), fall back to
     // deck-based legacy pairings.
     let audio = null, srt = null;
+    let activeTitle = null;
     try {
       if (window._activeTitleId && window.titleStore?.list) {
         const titles = await window.titleStore.list();
-        const t = titles.find(x => x.id === window._activeTitleId);
+        activeTitle = titles.find(x => x.id === window._activeTitleId) || null;
+        const t = activeTitle;
         if (t?.attachments?.audio?.path) audio = { path: t.attachments.audio.path, name: t.attachments.audio.name };
         if (t?.attachments?.srt?.path)   srt   = { path: t.attachments.srt.path,   name: t.attachments.srt.name };
       }
@@ -1793,8 +2527,23 @@
         srt   = srt   || await window.getSrtPairingForDeck(deck);
       }
     }
-    if (!audio || !srt) { log('No audio/srt context for paged reader'); return false; }
+    if (!audio || !srt) {
+      log('No audio/srt context for paged reader');
+      // Wipe the stale LEGACY audiobook context ONLY for a GENUINELY EPUB-only
+      // title (epub + NO audiobook/audio/srt/deck attachment). `!audio||!srt`
+      // here only means the PAGED resolver couldn't find audio — for an
+      // "enriched" title whose audio the LEGACY reader loaded but this resolver
+      // missed (older pairing / timing), we must KEEP __abCues, else its
+      // Set-playhead + cue highlight vanish. The leak that clearing fixes (stale
+      // cues bleeding into an EPUB-only book) only happens for true EPUB-only
+      // titles, so scope the clear to exactly those.
+      const at = activeTitle && activeTitle.attachments;
+      const epubOnly = !!at && !!at.epub && !at.audiobook && !at.audio && !at.srt && !at.deck;
+      if (epubOnly) { try { window._clearLegacyAudioContext?.(); } catch (_) {} }
+      return false;
+    }
     pagedAudioPath = audio.path;
+    window._pagedAudioPath = audio.path; // the visible reader's CURRENT-title audiobook
 
     try {
       const url = window.Capacitor?.convertFileSrc
@@ -1857,6 +2606,7 @@
         if (ratio >= window.cueAlignment.MIN_MATCHED_RATIO) {
           const maps = window.cueAlignment.buildCueToChunk(alignment, chunks);
           pagedCueToChunk = maps.cueToChunk;
+          pagedChunkToCue = maps.chunkToCue;
           pagedCueMapFromAlignment = true;
           used = cached ? 'align-cache' : 'align-fresh';
         } else {
@@ -1970,9 +2720,7 @@
     // search if the map missed (e.g. buildCueChunkMaps' forward-cursor
     // skipped past a chunk, or the map wasn't fully populated when this
     // event fired).
-    let chunkIdx = pagedCueToChunk ? pagedCueToChunk[cueIdx] : -1;
-    let chunk = (chunkIdx >= 0) ? chunks[chunkIdx] : null;
-    if (!chunk) chunk = findChunkForText(cue.text);
+    const chunk = resolveCueChunk(cueIdx, cue.text, !pagedCueMapFromAlignment);
     if (!chunk) {
       log(`paintCueHighlight: no chunk for cue ${cueIdx} "${cue.text.slice(0, 20)}"`);
       return;
@@ -1989,25 +2737,49 @@
   // (node, offset) pairs for a Range.
   function setCueRangeHighlight(chunk, cueText) {
     if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
-    const textNodes = [];
-    let flat = '';
-    const walker = document.createTreeWalker(chunk, NodeFilter.SHOW_TEXT, {
-      acceptNode(n) {
-        let p = n.parentNode;
-        while (p && p !== chunk) {
-          if (p.tagName === 'RT' || p.tagName === 'RP') return NodeFilter.FILTER_REJECT;
-          p = p.parentNode;
-        }
-        return n.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-      }
-    });
-    let n;
-    while ((n = walker.nextNode())) { textNodes.push(n); flat += n.nodeValue; }
-    if (!flat) return;
     const normCue = normalizeJP(cueText);
     if (!normCue) { clearCueHighlight(); return; }
-    const normFlat = normalizeJP(flat);
-    const normStart = normFlat.indexOf(normCue);
+    // Collect text nodes (skipping ruby rt/rp) from `chunk`, EXTENDING into
+    // following sibling chunks when the cue text straddles a paragraph
+    // boundary. The cue→chunk map anchors a cue to the chunk holding its
+    // FIRST char; SRT cues are segmented independently of paragraph breaks,
+    // so a cue can continue into the next chunk and be only HALF-present in
+    // the anchor chunk. A single-chunk indexOf would then miss → clear →
+    // white text (the "no green / skips a line" bug, on enter AND during
+    // live audio-follow). Walking consecutive chunks reconstructs the same
+    // flat text the alignment matched against, so the Range can span the
+    // break (CSS Custom Highlights paint across block elements). Capped so a
+    // genuinely-absent cue can't walk the whole book.
+    const startIdx = chunks.indexOf(chunk);
+    const MAX_SPAN_CHUNKS = 4;
+    const textNodes = [];
+    let flat = '';
+    const collectChunk = (c) => {
+      const walker = document.createTreeWalker(c, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          let p = n.parentNode;
+          while (p && p !== c) {
+            if (p.tagName === 'RT' || p.tagName === 'RP') return NodeFilter.FILTER_REJECT;
+            p = p.parentNode;
+          }
+          return n.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      });
+      let n;
+      while ((n = walker.nextNode())) { textNodes.push(n); flat += n.nodeValue; }
+    };
+    let normStart = -1;
+    const maxIdx = (startIdx >= 0) ? Math.min(chunks.length - 1, startIdx + MAX_SPAN_CHUNKS) : -1;
+    let ci = startIdx;
+    // Collect the anchor chunk first; extend forward ONLY while the cue text
+    // isn't yet fully contained. A cue that fits one chunk matches on the
+    // first iteration and never touches its neighbours (identical to before).
+    do {
+      collectChunk((startIdx >= 0) ? chunks[ci] : chunk);
+      normStart = normalizeJP(flat).indexOf(normCue);
+      ci++;
+    } while (normStart < 0 && startIdx >= 0 && ci <= maxIdx);
+    if (!flat) return;
     if (normStart < 0) { clearCueHighlight(); return; }
     const normEnd = normStart + normCue.length;
     // Map normalized indices back to raw indices in `flat`.
@@ -2061,6 +2833,8 @@
       // re-publish to trigger invalidation).
       CSS.highlights.set('cue-active', activeCueHighlight);
       document.body.classList.add('has-cue-highlight');
+      // Remember which chunk is green — anchors the bounded local search.
+      lastHighlightedChunkIdx = chunks.indexOf(chunk);
       // Force a synchronous layout read so the new highlight invalidation
       // is flushed before any subsequent paint queues up. Without this,
       // rapid back-to-back paints during a smooth scroll animation could
@@ -2095,7 +2869,16 @@
     // not to nudge to a different position each line. The user explicitly
     // wants the page to stay put while a cue is fully readable, and only
     // shift when the cue runs off the edge.
-    const fullyVisible = rangeRect.left >= sr.left && rangeRect.right <= sr.right;
+    //
+    // CRITICAL: exclude the edge MASKS from the visible region. A cue that has
+    // advanced under the left mask is geometrically on-screen (rangeRect.left >=
+    // sr.left) but VISUALLY BLACKED OUT — without this the narrator reads a line
+    // that's never shown. Treating the masked strip as off-screen makes the page
+    // turn the instant the cue reaches it, re-justifying that line to the clean
+    // reading edge. (_maskLW/_maskRW are 0 when masks are off.)
+    const visLeft = sr.left + (_maskLW || 0);
+    const visRight = sr.right - (_maskRW || 0);
+    const fullyVisible = rangeRect.left >= visLeft && rangeRect.right <= visRight;
     if (fullyVisible) return;
     // Cue overflows on one side (or is entirely off-screen). Right-justify
     // the cue's BEGINNING at the viewport's right edge (= top-right of
@@ -2122,24 +2905,41 @@
   // Load the EPUB attached to the currently active title, if we haven't
   // already loaded that title. Returns true if a load was attempted.
   let currentTitleId = null;
+  let _epubLoadPromise = null;   // in-flight load, to coalesce concurrent callers
+  let _epubLoadTitleId = null;
   async function tryLoadFromActiveTitle() {
-    try {
-      if (!window.titleStore || !window._activeTitleId) return false;
-      // Don't reload the same book we already have.
-      if (window._activeTitleId === currentTitleId &&
-          innerEl.querySelector('.reading-chunk')) return false;
-      const titles = await window.titleStore.list();
-      const t = titles.find(x => x.id === window._activeTitleId);
-      const ep = t?.attachments?.epub;
-      if (!ep?.uri || !ep?.name) return false;
-      currentTitleId = window._activeTitleId;
-      log(`Auto-load from active title: ${ep.name}`);
-      await loadEpubFromUri(ep.uri, ep.name);
-      return true;
-    } catch (e) {
-      log('tryLoadFromActiveTitle error:', e.message);
-      return false;
-    }
+    if (!window.titleStore || !window._activeTitleId) return false;
+    // Don't reload the same book we already have.
+    if (window._activeTitleId === currentTitleId &&
+        innerEl.querySelector('.reading-chunk')) return false;
+    const titleId = window._activeTitleId;
+    // COALESCE concurrent loads. openView (visible load when restoring straight
+    // into read mode) and pagedPrewarm (hidden preload) both fire on the same
+    // title open; two concurrent loadEpubFromUri calls race on innerEl.innerHTML
+    // → corrupted/empty render → BLACK reader. Reuse the in-flight load instead.
+    // _epubLoadPromise is assigned SYNCHRONOUSLY (before any await) so the second
+    // caller always sees it.
+    if (_epubLoadPromise && _epubLoadTitleId === titleId) return _epubLoadPromise;
+    _epubLoadTitleId = titleId;
+    _epubLoadPromise = (async () => {
+      try {
+        const titles = await window.titleStore.list();
+        const t = titles.find(x => x.id === titleId);
+        const ep = t?.attachments?.epub;
+        if (!ep?.uri || !ep?.name) return false;
+        currentTitleId = titleId;
+        log(`Auto-load from active title: ${ep.name}`);
+        await loadEpubFromUri(ep.uri, ep.name);
+        return true;
+      } catch (e) {
+        log('tryLoadFromActiveTitle error: ' + (e?.message || e));
+        return false;
+      } finally {
+        _epubLoadPromise = null;
+        _epubLoadTitleId = null;
+      }
+    })();
+    return _epubLoadPromise;
   }
 
   async function openView() {
@@ -2163,28 +2963,53 @@
     // Auto-load EPUB from the active title.
     await tryLoadFromActiveTitle();
 
-    if (innerEl.querySelector('.reading-chunk')) {
-      setTimeout(async () => {
-        recompute();
-        centerOnActiveCard();
-        await loadAudiobookCues();
-        attachBgListener();
-        // Consume a pending audio-reentry centering set by
-        // reentryChoose('audio'). One-shot — clear after use so a
-        // later openView doesn't re-trigger.
-        try {
-          const jumpCue = window._reentryAudioJumpCueIdx;
-          if (Number.isFinite(jumpCue)) {
-            window._reentryAudioJumpCueIdx = null;
-            // Small extra delay so loadAudiobookCues' alignment-map
-            // setup is fully done before we read pagedCueToChunk.
-            setTimeout(() => {
-              try { window.pagedCenterOnCue?.(jumpCue); } catch (_) {}
-            }, 60);
-          }
-        } catch (_) {}
-      }, 80);
-    }
+    // Run the cue-load + green-highlight setup once the EPUB chunks are
+    // actually in the DOM. THE COLD-OPEN BUG: on "switch to read immediately
+    // after opening a title", loadEpubFromUri can still be rendering chunks
+    // when we reach here — a one-shot `if (.reading-chunk)` check would then
+    // skip the ENTIRE setup and leave the reader unmarked until the user plays
+    // a card (which warms the shared state, masking the race). Poll for the
+    // chunks first, then retry the paint until it lands.
+    let _openWaited = 0;
+    const runReaderEnterSetup = async () => {
+      if (!viewEl || viewEl.style.display === 'none') return;       // left read mode
+      if (!innerEl.querySelector('.reading-chunk')) {
+        if (_openWaited < 4000) { _openWaited += 80; setTimeout(runReaderEnterSetup, 80); }
+        return;
+      }
+      recompute();
+      centerOnActiveCard();
+      _scheduleEdgeMask(); // paint the leftover-column mask now that content is laid out
+      await loadAudiobookCues();
+      attachBgListener();
+      if (!viewEl || viewEl.style.display === 'none') return;       // bailed during await
+      lastUserScrollTime = 0; // deliberate enter → always allow centering
+      const jumpCue = window._reentryAudioJumpCueIdx;
+      window._reentryAudioJumpCueIdx = null;
+      const preferred = Number.isFinite(jumpCue) ? jumpCue : -1;
+      const cueN = (pagedCues?.length ? pagedCues : (window.__abCues || [])).length;
+      if (cueN <= 0) { centerOnActiveCard(); return; }
+      // GUARANTEED green-on-enter, WITH RETRY. chunks, cues, and the alignment
+      // map don't all become ready at the same instant on a cold open, so keep
+      // re-attempting the paint until it actually lands — this is what "playing
+      // a card first" did implicitly by warming the state. Yield the moment
+      // audio starts (live audio-follow owns the highlight then) or the reader
+      // is closed. ensureGreenOnEnter returns true on a successful paint, which
+      // stops the retry.
+      let _tries = 0;
+      const tryPaint = () => {
+        if (!viewEl || viewEl.style.display === 'none') return;
+        const ok = ensureGreenOnEnter(preferred);
+        _tries++;
+        // The FIRST attempt always runs (no blank gap on enter, even while
+        // audio plays). Keep retrying only while it hasn't painted, under the
+        // cap, AND audio isn't driving the highlight live — once _bgPlaying is
+        // true, __onPagedCueUpdate owns the paint and retries would fight it.
+        if (!ok && _tries < 20 && !window._bgPlaying) setTimeout(tryPaint, 120);
+      };
+      tryPaint();
+    };
+    setTimeout(runReaderEnterSetup, 80);
   }
   function closeView() {
     if (viewEl) viewEl.style.display = 'none';
@@ -2200,6 +3025,16 @@
     const original = window.notifyCardIndexChanged;
     window.notifyCardIndexChanged = function (idx) {
       try { if (typeof original === 'function') original(idx); } catch (e) {}
+      // Keep the shared "current subtitle" in sync when the active card IS a
+      // cue (SRT-cards titles: card index === cue index). Then read-mode enter
+      // and the audio-follow highlight all reference the same current line.
+      try {
+        const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+        if (Number.isFinite(idx) && idx >= 0 && idx < cues.length &&
+            cues[idx]?.text && window.allNotes?.[idx]?.expression === cues[idx].text) {
+          window._lastAudioCueIdx = idx;
+        }
+      } catch (e) {}
       if (viewEl && viewEl.style.display !== 'none') {
         try { centerOnActiveCard(); } catch (e) {}
       }
@@ -2311,6 +3146,12 @@
     // This is the same machinery the old swipe-up gesture used.
     paintSelectionHighlight(chosen, fullCue.text || '');
     selectedCue = { cue: fullCue, idx: nearest.idx, chunk: chosen };
+    // Paint cue-active (green) + reset BOTH cue gates so the highlight FOLLOWS
+    // as audio advances — legacy abUpdateCueDisplay's own `idx===abCurrentCueIdx`
+    // gate would otherwise swallow the first update. See pagedPlayFromCue.
+    try { setCueRangeHighlight(chosen, fullCue.text || ''); } catch (_) {}
+    lastHighlightedCue = -1;
+    try { window._resetAbCueGate?.(); } catch (_) {}
     note('setPlayhead → cue#' + nearest.idx + ' "' + (fullCue.text||'').slice(0,30) +
          '" at ' + Math.round(nearest.startMs) + 'ms');
     // Resolve the audio file path + URL. Must come from somewhere even
@@ -2343,7 +3184,6 @@
       try { window.showToast?.('Play error: ' + e.message, 2200); } catch (_) {}
       return;
     }
-    try { window.showToast?.('▶ cue ' + nearest.idx, 1400); } catch (_) {}
   };
 
   window.openPagedReader     = openView;
@@ -2371,11 +3211,8 @@
     const cuesSrc = (pagedCues?.length ? pagedCues : (window.__abCues || []));
     const cue = cuesSrc[cueIdx];
     if (!cue) return false;
-    let chunk = null;
-    if (pagedCueToChunk && pagedCueToChunk[cueIdx] >= 0) {
-      chunk = chunks[pagedCueToChunk[cueIdx]] || null;
-    }
-    if (!chunk) chunk = findChunkForText(cue.text || '');
+    // Deliberate jump → allow the book-wide fallback so we always land somewhere.
+    const chunk = resolveCueChunk(cueIdx, cue.text || '', true);
     if (!chunk) {
       log('pagedCenterOnCue: no chunk for cue ' + cueIdx);
       return false;
@@ -2506,15 +3343,21 @@
     }
     if (!chunk) chunk = findChunkForText(cue.text);
     if (chunk) {
-      try { paintSelectionHighlight(chunk, cue.text || ''); } catch (e) {}
+      // Paint the cue-active (GREEN) highlight directly — the same key the
+      // audio auto-follow uses — so the line is green immediately AND keeps
+      // following as audio advances. (The old paintSelectionHighlight set the
+      // separate reader-selection key, which is static and doesn't move with
+      // the playhead.)
+      try { setCueRangeHighlight(chunk, cue.text || ''); } catch (e) {}
     }
-    // Reset the highlight-cue gate so the position listener WILL
-    // fire __onPagedCueUpdate when the new cue lands — without this
-    // reset, if lastHighlightedCue happens to already equal cueIdx
-    // (or the cue we land on right after), the listener's
-    // `idx === lastHighlightedCue` early return swallows the paint
-    // and the cue plays unhighlighted.
+    // Reset BOTH cue gates so the position listener re-renders and re-fires
+    // __onPagedCueUpdate for the landing cue — even when the audio lands on the
+    // SAME index that was already current. The paged gate alone isn't enough:
+    // the LEGACY abUpdateCueDisplay has its own `idx === abCurrentCueIdx` early
+    // return that swallows the update upstream (the "Set Playhead → line not
+    // green" bug). _resetAbCueGate (reading-mode.js) clears the legacy one.
     lastHighlightedCue = -1;
+    try { window._resetAbCueGate?.(); } catch (_) {}
     // Construct play URL + adjusted startMs (AUDIO_START_OFFSET_MS
     // compensates MP3 frame alignment + SRT-imprecision so the first
     // word of the cue isn't clipped).
@@ -2548,13 +3391,86 @@
   // than register a second listener (which fought legacy for the same
   // CSS.highlights 'cue-active' key and lost the race), we piggyback.
   // Receives (idx, cue) — `cue` may be null when idx<0.
-  window.__onPagedCueUpdate = function (idx, cue) {
+  window.__onPagedCueUpdate = function (idx, cue, positionMs) {
     // Update the top-left progress strip regardless of whether the
     // paged reader view is visible — the strip lives at body level
     // and is visible across all modes (card / read / audio). User
     // wanted the counter to track current playhead position even
     // outside read mode.
     if (Number.isFinite(idx) && idx >= 0) {
+      // Audio chars: credit cue text length as the playhead advances —
+      // but ONLY while the user is actually in AUDIO mode. Card-mode SRT
+      // clips share the BackgroundAudio plugin and also set _bgPlaying, so
+      // gating on _bgPlaying alone wrongly counted card browsing as
+      // listening. And only credit a CONTINUOUS forward advance: the first
+      // cue of a session (no prior baseline) or a big jump (seek / mode
+      // re-entry / catch-up) RE-BASELINES without crediting — previously the
+      // whole 0→N range got dumped in at once (the "huge chars" bug).
+      // Credit while audio plays in a LISTENING context — audio mode OR
+      // reading-along (read mode). Card mode is EXCLUDED: its SRT clips share
+      // the plugin and set _bgPlaying but aren't "listening" (this was the
+      // over-count source). Only a CONTINUOUS advance counts: the first cue of
+      // a session (no baseline) or a seek (big TIME gap) re-baselines WITHOUT
+      // crediting, so the whole range can never dump in at once. The baseline
+      // is reset on each audio-mode entry (openAudiobookMode), so re-entering
+      // at an earlier position credits cleanly instead of being swallowed by a
+      // stale high-water mark.
+      const listening = window._bgPlaying && !document.body.classList.contains('mode-card');
+      if (listening && window.stats?.incrementAudioChars) {
+        const cuesS = (window.pagedCues?.length ? window.pagedCues : window.__abCues) || [];
+        const prev = window._lastAudioCueIdxForStats ?? -1;
+        // Capture the CURRENT playhead + wall clock, and read the PRIOR
+        // baseline before overwriting it below.
+        const nowWall = Date.now();
+        const rate = parseFloat(window.audioPlaybackRate) || 1;
+        const lastWall = window._audioStatsLastWallMs ?? 0;
+        const lastPos  = window._audioStatsLastPosMs ?? -1;
+        const posMs = Number.isFinite(positionMs) ? positionMs : (cuesS[idx]?.startMs ?? 0);
+        if (idx > prev) {                       // credit FORWARD advances only
+          // CONTINUITY CHECK (replaces the old cue-start-time gap ≤ 3000ms,
+          // which compared cue DURATIONS and silently dropped every cue
+          // longer than 3 s — undercounting real listening by ~half).
+          //
+          // The right question isn't "how long is this cue" but "did the
+          // playhead actually traverse this span in real time, or did the
+          // user SEEK?". Compare playhead advance to wall-clock advance,
+          // scaled by playback rate: continuous listening moves the
+          // playhead ≈ wall × rate; a forward seek moves it far more than
+          // elapsed real time allows. This also credits screen-off /
+          // background listening correctly (wall and playhead both advance
+          // together across a long suspended gap), and treats pause→resume
+          // as continuous (playhead barely moved while wall ran on).
+          let continuous = false;
+          if (prev >= 0 && lastWall > 0 && lastPos >= 0) {
+            const playheadAdvance = posMs - lastPos;     // ms of audio crossed
+            const wallAdvance     = nowWall - lastWall;  // ms of real time elapsed
+            // Allowed playhead motion for a continuous listen: wall×rate
+            // plus slack for poll granularity (≈2-3 Hz) and several short
+            // cues collapsing into one tick. A forward seek blows past this.
+            const allowed = wallAdvance * rate * 1.5 + 2500;
+            continuous = playheadAdvance >= 0 && playheadAdvance <= allowed;
+          }
+          if (continuous) {
+            let total = 0;
+            for (let i = prev + 1; i <= idx; i++) {
+              const c = (i === idx) ? (cue || cuesS[i]) : cuesS[i];
+              if (c?.text) total += c.text.length;
+            }
+            if (total > 0) window.stats.incrementAudioChars(total);
+          }
+          window._lastAudioCueIdxForStats = idx; // high-water (forward only)
+        }
+        // Advance the continuity baseline on EVERY listening tick — forward,
+        // backward, or replay — NOT just forward advances. If we only moved
+        // it forward, a backward-seek detour (idx ≤ prev) would freeze
+        // lastWall/lastPos at the high-water cue while real time ran on, and
+        // a later forward seek would then look "continuous" (huge wallAdvance
+        // vs the frozen baseline) and get falsely credited. Tracking the
+        // playhead's ACTUAL position each tick keeps the next forward jump
+        // measured against where the audio really was.
+        window._audioStatsLastWallMs = nowWall;
+        window._audioStatsLastPosMs  = posMs;
+      }
       window._lastAudioCueIdx = idx;
       try { updateProgress({ cueIdx: idx }); } catch (_) {}
     }
@@ -2573,17 +3489,13 @@
     //
     // When the map came from the legacy buildCueChunkMaps fallback,
     // the old findChunkForText safety net stays active.
-    let chunk = null;
-    if (pagedCueToChunk && pagedCueToChunk[idx] >= 0) {
-      chunk = chunks[pagedCueToChunk[idx]] || null;
-    } else if (pagedCueMapFromAlignment) {
-      // Trustworthy "unmatched" — leave whatever highlight is up alone,
-      // don't risk a wrong scroll.
-      log('[scroll-trace] __onPagedCueUpdate idx=' + idx + ' SKIP unmatched (alignment)');
-      return;
-    }
-    if (!chunk) chunk = findChunkForText(cue.text);
-    if (!chunk) return;
+    // Resolve via map → bounded local search (anchored to the current green
+    // chunk) → book-wide ONLY for legacy (non-alignment) maps. The bounded
+    // local search keeps the highlight following the subtitle line-by-line
+    // even when the alignment map left this cue unmatched, without risking
+    // the book-wide far-jump that the old "SKIP unmatched" guarded against.
+    const chunk = resolveCueChunk(idx, cue.text, !pagedCueMapFromAlignment);
+    if (!chunk) return; // genuinely unplaceable — keep the current highlight
     const range = setCueRangeHighlight(chunk, cue.text);
     if (!range || !scrollEl) return;
     // No user-scroll grace gate here — this hook only fires when the

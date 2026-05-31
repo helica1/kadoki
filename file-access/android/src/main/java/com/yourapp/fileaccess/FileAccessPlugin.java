@@ -135,8 +135,13 @@ public class FileAccessPlugin extends Plugin {
     @PluginMethod
     public void pickFileWithUri(PluginCall call) {
         // Optional kind: "epub" (deck/EPUB defaults), "audio" (audiobooks/MP3s),
-        // "any" (no filter). Defaults to "epub" for backwards compat.
-        String kind = call.getString("kind", "epub");
+        // "any" (no filter). Accept BOTH "kind" (Android convention) and "type"
+        // (iOS convention, which several JS callers — e.g. the audio-archive
+        // importer — pass). Without the "type" fallback, {type:'any'} fell
+        // through to the "epub" MIME filter here and .tar/.tar.xz archives were
+        // grayed out in the picker. Defaults to "epub" for backwards compat.
+        String kind = call.getString("kind");
+        if (kind == null) kind = call.getString("type", "epub");
 
         // Always use ACTION_OPEN_DOCUMENT with setType("*/*") + EXTRA_MIME_TYPES
         // for filtering. This pattern keeps folder navigation visible in

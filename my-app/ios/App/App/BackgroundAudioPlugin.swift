@@ -52,13 +52,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - Constants
 
-    /// Default fade duration in ms for play / pause / resume. 5 ms —
-    /// below the threshold of perception for "delay" and enough to
-    /// take the edge off the amplitude-discontinuity click. The
-    /// originally-tested 50 ms felt laggy because the asyncAfter
-    /// delay before pause was visible; 5 ms is not. Callers can
-    /// override via `fadeMs` in the call (0 disables entirely).
-    static let defaultFadeMs: Double = 5
+    /// Default fade duration in ms for play / pause / resume. 20 ms —
+    /// long enough to fully mask the amplitude-discontinuity click
+    /// (5 ms was too short: on iOS the hardware ramp barely engaged, on
+    /// Android it collapsed to a single hard step), still well below a
+    /// perceptible "delay". This default also governs the dictionary
+    /// pause/resume (it calls pause()/resume() with no fadeMs). Callers
+    /// can override via `fadeMs` in the call (0 disables entirely).
+    static let defaultFadeMs: Double = 20
 
     // MARK: - State
 
@@ -67,7 +68,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var currentRate: Float = 1.0
     private var nowPlayingTitle: String = "Audiobook"
     private var nowPlayingSubtitle: String = ""
+    private var nowPlayingArtwork: MPMediaItemArtwork?
     private var remoteCommandsConfigured = false
+    /// Bumped on every pause/resume/play so a faded pause's deferred
+    /// pause() closure can detect that a resume/play raced in during the
+    /// fade window and abort — otherwise a quick dictionary close (resume)
+    /// right after open (pause) would be undone by the still-pending
+    /// asyncAfter pause. (Android's cancelFade already handles this.)
+    private var fadeGeneration = 0
 
     // MARK: - Lifecycle
 
@@ -104,6 +112,10 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             self?.startPositionTimer()
             self?.emitState(playing: true)
             self?.updateNowPlaying()
+            // Tell JS this play came from the lock screen / Control Center, so
+            // it can force AUDIO mode (audiobook + audio timer) regardless of
+            // whatever mode the app was in.
+            self?.notifyListeners("remoteCommand", data: ["action": "play"])
             return .success
         }
         cmd.pauseCommand.addTarget { [weak self] _ in
@@ -123,22 +135,24 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 p.play()
                 self?.startPositionTimer()
                 self?.emitState(playing: true)
+                self?.notifyListeners("remoteCommand", data: ["action": "play"])
             }
             self?.updateNowPlaying()
             return .success
         }
-        cmd.skipForwardCommand.preferredIntervals = [30]
-        cmd.skipForwardCommand.addTarget { [weak self] _ in
-            guard let p = self?.player else { return .commandFailed }
-            p.currentTime = min(p.duration, p.currentTime + 30)
-            self?.updateNowPlaying()
+        // Prev/next-track (⏮⏭) jump by SUBTITLE CUE. JS owns cue boundaries, so
+        // these just notify it; the ±30 s skip buttons are disabled in favor of
+        // cue navigation (more useful for sentence-level immersion).
+        cmd.skipForwardCommand.isEnabled = false
+        cmd.skipBackwardCommand.isEnabled = false
+        cmd.nextTrackCommand.isEnabled = true
+        cmd.nextTrackCommand.addTarget { [weak self] _ in
+            self?.notifyListeners("remoteCommand", data: ["action": "nextCue"])
             return .success
         }
-        cmd.skipBackwardCommand.preferredIntervals = [30]
-        cmd.skipBackwardCommand.addTarget { [weak self] _ in
-            guard let p = self?.player else { return .commandFailed }
-            p.currentTime = max(0, p.currentTime - 30)
-            self?.updateNowPlaying()
+        cmd.previousTrackCommand.isEnabled = true
+        cmd.previousTrackCommand.addTarget { [weak self] _ in
+            self?.notifyListeners("remoteCommand", data: ["action": "prevCue"])
             return .success
         }
         cmd.changePlaybackPositionCommand.addTarget { [weak self] event in
@@ -200,6 +214,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             // play() handoff. When fadeMs == 0 (current default) we
             // just play at full volume — the audio buffer was empty
             // so there's no amplitude discontinuity to click on.
+            // New playback supersedes any pending faded-pause.
+            fadeGeneration += 1
             let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
             if fadeMs > 0 {
                 p.volume = 0.0
@@ -222,15 +238,20 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func pause(_ call: CAPPluginCall) {
-        // 50 ms fade-out then pause. setVolume(_:fadeDuration:) returns
-        // immediately and schedules the ramp; we asyncAfter the
-        // actual pause() so the fade audibly completes first. Without
-        // this the source clipped on the pause boundary.
+        // Fade-out then pause. setVolume(_:fadeDuration:) returns immediately
+        // and schedules the ramp; we asyncAfter the actual pause() so the fade
+        // audibly completes first (otherwise the source clips on the pause
+        // boundary). The fadeGeneration token lets a resume/play that races in
+        // during the fade window — e.g. a quick dictionary close — cancel this
+        // pending pause instead of stopping the freshly-resumed audio.
         let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
+        fadeGeneration += 1
+        let gen = fadeGeneration
         if let p = player, fadeMs > 0 {
             p.setVolume(0.0, fadeDuration: fadeMs / 1000.0)
             DispatchQueue.main.asyncAfter(deadline: .now() + fadeMs / 1000.0) { [weak self] in
                 guard let self = self else { return }
+                guard self.fadeGeneration == gen else { return } // resume/play raced in — keep playing
                 self.player?.pause()
                 self.player?.volume = 1.0 // restore for next play
                 self.stopPositionTimer()
@@ -257,6 +278,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func resume(_ call: CAPPluginCall) {
         guard let p = player else { call.resolve(); return }
+        fadeGeneration += 1 // supersede any pending faded-pause so it doesn't stop us
         let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
         if fadeMs > 0 {
             p.volume = 0.0
@@ -313,8 +335,23 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func setMetadata(_ call: CAPPluginCall) {
         if let t = call.getString("title"),    !t.isEmpty { nowPlayingTitle = t }
         if let s = call.getString("subtitle")             { nowPlayingSubtitle = s }
+        // Cover art for the lock screen / Control Center. Accepts a data URI
+        // ("data:image/...;base64,XXXX") or raw base64. Empty string clears it.
+        if let art = call.getString("artwork") { setArtwork(from: art) }
         updateNowPlaying()
         call.resolve()
+    }
+
+    private func setArtwork(from s: String) {
+        if s.isEmpty { nowPlayingArtwork = nil; return }
+        var b64 = s
+        if s.hasPrefix("data:"), let comma = s.firstIndex(of: ",") {
+            b64 = String(s[s.index(after: comma)...])
+        }
+        guard let data = Data(base64Encoded: b64), let img = UIImage(data: data) else {
+            return // decode failed — keep whatever artwork we had
+        }
+        nowPlayingArtwork = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
     }
 
     // MARK: - Position events
@@ -372,6 +409,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = p.currentTime
         // Rate 0 means paused; the system shows a play icon then.
         info[MPNowPlayingInfoPropertyPlaybackRate]  = p.isPlaying ? Double(currentRate) : 0.0
+        if let art = nowPlayingArtwork { info[MPMediaItemPropertyArtwork] = art }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
     }
 

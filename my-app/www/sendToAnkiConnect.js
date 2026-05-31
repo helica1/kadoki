@@ -25,6 +25,89 @@ async function isCap() {
   return typeof window.isCapacitorEnvironment === 'function' && window.isCapacitorEnvironment();
 }
 
+// =============================================================================
+// AnkiMobile x-callback resolution
+// =============================================================================
+//
+// When iOS opens our anki:// URL, AnkiMobile invokes EITHER
+// `ankideckreader://anki-success` or `ankideckreader://anki-error` once
+// it's done. Without this listener, our addNote toast fires the moment
+// iOS successfully HANDS OFF the URL (UIApplication.shared.open ok=true),
+// which is NOT the same as AnkiMobile actually creating a card. Result:
+// "Added to Mining" toast with no card present, because AnkiMobile
+// silently rejected the URL (most commonly: model name doesn't exist).
+//
+// We hook into the Capacitor App plugin's appUrlOpen event, route the
+// callback URL to whichever send is currently waiting for it, and the
+// send path can replace the optimistic toast with the actual outcome.
+let _pendingAnkiCallbackResolve = null;
+let _pendingAnkiCallbackTimer   = null;
+
+function _resolveAnkiCallback(result) {
+  if (_pendingAnkiCallbackTimer) clearTimeout(_pendingAnkiCallbackTimer);
+  _pendingAnkiCallbackTimer = null;
+  const r = _pendingAnkiCallbackResolve;
+  _pendingAnkiCallbackResolve = null;
+  if (r) r(result);
+}
+
+function _handleCallbackUrl(u, source) {
+  console.log(`[anki-cb] (${source}) url=`, u);
+  try { window._lastAnkiCallbackUrl = u; } catch (_) {}
+  if (u.includes('anki-success')) _resolveAnkiCallback('success');
+  else if (u.includes('anki-error')) _resolveAnkiCallback('error');
+}
+
+function hookAnkiCallbackOnce() {
+  if (window._ankiCallbackHooked) return;
+  let hooked = false;
+  // Primary path: @capacitor/app's appUrlOpen event. Only available
+  // if @capacitor/app is installed (it isn't, in this build — kept
+  // for completeness if it's added later).
+  const App = window.Capacitor?.Plugins?.App;
+  if (App?.addListener) {
+    try {
+      App.addListener('appUrlOpen', (data) => _handleCallbackUrl(data?.url || '', 'App'));
+      console.log('[anki-cb] App.appUrlOpen listener hooked');
+      hooked = true;
+    } catch (e) { console.warn('[anki-cb] App hook failed:', e?.message); }
+  }
+  // Fallback path: AnkiBridge plugin's ankiCallbackUrl event, which is
+  // fired by AppDelegate.swift via NSNotification. This works without
+  // @capacitor/app installed.
+  const Ab = window.Capacitor?.Plugins?.AnkiBridge;
+  if (Ab?.addListener) {
+    try {
+      Ab.addListener('ankiCallbackUrl', (data) => _handleCallbackUrl(data?.url || '', 'AnkiBridge'));
+      console.log('[anki-cb] AnkiBridge.ankiCallbackUrl listener hooked');
+      hooked = true;
+    } catch (e) { console.warn('[anki-cb] AnkiBridge hook failed:', e?.message); }
+  }
+  if (hooked) window._ankiCallbackHooked = true;
+  else console.warn('[anki-cb] no listener available yet — will retry');
+}
+// Retry aggressively at boot — plugins can be unavailable for the
+// first few hundred ms on iOS while WKWebView initializes.
+[100, 300, 500, 1000, 2000, 4000].forEach(ms => setTimeout(hookAnkiCallbackOnce, ms));
+
+// Resolves to 'success' | 'error' | 'timeout' depending on which callback
+// AnkiMobile fires. Caller should immediately invoke addNote AFTER this
+// returns a Promise (to avoid the race where the callback fires before
+// the listener is armed).
+function waitForAnkiCallback(timeoutMs) {
+  hookAnkiCallbackOnce();
+  // If a previous send didn't resolve yet, kill it — the new send is
+  // what the user is paying attention to.
+  if (_pendingAnkiCallbackResolve) _resolveAnkiCallback('superseded');
+  return new Promise((resolve) => {
+    _pendingAnkiCallbackResolve = resolve;
+    _pendingAnkiCallbackTimer = setTimeout(() => {
+      _resolveAnkiCallback('timeout');
+    }, timeoutMs || 8000);
+  });
+}
+window.waitForAnkiCallback = waitForAnkiCallback;
+
 async function getPref(key) {
   if (await isCap()) {
     try {
@@ -260,13 +343,52 @@ async function sendToAnki({ expression, imageData, audioData }) {
       // card/read timer isn't halted just because the user added a
       // card. Harmless no-op on Android (no handoff happens).
       try { window.stats?.markAnkiRoundtripActive?.(); } catch (_) {}
+      // Arm the callback listener BEFORE addNote so the x-success /
+      // x-error event from AnkiMobile can be caught. addNote itself
+      // resolves the moment iOS hands off the URL — which says
+      // nothing about whether AnkiMobile actually created the card.
+      // iOS hands the note off to AnkiMobile via an anki:// URL and learns the
+      // REAL result asynchronously through the x-callback. Android inserts
+      // directly through the AnkiDroid ContentProvider — addNote is SYNCHRONOUS
+      // and authoritative (it rejects on a bad deck/model/permission/duplicate),
+      // and there is NO x-callback. Waiting for one on Android always timed out
+      // → the bogus "No reply from AnkiMobile" error.
+      const isAndroid = window.Capacitor?.getPlatform?.() === 'android';
+      const cbPromise = (!isAndroid && typeof window.waitForAnkiCallback === 'function')
+        ? window.waitForAnkiCallback(8000)
+        : Promise.resolve('unknown');
       const r = await ab.addNote(params);
       console.log('AnkiBridge.addNote ->', r);
       if (r?.mediaServerRestartedThisSend) {
         console.log('AnkiBridge: media server was restarted to complete this send');
       }
+      if (isAndroid) {
+        // A non-throwing addNote means AnkiDroid created the note (r.noteId).
+        if (typeof window.showToast === 'function') {
+          window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+        }
+        return;
+      }
+      // Optimistic "Sending…" toast while we wait for the callback (iOS).
       if (typeof window.showToast === 'function') {
-        window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+        window.showToast(`Sending to ${cfg.deck}…`, 1400);
+      }
+      const cbResult = await cbPromise;
+      console.log('AnkiBridge x-callback result:', cbResult);
+      if (typeof window.showToast === 'function') {
+        if (cbResult === 'success') {
+          window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+        } else if (cbResult === 'error') {
+          window.showToast(`✗ AnkiMobile rejected — model "${cfg.model}" likely doesn't exist`, 5500);
+        } else if (cbResult === 'timeout') {
+          // Most common cause of a silent timeout (no x-error fired)
+          // is the model name mismatching what's in AnkiMobile. Surface
+          // the model we sent so the user can compare it against
+          // AnkiMobile → manage note types without leaving the toast.
+          window.showToast(`? No reply from AnkiMobile. Sent model="${cfg.model}". Verify it exists in AnkiMobile → Manage note types.`, 6500);
+        } else {
+          window.showToast(`✓ Sent to ${cfg.deck}`, 2200);
+        }
       }
       return;
     } catch (err) {

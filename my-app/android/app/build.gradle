@@ -42,6 +42,9 @@ dependencies {
     implementation project(':capacitor-cordova-android-plugins')
     // Background audio MediaSession + MediaStyle notification
     implementation "androidx.media:media:1.7.0"
+    // Pure-Java XZ/LZMA2 decoder so ArchiveExtractor can import .tar.xz directly
+    // (Java has GZIP built in but no XZ). ~120 KB, streaming decode.
+    implementation "org.tukaani:xz:1.9"
 }
 
 apply from: 'capacitor.build.gradle'

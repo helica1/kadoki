@@ -125,10 +125,11 @@
   async function refreshTabAvailability() {
     const audioTab = document.querySelector('#shellModeTabs .mode-tab[data-mode="audio"]');
     const readTab  = document.querySelector('#shellModeTabs .mode-tab[data-mode="read"]');
+    const cardTab  = document.querySelector('#shellModeTabs .mode-tab[data-mode="card"]');
 
     // Source of truth: the Title object's attachments. Falls back to the
     // legacy per-deck pref read only when no Title is active.
-    let hasAudio = false, hasEpub = false;
+    let hasAudio = false, hasEpub = false, hasDeck = false, hasSrt = false;
     let source = 'none';
     const idsToCheck = [window._activeTitleId, window._editingTitleId].filter(Boolean);
     try {
@@ -138,8 +139,10 @@
           if (!t) continue;
           if (t.attachments?.audiobook) hasAudio = true;
           if (t.attachments?.epub) hasEpub = true;
+          if (t.attachments?.deck) hasDeck = true;
+          if (t.attachments?.srt) hasSrt = true;
           source = 'title:' + id;
-          if (hasAudio && hasEpub) break;
+          if (hasAudio && hasEpub && hasDeck) break;
         }
       }
     } catch (e) {}
@@ -163,8 +166,18 @@
       }
     }
 
+    // CARD mode is available when there's an Anki deck OR a synthetic
+    // SRT-cards source (audiobook + SRT). When a Title resolved, trust its
+    // attachments exclusively. Only when no Title is active (legacy / raw
+    // deck) do we fall back to "are cards actually loaded in memory."
+    const titleResolved = source.indexOf('title:') === 0;
+    let hasCards = hasDeck || (hasAudio && hasSrt);
+    if (!titleResolved && !hasCards) {
+      hasCards = !!(window.allNotes && window.allNotes.length > 0);
+    }
+
     console.log('[shell] refreshTabAvailability source=' + source +
-      ' hasAudio=' + hasAudio + ' hasEpub=' + hasEpub);
+      ' hasAudio=' + hasAudio + ' hasEpub=' + hasEpub + ' hasCards=' + hasCards);
     const setEmpty = (tab, empty) => {
       if (!tab) return;
       if (empty) tab.dataset.empty = '1';
@@ -172,6 +185,14 @@
     };
     setEmpty(audioTab, !hasAudio);
     setEmpty(readTab, !hasEpub);
+    setEmpty(cardTab, !hasCards);
+
+    // Play/pause button only makes sense when there's something to play — an
+    // audiobook (read-along / audio mode) or cards (card audio). An EPUB-only
+    // title has no transport at all, so hide the button entirely. (The timer
+    // pill stays — it still tracks reading time.)
+    const playBtn = document.getElementById('shellPlayBtn');
+    if (playBtn) playBtn.style.display = (hasAudio || hasCards) ? '' : 'none';
   }
 
   // Authoritative "what mode is actually visible right now" — checks the DOM,
@@ -200,7 +221,41 @@
   // bails out if it no longer matches.
   let _switchGen = 0;
 
-  window.setShellMode = function (mode) {
+  // Short-circuit Read / Audio switches when the active title doesn't
+  // have the corresponding attachment. Without this, tapping Read with
+  // no EPUB opened the paged reader on an empty inner element (the
+  // "blank reader" symptom) and tapping Audio with no audiobook
+  // attached fired the "audiobook not paired" toast — both readable
+  // as "the button is broken" rather than "this mode isn't available
+  // for this title." Read tab availability comes from the data-empty
+  // attribute that refreshTabAvailability already maintains.
+  function _maybeRefuseSwitch(mode) {
+    const tab = document.querySelector('#shellModeTabs .mode-tab[data-mode="' + mode + '"]');
+    if (!tab || tab.dataset.empty !== '1') return false;
+    if (mode === 'read') {
+      try { window.showToast?.('No EPUB attached to this title', 2000); } catch (_) {}
+      return true;
+    }
+    if (mode === 'audio') {
+      try { window.showToast?.('No audiobook attached to this title', 2000); } catch (_) {}
+      return true;
+    }
+    if (mode === 'card') {
+      try { window.showToast?.('No cards in this title', 2000); } catch (_) {}
+      return true;
+    }
+    return false;
+  }
+
+  window.setShellMode = function (mode, opts) {
+    // Block USER switches into modes whose backing content isn't loaded.
+    // Programmatic callers that just loaded the right content pass
+    // {force:true} to skip the gate — at that instant the data-empty
+    // attribute still reflects the PREVIOUS title (refreshTabAvailability
+    // is async), so without the bypass the switch would wrongly refuse.
+    const force = !!(opts && opts.force);
+    if (!force && (mode === 'read' || mode === 'audio' || mode === 'card') &&
+        _maybeRefuseSwitch(mode)) return;
     // If the audio→other reentry modal is up, treat a tab tap as
     // "dismiss without changing position" AND supersede the prior
     // switch's async block (its closeAudio/openRead steps would
@@ -223,7 +278,24 @@
     }
     if (_switchInFlight) return;
     currentMode = inferActiveMode();
-    if (mode === currentMode) return;
+    if (mode === currentMode) {
+      // Same mode — normally a no-op. BUT a TITLE OPEN can swap the underlying
+      // content while the mode stays the same: opening title B while already
+      // in read mode on title A would otherwise keep showing A's EPUB (the
+      // open function never re-runs). Re-invoke just the target mode's
+      // open/load so it picks up the new active title. No close/visibility
+      // flip — the view is already correct, only its content is stale. Card
+      // content is loaded by the caller (loadDeckFromLibrary /
+      // loadTitleAsSrtCards), so only read/audio need this.
+      if (opts && opts.titleOpen) {
+        if (mode === 'read' && typeof window.openReadingMode === 'function') {
+          try { window.openReadingMode(); } catch (e) {}
+        } else if (mode === 'audio' && typeof window.openAudiobookMode === 'function') {
+          try { window.openAudiobookMode(); } catch (e) {}
+        }
+      }
+      return;
+    }
     _switchInFlight = true;
     _switchGen++;
     const myGen = _switchGen;
@@ -259,6 +331,16 @@
     const prevMode = currentMode;
     currentMode = mode;
     updateTabsUI(mode);
+    // Remember this mode PER-TITLE so opening the title (or restoring it on
+    // launch) reopens in the mode the user last left it in. Only on a real
+    // switch (we're past the same-mode early return above), never on refresh
+    // ticks. localStorage LAST_MODE_V1 (in updateTabsUI) stays as the global
+    // fallback for the very first launch before any title has a stored mode.
+    try {
+      if (window._activeTitleId && window.titleStore?.setMode) {
+        window.titleStore.setMode(window._activeTitleId, mode);
+      }
+    } catch (_) {}
 
     // Save the reader cursor BEFORE audio mode takes over and starts
     // auto-scrolling the reader along with playback. The audio→read
@@ -321,7 +403,13 @@
         //     a button. The flag persists across mode switches
         //     until they explicitly choose; the dialog re-appears
         //     in the target mode's flavor each time.
-        const triggerDialog = (mode === 'card' || mode === 'read') &&
+        // Suppress on a TITLE OPEN / launch-restore (opts.titleOpen): a fresh
+        // title has no audio↔cursor divergence, so the "prior card N vs new
+        // card M" dialog must never appear there — it was comparing the
+        // previous title's stale position. The dialog is only for in-session
+        // audio→card/read transitions.
+        const triggerDialog = !(opts && opts.titleOpen) &&
+                              (mode === 'card' || mode === 'read') &&
                               (prevMode === 'audio' || window._audioPositionUnresolved);
         if (triggerDialog) {
           try {
@@ -341,12 +429,13 @@
           if (myGen !== _switchGen) return;
         }
         if (mode === 'audio' && typeof window.openAudiobookMode === 'function') {
-          // resumeOnly: when the prior switch's reentry dialog was
-          // dismissed by tapping a tab (no explicit position choice),
-          // we should NOT seek audio back to the card/cursor position —
-          // user wants it to continue from where it was paused. The
-          // flag is one-shot; openAudiobookMode consumes + clears it.
-          const resumeOnly = !!window._reentryDismissedByTab;
+          // resumeOnly: continue from wherever the BG plugin is paused/playing
+          // instead of seeking back to the card/cursor position. True when (a)
+          // the prior reentry dialog was dismissed by a tab tap (one-shot flag),
+          // OR (b) the CALLER asked for it explicitly via opts.resumeOnly — the
+          // lock-screen "play" path needs this so it attaches to the audio the
+          // native side ALREADY resumed instead of restarting it (double-play).
+          const resumeOnly = !!window._reentryDismissedByTab || !!(opts && opts.resumeOnly);
           await window.openAudiobookMode({
             seekToCurrentPosition: (prevMode === 'card' || prevMode === 'read') && !resumeOnly,
             resumeOnly
@@ -434,10 +523,17 @@
     // Trimmed: removed Hide/Show timer (no way to recover once hidden was
     // confusing) and Reset timer (moved into the Stats popup so it can't
     // be tapped by mistake).
-    menu.appendChild(mkItem(running ? 'Pause timer' : 'Start timer', () => {
+    const mkDivider = () => {
+      const d = document.createElement('div');
+      d.className = 'menu-divider';
+      d.style.cssText = 'height:1px;background:#2a2a2a;margin:6px 8px;pointer-events:none;';
+      return d;
+    };
+    menu.appendChild(mkItem(running ? 'Pause Timer' : 'Start Timer', () => {
       if (typeof window.toggleReadingTimer === 'function') window.toggleReadingTimer();
       refreshTimerLabel();
     }));
+    menu.appendChild(mkDivider());
     menu.appendChild(mkItem('Stats…', () => {
       if (typeof window.openReadingStats === 'function') window.openReadingStats();
     }));
@@ -610,11 +706,11 @@
       return d;
     };
 
-    menu.appendChild(mkItem('Library',         () => { if (typeof openLibrary === 'function') openLibrary(); }));
+    menu.appendChild(mkItem('Library…',        () => { if (typeof openLibrary === 'function') openLibrary(); }));
     menu.appendChild(mkDivider());
-    menu.appendChild(mkItem('Playback speed',  () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
+    menu.appendChild(mkItem('Playback Speed…', () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
     menu.appendChild(mkDivider());
-    menu.appendChild(mkItem('Preferences',     () => { if (typeof openPreferences === 'function') openPreferences(); }));
+    menu.appendChild(mkItem('Preferences…',    () => { if (typeof openPreferences === 'function') openPreferences(); }));
 
     document.body.appendChild(menu);
     const trigger = ev?.currentTarget || el('shellMoreBtn');
@@ -673,6 +769,11 @@
 
   function init() {
     console.log('[shell] init');
+    // Platform class on <body> so CSS can scope tweaks per-OS. Used by the
+    // narrow-header button sizing, which is Android-only (iOS is left as-is).
+    try {
+      document.body.classList.add('platform-' + (window.Capacitor?.getPlatform?.() || 'web'));
+    } catch (_) {}
     installChromeTapHandler();
     attachShellButtonListeners();
     startTimerPoll();
@@ -684,15 +785,184 @@
     setInterval(() => {
       if (typeof window.updateProgressBar === 'function') window.updateProgressBar();
     }, 500);
+    // Ensure the top-left progress strip exists from app boot — needed
+    // for Anki-only titles where the reader never opens, so the strip's
+    // lazy creation inside openView() never fired and the card counter
+    // simply didn't render. Retry briefly in case the paged-reader IIFE
+    // hasn't installed the hook yet.
+    const tryStrip = () => {
+      if (typeof window.pagedEnsureProgressStrip === 'function') {
+        window.pagedEnsureProgressStrip();
+        // Keep the card counter live as the user swipes through cards.
+        setInterval(() => {
+          if (document.body.classList.contains('mode-card')) {
+            window.pagedEnsureProgressStrip();
+          }
+        }, 500);
+        return true;
+      }
+      return false;
+    };
+    if (!tryStrip()) {
+      setTimeout(tryStrip, 100);
+      setTimeout(tryStrip, 500);
+      setTimeout(tryStrip, 1500);
+    }
+
+    // ----- Card-mode cover-image background + active-title watcher -----
+    // The watcher does two things on every detected title change:
+    //   1) Re-fires the silent reader prewarm so a fresh title's EPUB
+    //      gets laid out before the user switches to read (matches
+    //      "play a card through then switch" reliability).
+    //   2) Repaints the card-mode background with the new title's
+    //      cover image at low opacity — purely decorative, lives
+    //      behind cardContainer.
+    function ensureCardBackground() {
+      let bg = document.getElementById('cardBackgroundImage');
+      if (bg) return bg;
+      bg = document.createElement('div');
+      bg.id = 'cardBackgroundImage';
+      bg.style.cssText =
+        'position:fixed;top:0;left:0;right:0;bottom:0;' +
+        'background-size:cover;background-position:center;background-repeat:no-repeat;' +
+        // Slight blur softens the cover so it reads as ambient texture
+        // rather than a competing focal element. `scale(1.05)` masks the
+        // hard edges that filter:blur leaves at the viewport rim.
+        'filter:blur(6px);-webkit-filter:blur(6px);transform:scale(1.05);' +
+        // z-index 0 lets cardContainer (no z-index, painted later in
+        // source order) appear ABOVE the background without explicit
+        // z-index gymnastics on every card element.
+        'opacity:0;z-index:0;pointer-events:none;' +
+        'transition:opacity .25s ease, background-image .25s ease;';
+      // First child of body so source order puts it behind everything.
+      document.body.insertBefore(bg, document.body.firstChild);
+      return bg;
+    }
+    // Pull the current card's image data URI (Anki deck-only mode has
+    // no Title cover, but each card usually carries its own image —
+    // expanding that as a faded background gives users the same
+    // ambient effect for plain decks). Cheap: a regex against the
+    // card.imageHtml field that displayCard already populates.
+    function currentCardImageDataUri() {
+      try {
+        const card = window.allNotes?.[window.currentCardIndex ?? 0];
+        if (!card?.imageHtml) return null;
+        const m = card.imageHtml.match(/src="([^"]+)"/);
+        return m ? m[1] : null;
+      } catch (_) { return null; }
+    }
+
+    async function paintCardBackground() {
+      const bg = ensureCardBackground();
+      const isCard = document.body.classList.contains('mode-card');
+      if (!isCard) { bg.style.opacity = '0'; return; }
+
+      // Priority 1 — active Title's cover image (works for any Title
+      // with a saved cover attachment).
+      let dataUri = null;
+      let cacheKey = '';
+      const id = window._activeTitleId;
+      if (id && window.titleStore?.list) {
+        try {
+          const titles = await window.titleStore.list();
+          const t = titles.find(x => x.id === id);
+          if (t?.attachments?.cover?.dataUri) {
+            dataUri = t.attachments.cover.dataUri;
+            cacheKey = 'title:' + id;
+          }
+        } catch (_) {}
+      }
+      // Priority 2 — Anki-deck-only mode: use the CURRENT card's
+      // image. Key on the card index so swiping advances the
+      // background to match.
+      if (!dataUri) {
+        const cardImg = currentCardImageDataUri();
+        if (cardImg) {
+          dataUri = cardImg;
+          cacheKey = 'card:' + (window.currentCardIndex ?? 0);
+        }
+      }
+
+      if (dataUri) {
+        if (bg.dataset.cacheKey !== cacheKey) {
+          bg.style.backgroundImage = 'url("' + dataUri + '")';
+          bg.dataset.cacheKey = cacheKey;
+        }
+        bg.style.opacity = '0.10';
+      } else {
+        bg.style.opacity = '0';
+        bg.style.backgroundImage = '';
+        delete bg.dataset.cacheKey;
+      }
+    }
+    // Active-title watcher. Poll-based because there's no central
+    // assignment event; whatever sets window._activeTitleId can be in
+    // app.js, library, autoRestoreFromTitles, etc.
+    let _lastSeenTitleId = window._activeTitleId || null;
+    function checkTitleChange() {
+      const cur = window._activeTitleId || null;
+      if (cur !== _lastSeenTitleId) {
+        _lastSeenTitleId = cur;
+        // Re-arm the paged-reader prewarm. Clearing _pagedPrewarmDone
+        // lets the next pagedPrewarm() call actually run.
+        window._pagedPrewarmDone = false;
+        if (typeof window.pagedPrewarm === 'function') {
+          // Small delay so attachment writes from the title-load path
+          // (titleStore.attach etc.) settle before tryLoadFromActiveTitle.
+          setTimeout(() => window.pagedPrewarm(), 250);
+        }
+        paintCardBackground();
+      }
+    }
+    // Initial paint + watcher tick. 500 ms is fine — title changes are
+    // user-driven (library tap) so there's no race-sensitive deadline.
+    paintCardBackground();
+    setInterval(() => {
+      checkTitleChange();
+      paintCardBackground();
+    }, 500);
+    // Repaint on mode-change too so the background appears/disappears
+    // immediately when the user switches in/out of card mode.
+    window.addEventListener('shell:mode-change', () => paintCardBackground());
     // Restore the last mode the user was in. Wait briefly so the active
     // title finishes loading (otherwise we'd try to enter read/audio
     // before chunks / cues are ready and bounce back to card).
-    setTimeout(() => {
-      let lastMode = null;
-      try { lastMode = localStorage.getItem('LAST_MODE_V1'); } catch (e) {}
-      if (lastMode && lastMode !== 'card' && lastMode !== currentMode &&
+    setTimeout(async () => {
+      // Reopen the restored title in the mode it was last viewed in. Prefer
+      // the PER-TITLE lastMode (clamped to the modes this title actually
+      // enables); fall back to the global LAST_MODE_V1 only when the title
+      // has none yet. Force the switch — without {force}, the tab gate
+      // (data-empty still reflecting the just-loaded title) would refuse and
+      // we'd stay stuck in card, which is why restore "always" landed on card.
+      let targetMode = null, enabled = null;
+      try {
+        if (window._activeTitleId && window.titleStore?.list) {
+          const titles = await window.titleStore.list();
+          const t = titles.find(x => x.id === window._activeTitleId);
+          enabled = (t && window.titleStore.enabledModes)
+            ? window.titleStore.enabledModes(t) : null;
+          if (t?.lastMode && (!enabled || enabled[t.lastMode])) targetMode = t.lastMode;
+        }
+      } catch (e) {}
+      if (!targetMode) {
+        // Global fallback (first launch after this update, before the title
+        // has a stored mode). Clamp to modes the title actually enables so we
+        // never switch into an empty read/audio view.
+        let g = null; try { g = localStorage.getItem('LAST_MODE_V1'); } catch (e) {}
+        // Require enabled to be KNOWN and to include g — if we couldn't
+        // determine the title's modes (list() failed / title missing), stay on
+        // card rather than risk switching into an empty read/audio view.
+        if (g && enabled && enabled[g]) targetMode = g;
+      }
+      if (!targetMode && enabled) {
+        // Still nothing → open the title in its NATURAL mode (first enabled),
+        // so an EPUB-only (or audio-only) title is NOT dumped into the disabled
+        // card mode on launch. EPUB-only → read; audio-only → audio; deck → card.
+        targetMode = enabled.card ? 'card' : enabled.read ? 'read' : enabled.audio ? 'audio' : null;
+      }
+      if (targetMode && targetMode !== currentMode &&
           typeof window.setShellMode === 'function') {
-        window.setShellMode(lastMode);
+        window.setShellMode(targetMode, { force: true, titleOpen: true });
       }
     }, 1500);
   }

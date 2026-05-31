@@ -24,32 +24,32 @@
   // the Documents path that ArchiveExtractor wrote when the user finished
   // their .tar import. Cached after first resolve so per-lookup overhead
   // stays at a Map.get(), not a bridge round-trip.
-  let resolvedBase = null;       // string or null
+  let resolvedBase = null;       // non-empty string or null
   let resolveBasePromise = null; // dedupe concurrent first-lookup probes
   function ensureResolvedBase() {
-    if (resolvedBase !== null) return Promise.resolve(resolvedBase);
+    // Only cache *non-empty* results. If a lookup runs before the user
+    // imports the archive, resolveBase will return '' (Android fallback)
+    // — caching that would mean the dict popup keeps using the wrong
+    // path even after the import completes. Re-running the resolver
+    // until we get a real base is cheap.
+    if (resolvedBase) return Promise.resolve(resolvedBase);
     if (resolveBasePromise) return resolveBasePromise;
     resolveBasePromise = (async () => {
-      // 1) Preferences pref written by audio-archive.js when the user
-      //    extracted a .tar through the importer.
-      try {
-        if (window.Capacitor?.Plugins?.Preferences) {
-          const r = await window.Capacitor.Plugins.Preferences.get({ key: 'YOMICHAN_AUDIO_DIR' });
-          if (r.value) {
-            console.log(`[local-audio] base from Preferences: ${r.value}`);
-            resolvedBase = r.value;
-            return r.value;
-          }
-        }
-      } catch (e) {}
-      // 2) Fallback: if the user manually dragged files into
-      //    "On My iPhone → AnkiDeckReader → yomichan-audio" via Files.app,
-      //    no pref is set. Discover the path via the Filesystem plugin
-      //    (DOCUMENTS dir + "yomichan-audio").
+      // 1) PRIMARY: ask Filesystem.getUri for the CURRENT container's
+      //    Documents/yomichan-audio. The iOS app container UUID changes
+      //    on reinstall; if we stored an absolute path in Preferences
+      //    once, that path becomes a phantom after the next rebuild.
+      //    Filesystem.getUri always returns the live path.
       try {
         if (window.Capacitor?.Plugins?.Filesystem?.getUri) {
+          // iOS keeps the imported archive in Documents; Android in the app's
+          // external files dir (Directory.EXTERNAL = getExternalFilesDir — no
+          // storage permission, multi-GB room) which is exactly where
+          // ArchiveExtractorPlugin writes it. Picking the wrong directory here
+          // resolves to an empty/forbidden path and the lookup silently fails.
+          const audioDir = (window.Capacitor?.getPlatform?.() === 'android') ? 'EXTERNAL' : 'DOCUMENTS';
           const u = await window.Capacitor.Plugins.Filesystem.getUri({
-            directory: 'DOCUMENTS',
+            directory: audioDir,
             path: 'yomichan-audio'
           });
           if (u?.uri) {
@@ -62,15 +62,46 @@
           }
         }
       } catch (e) {
-        console.warn('[local-audio] Filesystem.getUri fallback failed:', e?.message);
+        console.warn('[local-audio] Filesystem.getUri probe failed:', e?.message);
       }
+      // 2) Fallback: legacy Preferences pref. Note this can be a stale
+      //    absolute path from a prior install; only used if getUri above
+      //    didn't return anything.
+      try {
+        if (window.Capacitor?.Plugins?.Preferences) {
+          const r = await window.Capacitor.Plugins.Preferences.get({ key: 'YOMICHAN_AUDIO_DIR' });
+          if (r.value) {
+            console.log(`[local-audio] base from Preferences (fallback): ${r.value}`);
+            resolvedBase = r.value;
+            return r.value;
+          }
+        }
+      } catch (e) {}
       // 3) Final fallback: relative path (Android bundles audio at
-      //    www/yomichan-audio/...).
-      resolvedBase = '';
+      //    www/yomichan-audio/...). Don't cache this — see above.
+      resolveBasePromise = null;
       return '';
     })();
     return resolveBasePromise;
   }
+
+  // Called by audio-archive.js after a successful import. Clears every
+  // cache that may have been populated with pre-import "no archive yet"
+  // misses so the next dict lookup picks up the new files without an
+  // app restart.
+  window.invalidateLocalAudio = function () {
+    resolvedBase = null;
+    resolveBasePromise = null;
+    _layoutCache.clear();
+    bucketCache.clear();
+    for (const src of SOURCES) {
+      src.index = null;
+      src.indexLoaded = null;
+      src.layout = null;
+      src.layoutPromise = null;
+    }
+    console.log('[local-audio] caches invalidated');
+  };
 
   // Probe-and-cache the actual subdirectory layout inside the extracted
   // archive. The community archive (e.g. local-yomichan-audio-collection-
@@ -123,10 +154,86 @@
     return path;
   }
 
+  // After the index loads we know enough to probe whether this archive is
+  // shipping bucketed-into-zips (Android-bundled layout, used to dodge the
+  // 65,535-entry APK ZIP cap) or loose files in bucket subdirectories
+  // (community tar.gz layout). iOS doesn't care about the APK cap so flat
+  // is the natural form there.
+  //
+  // We pick one filename out of the loaded index and HEAD-probe its flat
+  // path. If 2xx, layout=flat — every subsequent lookup just hands the
+  // file URL straight to the audio element / fetch. If not, fall back to
+  // the existing JSZip pipeline.
+  async function detectLayout(src) {
+    if (src.layout) return src.layout;
+    if (src.layoutPromise) return src.layoutPromise;
+    src.layoutPromise = (async () => {
+      const idx = src.index;
+      let probeFile = null;
+      if (idx?.headwords) {
+        for (const k in idx.headwords) {
+          const files = idx.headwords[k];
+          const arr = Array.isArray(files) ? files : [files];
+          for (const f of arr) {
+            if (typeof f === 'string') { probeFile = f; break; }
+          }
+          if (probeFile) break;
+        }
+      }
+      if (probeFile) {
+        const prefix = await probeLayout(src);
+        const mediaDir = src.mediaDir || 'media';
+        const flatPath = `${prefix}/${mediaDir}/${probeFile}`;
+        const flatUrl = (window.Capacitor?.convertFileSrc && (await ensureResolvedBase()))
+          ? window.Capacitor.convertFileSrc(flatPath)
+          : flatPath;
+        try {
+          // Range header keeps the probe to a single byte instead of
+          // pulling the whole mp3 just to test existence.
+          const r = await fetch(flatUrl, { headers: { Range: 'bytes=0-0' } });
+          if (r.ok || r.status === 206) {
+            src.layout = 'flat';
+            console.log(`[local-audio] ${src.id} layout=flat (probe ${probeFile} → ${r.status})`);
+            return 'flat';
+          }
+          console.log(`[local-audio] ${src.id} flat probe ${flatPath} → ${r.status}, assuming zipped`);
+        } catch (e) {
+          console.warn(`[local-audio] ${src.id} flat probe error:`, e?.message);
+        }
+      }
+      src.layout = 'zipped';
+      return 'zipped';
+    })();
+    return src.layoutPromise;
+  }
+
+  // For flat-layout archives (community tar) all mp3s live in a single
+  // <prefix>/<mediaDir>/<filename>. No bucketing — iOS handles a
+  // 134k-file directory fine, and the source archive ships this way.
+  async function flatFileUrl(src, filename) {
+    const prefix = await probeLayout(src);
+    const mediaDir = src.mediaDir || 'media';
+    const path = `${prefix}/${mediaDir}/${filename}`;
+    if (window.Capacitor?.convertFileSrc && (await ensureResolvedBase())) {
+      return window.Capacitor.convertFileSrc(path);
+    }
+    return path;
+  }
+
+  // `mediaDir` is the source archive's flat-layout subdir (community tar):
+  // <prefix>/<mediaDir>/<filename>. `bucketsDir` is the APK-bundled
+  // layout: <prefix>/<bucketsDir>/<bucketKey>.zip → contains <filename>.
+  // bucketKey/bucketsDir only matter when layout=zipped (Android path).
+  //
+  // Each entry must have all three fields; probeLayout falls back to a
+  // sensible candidate when the source dir doesn't exist in this user's
+  // archive, so registering extra sources is harmless (loadIndex 404s
+  // silently and the source is skipped per-lookup).
   const SOURCES = [
     {
       id: 'jpod',
       base: 'yomichan-audio/jpod_files',
+      mediaDir: 'media',
       bucketsDir: 'media-zips',
       bucketKey: (fn) => fn.slice(0, 2).toLowerCase(),
       indexFile: 'index.json',
@@ -137,15 +244,54 @@
     {
       id: 'shinmeikai',
       base: 'yomichan-audio/shinmeikai8_files',
+      mediaDir: 'media',
       bucketsDir: 'media-zips',
       bucketKey: (fn) => fn.slice(0, 2),
       indexFile: 'index.json',
       indexFormat: 'standard',
       indexLoaded: null,
       index: null
+    },
+    {
+      // NHK Accent Dict 16 — array-format entries.json, audio/ subdir.
+      // Was dropped from the Android APK for the 4 GB ZIP32 limit, but
+      // iOS has no such cap so we can light it up on the imported tar.
+      id: 'nhk',
+      base: 'yomichan-audio/nhk16_files',
+      mediaDir: 'audio',
+      bucketsDir: 'audio-zips',
+      bucketKey: (fn) => fn.slice(12, 14),
+      indexFile: 'entries.json',
+      indexFormat: 'nhk',
+      indexLoaded: null,
+      index: null
+    },
+    {
+      // Daijirin (大辞林) — if present in the user's archive. Same
+      // standard schema as jpod. Skipped silently if the dir doesn't
+      // exist.
+      id: 'daijirin',
+      base: 'yomichan-audio/daijirin_files',
+      mediaDir: 'media',
+      bucketsDir: 'media-zips',
+      bucketKey: (fn) => fn.slice(0, 2).toLowerCase(),
+      indexFile: 'index.json',
+      indexFormat: 'standard',
+      indexLoaded: null,
+      index: null
+    },
+    {
+      // Daijisen (大辞泉) — same pattern as daijirin.
+      id: 'daijisen',
+      base: 'yomichan-audio/daijisen_files',
+      mediaDir: 'media',
+      bucketsDir: 'media-zips',
+      bucketKey: (fn) => fn.slice(0, 2).toLowerCase(),
+      indexFile: 'index.json',
+      indexFormat: 'standard',
+      indexLoaded: null,
+      index: null
     }
-    // NHK16 was dropped to keep the APK under the 4 GB ZIP32 limit.
-    // Re-add the entry block if you ever externalize audio to /sdcard.
   ];
 
   const LRU_MAX = 8;
@@ -198,6 +344,11 @@
           console.log(`[local-audio] ${src.id}: loaded ${Object.keys(json.headwords || {}).length} headwords`);
         }
         src.index = idx;
+        // Layout probe now that we have a real filename to test with.
+        // Run async; resolveAudioBlobUrl awaits it lazily on first lookup.
+        detectLayout(src).catch((e) =>
+          console.warn(`[local-audio] ${src.id} layout detect failed:`, e?.message)
+        );
         return idx;
       } catch (e) {
         console.warn(`[local-audio] index load failed for ${src.id}:`, e.message);
@@ -243,6 +394,13 @@
 
   async function resolveAudioBlobUrl(src, filename) {
     if (!filename) return null;
+    // Flat layout — just hand back a fetchable URL pointing at the file
+    // on disk. No zip extraction needed, so playback is faster too.
+    const layout = await detectLayout(src);
+    if (layout === 'flat') {
+      return await flatFileUrl(src, filename);
+    }
+    // Zipped layout (Android-bundled archive).
     const bucketKey = src.bucketKey(filename);
     const zip = await loadBucket(src, bucketKey);
     if (!zip) return null;
@@ -257,10 +415,16 @@
   }
 
   async function lookupLocalAudio(term, reading) {
+    console.log(`[local-audio] lookupLocalAudio enter: term="${term}" reading="${reading}"`);
     if (!term) return [];
+    // Load every source's index in parallel — total wait is the slowest
+    // index, not the sum. NHK's entries.json is ~7 MB and used to dominate
+    // first-popup latency when loaded serially after jpod/shinmeikai.
+    const indexes = await Promise.all(SOURCES.map(src =>
+      loadIndex(src).then(idx => ({ src, idx }), () => ({ src, idx: null }))
+    ));
     const refs = [];
-    for (const src of SOURCES) {
-      const idx = await loadIndex(src);
+    for (const { src, idx } of indexes) {
       if (!idx || !idx.headwords) continue;
       const tryKey = (key) => {
         if (!key) return;
@@ -340,12 +504,28 @@
     const refs = await lookupLocalAudio(term, reading);
     for (const ref of refs) {
       try {
-        const bucketKey = ref.source.bucketKey(ref.filename);
-        const zip = await loadBucket(ref.source, bucketKey);
-        if (!zip) continue;
-        const entry = zip.file(ref.filename);
-        if (!entry) continue;
-        const blob = await entry.async('blob');
+        const layout = await detectLayout(ref.source);
+        let blob;
+        if (layout === 'flat') {
+          // Flat: fetch the mp3 directly, no JSZip needed. Range header
+          // forces the HTTPURLResponse code-path in WebViewAssetHandler;
+          // without it iOS sends a bare URLResponse for media files and
+          // res.ok comes back false despite the body being intact.
+          const url = await flatFileUrl(ref.source, ref.filename);
+          const res = await fetch(url, { headers: { Range: 'bytes=0-' } });
+          blob = await res.blob();
+          if (!blob || blob.size === 0) {
+            console.warn(`[local-audio] flat fetch ${ref.filename} → empty (status=${res.status})`);
+            continue;
+          }
+        } else {
+          const bucketKey = ref.source.bucketKey(ref.filename);
+          const zip = await loadBucket(ref.source, bucketKey);
+          if (!zip) continue;
+          const entry = zip.file(ref.filename);
+          if (!entry) continue;
+          blob = await entry.async('blob');
+        }
         const base64 = await blobToBase64(blob);
         if (!base64) continue;
         return { filename: ref.filename, base64, source: ref.source.id };
@@ -356,8 +536,54 @@
     return null;
   }
 
+  // Single-ref helpers — let callers (dict popup) choose WHICH audio to
+  // play / send rather than always picking the first match. Powers the
+  // ◀ ▶ audio cycler.
+  async function playRef(ref) {
+    if (!ref) return false;
+    return playRefs([ref]);
+  }
+  async function getRefAudioBase64(ref) {
+    if (!ref) return null;
+    try {
+      const layout = await detectLayout(ref.source);
+      let blob;
+      if (layout === 'flat') {
+        const url = await flatFileUrl(ref.source, ref.filename);
+        // iOS Capacitor's WebViewAssetHandler sends media files (.mp3
+        // etc.) with a bare URLResponse — no HTTP status. That makes
+        // `fetch().ok` false even though the body bytes are streamed
+        // through fine. Forcing a Range header routes the request
+        // through the handler's range branch which DOES send a 206
+        // HTTPURLResponse. `bytes=0-` means "from offset 0 to EOF" —
+        // we still get the whole file.
+        const res = await fetch(url, { headers: { Range: 'bytes=0-' } });
+        blob = await res.blob();
+        if (!blob || blob.size === 0) {
+          console.warn(`[local-audio] flat fetch ${ref.filename} → empty blob (status=${res.status} ok=${res.ok})`);
+          return null;
+        }
+      } else {
+        const bucketKey = ref.source.bucketKey(ref.filename);
+        const zip = await loadBucket(ref.source, bucketKey);
+        if (!zip) return null;
+        const entry = zip.file(ref.filename);
+        if (!entry) return null;
+        blob = await entry.async('blob');
+      }
+      const base64 = await blobToBase64(blob);
+      if (!base64) return null;
+      return { filename: ref.filename, base64, source: ref.source.id };
+    } catch (e) {
+      console.warn('[local-audio] getRefAudioBase64 failed:', e?.message);
+      return null;
+    }
+  }
+
   window.lookupLocalAudio = lookupLocalAudio;
   window.getLocalAudioBase64 = getLocalAudioBase64;
+  window.playRef = playRef;
+  window.getRefAudioBase64 = getRefAudioBase64;
   window.playLocalAudio = async function (term, reading) {
     const refs = await lookupLocalAudio(term, reading);
     if (!refs.length) return false;

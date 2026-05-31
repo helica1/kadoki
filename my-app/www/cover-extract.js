@@ -35,8 +35,18 @@
   }
 
   async function readFirstNBytes(url, n) {
-    const r = await fetch(url);
-    if (!r.ok) throw new Error('fetch ' + url + ' → ' + r.status);
+    // Capacitor's iOS WebViewAssetHandler responds to media file extensions
+    // with a bare URLResponse (no HTTP status), so a plain `fetch(url).ok`
+    // is false even though the body bytes are intact. Forcing a Range
+    // header routes through the handler's range branch which always emits
+    // a 206 HTTPURLResponse — bytes flow through normally and .ok is true.
+    // (Same trap we worked around in local-audio.js for Anki audio fetching.)
+    const r = await fetch(url, { headers: { Range: `bytes=0-${Math.max(1, n - 1)}` } });
+    // Treat any 2xx / 206 as success — guards against the rare cache
+    // path that does emit a plain HTTPURLResponse with 200.
+    if (!r.ok && r.status !== 206 && r.status !== 0) {
+      throw new Error('fetch ' + url + ' → ' + r.status);
+    }
     const reader = r.body.getReader();
     const chunks = [];
     let total = 0;
@@ -47,6 +57,9 @@
       total += value.byteLength;
     }
     try { reader.cancel(); } catch (e) {}
+    if (total === 0) {
+      throw new Error('fetch ' + url + ' → 0 bytes (status ' + r.status + ')');
+    }
     const out = new Uint8Array(total);
     let off = 0;
     for (const c of chunks) {
@@ -166,44 +179,112 @@
     return { nextOff: end + 1 };
   }
 
+  // Walk top-level MP4 boxes looking for `moov > udta > meta > ilst > covr`.
+  // Audiobooks distributed as `.m4b` / `.m4a` use this format; the cover
+  // art is an atom payload, not an ID3 frame.
+  function findMp4Cover(bytes, start, end) {
+    // Look for moov first.
+    function walk(at, until, target) {
+      let off = at;
+      while (off + 8 <= until) {
+        const size = readU32BE(bytes, off);
+        const type = String.fromCharCode(bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7]);
+        if (size < 8 || off + size > until) return null;
+        if (type === target) return { contentStart: off + 8, contentEnd: off + size };
+        off += size;
+      }
+      return null;
+    }
+    const moov = walk(start, end, 'moov');
+    if (!moov) return null;
+    const udta = walk(moov.contentStart, moov.contentEnd, 'udta');
+    if (!udta) return null;
+    const meta = walk(udta.contentStart, udta.contentEnd, 'meta');
+    if (!meta) return null;
+    // meta has a 4-byte version+flags BEFORE its subboxes.
+    const ilst = walk(meta.contentStart + 4, meta.contentEnd, 'ilst');
+    if (!ilst) return null;
+    const covr = walk(ilst.contentStart, ilst.contentEnd, 'covr');
+    if (!covr) return null;
+    // covr contains one or more `data` subboxes. The image is inside the
+    // first one. data layout: 4B size, 4B 'data', 4B type-indicator,
+    // 4B locale, then image bytes.
+    const data = walk(covr.contentStart, covr.contentEnd, 'data');
+    if (!data) return null;
+    if (data.contentEnd - data.contentStart < 8) return null;
+    const typeIndicator = readU32BE(bytes, data.contentStart) & 0xFFFFFF;
+    // 13 = JPEG, 14 = PNG (per iTunes metadata atom spec).
+    const mime = (typeIndicator === 14) ? 'image/png' : 'image/jpeg';
+    const pic = bytes.subarray(data.contentStart + 8, data.contentEnd);
+    if (pic.length === 0) return null;
+    return { dataUri: makeDataUri(pic, mime), mime };
+  }
+
   async function fromAudio(cachePath) {
     if (!cachePath) return null;
     try {
       const bytes = await readFirstNBytes(urlFor(cachePath), MAX_AUDIO_HEAD_BYTES);
-      if (bytes.length < 10) return null;
-      // Magic check.
-      if (bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33) return null;
-      const major = bytes[3];
-      // const flags = bytes[5];
-      const tagSize = readSynchsafe(bytes, 6);
-      const tagEnd = 10 + tagSize;
-      let off = 10;
-      while (off + 10 <= bytes.length && off + 10 <= tagEnd) {
-        const id = String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]);
-        if (!/^[A-Z0-9]{4}$/.test(id)) break;  // padding
-        const size = (major >= 4) ? readSynchsafe(bytes, off + 4) : readU32BE(bytes, off + 4);
-        // frame flags = off+8..9
-        const dataStart = off + 10;
-        const dataEnd = dataStart + size;
-        if (id === 'APIC') {
-          if (dataEnd > bytes.length) {
-            console.warn('[cover] APIC frame truncated — head buffer too small');
-            return null;
-          }
-          let p = dataStart;
-          const encoding = bytes[p++];
-          const mimeR = readAscii(bytes, p, dataEnd - p);
-          const mime = mimeR.text || 'image/jpeg';
-          p = mimeR.nextOff;
-          p++; // picture type byte
-          const descR = readNullTerm(bytes, p, encoding);
-          p = descR.nextOff;
-          const pic = bytes.subarray(p, dataEnd);
-          if (pic.length === 0) return null;
-          return { dataUri: makeDataUri(pic, mime), mime };
-        }
-        off = dataEnd;
+      if (bytes.length < 10) {
+        console.warn('[cover] audio: read returned only ' + bytes.length + ' bytes');
+        return null;
       }
+      // Detect container by magic bytes for clearer diagnostics.
+      const head = Array.from(bytes.subarray(0, 12))
+        .map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.log('[cover] audio first 12 bytes: ' + head);
+      const ftypAt4 = String.fromCharCode(bytes[4], bytes[5], bytes[6], bytes[7]);
+
+      // ---- ID3v2 (MP3) ----
+      if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+        const major = bytes[3];
+        const tagSize = readSynchsafe(bytes, 6);
+        const tagEnd = 10 + tagSize;
+        console.log('[cover] ID3v2.' + major + ' tag, size=' + tagSize);
+        let off = 10;
+        while (off + 10 <= bytes.length && off + 10 <= tagEnd) {
+          const id = String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]);
+          if (!/^[A-Z0-9]{4}$/.test(id)) break;  // padding
+          const size = (major >= 4) ? readSynchsafe(bytes, off + 4) : readU32BE(bytes, off + 4);
+          const dataStart = off + 10;
+          const dataEnd = dataStart + size;
+          if (id === 'APIC') {
+            if (dataEnd > bytes.length) {
+              console.warn('[cover] APIC frame truncated — head buffer too small');
+              return null;
+            }
+            let p = dataStart;
+            const encoding = bytes[p++];
+            const mimeR = readAscii(bytes, p, dataEnd - p);
+            const mime = mimeR.text || 'image/jpeg';
+            p = mimeR.nextOff;
+            p++; // picture type byte
+            const descR = readNullTerm(bytes, p, encoding);
+            p = descR.nextOff;
+            const pic = bytes.subarray(p, dataEnd);
+            if (pic.length === 0) return null;
+            console.log('[cover] ID3 APIC found, ' + pic.length + ' bytes ' + mime);
+            return { dataUri: makeDataUri(pic, mime), mime };
+          }
+          off = dataEnd;
+        }
+        console.warn('[cover] ID3v2 tag had no APIC frame — file has no cover art embedded in the ID3 header.');
+        return null;
+      }
+
+      // ---- MP4 / M4B / M4A ----
+      if (ftypAt4 === 'ftyp') {
+        console.log('[cover] MP4 container detected — walking atoms');
+        const r = findMp4Cover(bytes, 0, bytes.length);
+        if (r) {
+          console.log('[cover] MP4 covr found, ' + r.dataUri.length + ' base64 chars ' + r.mime);
+          return r;
+        }
+        console.warn('[cover] MP4 has no covr atom in the first ' +
+          Math.round(MAX_AUDIO_HEAD_BYTES / 1024 / 1024) + ' MB. Cover may be in mvhd > udta past the buffer.');
+        return null;
+      }
+
+      console.warn('[cover] unrecognized audio container — head=' + head);
       return null;
     } catch (e) {
       console.warn('[cover] audio extract failed:', e?.message || e);

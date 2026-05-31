@@ -296,17 +296,45 @@
       background: var(--panel, #161616);
       border: 1px solid var(--border, #2a2a2a);
       border-radius: 10px;
-      padding: 14px;
       cursor: pointer;
-      transition: border-color 0.15s, background 0.15s, transform 0.08s;
       position: relative;
+      overflow: hidden;            /* clip the sliding content */
     }
-    .deck-item:hover,
-    .deck-item:active {
+    /* Sliding content layer — the visible card; slides left to reveal actions. */
+    .deck-item-content {
+      background: var(--panel, #161616);
+      padding: 14px;
+      position: relative;
+      z-index: 2;
+      transition: transform 0.22s cubic-bezier(.2,.7,.3,1), background 0.15s;
+      touch-action: pan-y;         /* let vertical scroll through; we handle horizontal */
+    }
+    .deck-item:hover .deck-item-content,
+    .deck-item:active .deck-item-content {
       background: var(--panel-elev, #1c1c1c);
-      border-color: var(--border-strong, #3a3a3a);
     }
-    .deck-item:active { transform: scale(0.995); }
+    /* Action layer revealed behind the content on a left-swipe. */
+    .deck-item-actions {
+      position: absolute;
+      top: 0; right: 0; bottom: 0;
+      width: 150px;
+      display: flex;
+      z-index: 1;
+    }
+    .deck-action {
+      flex: 1;
+      border: none;
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .deck-action-edit { background: #243744; color: #bfe3f2; }
+    .deck-action-del  { background: #46232a; color: #f4b3bb; }
+    .deck-action:active { filter: brightness(1.25); }
 
     .title-chip {
       display: inline-block;
@@ -814,13 +842,17 @@ body.dimmed .card-image {
         <details class="prefs-section">
           <summary class="prefs-heading">Audio archive</summary>
           <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;">
-            On iOS, the per-word audio archive is sideloaded as a single
-            <code>.tar</code> file (the unpacked form would be too many
-            individual files to transfer over USB). On your Mac:
-            <code>xz -d local-yomichan.tar.xz</code> → drop the resulting
-            <code>local-yomichan.tar</code> into this app via Finder's Files
-            tab → tap Import below. Extraction takes ~30 seconds and frees
-            the .tar after success.
+            The per-word audio archive imports as one <code>.tar</code>,
+            <code>.tar.gz</code>, or <code>.tar.xz</code> file (the unpacked
+            form is too many individual files to transfer). Tap Import and
+            pick the file:
+            <ul style="margin:6px 0 0 0;padding-left:18px;">
+              <li><b>Android</b>: any of <code>.tar</code> / <code>.tar.gz</code> / <code>.tar.xz</code>, picked from the system file browser.</li>
+              <li><b>iOS</b>: <code>.tar</code> (if yours is <code>.tar.xz</code>, run <code>xz -d local-yomichan.tar.xz</code> on your computer first). Drop it in via Finder's Files tab, or pick it from the file browser.</li>
+            </ul>
+            Extraction takes ~30 s for <code>.tar</code>/<code>.tar.gz</code>,
+            longer for <code>.tar.xz</code> (XZ is CPU-heavy); archives we
+            copied in are freed after success.
           </div>
           <div id="prefsAudioArchiveStatus" style="font-size:.78rem;color:#aaa;margin:8px 0;"></div>
           <button id="prefsAudioArchiveImport"
@@ -829,7 +861,7 @@ body.dimmed .card-image {
                          padding:10px 16px;border-radius:8px;font-weight:600;
                          font-family:var(--font-sans);font-size:.88rem;
                          cursor:pointer;">
-            Import .tar
+            Import audio archive
           </button>
           <div id="prefsAudioArchiveProgress" style="display:none;margin-top:12px;">
             <div style="display:flex;justify-content:space-between;font-size:.75rem;color:#aaa;margin-bottom:4px;">
@@ -888,37 +920,24 @@ body.dimmed .card-image {
           <div class="prefs-row"><label>Term audio → field</label><select id="ankiDictFieldTermAudio"></select></div>
         </details>
 
-        <!-- ===== CARD MODE ===== -->
-        <details class="prefs-section">
-          <summary class="prefs-heading">Card mode</summary>
-          <div class="prefs-row">
-            <label>Subtitle vertical offset <span id="subtitleOffsetLabel" style="color:#fff;font-weight:bold;">30px</span></label>
-            <input id="subtitleOffsetSlider" type="range" min="0" max="150" step="1" value="30"
-                   oninput="document.getElementById('subtitleOffsetLabel').textContent=this.value+'px';document.documentElement.style.setProperty('--subtitle-offset',this.value+'px');">
-          </div>
-          <div class="prefs-row">
-            <label>Stopwatch inactivity timeout (s)</label>
-            <input id="timeoutInput" type="number" min="5" max="600">
-          </div>
-        </details>
+        <!-- Card mode + Playback prefs sections removed 2026-05-30.
+             Subtitle vertical offset + Stopwatch timeout moved into the
+             Card appearance block. Audio playback speed lives in the
+             hamburger menu's "Playback Speed…" dialog. Pause-on-dict-lookup
+             is now hardcoded on by default (DICT_PAUSE_ON_LOOKUP defaults
+             to true in enhanced-dictionary.js when localStorage is unset).
 
-        <!-- ===== PLAYBACK ===== -->
-        <details class="prefs-section">
-          <summary class="prefs-heading">Playback</summary>
-          <div class="prefs-row">
-            <label>Audio speed <span id="audioSpeedLabel" style="color:#fff;font-weight:bold;">1.00×</span></label>
-            <input id="audioSpeedSlider" type="range" min="1.0" max="1.8" step="0.05" value="1.0"
-                   oninput="document.getElementById('audioSpeedLabel').textContent=parseFloat(this.value).toFixed(2)+'×';">
-          </div>
-          <div class="prefs-row">
-            <label>Pause audio on dictionary lookup
-              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">Auto-resumes when popup closes (reader + audiobook only)</span>
-            </label>
-            <input id="pauseOnLookupToggle" type="checkbox" checked>
-          </div>
-          <!-- Keep #deckSelect alive for legacy code paths that still reference it. Hidden mirror of ankiSwipeDeck. -->
-          <select id="deckSelect" style="display:none;"></select>
-        </details>
+             Kept hidden mirrors for the controls that DO still belong
+             to the save flow: subtitle offset + stopwatch timeout (the
+             Card appearance block writes into these). Removed
+             #audioSpeedSlider and #pauseOnLookupToggle — their save
+             handlers would overwrite the actually-saved values with
+             the placeholders' bogus contents. Kept #deckSelect for the
+             legacy deck-load code path. -->
+        <input id="subtitleOffsetSlider" type="hidden" value="65">
+        <span id="subtitleOffsetLabel" style="display:none;">65px</span>
+        <input id="timeoutInput" type="hidden">
+        <select id="deckSelect" style="display:none;"></select>
 
       </div>
     </div>
@@ -1061,8 +1080,9 @@ body.dimmed .card-image {
     </div>
   </div>
 
-  <!-- Stats Modal — three sections (CARD / READ / AUDIO) -->
-  <div id="readingStatsModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:2850;justify-content:center;align-items:center;">
+  <!-- Stats Modal — three sections (CARD / READ / AUDIO).
+       Tap on the backdrop dismisses; tap inside the panel does not. -->
+  <div id="readingStatsModal" onclick="if(event.target===this)window.closeReadingStats&&window.closeReadingStats()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:2850;justify-content:center;align-items:center;">
     <div class="stats-panel" style="background:var(--bg,#0c0c0c);border:1px solid var(--border,#2a2a2a);border-radius:12px;width:min(460px,94vw);max-height:88vh;overflow:auto;">
       <div style="padding:14px 18px;border-bottom:1px solid var(--border,#2a2a2a);display:flex;align-items:center;justify-content:space-between;">
         <div class="label-cap" style="color:var(--text,#e8e8e8);">Session Stats</div>
@@ -1073,6 +1093,7 @@ body.dimmed .card-image {
         <div id="statsCard" class="stats-block" data-mode="card">
           <div class="stats-block-header">
             <span class="stats-block-title">Card</span>
+            <button onclick="window.resetReadingTimerFor && window.resetReadingTimerFor('card')" title="Reset card stats" style="background:transparent;border:none;color:var(--text-muted,#666);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:2px 6px;">Reset</button>
             <span class="stats-block-status">●</span>
           </div>
           <div class="stat-row">
@@ -1096,6 +1117,7 @@ body.dimmed .card-image {
         <div id="statsRead" class="stats-block" data-mode="read">
           <div class="stats-block-header">
             <span class="stats-block-title">Read</span>
+            <button onclick="window.resetReadingTimerFor && window.resetReadingTimerFor('read')" title="Reset read stats" style="background:transparent;border:none;color:var(--text-muted,#666);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:2px 6px;">Reset</button>
             <span class="stats-block-status">●</span>
           </div>
           <div class="stat-row">
@@ -1115,17 +1137,26 @@ body.dimmed .card-image {
         <div id="statsAudio" class="stats-block" data-mode="audio">
           <div class="stats-block-header">
             <span class="stats-block-title">Audio</span>
+            <button onclick="window.resetReadingTimerFor && window.resetReadingTimerFor('audio')" title="Reset audio stats" style="background:transparent;border:none;color:var(--text-muted,#666);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:2px 6px;">Reset</button>
             <span class="stats-block-status">●</span>
           </div>
-          <div class="stat-row stat-row-last">
+          <div class="stat-row">
             <span class="stat-label">Time playing</span>
             <span id="statsAudioTime" class="stat-value">0:00</span>
           </div>
+          <div class="stat-row">
+            <span class="stat-label">Chars heard</span>
+            <span id="statsAudioChars" class="stat-value">0</span>
+          </div>
+          <div class="stat-row stat-row-last">
+            <span class="stat-label">Chars / hr</span>
+            <span id="statsAudioRate" class="stat-value">—</span>
+          </div>
         </div>
-        <button onclick="window.resetReadingTimer && window.resetReadingTimer()"
-                class="btn btn-ghost" style="display:block;width:100%;margin-top:14px;padding:10px;letter-spacing:.12em;text-transform:uppercase;font-size:.72rem;color:var(--text-muted,#888);">
-          Reset All Stats
-        </button>
+        <!-- "Reset All Stats" button removed — too easy to hit by accident.
+             Per-section Reset buttons in each block header now handle this
+             intentionally. -->
+
       </div>
     </div>
   </div>
@@ -1186,6 +1217,9 @@ body.dimmed .card-image {
   </div>
 
 <script src="jszip.min.js"></script>
+  <script src="zipjs.min.js"></script>
+  <script src="fzstd.min.js"></script>
+  <script src="apkg-reader.js"></script>
   <script src="sql-wasm.js"></script>
   <script src="app.js"></script>
   <script src="sendToAnkiConnect.js"></script>
@@ -1208,6 +1242,7 @@ body.dimmed .card-image {
   <script src="srt-parser.js"></script>
   <script src="cue-alignment.js"></script>
   <script src="waveform.js"></script>
+  <script src="livewaveform.js"></script>
   <script src="reading-mode.js"></script>
   <script src="reading-mode-paged.js"></script>
 
@@ -1410,46 +1445,103 @@ body.dimmed .card-image {
           ? `<img src="${coverUri}" alt="" style="width:56px;height:56px;border-radius:6px;object-fit:cover;flex-shrink:0;">`
           : `<div class="title-avatar" style="width:56px;height:56px;border-radius:6px;background:var(--panel-elev);color:${avatarTint};display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:700;font-family:var(--font-sans);flex-shrink:0;border:1px solid var(--border);">${escapeHtml(firstLetter)}</div>`;
         item.innerHTML = `
-          <button class="deck-delete title-edit-btn" data-id="${title.id}" title="Edit this title" style="right:48px;background:#333;">✎</button>
-          <button class="deck-delete" data-id="${title.id}" title="Remove from library">✕</button>
-          <div style="display:flex;gap:12px;align-items:flex-start;">
-            ${thumb}
-            <div style="flex:1;min-width:0;">
-              <div class="deck-name" style="margin:0;">${escapeHtml(title.name || 'Untitled')}</div>
-              <div class="title-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">
-                ${chipHtml('card',  'DECK',  !!a.deck)}
-                ${chipHtml('read',  'EPUB',  !!a.epub)}
-                ${chipHtml('audio', 'AUDIO', !!a.audiobook)}
-                ${chipHtml('srt',   'SRT',   !!a.srt)}
-              </div>
-              <div class="deck-info" style="color:#888;font-size:0.85em;display:flex;gap:10px;flex-wrap:wrap;">
-                ${a.deck ? `<span>Card ${(Number.isFinite(title.lastCardIndex) ? title.lastCardIndex : (a.deck.cardIndex || 0)) + 1}${a.deck.totalCards ? ' / ' + a.deck.totalCards : ''}</span>` : ''}
-                ${a.epub ? bookProgressHtml(title) : ''}
-                <span>${new Date(title.lastOpenedAt || title.createdAt).toLocaleDateString()}</span>
+          <div class="deck-item-actions">
+            <button class="deck-action deck-action-edit">Edit</button>
+            <button class="deck-action deck-action-del">Delete</button>
+          </div>
+          <div class="deck-item-content">
+            <div style="display:flex;gap:12px;align-items:flex-start;">
+              ${thumb}
+              <div style="flex:1;min-width:0;">
+                <div class="deck-name" style="margin:0;">${escapeHtml(title.name || 'Untitled')}</div>
+                <div class="title-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">
+                  ${chipHtml('card',  'DECK',  !!a.deck)}
+                  ${chipHtml('read',  'EPUB',  !!a.epub)}
+                  ${chipHtml('audio', 'AUDIO', !!a.audiobook)}
+                  ${chipHtml('srt',   'SRT',   !!a.srt)}
+                </div>
+                <div class="deck-info" style="color:#888;font-size:0.85em;display:flex;gap:10px;flex-wrap:wrap;">
+                  ${a.deck ? `<span>Card ${(Number.isFinite(title.lastCardIndex) ? title.lastCardIndex : (a.deck.cardIndex || 0)) + 1}${a.deck.totalCards ? ' / ' + a.deck.totalCards : ''}</span>` : ''}
+                  ${a.epub ? bookProgressHtml(title) : ''}
+                  <span>${new Date(title.lastOpenedAt || title.createdAt).toLocaleDateString()}</span>
+                </div>
               </div>
             </div>
           </div>
         `;
-        item.onclick = (e) => {
-          if (e.target.classList.contains('title-edit-btn')) {
-            const id = e.target.getAttribute('data-id');
-            if (id) openTitleEdit(id);
-            return;
+        // Action buttons (revealed by left-swipe).
+        item.querySelector('.deck-action-edit').addEventListener('click', (e) => {
+          e.stopPropagation(); openTitleEdit(title.id);
+        });
+        item.querySelector('.deck-action-del').addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (window.titleStore && confirm('Remove this title from your library?')) {
+            window.titleStore.remove(title.id).then(populateLibrary).catch(() => {});
           }
-          if (e.target.classList.contains('deck-delete')) {
-            const id = e.target.getAttribute('data-id');
-            if (id && window.titleStore) {
-              if (confirm('Remove this title from your library?')) {
-                window.titleStore.remove(id).then(populateLibrary).catch(() => {});
-              }
-            }
-            return;
-          }
-          loadTitleFromLibrary(title);
-        };
-        item.style.cursor = 'pointer';
+        });
+        setupLibrarySwipe(item, title);
         deckList.appendChild(item);
       }
+    }
+
+    // Left-swipe a library item to reveal its Edit / Delete actions; tap to
+    // open. The content layer follows the finger live, then snaps open/closed.
+    const SWIPE_ACTIONS_W = 150;
+    function closeOtherSwipes(except) {
+      document.querySelectorAll('#deckList .deck-item.swiped').forEach(el => {
+        if (el !== except && typeof el._closeSwipe === 'function') el._closeSwipe();
+      });
+    }
+    function setupLibrarySwipe(item, title) {
+      const content = item.querySelector('.deck-item-content');
+      const W = SWIPE_ACTIONS_W;
+      let x0 = 0, y0 = 0, dragging = false, decided = false, horiz = false, opened = false, moved = false;
+      const setOffset = (px, animate) => {
+        if (animate) {
+          content.style.transition = '';
+          void content.offsetWidth;   // commit transition:none→'' before the transform changes, so the snap animates
+        } else {
+          content.style.transition = 'none';
+        }
+        content.style.transform = px ? `translateX(${px}px)` : '';
+      };
+      const open  = () => { opened = true;  item.classList.add('swiped');    setOffset(-W, true); closeOtherSwipes(item); };
+      const close = () => { opened = false; item.classList.remove('swiped'); setOffset(0, true); };
+      item._closeSwipe = close;
+
+      content.addEventListener('touchstart', (e) => {
+        const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY;
+        dragging = true; decided = false; horiz = false; moved = false;
+      }, { passive: true });
+      content.addEventListener('touchmove', (e) => {
+        if (!dragging) return;
+        const t = e.touches[0], dx = t.clientX - x0, dy = t.clientY - y0;
+        if (!decided && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
+          decided = true; horiz = Math.abs(dx) > Math.abs(dy); moved = true;
+        }
+        if (decided && horiz) {
+          let off = (opened ? -W : 0) + dx;
+          off = Math.max(-W, Math.min(0, off));
+          setOffset(off, false);
+          e.preventDefault();   // we own the horizontal axis; keep vertical scroll otherwise
+        }
+      }, { passive: false });
+      content.addEventListener('touchend', (e) => {
+        if (!dragging) return;
+        dragging = false;
+        if (!decided || !horiz) return;   // a tap or a vertical scroll → let click/scroll handle it
+        const dx = (e.changedTouches[0]?.clientX ?? x0) - x0;
+        const off = (opened ? -W : 0) + dx;
+        if (off < -W / 2) open(); else close();
+      }, { passive: true });
+
+      // Tap (synthetic click — suppressed by the browser after a real drag):
+      // open the title, or close the actions if they're showing.
+      content.addEventListener('click', () => {
+        if (moved) { moved = false; return; }
+        if (opened) close();
+        else loadTitleFromLibrary(title);
+      });
     }
 
     function escapeHtml(s) {
@@ -1484,43 +1576,60 @@ body.dimmed .card-image {
     function renderAttachmentRows(title) {
       const cont = document.getElementById('titleEditAttachments');
       const a = title.attachments || {};
-      const kinds = [
-        { id: 'deck',      label: 'Anki deck (.apkg)' },
-        { id: 'epub',      label: 'EPUB' },
-        { id: 'audiobook', label: 'Audiobook' },
-        { id: 'srt',       label: 'SRT subtitles' }
-      ];
-      let html = kinds.map(k => {
-        const at = a[k.id];
+      // One attachment row. `indent` marks Audio/SRT as children of EPUB.
+      const rowHtml = (id, label, indent) => {
+        const at = a[id];
         const name = at?.name || '<i style="color:#666;">Not attached</i>';
         return `
-          <div style="display:flex;align-items:center;gap:8px;padding:12px 0;border-bottom:1px solid #2a2a2a;">
+          <div style="display:flex;align-items:center;gap:8px;padding:11px 0;padding-left:${indent ? 20 : 0}px;border-bottom:1px solid #2a2a2a;">
             <div style="flex:1;min-width:0;">
-              <div style="font-size:0.72rem;color:#888;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;">${k.label}</div>
+              <div style="font-size:0.72rem;color:#888;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;">${indent ? '<span style="color:#555;">└&nbsp;</span>' : ''}${label}</div>
               <div style="font-size:0.95rem;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${at ? '#e8e8e8' : '#666'};">${name}</div>
             </div>
-            <button onclick="pickTitleAttachment('${k.id}')" style="background:#333;color:#fff;border:1px solid #444;padding:7px 12px;border-radius:5px;font-size:0.85rem;">${at ? 'Replace' : 'Pick'}</button>
-            ${at ? `<button onclick="removeTitleAttachment('${k.id}')" style="background:transparent;color:#aaa;border:1px solid #333;padding:7px 10px;border-radius:5px;font-size:0.85rem;">✕</button>` : ''}
-          </div>
-        `;
-      }).join('');
+            <button onclick="pickTitleAttachment('${id}')" style="background:#333;color:#fff;border:1px solid #444;padding:7px 12px;border-radius:5px;font-size:0.85rem;">${at ? 'Replace' : 'Pick'}</button>
+            ${at ? `<button onclick="removeTitleAttachment('${id}')" style="background:transparent;color:#aaa;border:1px solid #333;padding:7px 10px;border-radius:5px;font-size:0.85rem;">✕</button>` : ''}
+          </div>`;
+      };
+      const groupLabel = (txt) =>
+        `<div style="font-size:0.64rem;color:#00ffcc;opacity:0.78;text-transform:uppercase;letter-spacing:0.16em;font-weight:700;margin:16px 0 4px;">${txt}</div>`;
 
-      // Cover row — picture used in audio mode + sent to Anki.
+      // Reading group: EPUB is the parent; Audio + SRT are its sync children.
+      let html = groupLabel('Reading');
+      html += rowHtml('epub', 'EPUB', false);
+      html += rowHtml('audiobook', 'Audiobook', true);
+      html += rowHtml('srt', 'SRT subtitles', true);
+      // Cards group: the Anki deck stands on its own.
+      html += groupLabel('Cards');
+      html += rowHtml('deck', 'Anki deck (.apkg)', false);
+      html += groupLabel('Cover');
+
+      // Cover row — picture used in audio mode + sent to Anki. Three
+      // explicit sources: EPUB cover, audiobook embedded art, clipboard
+      // image. Buttons gray out when their source isn't available.
       const cv = a.cover;
+      const hasEpub  = !!a.epub?.uri;
+      const hasAudio = !!a.audiobook?.cachePath;
+      const btnStyle = (enabled) =>
+        `background:#333;color:${enabled ? '#fff' : '#666'};border:1px solid ${enabled ? '#444' : '#222'};` +
+        `padding:7px 10px;border-radius:5px;font-size:0.78rem;` +
+        (enabled ? '' : 'opacity:.5;cursor:not-allowed;');
       html += `
-        <div style="display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid #2a2a2a;">
+        <div style="display:flex;align-items:center;gap:8px;padding:12px 0;border-bottom:1px solid #2a2a2a;flex-wrap:wrap;">
           <div style="width:48px;height:48px;border-radius:4px;background:#1a1a1a;border:1px solid #333;overflow:hidden;flex-shrink:0;display:flex;align-items:center;justify-content:center;">
             ${cv?.dataUri
               ? `<img src="${cv.dataUri}" style="width:100%;height:100%;object-fit:cover;">`
               : `<span style="color:#444;font-size:.65rem;letter-spacing:.1em;">NONE</span>`}
           </div>
-          <div style="flex:1;min-width:0;">
+          <div style="flex:1;min-width:120px;">
             <div style="font-size:0.72rem;color:#888;text-transform:uppercase;letter-spacing:0.1em;font-weight:600;">Cover image</div>
-            <div style="font-size:0.85rem;margin-top:2px;color:${cv ? '#e8e8e8' : '#666'};">${cv ? (cv.source || 'manual') : 'Auto-extract from audiobook or EPUB'}</div>
+            <div style="font-size:0.85rem;margin-top:2px;color:${cv ? '#e8e8e8' : '#666'};">${cv ? (cv.source || 'manual') : 'Pick a source below — EPUB preferred'}</div>
           </div>
-          <button onclick="autoExtractTitleCover()" style="background:#333;color:#fff;border:1px solid #444;padding:7px 10px;border-radius:5px;font-size:0.78rem;">Auto</button>
-          <button onclick="pickTitleCoverManual()" style="background:#333;color:#fff;border:1px solid #444;padding:7px 10px;border-radius:5px;font-size:0.78rem;">${cv ? 'Replace' : 'Pick'}</button>
-          ${cv ? `<button onclick="removeTitleAttachment('cover')" style="background:transparent;color:#aaa;border:1px solid #333;padding:7px 10px;border-radius:5px;font-size:0.85rem;">✕</button>` : ''}
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button onclick="setTitleCoverFromEpub()"      ${hasEpub  ? '' : 'disabled'} style="${btnStyle(hasEpub)}">EPUB</button>
+            <button onclick="setTitleCoverFromAudio()"     ${hasAudio ? '' : 'disabled'} style="${btnStyle(hasAudio)}">Audio</button>
+            <button onclick="setTitleCoverFromClipboard()" style="${btnStyle(true)}">Clipboard</button>
+            ${cv ? `<button onclick="removeTitleAttachment('cover')" style="background:transparent;color:#aaa;border:1px solid #333;padding:7px 10px;border-radius:5px;font-size:0.85rem;">✕</button>` : ''}
+          </div>
         </div>
       `;
       cont.innerHTML = html;
@@ -1528,21 +1637,100 @@ body.dimmed .card-image {
 
     // ---- Cover-image actions for the Edit Title sheet ----
 
+    // Shared writer — persist a freshly extracted cover and re-render the
+    // attachments list.
+    async function _attachCoverResult(result) {
+      await window.titleStore.attach(_editingTitleId, 'cover',
+        { dataUri: result.dataUri, mime: result.mime, source: result.source, name: 'cover' });
+      const updated = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
+      renderAttachmentRows(updated);
+    }
+
+    // EPUB → cover. Materializes the EPUB to cache if it isn't already
+    // there (FileAccess.materializeToCache is a no-op when cached).
+    window.setTitleCoverFromEpub = async function () {
+      if (!_editingTitleId) return;
+      if (!window.coverExtract) { alert('Cover extractor not loaded'); return; }
+      const title = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
+      if (!title?.attachments?.epub?.uri) { alert('No EPUB attached to this title'); return; }
+      let epubPath = null;
+      const fa = window.Capacitor?.Plugins?.FileAccess;
+      try {
+        if (fa) {
+          const mat = await fa.materializeToCache({ uri: title.attachments.epub.uri });
+          epubPath = mat?.path;
+        }
+      } catch (e) {}
+      if (!epubPath) { alert('Could not load the EPUB into cache'); return; }
+      const result = await window.coverExtract.fromEpub(epubPath);
+      if (!result) { alert('No embedded cover found in the EPUB'); return; }
+      result.source = 'epub';
+      await _attachCoverResult(result);
+    };
+
+    // Audiobook → cover (ID3 APIC frame).
+    window.setTitleCoverFromAudio = async function () {
+      if (!_editingTitleId) return;
+      if (!window.coverExtract) { alert('Cover extractor not loaded'); return; }
+      const title = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
+      const audioPath = title?.attachments?.audiobook?.cachePath;
+      if (!audioPath) { alert('No audiobook attached to this title'); return; }
+      const result = await window.coverExtract.fromAudio(audioPath);
+      if (!result) { alert('No embedded cover found in the audiobook'); return; }
+      result.source = 'id3';
+      await _attachCoverResult(result);
+    };
+
+    // Clipboard image → cover. Requires the modern Async Clipboard API
+    // (`navigator.clipboard.read`) which Safari/WKWebView supports under
+    // a user gesture. We iterate the clipboard items, pick the first
+    // image/* type we recognize, and route through coverExtract.fromFile
+    // so the data URI / mime are produced the same way as a file pick.
+    window.setTitleCoverFromClipboard = async function () {
+      if (!_editingTitleId) return;
+      if (!window.coverExtract) { alert('Cover extractor not loaded'); return; }
+      if (!navigator.clipboard?.read) {
+        alert('This device does not expose a clipboard read API.\n\nCopy an image into the clipboard and try again, or use one of the other buttons.');
+        return;
+      }
+      let items;
+      try {
+        items = await navigator.clipboard.read();
+      } catch (e) {
+        alert('Clipboard read failed: ' + (e?.message || e) + '\n\nMake sure you have an image (not just text) on the clipboard.');
+        return;
+      }
+      for (const item of (items || [])) {
+        const imageType = (item.types || []).find(t => t.startsWith('image/'));
+        if (!imageType) continue;
+        try {
+          const blob = await item.getType(imageType);
+          const r = await window.coverExtract.fromFile(blob);
+          if (!r) continue;
+          r.source = 'clipboard';
+          await _attachCoverResult(r);
+          return;
+        } catch (e) {
+          console.warn('[cover-clipboard] getType failed:', e);
+        }
+      }
+      alert('No image found on the clipboard.');
+    };
+
+    // ----- Legacy helpers retained for any external callers -----
+    // autoExtractTitleCover now prefers EPUB (per user request — EPUB
+    // covers tend to be higher quality and aren't tied to ID3 tagging
+    // quirks). Falls back to audiobook art if the EPUB has no embedded
+    // cover. Still callable but no longer wired to any UI button.
     window.autoExtractTitleCover = async function () {
       if (!_editingTitleId) return;
-      const titles = await window.titleStore.list();
-      const title = titles.find(t => t.id === _editingTitleId);
+      const title = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
       if (!title) return;
       const a = title.attachments || {};
       if (!window.coverExtract) { alert('Cover extractor not loaded'); return; }
-      // Audiobook preferred; EPUB fallback.
       let result = null;
-      if (a.audiobook?.cachePath) {
-        result = await window.coverExtract.fromAudio(a.audiobook.cachePath);
-        if (result) result.source = 'id3';
-      }
-      if (!result && a.epub?.uri) {
-        // EPUB needs to live in cache; materialize if it isn't already.
+      // EPUB first.
+      if (a.epub?.uri) {
         let epubPath = null;
         const fa = window.Capacitor?.Plugins?.FileAccess;
         try {
@@ -1556,18 +1744,19 @@ body.dimmed .card-image {
           if (result) result.source = 'epub';
         }
       }
+      // Audiobook fallback.
+      if (!result && a.audiobook?.cachePath) {
+        result = await window.coverExtract.fromAudio(a.audiobook.cachePath);
+        if (result) result.source = 'id3';
+      }
       if (!result) {
-        alert('No embedded cover found. Use Pick to choose an image manually.');
+        alert('No embedded cover found in EPUB or audiobook. Try Clipboard.');
         return;
       }
-      await window.titleStore.attach(_editingTitleId, 'cover',
-        { dataUri: result.dataUri, mime: result.mime, source: result.source, name: 'cover' });
-      const updated = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
-      renderAttachmentRows(updated);
+      await _attachCoverResult(result);
     };
 
     window.pickTitleCoverManual = function () {
-      // Hidden file input — simpler than going through FileAccess for an image.
       let input = document.getElementById('coverPickInput');
       if (!input) {
         input = document.createElement('input');
@@ -1583,10 +1772,8 @@ body.dimmed .card-image {
         if (!f) return;
         const r = await window.coverExtract.fromFile(f);
         if (!r) { alert('Could not read image'); return; }
-        await window.titleStore.attach(_editingTitleId, 'cover',
-          { dataUri: r.dataUri, mime: r.mime, source: 'manual', name: f.name || 'cover' });
-        const updated = (await window.titleStore.list()).find(t => t.id === _editingTitleId);
-        renderAttachmentRows(updated);
+        r.source = 'manual';
+        await _attachCoverResult(r);
       };
       input.click();
     };
@@ -1696,11 +1883,9 @@ body.dimmed .card-image {
       if (!title || title.attachments?.cover) return;
       const a = title.attachments || {};
       let result = null;
-      if (a.audiobook?.cachePath) {
-        result = await window.coverExtract.fromAudio(a.audiobook.cachePath);
-        if (result) result.source = 'id3';
-      }
-      if (!result && a.epub?.uri) {
+      // EPUB cover preferred — user request 2026-05-30. Tends to be a
+      // dedicated cover image rather than re-using the ID3 album art.
+      if (a.epub?.uri) {
         let epubPath = null;
         try {
           const mat = await window.Capacitor?.Plugins?.FileAccess?.materializeToCache?.({ uri: a.epub.uri });
@@ -1710,6 +1895,10 @@ body.dimmed .card-image {
           result = await window.coverExtract.fromEpub(epubPath);
           if (result) result.source = 'epub';
         }
+      }
+      if (!result && a.audiobook?.cachePath) {
+        result = await window.coverExtract.fromAudio(a.audiobook.cachePath);
+        if (result) result.source = 'id3';
       }
       if (!result) return;
       await window.titleStore.attach(titleId, 'cover',
@@ -1727,6 +1916,10 @@ body.dimmed .card-image {
     window.closeTitleEdit = function () {
       document.getElementById('titleEditModal').style.display = 'none';
       _editingTitleId = null;
+      // Refresh the Library grid so any cover image (or other attachment
+      // change) made inside the edit modal shows up immediately, without
+      // waiting for the next library open.
+      try { populateLibrary(); } catch (_) {}
     };
 
     window.confirmDeleteTitle = async function () {
@@ -1779,6 +1972,9 @@ body.dimmed .card-image {
 
     async function loadTitleFromLibrary(title) {
       debugLog('📚 Loading title: ' + title.name);
+      // Deliberate open → clear any safe-boot suppression and lift this
+      // title's crash quarantine so auto-restore resumes next launch.
+      if (typeof window.clearAutoRestoreSuppression === 'function') window.clearAutoRestoreSuppression(title.id);
       // Re-materialize audio/SRT cache files if needed before any consumer
       // tries to read them. Cheap when cache survives (mtime check returns
       // early); fully rebuilds when files are gone.
@@ -1786,6 +1982,16 @@ body.dimmed .card-image {
       const a = title.attachments || {};
       if (window.titleStore) await window.titleStore.touchOpened(title.id);
       window._activeTitleId = title.id;
+      // Opening a title must never blast card audio while things initialize —
+      // suppress card auto-play until the user navigates a card or taps PLAY.
+      window.startupAutoPlayBlocked = true;
+      // Reopen in the mode this title was last viewed in (clamped to the modes
+      // it actually enables); default per attachment shape when none stored.
+      const _en = window.titleStore?.enabledModes ? window.titleStore.enabledModes(title)
+                : { card: true, read: true, audio: true };
+      let _defMode = 'card';
+      if (!_en.card) _defMode = _en.read ? 'read' : (_en.audio ? 'audio' : 'card');
+      const targetMode = (title.lastMode && _en[title.lastMode]) ? title.lastMode : _defMode;
       // If a deck is attached, reuse the existing deck-restore path. That
       // path already restores per-deck pairings (EPUB / audiobook / SRT)
       // from prefs which we kept in sync via migration.
@@ -1811,11 +2017,14 @@ body.dimmed .card-image {
           available: true,
           lastAccessed: title.lastOpenedAt
         });
-        // Always switch to card mode when opening a deck-based title.
-        // Otherwise opening a deck-only title from audio mode left the
-        // user staring at the previous title's audiobook view.
+        // Reopen in the title's last-used mode (default card for a deck).
+        // titleOpen:true suppresses the audio-reentry dialog (a fresh open
+        // has no divergence), and force bypasses the not-yet-refreshed tab
+        // gate. This also fixes "opening a deck-only title from audio mode
+        // left the user on the previous title's audiobook view" — we always
+        // switch to THIS title's mode/content.
         if (typeof window.setShellMode === 'function') {
-          try { window.setShellMode('card'); } catch (e) {}
+          try { window.setShellMode(targetMode, { force: true, titleOpen: true }); } catch (e) {}
         }
         // Kick a tab refresh once the deckName has been painted so we don't
         // have to wait up to 3 s for the next interval tick.
@@ -1830,7 +2039,7 @@ body.dimmed .card-image {
         if (typeof window.loadTitleAsSrtCards === 'function') {
           const ok = await window.loadTitleAsSrtCards(title);
           if (ok) {
-            if (typeof window.setShellMode === 'function') window.setShellMode('card');
+            if (typeof window.setShellMode === 'function') window.setShellMode(targetMode, { force: true, titleOpen: true });
             if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
             return;
           }
@@ -1838,22 +2047,28 @@ body.dimmed .card-image {
         return;
       }
       // EPUB-only title → switch to read mode (user opens the EPUB via MORE).
+      // Wipe any previously loaded cards/audio so CARD + AUDIO modes go
+      // empty (and their tabs gray out) instead of showing the prior
+      // title's content.
       if (a.epub) {
         closeLibrary();
         try { await syncTitleToLegacyPrefs(title); } catch (e) {}
+        if (typeof window.clearLoadedCardsAndAudio === 'function') window.clearLoadedCardsAndAudio();
         const deckEl = document.getElementById('deckName');
         if (deckEl) deckEl.textContent = title.name;
-        if (typeof window.setShellMode === 'function') await window.setShellMode('read');
+        if (typeof window.setShellMode === 'function') await window.setShellMode(targetMode, { force: true, titleOpen: true });
         if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
         return;
       }
-      // Audiobook-only title → switch to audio mode.
+      // Audiobook-only title → switch to audio mode. Clear stale cards so
+      // CARD mode doesn't keep the previous title's deck.
       if (a.audiobook) {
         closeLibrary();
         try { await syncTitleToLegacyPrefs(title); } catch (e) {}
+        if (typeof window.clearLoadedCardsAndAudio === 'function') window.clearLoadedCardsAndAudio();
         const deckEl = document.getElementById('deckName');
         if (deckEl) deckEl.textContent = title.name;
-        if (typeof window.setShellMode === 'function') await window.setShellMode('audio');
+        if (typeof window.setShellMode === 'function') await window.setShellMode(targetMode, { force: true, titleOpen: true });
         if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
         return;
       }

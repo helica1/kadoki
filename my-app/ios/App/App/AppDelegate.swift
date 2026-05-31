@@ -36,6 +36,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
         // Called when the app was launched with a url. Feel free to add additional processing here,
         // but if you want the App API to support tracking app url opens, make sure to keep this call
+        NSLog("[AppDelegate] open url: \(url.absoluteString)")
+        // Post a notification so AnkiBridgePlugin can react to the URL open
+        // even when @capacitor/app is NOT installed (which it isn't — Capacitor's
+        // built-in App plugin requires an npm package we don't have).
+        NotificationCenter.default.post(
+            name: Notification.Name("AnkiBridgeAppUrlOpen"),
+            object: nil,
+            userInfo: ["url": url.absoluteString]
+        )
         return ApplicationDelegateProxy.shared.application(app, open: url, options: options)
     }
 

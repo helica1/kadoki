@@ -29,16 +29,21 @@
       playheadRAF = null;
       return;
     }
-    const rate = window.audioPlaybackRate || 1;
+    // Use the MEASURED velocity (falls back to the configured rate) so the line
+    // tracks true playback speed without drift.
+    const rate = state.playheadRate || window.audioPlaybackRate || 1;
     const dt = performance.now() - (state.playheadLastTs || 0);
     // Stale-event guard: when dt is huge (paused tab, slow first event),
     // don't extrapolate ahead — wait for a fresh position event.
-    if (dt > 300) {
-      state.playheadInterpMs = state.playheadMs;
-    } else {
-      state.playheadInterpMs = state.playheadMs + dt * rate;
-    }
-    render();
+    const raw = dt > 300 ? state.playheadMs : state.playheadMs + dt * rate;
+    // Low-pass the displayed position so the per-event correction eases in
+    // instead of snapping (snapping is what looked jittery at high speed).
+    if (!Number.isFinite(state.playheadDispMs)) state.playheadDispMs = raw;
+    const diff = raw - state.playheadDispMs;
+    if (Math.abs(diff) > 1200) state.playheadDispMs = raw; // seek → snap
+    else state.playheadDispMs += diff * 0.3;
+    state.playheadInterpMs = state.playheadDispMs;
+    paintFromSnapshot();
     // Stop the loop once playback has passed the selection end. The line
     // is already invisible (render() clips to [startMs, endMs]); no need
     // to keep burning rAF frames.
@@ -215,25 +220,9 @@
     ctx.fillStyle = rgba(accent, 0.06);
     ctx.fillRect(x0, wfTop, x1 - x0, wfHeight);
 
-    // ---- playhead (driven by bg position events, smoothed via rAF) ----
-    // Only paint within the SELECTED region (startMs..endMs). Audio that
-    // continues playing past the selection end — common when the user
-    // opens the editor mid-playback in audiobook mode — would otherwise
-    // drag the line through the whole context window, which is visually
-    // wrong: the line represents progress through the cue, not the file.
-    const phMs = Number.isFinite(state.playheadInterpMs)
-      ? state.playheadInterpMs : state.playheadMs;
-    if (Number.isFinite(phMs) && phMs >= state.startMs && phMs <= state.endMs) {
-      const px = Math.round(((phMs - wfStartMs) / wfRange) * cssW) + 0.5;
-      ctx.strokeStyle = '#ffffff';
-      ctx.globalAlpha = 0.9;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(px, wfTop);
-      ctx.lineTo(px, wfBottom);
-      ctx.stroke();
-      ctx.globalAlpha = 1;
-    }
+    // ---- playhead is drawn AFTER the static snapshot (see end of render) so
+    // the rAF loop can blit the cached static layer instead of rebuilding the
+    // whole waveform every frame — that per-frame rebuild was the choppiness. ----
 
     // ---- handles (vertical line + circular cap) ----
     const drawHandle = (x) => {
@@ -261,6 +250,73 @@
     };
     drawHandle(x0);
     drawHandle(x1);
+
+    // Cache everything above (sans playhead) so the rAF playhead loop only has
+    // to blit + draw the cursor — no per-frame waveform rebuild.
+    snapshotStatic();
+    drawPlayhead();
+  }
+
+  // Snapshot the current canvas (the static waveform + handles, before the
+  // playhead) into an offscreen layer keyed to the device-pixel buffer size.
+  function snapshotStatic() {
+    if (!state || !state.canvas) return;
+    const c = state.canvas;
+    let s = state._staticLayer || (state._staticLayer = document.createElement('canvas'));
+    if (s.width !== c.width || s.height !== c.height) { s.width = c.width; s.height = c.height; }
+    const sctx = s.getContext('2d');
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.clearRect(0, 0, s.width, s.height);
+    sctx.drawImage(c, 0, 0);
+  }
+
+  // A soft glowing, sub-pixel playhead. Drawn on top of the static layer in
+  // CSS-pixel space (the main ctx is dpr-transformed at this point).
+  function drawPlayhead() {
+    if (!state || !state.canvas) return;
+    const c = state.canvas;
+    const cssW = c.clientWidth, cssH = c.clientHeight;
+    const wfRange = state.wfEndMs - state.wfStartMs;
+    const phMs = Number.isFinite(state.playheadInterpMs) ? state.playheadInterpMs : state.playheadMs;
+    // Only within the SELECTED region — the line represents progress through
+    // the cue, not the whole file.
+    if (!Number.isFinite(phMs) || phMs < state.startMs || phMs > state.endMs || wfRange <= 0) return;
+    const ctx2 = c.getContext('2d');
+    const px = ((phMs - state.wfStartMs) / wfRange) * cssW; // sub-pixel, never rounded
+    const accent = getModeColor();
+    // Very subtle bloom around the cursor — just a hint of glow.
+    ctx2.save();
+    const bloomR = cssH * 0.38;
+    const bloom = ctx2.createRadialGradient(px, cssH / 2, 0, px, cssH / 2, bloomR);
+    bloom.addColorStop(0, rgba(accent, 0.10));
+    bloom.addColorStop(1, rgba(accent, 0));
+    ctx2.globalCompositeOperation = 'lighter';
+    ctx2.fillStyle = bloom;
+    ctx2.fillRect(px - bloomR, 0, bloomR * 2, cssH);
+    ctx2.restore();
+    // Crisp bright core.
+    const cg = ctx2.createLinearGradient(0, 0, 0, cssH);
+    cg.addColorStop(0, rgba(accent, 0.25));
+    cg.addColorStop(0.5, 'rgba(255,255,255,0.95)');
+    cg.addColorStop(1, rgba(accent, 0.25));
+    ctx2.fillStyle = cg;
+    ctx2.fillRect(px - 1, 0, 2, cssH);
+  }
+
+  // Per-rAF playhead frame: restore the cached static layer + draw the cursor.
+  function paintFromSnapshot() {
+    if (!state || !state.canvas) return;
+    const c = state.canvas;
+    const s = state._staticLayer;
+    // No cache yet, or the canvas was resized since the snapshot → full redraw.
+    if (!s || s.width !== c.width || s.height !== c.height) { render(); return; }
+    const ctx2 = c.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    ctx2.setTransform(1, 0, 0, 1, 0, 0);
+    ctx2.clearRect(0, 0, c.width, c.height);
+    ctx2.drawImage(state._staticLayer, 0, 0);
+    ctx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawPlayhead();
   }
 
   function hitTestHandle(xPx) {
@@ -516,6 +572,17 @@
           if (!state) return;
           const prevPos = state.playheadMs;
           const prevInterp = state.playheadInterpMs;
+          // Measure the ACTUAL playback velocity (ms audio per ms real) from
+          // consecutive events. Extrapolating with the configured rate drifts
+          // when the real rate differs — the source of the high-speed jitter.
+          const nowTs = performance.now();
+          if (Number.isFinite(prevPos) && Number.isFinite(state.playheadLastTs)) {
+            const dv = d.positionMs - prevPos, dt = nowTs - state.playheadLastTs;
+            if (dt > 20 && dv >= 0 && dv < 8000) {
+              const inst = dv / dt;
+              state.playheadRate = (state.playheadRate || (window.audioPlaybackRate || 1)) * 0.6 + inst * 0.4;
+            }
+          }
           // Reject minor backward steps (the native poll occasionally
           // reports an older position right after play starts — caused
           // visible jitter at the beginning of a preview).
@@ -526,7 +593,7 @@
             state.playheadMs = d.positionMs;
             state.playheadInterpMs = d.positionMs;
           }
-          state.playheadLastTs = performance.now();
+          state.playheadLastTs = nowTs;
           state.playheadPlaying = !!d.playing;
           // Warmup gate: don't start the rAF interpolation until we've
           // seen the position actually MOVE between two events. During
@@ -667,27 +734,35 @@
         const panel = document.createElement('div');
         panel.style.cssText = `
           background:var(--bg,#0c0c0c); border:1px solid var(--border,#2a2a2a);
-          border-radius:12px; width:min(640px,94vw); padding:16px;
+          border-radius:12px; width:min(720px,96vw); padding:16px;
+          max-height:92vh; overflow-y:auto;
         `;
-        // Text picker: three cues across (prev, current, next). The middle
-        // chunk is "selected" by default and rendered in mode color, the
-        // others are dimmed context. ± buttons on each end expand or
-        // contract the selection one cue at a time; whenever the selection
-        // changes, the audio bounds snap to the matching cue boundaries.
+        // Text picker: cues stack vertically inside a scrollable column so
+        // long subtitle text can show in full and the user can scroll
+        // through a wide selection. ± buttons sit on each side:
+        //   left  +  → prepend the previous cue  to the selection
+        //   left  −  → drop  the current first   selected cue
+        //   right +  → append the next cue       to the selection
+        //   right −  → drop  the current last    selected cue
+        // Whenever the selection changes, audio bounds snap to the
+        // matching cue boundaries and the waveform viewport grows to
+        // include the new range.
         const textRowHtml = useTextHandles ? `
-          <div data-role="text-row" style="display:flex;align-items:stretch;gap:6px;margin-bottom:10px;">
-            <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 28px;">
-              <button data-role="left-plus" class="tr-btn">+</button>
-              <button data-role="left-minus" class="tr-btn">−</button>
+          <div data-role="text-row" style="display:flex;align-items:stretch;gap:8px;margin-bottom:10px;">
+            <div style="display:flex;flex-direction:column;gap:6px;flex:0 0 32px;justify-content:center;">
+              <button data-role="left-plus"  class="tr-btn" title="Add previous subtitle">+</button>
+              <button data-role="left-minus" class="tr-btn" title="Drop first selected subtitle">−</button>
             </div>
             <div data-role="cues-row" style="
-              flex:1; display:flex; gap:4px; align-items:stretch;
-              min-height:3em; overflow-x:auto; overflow-y:hidden;
-              -webkit-overflow-scrolling:touch; touch-action:pan-x;
-              scrollbar-width:thin;"></div>
-            <div style="display:flex;flex-direction:column;gap:4px;flex:0 0 28px;">
-              <button data-role="right-plus" class="tr-btn">+</button>
-              <button data-role="right-minus" class="tr-btn">−</button>
+              flex:1; display:flex; flex-direction:column; gap:6px;
+              max-height:240px; min-height:80px;
+              overflow-y:auto; overflow-x:hidden;
+              -webkit-overflow-scrolling:touch; touch-action:pan-y;
+              scrollbar-width:thin;
+              padding:2px;"></div>
+            <div style="display:flex;flex-direction:column;gap:6px;flex:0 0 32px;justify-content:center;">
+              <button data-role="right-plus"  class="tr-btn" title="Add next subtitle">+</button>
+              <button data-role="right-minus" class="tr-btn" title="Drop last selected subtitle">−</button>
             </div>
           </div>
         ` : `
@@ -700,20 +775,19 @@
         panel.innerHTML = `
           <style>
             #waveformEditorOverlay .tr-btn {
-              flex:1; padding:0; background:#1a1a1a; color:${modeColor};
+              flex:1; min-height:44px; padding:0; background:#1a1a1a; color:${modeColor};
               border:1px solid ${rgba(modeColor, 0.5)}; border-radius:6px;
-              font-size:1rem; font-weight:700; cursor:pointer; touch-action:manipulation;
+              font-size:1.1rem; font-weight:700; cursor:pointer; touch-action:manipulation;
               transition: transform .12s ease, background .12s ease;
             }
             #waveformEditorOverlay .tr-btn:active { transform: scale(0.92); }
             #waveformEditorOverlay .tr-btn:disabled {
-              color:#444; border-color:#1f1f1f; cursor:default;
+              color:#444; border-color:#1f1f1f; cursor:default; opacity:.4;
             }
             #waveformEditorOverlay .cue-chip {
-              padding:8px 10px; border-radius:6px; font-size:.85rem;
-              font-family:var(--font-family-card,serif); line-height:1.35;
-              max-height:5em; overflow-y:auto;
-              flex:0 0 auto; min-width:120px; max-width:240px;
+              padding:10px 12px; border-radius:6px; font-size:.9rem;
+              font-family:var(--font-family-card,serif); line-height:1.45;
+              word-wrap:break-word; overflow-wrap:break-word;
               transition: transform .16s cubic-bezier(0.34, 1.56, 0.64, 1),
                           background .12s ease, border-color .12s ease;
             }
@@ -774,12 +848,16 @@
             div.dataset.cueIdx = i;
             row.appendChild(div);
           }
-          // Bounce the chip that just changed selection state.
+          // Bounce the chip that just changed selection state, and scroll
+          // it into view since the chip column is vertically scrollable
+          // and a freshly added (or about-to-be-removed) chip on the far
+          // end may otherwise sit outside the visible window.
           if (Number.isFinite(bounceIdx)) {
             const target = row.querySelector(`[data-cue-idx="${bounceIdx}"]`);
             if (target) {
               target.classList.add('bounce');
               setTimeout(() => target.classList.remove('bounce'), 160);
+              try { target.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (_) {}
             }
           }
           // Button enable/disable state.
@@ -825,25 +903,51 @@
         }
         if (useTextHandles) {
           renderCueChips();
-          // Wire the four ± buttons. Each click changes the selection by one
-          // cue and bounces the newly-affected cue chip.
-          panel.querySelector('[data-role="left-plus"]').addEventListener('click', () => {
+          // Wire the four ± buttons. iOS WKWebView inside a touch-blocking
+          // overlay (the modal stops touchstart/move/end at line ~663) eats
+          // the synthetic click that normally follows touchend, so a plain
+          // 'click' listener never fires here. Per
+          // [[reference-paged-reader-button-pitfalls]], the working recipe
+          // is: listen for 'click', 'pointerup', AND 'touchend' with capture,
+          // dedupe within a tick.
+          const wireButton = (role, action) => {
+            const el = panel.querySelector(`[data-role="${role}"]`);
+            if (!el) return;
+            let firingTick = 0;
+            const fire = (e) => {
+              if (el.disabled) return;
+              // Same-event dedupe — touchend then synthetic click then
+              // pointerup can all fire for one tap. Run the action once
+              // per render-frame.
+              const now = performance.now();
+              if (now - firingTick < 200) return;
+              firingTick = now;
+              console.log(`[wf-btn] ${role} ${e?.type} → action`);
+              if (e?.stopPropagation) e.stopPropagation();
+              if (e?.preventDefault)  e.preventDefault();
+              action();
+            };
+            el.addEventListener('click', fire);
+            el.addEventListener('pointerup', fire);
+            el.addEventListener('touchend', fire, { capture: true });
+          };
+          wireButton('left-plus', () => {
             if (textRangeState.leftIdx <= 0) return;
             textRangeState.leftIdx--;
             applyTextRange(textRangeState.leftIdx);
           });
-          panel.querySelector('[data-role="left-minus"]').addEventListener('click', () => {
+          wireButton('left-minus', () => {
             if (textRangeState.leftIdx >= textRangeState.rightIdx) return;
             const dropped = textRangeState.leftIdx;
             textRangeState.leftIdx++;
             applyTextRange(dropped);
           });
-          panel.querySelector('[data-role="right-plus"]').addEventListener('click', () => {
+          wireButton('right-plus', () => {
             if (textRangeState.rightIdx >= cues.length - 1) return;
             textRangeState.rightIdx++;
             applyTextRange(textRangeState.rightIdx);
           });
-          panel.querySelector('[data-role="right-minus"]').addEventListener('click', () => {
+          wireButton('right-minus', () => {
             if (textRangeState.rightIdx <= textRangeState.leftIdx) return;
             const dropped = textRangeState.rightIdx;
             textRangeState.rightIdx--;

@@ -5,6 +5,22 @@
 // Cleared the first time displayCard is asked to start audio. Keeps the
 // app silent on launch so the user can choose when to start playback.
 window.startupAutoPlayBlocked = true;
+
+// System-gesture safe zones (iOS + Android). A swipe that BEGINS within these
+// edge bands belongs to the OS — top = notification shade / Control Center,
+// bottom = app switcher / home — so the app's swipe handlers must ignore it,
+// otherwise the system gesture also fires an in-app action. Generous enough to
+// cover the status-bar/notch region up top and the gesture-nav pill / home
+// indicator at the bottom on both platforms. `_inSystemGestureZone(clientY)` is
+// called at the START point of every vertical-swipe handler.
+window.SYS_GESTURE_TOP = 64;
+window.SYS_GESTURE_BOTTOM = 72;
+window._inSystemGestureZone = function (clientY) {
+  if (!Number.isFinite(clientY)) return false;
+  const vh = window.innerHeight || 0;
+  return clientY <= window.SYS_GESTURE_TOP ||
+         (vh > 0 && clientY >= vh - window.SYS_GESTURE_BOTTOM);
+};
 // Cue → audio offset (ms). Compensates for two real-world issues:
 //   (a) SRT timestamps tend to land *at* the first phoneme rather than
 //       just before it, so playback starts mid-word.
@@ -22,6 +38,8 @@ let stopwatchInterval = null;
 let lastInteractionTime = Date.now();
 let viewedNotes = new Set();
 let currentZip = null;
+let currentApkgReader = null; // open zip.js ZipReader for the active deck (lazy media)
+let _deckLoadInFlight = false; // serializes loadDeckFromFile against concurrent calls
 let mediaCache = new Map(); // LRU cache for media files
 let maxCacheSize = 50; // Limit cache to 50 media files
 
@@ -272,14 +290,6 @@ async function loadDeckFromUri(uri, fileName) {
   const { path, size, cached } = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri });
   debugLog(`Cache ready: ${path} (${size} bytes, cached=${cached})`);
 
-  const fetchUrl = window.Capacitor.convertFileSrc(path);
-  const response = await fetch(fetchUrl);
-  if (!response.ok) {
-    throw new Error(`fetch(${fetchUrl}) returned ${response.status}`);
-  }
-  const blob = await response.blob();
-  const file = new File([blob], fileName, { type: 'application/zip' });
-
   currentFileUri = uri;
 
   const deckNameEl = document.getElementById('deckName');
@@ -288,7 +298,11 @@ async function loadDeckFromUri(uri, fileName) {
   deckNameEl.style.cursor = 'default';
   deckNameEl.onclick = null;
 
-  await loadDeckFromFile(file);
+  // Pass the disk path straight through — loadDeckFromFile reads it by
+  // byte-range. The old code fetch→blob→new File()'d the whole file into the JS
+  // heap here, then loadDeckFromFile did file.arrayBuffer() — two full ~1 GB
+  // copies before parsing even began. That double-copy was the OOM.
+  await loadDeckFromFile({ path, size, name: fileName });
 }
 
 // Add or update deck in the deck list
@@ -373,7 +387,12 @@ async function autoRestoreFromTitles() {
     if (!window.titleStore) return false;
     const titles = await window.titleStore.list();
     if (!titles?.length) return false;
-    const sorted = titles.slice().sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
+    // Skip any title quarantined after its deck hard-crashed on load — auto-
+    // opening it would just re-trigger the crash. The user lifts the
+    // quarantine by deliberately opening it from the Library.
+    const sorted = titles.slice()
+      .filter(t => !(window.isDeckQuarantined && window.isDeckQuarantined(t.id)))
+      .sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
     let t = sorted[0];
     if (!t) return false;
     // Rebuild audio/SRT cache files from their stored URIs if they were
@@ -427,6 +446,10 @@ async function autoRestoreFromTitles() {
     }
 
     // EPUB-only or audio-only: nothing to "load" at startup beyond labeling.
+    // Crucially, RETURN TRUE so the caller does NOT fall through to
+    // loadDeckState() — that would restore the legacy saved deck (some
+    // OTHER title's cards) into CARD mode even though this title has no
+    // deck. Also wipe any cards/audio so CARD mode starts genuinely empty.
     if (a.epub || a.audiobook) {
       const deckEl = document.getElementById('deckName');
       if (deckEl) {
@@ -434,10 +457,13 @@ async function autoRestoreFromTitles() {
         deckEl.className = 'file-name restored';
       }
       window._activeTitleId = t.id;
+      if (typeof window.clearLoadedCardsAndAudio === 'function') {
+        window.clearLoadedCardsAndAudio();
+      }
       if (a.epub && typeof window.prewarmReader === 'function') {
         setTimeout(() => window.prewarmReader(), 0);
       }
-      return false;
+      return true;
     }
     return false;
   } catch (e) {
@@ -570,7 +596,13 @@ async function tryAutoRestoreFile(maybeUri, savedFileName) {
   }
 
   // Caller may pass the URI directly; otherwise pull it from Preferences.
-  let savedUri = (typeof maybeUri === 'string' && maybeUri.startsWith('content://')) ? maybeUri : null;
+  // Accept any scheme — Android documents arrive as `content://`, iOS
+  // document-picker URIs as `file://`, and both flow through the
+  // FileAccess plugin's bookmark store. The prior check filtered out
+  // anything that wasn't `content://`, which silently nulled out every
+  // iOS URI and dropped us into the "please select manually" fallback.
+  let savedUri = (typeof maybeUri === 'string' && /^[a-z][a-z0-9+.\-]*:\/\//i.test(maybeUri))
+    ? maybeUri : null;
   if (!savedUri) {
     try {
       const uriResult = await Preferences.get({ key: PERSISTENCE_KEYS.FILE_URI });
@@ -913,6 +945,12 @@ function showToast(message, duration = 3000) {
 function updateCardIndex(newIndex) {
   if (newIndex >= 0 && newIndex < allNotes.length && newIndex !== currentCardIndex) {
     debugLog(`Updating card index from ${currentCardIndex} to ${newIndex}`);
+    // A genuine card navigation (swipe / keyboard / number-jump / auto-advance)
+    // lifts the open/restart auto-play suppression, so this card and the ones
+    // after it play normally. The INITIAL card on open/restart sets
+    // currentCardIndex DIRECTLY + displayCard() (NOT through this function), so
+    // it stays silent — which is the "stop the card auto-playing on open" fix.
+    window.startupAutoPlayBlocked = false;
     currentCardIndex = newIndex;
     window.currentCardIndex = currentCardIndex;
     // Tell the reader so its cached cursor stays in sync. Otherwise a
@@ -1124,6 +1162,12 @@ window.onProgressBarTap = function (e) {
     // simple info modal explaining this.
     _showAudioSeekRedirectInfo();
     return;
+  }
+  if (mode === 'read') {
+    // READ mode: percent/character jump (works for EPUB-only titles too,
+    // which have no cards). Falls back to the card jump only if the paged
+    // reader's modal isn't available.
+    if (typeof window.pagedOpenJumpModal === 'function') { window.pagedOpenJumpModal(); return; }
   }
   promptCardJump();
 };
@@ -1651,10 +1695,16 @@ function cleanupMemory() {
   
   // Clear media cache
   mediaCache.clear();
-  
+
   // Clear ZIP reference
   currentZip = null;
-  
+
+  // Close the random-access deck reader (releases its file handle / buffers).
+  if (currentApkgReader) {
+    try { currentApkgReader.close(); } catch (e) {}
+    currentApkgReader = null;
+  }
+
   // Reset swipe listeners flag
   window.swipeListenersSetup = false;
   
@@ -2031,8 +2081,14 @@ async function loadMediaFile(filename, mediaPromises) {
     } catch (error) {
       debugLog(`❌ Error loading media file ${filename}: ${error.message}`);
     }
+  } else {
+    // Diagnostic: the card referenced a file that isn't in the media manifest.
+    // Usually a name-mismatch (path/encoding/case) between the card HTML and the
+    // manifest. Show a few available keys to compare.
+    const keys = Object.keys(mediaPromises || {});
+    debugLog(`⚠️ Media "${filename}" not in manifest (${keys.length} entries). Sample: ${keys.slice(0, 4).join(', ')}`);
   }
-  
+
   return null;
 }
 
@@ -2130,6 +2186,21 @@ if (!audioFilename) {
     if (m) {
       audioFilename = m[1];
       debugLog(`🔊 Detected audio bare filename: ${audioFilename}`);
+      break;
+    }
+  }
+}
+// Content-based IMAGE fallback if not found by field name. Audio already has
+// this; images didn't, so a card whose image field wasn't identified (e.g. a
+// non-standard field name, or a new-schema notetype whose fields didn't parse)
+// silently lost its picture while audio still resolved via its own scan.
+if (!imageFilename) {
+  for (const fld of fields) {
+    if (!fld) continue;
+    const m = fld.match(/<img[^>]+src=["']([^"']+)["']/i);
+    if (m) {
+      imageFilename = m[1].replace(/^.*[\/\\]/, '');
+      debugLog(`🖼️ Detected image from content: ${imageFilename}`);
       break;
     }
   }
@@ -2330,84 +2401,141 @@ async function getSavedFieldMappings(deckName) {
   }
 }
 
-async function loadDeckFromFile(file) {
-  debugLog(`Loading deck: ${file.name} (${Math.round(file.size / 1024 / 1024)}MB)`);
-  
+async function loadDeckFromFile(source) {
+  // Callers pass EITHER a File/Blob (the file picker — already disk-backed and
+  // lazily sliceable) OR a disk descriptor { path, size, name } (auto-restore /
+  // library open). The latter lets us read the archive by byte-range straight
+  // off disk instead of copying the whole (up to ~1 GB) file into the JS heap.
+  let file = null, path = null, size = 0, displayName = 'deck.apkg';
+  if (source instanceof Blob) {
+    file = source; displayName = source.name || displayName; size = source.size || 0;
+  } else if (source && source.path) {
+    path = source.path; size = source.size || 0; displayName = source.name || displayName;
+  } else {
+    debugLog('❌ loadDeckFromFile: invalid source'); return;
+  }
+
+  // Serialize against concurrent loads (double-tap, or auto-restore racing a
+  // manual open). Two loads in flight would stomp currentApkgReader and leave
+  // one ZipReader orphaned mid-parse. The `finally` at the end clears this.
+  if (_deckLoadInFlight) {
+    debugLog('⏳ Deck load already in progress — ignoring concurrent request');
+    return;
+  }
+  _deckLoadInFlight = true;
+
+  debugLog(`Loading deck: ${displayName} (${size ? Math.round(size / 1024 / 1024) + 'MB' : 'size unknown'})`);
+
+  // Everything below runs under one try/finally so the in-flight flag is ALWAYS
+  // cleared — a leak here would block every future load until app restart.
+  try {
+  // Arm the crash guard before the heavy read. Even with random-access reading,
+  // a pathological deck could still exhaust memory; if that hard-kills the
+  // WebView before we disarm, the next launch boots safe instead of looping.
+  await markDeckLoadStart();
+
+  resetCrossTitlePositionState();
+
   // Clean up memory from previous deck
   cleanupMemory();
 
-  document.getElementById('deckName').textContent = file.name;
-  
+  document.getElementById('deckName').textContent = displayName;
+
   // Store current deck name for field mapping
-  window.currentDeckName = file.name;
+  window.currentDeckName = displayName;
 
 // Attempt to load saved field mappings for this deck *before* processing notes
-window.currentFieldMappings = await getSavedFieldMappings(file.name);
+window.currentFieldMappings = await getSavedFieldMappings(displayName);
 if (window.currentFieldMappings) {
-  debugLog(`✅ Loaded saved field mappings for ${file.name}: ` +
-           JSON.stringify(window.currentFieldMappings));
+  debugLog(`✅ Loaded saved field mappings for ${displayName}`);
 } else {
-  debugLog(`ℹ️ No saved field mappings for ${file.name}`);
+  debugLog(`ℹ️ No saved field mappings for ${displayName}`);
 }
 
+    // Open the archive for RANDOM ACCESS — reads only the central directory now,
+    // and individual entries on demand below. No whole-file buffering.
+    debugLog("Opening deck archive (random-access)...");
+    const apkg = await window.ApkgReader.open({ file, path, size });
+    currentApkgReader = apkg.zipReader; // closed in cleanupMemory()
+    debugLog(`✅ Archive opened (mode=${apkg.mode}); ${apkg.entries.length} entries`);
 
-  try {
-    // Load the deck normally...
-    debugLog("Loading ZIP file into memory...");
-    const arrayBuffer = await file.arrayBuffer();
-    const zip = await JSZip.loadAsync(arrayBuffer);
-    currentZip = zip; // Store reference
+    // Index entries by name for O(1) lookup.
+    const byName = new Map();
+    for (const e of apkg.entries) byName.set(e.filename, e);
 
-    debugLog("✅ Successfully loaded ZIP file");
+    // New-format (.anki21b) decks zstd-compress the DB, the media manifest, and
+    // every media blob; legacy decks store a JSON media map and raw blobs.
+    const newFormat = byName.has("collection.anki21b");
 
-    // Handle media files with better error handling
+    // Media manifest → { "0": "real.mp3", ... }. Legacy = JSON; new = protobuf
+    // MediaEntries (zstd) whose entry order IS the numbered zip member.
     let media = {};
     try {
-      if (zip.file("media")) {
-        const mediaContent = await zip.file("media").async("string");
-        media = safeJsonParse(mediaContent, {});
-        debugLog(`Loaded media manifest with ${Object.keys(media).length} files`);
+      const manifestEntry = byName.get("media");
+      if (manifestEntry) {
+        if (newFormat) {
+          const mb = window.ApkgReader.maybeZstd(await window.ApkgReader.entryBytes(manifestEntry));
+          window.ApkgReader.decodeMediaEntries(mb).forEach((nm, i) => { if (nm) media[String(i)] = nm; });
+          debugLog(`Loaded protobuf media manifest with ${Object.keys(media).length} files (new format)`);
+        } else {
+          media = safeJsonParse(await window.ApkgReader.entryText(manifestEntry), {});
+          debugLog(`Loaded media manifest with ${Object.keys(media).length} files`);
+        }
       }
     } catch (mediaError) {
       debugLog(`Warning: Could not load media manifest: ${mediaError.message}`);
       media = {};
     }
 
-    // Create media file promises (don't load immediately)
+    // Lazy media: decode each entry from the archive only when a card asks for
+    // it (Phase 1 keeps the base64 data-URI shape; disk-offload is a later phase).
     const mediaPromises = {};
-    
+    const deckReader = apkg.zipReader; // bind closures to THIS deck's reader
     for (const [id, name] of Object.entries(media)) {
-      if (zip.file(id)) {
-        // Store promise instead of loading immediately
-        mediaPromises[name] = async () => {
-          try {
-            const blob = await zip.file(id).async("base64");
-            const ext = name.split('.').pop().toLowerCase();
-            let mime = "application/octet-stream";
-            if (["mp3", "m4a", "aac", "wav", "ogg"].includes(ext)) mime = `audio/${ext}`;
-            if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) mime = `image/${ext === "jpg" ? "jpeg" : ext}`;
-            return `data:${mime};base64,${blob}`;
-          } catch (error) {
-            debugLog(`Error loading media file ${name}: ${error.message}`);
-            return null;
+      const entry = byName.get(id);
+      if (!entry) continue;
+      mediaPromises[name] = async () => {
+        try {
+          // If the deck was switched since these promises were built, the
+          // reader has been closed by cleanupMemory — touching its entries
+          // would throw. Bail quietly; the new deck has its own mediaPromises.
+          if (currentApkgReader !== deckReader) return null;
+          const ext = (name.split('.').pop() || '').toLowerCase();
+          let mime = "application/octet-stream";
+          if (["mp3", "m4a", "aac", "wav", "ogg"].includes(ext)) mime = `audio/${ext}`;
+          if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) mime = `image/${ext === "jpg" ? "jpeg" : ext}`;
+          if (newFormat) {
+            // Blob bytes are a zstd frame — decompress, then base64 ourselves
+            // (zip.js's Data64URIWriter would encode the still-compressed bytes).
+            // Sniff the real MIME from magic bytes: an <img> won't render a data
+            // URI typed application/octet-stream, so a wrong extension → no image.
+            const raw = window.ApkgReader.maybeZstd(await window.ApkgReader.entryBytes(entry));
+            return window.ApkgReader.bytesToDataUri(raw, window.ApkgReader.sniffMime(raw, mime));
           }
-        };
-      }
+          return await window.ApkgReader.entryDataUri(entry, mime);
+        } catch (error) {
+          debugLog(`Error loading media file ${name}: ${error.message}`);
+          return null;
+        }
+      };
     }
 
-    // Load the collection database
-    let dbFile;
-    if (zip.file("collection.anki2")) {
-      debugLog("Loading collection.anki2");
-      dbFile = await zip.file("collection.anki2").async("arraybuffer");
-    } else if (zip.file("collection.anki21b")) {
-      debugLog("⚠️ Found collection.anki21b - attempting to load (may have compatibility issues)");
-      dbFile = await zip.file("collection.anki21b").async("arraybuffer");
-    } else {
-      throw new Error("No collection database found in the deck file");
+    // Read ONLY the collection DB entry into sql.js (not the whole archive).
+    // Prefer the NEWEST format present: a new-format export can include a
+    // legacy collection.anki2 STUB alongside the real zstd collection.anki21b,
+    // so checking anki2 first would load an empty placeholder.
+    const dbCandidates = ["collection.anki21b", "collection.anki21", "collection.anki2"]
+      .filter(k => byName.has(k));
+    if (dbCandidates.length > 1) {
+      debugLog(`⚠️ Multiple collection formats present (${dbCandidates.join(', ')}); using ${dbCandidates[0]}`);
     }
+    const dbEntry = dbCandidates.length ? byName.get(dbCandidates[0]) : null;
+    if (!dbEntry) throw new Error("No collection database found in the deck file");
+    debugLog(`Loading ${dbEntry.filename}`);
+    // maybeZstd decodes the new-format zstd DB and passes a raw sqlite DB through.
+    const dbBytes = window.ApkgReader.maybeZstd(await window.ApkgReader.entryBytes(dbEntry));
 
-    const db = new SQL.Database(new Uint8Array(dbFile));
+    const db = new SQL.Database(dbBytes);
     debugLog("✅ Database loaded successfully");
 
     // Get models using the enhanced function
@@ -2510,13 +2638,16 @@ function getActualFieldNames(noteRows, models) {
     debugLog(`Found ${noteRows[0].values.length} notes`);
 
     // Check for existing field mappings
-    await loadFieldMappings(file.name);
+    await loadFieldMappings(displayName);
 
     // START PROGRESSIVE LOADING - This will show first cards immediately!
     debugLog("🚀 Starting progressive loading...");
     await startProgressiveNoteProcessing(noteRows, models, mediaPromises);
 
     debugLog(`✅ Deck ready! ${noteRows[0].values.length} total notes loaded.`);
+
+    // Survived the heavy load and first cards are showing → disarm the guard.
+    markDeckLoadDone();
 
     // Show field mapping button
     const fieldMappingBtn = document.getElementById('fieldMappingBtn');
@@ -2540,15 +2671,22 @@ function getActualFieldNames(noteRows, models) {
   } catch (error) {
     debugLog(`❌ Detailed error: ${error.message}`);
     debugLog(`❌ Error stack: ${error.stack}`);
-    
+
+    // A caught error means the app is still alive (no hard crash), so this is
+    // NOT a boot-loop situation → disarm the guard so the next launch isn't
+    // needlessly forced into safe mode.
+    markDeckLoadDone();
+
     // Clear validation variables on error too
     window.expectedDeckName = undefined;
     window.pendingCardIndex = undefined;
-    
+
     alert(`Error loading deck: ${error.message}\n\nCheck the debug console for more details.`);
-    
+
     // Clean up on error
     cleanupMemory();
+  } finally {
+    _deckLoadInFlight = false;
   }
 }
 
@@ -2666,7 +2804,10 @@ async function displayCard() {
       // Also suppressed by startupAutoPlayBlocked on first launch so the
       // user gets a silent app open.
       if (window._skipNextCardAudioRestart || window.startupAutoPlayBlocked) {
-        if (window.startupAutoPlayBlocked) window.startupAutoPlayBlocked = false;
+        // Do NOT consume startupAutoPlayBlocked here — it must persist across
+        // the several displayCard calls during open/restart init, and is
+        // lifted only by a real card advance (updateCardIndex) or explicit
+        // PLAY. Only the one-shot _skipNextCardAudioRestart is consumed.
         window._skipNextCardAudioRestart = false;
         console.log('[srt-card] silent-display idx=' + currentCardIndex);
       } else {
@@ -2744,7 +2885,9 @@ async function displayCard() {
     // user expects a quiet startup. Subsequent displayCards (after a
     // swipe, PLAY tap, etc.) play normally.
     if (window.startupAutoPlayBlocked) {
-      window.startupAutoPlayBlocked = false;
+      // Suppressed on open/restart. Do NOT consume — it's lifted by a real
+      // card advance (updateCardIndex) or explicit PLAY, so the first card on
+      // open/restart never auto-plays while normal navigation still does.
     } else {
       currentAudio.play().catch(err => {
         debugLog(`Audio play error: ${err.message}`);
@@ -2868,6 +3011,10 @@ function setupSwipe() {
             // skip the swipe-actions branch.
             return;
           } else {
+            // System-gesture safe zones: a vertical swipe that BEGAN at the very
+            // top (notification shade / Control Center) or bottom (app switcher /
+            // home) belongs to the OS — don't also fire replay / send-to-Anki.
+            if (window._inSystemGestureZone?.(touchStartY)) return;
             if (deltaY > 30) {
               const card = allNotes[currentCardIndex];
               if (card?.isSrtCard) {
@@ -2890,12 +3037,9 @@ function setupSwipe() {
                 });
               }
             } else if (deltaY < -30) {
-              // Skip upswipes that start in the bottom 1/5 of the screen — that
-              // zone is Android's system app-switcher gesture, and we don't want
-              // to double-fire a send-to-Anki on every app switch.
-              if (touchStartY > window.innerHeight * 0.8) {
-                return;
-              }
+              // (Bottom-edge up-swipes — the app-switcher gesture — are already
+              // filtered by the _inSystemGestureZone guard at the top of this
+              // branch.)
               const card = allNotes[currentCardIndex];
               if (card && window.sendToAnki) {
                 const expression = card.expression;
@@ -3029,6 +3173,164 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Enhanced initialization with debugging
+// =====================================================================
+// Boot-crash guard
+// ---------------------------------------------------------------------
+// A title that crashes the app DURING restore (e.g. a ~1 GB deck that
+// exhausts WebView memory and throws "Maximum call stack size exceeded")
+// used to trap the app in a boot loop: every launch auto-restored the same
+// title and crashed again before the UI ever became usable, with no way out.
+//
+// loadDeckFromFile() writes an "in-progress" flag to durable storage right
+// before the heavy 1 GB ZIP+DB load and clears it once the deck reaches a
+// usable state (or fails GRACEFULLY). An UNCAUGHT crash (OOM / stack overflow
+// killing the WebView) leaves the flag set. So if a launch sees the flag
+// still set, the previous deck load hard-crashed — we skip auto-restore, clear
+// the legacy deck pointer, and drop the user into a usable empty app with
+// their Library fully intact. This catches crashes from BOTH boot auto-restore
+// AND a manual re-open of the same bad deck. A one-time "installed" check makes
+// the FIRST launch of this build also boot safe, so an already-looping install
+// recovers immediately on update.
+// =====================================================================
+const BOOT_GUARD_INPROGRESS_KEY  = 'KADOKI_BOOT_INPROGRESS_V1';
+const BOOT_GUARD_INSTALLED_KEY   = 'KADOKI_BOOTGUARD_INSTALLED_V1';
+const AUTORESTORE_SUPPRESSED_KEY = 'KADOKI_AUTORESTORE_SUPPRESSED_V1';
+const DECK_QUARANTINE_KEY        = 'KADOKI_DECK_QUARANTINE_V1';
+
+// localStorage is synchronous and persists across launches in the WebView, so
+// it is the most durable place to record the "deck load in progress" marker
+// right before a load that might HARD-OOM the process. Capacitor Preferences
+// resolves set() BEFORE the value is flushed to disk (Android editor.apply() /
+// iOS UserDefaults lazy sync), so an OOM kill can lose that write — the exact
+// failure an adversarial review flagged. We write the marker to localStorage
+// (sync) AND mirror to Preferences, and treat EITHER store reporting '1' as
+// in-progress so a single lost write can't reopen the crash loop.
+function _lsGet(key)      { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function _lsSet(key, v)   { try { localStorage.setItem(key, String(v)); } catch (e) {} }
+
+async function _guardPrefGet(key) {
+  try {
+    if (isCapacitorEnvironment() && window.Capacitor?.Plugins?.Preferences) {
+      const r = await window.Capacitor.Plugins.Preferences.get({ key });
+      return r?.value ?? null;
+    }
+    return localStorage.getItem(key);
+  } catch (e) { return null; }
+}
+async function _guardPrefSet(key, value) {
+  try {
+    if (isCapacitorEnvironment() && window.Capacitor?.Plugins?.Preferences) {
+      await window.Capacitor.Plugins.Preferences.set({ key, value: String(value) });
+    } else { localStorage.setItem(key, String(value)); }
+  } catch (e) {}
+}
+async function _guardPrefRemove(key) {
+  try {
+    if (isCapacitorEnvironment() && window.Capacitor?.Plugins?.Preferences) {
+      await window.Capacitor.Plugins.Preferences.remove({ key });
+    } else { localStorage.removeItem(key); }
+  } catch (e) {}
+}
+
+// In-progress marker: dual-written (localStorage + Preferences), read from either.
+async function _readInProgress() {
+  if (_lsGet(BOOT_GUARD_INPROGRESS_KEY) === '1') return true;
+  return (await _guardPrefGet(BOOT_GUARD_INPROGRESS_KEY)) === '1';
+}
+function _writeInProgress(v) {
+  _lsSet(BOOT_GUARD_INPROGRESS_KEY, v);              // sync, durable-ish
+  return _guardPrefSet(BOOT_GUARD_INPROGRESS_KEY, v); // mirror; awaitable
+}
+
+// Quarantine = the set of Title ids whose deck hard-crashed on load. Stored in
+// localStorage so it survives a kill. autoRestoreFromTitles refuses to
+// auto-open a quarantined title; a deliberate Library open clears it.
+function _getQuarantine() { try { return JSON.parse(_lsGet(DECK_QUARANTINE_KEY) || '[]'); } catch (e) { return []; } }
+function _addQuarantine(id) {
+  if (!id) return;
+  const q = _getQuarantine();
+  if (!q.includes(id)) { q.push(id); _lsSet(DECK_QUARANTINE_KEY, JSON.stringify(q)); }
+}
+function _removeQuarantine(id) {
+  if (!id) return;
+  _lsSet(DECK_QUARANTINE_KEY, JSON.stringify(_getQuarantine().filter(x => x !== id)));
+}
+window.isDeckQuarantined = function (id) { return !!id && _getQuarantine().includes(id); };
+
+// Decide whether THIS launch should skip auto-restore: a deck load crashed
+// last session (in-progress still set), this is the first run of the build, or
+// auto-restore is still suppressed from a prior crash. `crashed` distinguishes
+// a real crash (→ quarantine the culprit) from the benign first-launch check.
+async function evaluateBootGuard() {
+  let safe = false, reason = '', crashed = false;
+  const inProgress = await _readInProgress();
+  const installed  = await _guardPrefGet(BOOT_GUARD_INSTALLED_KEY);
+  const suppressed = await _guardPrefGet(AUTORESTORE_SUPPRESSED_KEY);
+  if (inProgress) {
+    safe = true; crashed = true;
+    reason = 'previous launch did not finish (deck load crashed)';
+  }
+  if (installed !== '1') {
+    safe = true;
+    reason = reason || 'first launch of crash-guard build';
+    await _guardPrefSet(BOOT_GUARD_INSTALLED_KEY, '1');
+  }
+  if (suppressed === '1') {
+    safe = true;
+    reason = reason || 'auto-restore suppressed after a prior crash';
+  }
+  return { safe, reason, crashed };
+}
+
+// Enter safe mode: load nothing, wipe the legacy deck pointer so no fallback
+// path can reload the crasher, and suppress auto-restore until the user
+// deliberately opens a title from the Library.
+async function enterSafeBoot(reason, crashed) {
+  debugLog(`⚠️ SAFE BOOT engaged — ${reason}`);
+  // We've recovered: clear the crash marker, wipe the legacy deck pointer so
+  // no fallback path reloads the crasher, and suppress auto-restore until the
+  // user deliberately opens a title from the Library.
+  await _writeInProgress('0');
+  await _guardPrefRemove(PERSISTENCE_KEYS.FILE_URI);
+  await _guardPrefRemove(PERSISTENCE_KEYS.FILE_NAME);
+  await _guardPrefRemove(PERSISTENCE_KEYS.CARD_INDEX);
+  await _guardPrefRemove(PERSISTENCE_KEYS.STORED_FILE_PATH);
+  await _guardPrefSet(AUTORESTORE_SUPPRESSED_KEY, '1');
+  // If a REAL crash triggered this safe boot, quarantine the most-recently
+  // opened deck Title (the culprit). Clearing only the legacy prefs isn't
+  // enough — autoRestoreFromTitles would faithfully rebuild that pointer from
+  // the surviving Title and loop us again. Quarantine blocks that rebuild
+  // until the user deliberately re-opens the title.
+  if (crashed) {
+    try {
+      const titles = (await window.titleStore?.list?.()) || [];
+      const culprit = titles
+        .filter(t => t?.attachments?.deck)
+        .sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0))[0];
+      if (culprit) { _addQuarantine(culprit.id); debugLog(`Quarantined likely crasher: ${culprit.id} (${culprit.name})`); }
+    } catch (e) {}
+  }
+  const deckEl = document.getElementById('deckName');
+  if (deckEl) { deckEl.textContent = 'No file chosen'; deckEl.className = 'file-name'; }
+  try {
+    window.showToast?.('Recovered from a crash — open a title from your Library to continue', 5000);
+  } catch (e) {}
+}
+
+// Called by loadDeckFromFile around the heavy load. start() arms the crash
+// marker (await it so the flag is persisted BEFORE the risky load); done()
+// disarms it once the deck is usable or failed gracefully.
+function markDeckLoadStart() { return _writeInProgress('1'); }
+function markDeckLoadDone()  { _writeInProgress('0'); }
+
+// Manual title opens are deliberate, so they clear the suppression set by a
+// prior safe boot AND lift the quarantine on the opened title (the user is
+// explicitly choosing to retry it), re-enabling auto-restore next launch.
+window.clearAutoRestoreSuppression = function (titleId) {
+  _guardPrefSet(AUTORESTORE_SUPPRESSED_KEY, '0');
+  if (titleId) _removeQuarantine(titleId);
+};
+
 async function init() {
   debugLog("🚀 App.js initialization started");
 
@@ -3042,21 +3344,31 @@ async function init() {
   window.SQL = SQL;
   debugLog("✅ SQL.js initialized");
 
+  // Boot-crash guard FIRST: if the previous launch started but never reached
+  // a stable state (a deck/title crashed during restore), skip auto-restore
+  // this launch so we don't re-trigger the same crash and trap the user.
+  const boot = await evaluateBootGuard();
+
   // Title-based auto-restore — preferred entry point. Picks the
   // most-recently-opened Title and either (a) bypasses legacy deck restore
   // entirely for deck-less Titles (SRT-cards / EPUB-only), or (b) mirrors
   // the deck attachment into the legacy keys so the existing flow restores
   // the same deck loadDeckState already knows how to handle.
-  const titleLoaded = await autoRestoreFromTitles();
-  debugLog(`Title-based restore: ${titleLoaded}`);
-
-  let restored = titleLoaded;
-  if (!titleLoaded) {
-    debugLog("Attempting legacy deck restore...");
-    restored = await loadDeckState();
-    debugLog(`Legacy deck restore: ${restored}`);
+  let titleLoaded = false;
+  let restored = false;
+  if (boot.safe) {
+    await enterSafeBoot(boot.reason, boot.crashed);
+  } else {
+    titleLoaded = await autoRestoreFromTitles();
+    debugLog(`Title-based restore: ${titleLoaded}`);
+    restored = titleLoaded;
+    if (!titleLoaded) {
+      debugLog("Attempting legacy deck restore...");
+      restored = await loadDeckState();
+      debugLog(`Legacy deck restore: ${restored}`);
+    }
   }
-  
+
   // Set up enhanced file input with URI capture and validation
   debugLog("Setting up file input with validation...");
   await setupFileInputWithUriCapture();
@@ -3130,6 +3442,104 @@ window.stopCardAudio = function () {
   }
 };
 
+// Persist the reading location for SRT-cards titles (where card index === cue
+// index): as the user reads in read mode, keep the card synced + save the
+// position so a relaunch restores the last-read line, not a stale spot. Only
+// applies to SRT-cards titles; deck/epub titles use the per-book scrollLeft.
+window.persistReadCue = function (cueIdx) {
+  if (!Number.isFinite(cueIdx) || cueIdx < 0) return;
+  if (!(allNotes && allNotes.length && allNotes[0]?.isSrtCard)) return;
+  if (cueIdx >= allNotes.length) return;
+  currentCardIndex = cueIdx;        // keep the card synced to reading (no re-render here)
+  if (window._activeTitleId && window.titleStore?.setCardIndex) {
+    window.titleStore.setCardIndex(window._activeTitleId, cueIdx).catch(() => {});
+  }
+};
+
+// Jump the loaded audiobook to the previous/next subtitle cue — used by the
+// lock-screen prev/next-track (⏮⏭) buttons. The audiobook is already loaded
+// while in audio mode, so a plain seek is enough; the position events repaint
+// the cue text + waveform.
+window.lockScreenCueJump = function (dir) {
+  const cues = (window.pagedCues?.length ? window.pagedCues : window.__abCues) || [];
+  const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+  if (!cues.length || !bg) return;
+  let cur = window._lastAudioCueIdx;
+  if (!Number.isFinite(cur) || cur < 0) cur = 0;
+  const target = Math.max(0, Math.min(cues.length - 1, cur + dir));
+  const cue = cues[target];
+  if (!cue || !Number.isFinite(cue.startMs)) return;
+  window._lastAudioCueIdx = target;
+  const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
+  try { bg.seek({ ms }); } catch (_) {}
+};
+
+// Drop any loaded cards + card audio WITHOUT tearing down the dictionary,
+// media cache, or other subsystems (unlike cleanupMemory). Used when a
+// deck-less title (EPUB-only / audio-only) becomes active so CARD mode
+// doesn't keep showing — or reload — the previous title's cards.
+// Drop the transient, cross-title position/stats state when a NEW title loads,
+// so the new book restores its OWN saved position instead of inheriting the
+// previous book's playhead (e.g. opening book B and jumping to book A's 2%) and
+// so the read char counter re-anchors per book instead of jumping.
+function resetCrossTitlePositionState() {
+  window._lastAudioCueIdx = -1;
+  window._lastAudioCueIdxForStats = -1;
+  // Audio-stats continuity baseline (playhead vs wall-clock). Clearing these
+  // forces the first cue advance of the new title to re-anchor without
+  // crediting, so a title switch can never dump a cross-title span.
+  window._audioStatsLastWallMs = 0;
+  window._audioStatsLastPosMs = -1;
+  // Reentry-dialog divergence state is PER-TITLE. If it survives a title
+  // load, opening a brand-new title re-shows the "prior card N vs new card M"
+  // dialog using the previous title's stale prior-position — which is exactly
+  // the "dialog on fresh title open" bug. A new title has no audio↔cursor
+  // divergence, so clear all of it here.
+  window._audioPositionUnresolved = false;
+  window._priorCardIdx = null;
+  window._priorCardIdxAtMs = 0;
+  window._priorReaderCursorIdx = null;
+  window._priorReaderCursorAtMs = 0;
+  window._reentryDismissedByTab = false;
+  // Drop the PREVIOUS title's loaded audio + its stale source paths. Without
+  // this, after switching titles the BackgroundAudio plugin still holds the old
+  // title's file (state.ready === true) and read-mode/audio PLAY RESUMED it —
+  // the "plays the old title's audio" bug. The next play then does a fresh
+  // bg.play with the new title's path (resolved via _pagedAudioPath).
+  try { window.Capacitor?.Plugins?.BackgroundAudio?.stop?.(); } catch (e) {}
+  window._pagedAudioPath = null;
+  window._currentReadingAudiobookPath = null;
+  window._audiobookSrcPath = null;
+  window._bgPlaying = false;
+  // Drop the previous title's dict lookup context (sentence + cue audio path +
+  // cueStartMs). Without this, opening an EPUB-only title and looking up a word
+  // inherited the prior audio title's cue audio → the dict popup wrongly showed
+  // the "Set playhead" section. Re-set fresh by the next lookup.
+  window.lookupContext = null;
+  try { window.stats?.rebaselineRead?.(); } catch (e) {}
+}
+
+window.clearLoadedCardsAndAudio = function () {
+  resetCrossTitlePositionState();
+  try {
+    if (typeof backgroundProcessor === 'object' && backgroundProcessor) {
+      backgroundProcessor.stop = true;
+    }
+  } catch (e) {}
+  allNotes = [];
+  window.allNotes = allNotes;
+  currentCardIndex = 0;
+  try { viewedNotes.clear(); } catch (e) {}
+  isLoadingComplete = false;
+  totalNotesExpected = 0;
+  notesProcessed = 0;
+  if (typeof window.stopCardAudio === 'function') window.stopCardAudio();
+  if (typeof window.invalidateAbContext === 'function') window.invalidateAbContext();
+  const cc = document.getElementById('cardContainer');
+  if (cc) cc.innerHTML = '';
+  try { updateProgressBar(); } catch (e) {}
+};
+
 // =====================================================================
 // SRT-derived card engine: when a Title has no Anki deck but DOES have an
 // audiobook + SRT, build synthetic notes from the SRT cues. Each "card" is
@@ -3148,17 +3558,44 @@ function _ensureBgListenersForSrtCards() {
   _srtEndListenerAttached = true;
   bg.addListener('state', (d) => {
     window._bgPlaying = !!d.playing;
-    // Trigger a strip refresh on play/pause so the top-left counter
-    // reflects the latest state immediately (mode-aware: audio shows
-    // mm:ss / mm:ss which depends on the current ms).
-    try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
+    // Strip refresh on play/pause only matters in AUDIO mode (where
+    // the strip shows mm:ss / mm:ss). In read mode, the user wants
+    // the scroll-derived character position; in card mode, card N/M.
+    // Letting this fire in those modes was racing the scroll/card
+    // handlers and overwriting their output with the audio cue's
+    // chunk char-offset (or '—' when the cue index was stale),
+    // producing the dash-flicker the user reported.
+    if (document.body.classList.contains('mode-audio')) {
+      try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
+    }
+  });
+  // Lock screen / Control Center remote commands. The audiobook is the ONLY
+  // content the lock screen ever controls (card SRT clips are just segments of
+  // the same audiobook file), so a remote "play" should always land us in
+  // AUDIO mode — which is what starts the audio timer + shows the cover, and
+  // guarantees we never mis-attribute the time to card/read.
+  bg.addListener('remoteCommand', (d) => {
+    const action = d?.action;
+    if (action === 'play') {
+      // Disarm the SRT-card end-boundary auto-pause IMMEDIATELY (synchronously)
+      // so the ~150ms position events can't pause the audio the lock screen
+      // just resumed before the async mode switch flips us out of card mode.
+      _srtCardEndMs = 0;
+      // Native already resumed playback; switch to audio mode in RESUME mode
+      // so we attach to it without reseeking/restarting.
+      if (!document.body.classList.contains('mode-audio') && typeof window.setShellMode === 'function') {
+        try { window.setShellMode('audio', { force: true, resumeOnly: true }); } catch (_) {}
+      }
+    } else if (action === 'nextCue' || action === 'prevCue') {
+      try { window.lockScreenCueJump?.(action === 'nextCue' ? 1 : -1); } catch (_) {}
+    }
   });
   bg.addListener('position', (d) => {
-    // Drive the top-left strip in audio mode (current time / total
-    // time). Throttled to ~3 Hz via a timestamp so we don't repaint
-    // on every position event (which can fire 10+ Hz).
+    // Same constraint as the state handler — only repaint the strip
+    // in audio mode. ~3 Hz throttle still applies.
     const now = Date.now();
-    if (!window._lastStripUpdateAt || (now - window._lastStripUpdateAt) > 300) {
+    if (document.body.classList.contains('mode-audio') &&
+        (!window._lastStripUpdateAt || (now - window._lastStripUpdateAt) > 300)) {
       window._lastStripUpdateAt = now;
       try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
     }
@@ -3188,6 +3625,7 @@ window.loadTitleAsSrtCards = async function (title) {
   const ab = title?.attachments?.audiobook;
   const srtAtt = title?.attachments?.srt;
   if (!ab || !srtAtt || !window.srtParser) return false;
+  resetCrossTitlePositionState();
 
   // Read + parse SRT.
   let cues = [];
@@ -3332,7 +3770,13 @@ window.toggleReadingPlayback = function () {
     //   2. The global audiobook context path (set when ensureCueContext
     //      / setAudiobookContextForSrtCards loads abAudioPath)
     //   3. SRT-card title's per-note audiobookPath
-    const audiobookPath = window._currentReadingAudiobookPath ||
+    // Source priority: the PAGED reader's current-title audiobook FIRST. The
+    // legacy _currentReadingAudiobookPath / _audiobookSrcPath come from the
+    // legacy reader's abAudioPath (cached by deck name) which doesn't refresh
+    // when the paged reader loads a new title — that staleness is what made
+    // read-mode PLAY play the OLD title's audio after switching titles.
+    const audiobookPath = window._pagedAudioPath ||
+                          window._currentReadingAudiobookPath ||
                           window._audiobookSrcPath ||
                           (window.allNotes?.[window.currentCardIndex]?.audiobookPath);
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;

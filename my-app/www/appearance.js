@@ -27,14 +27,16 @@
   };
 
   const DEFAULTS = {
-    card:  { fontSize: '1.8rem', align: 'center', fontFamily: 'serif',
+    // Defaults updated 2026-05-30 per user request:
+    // card/audio = 30 px (1.875 rem), read = 28 px (1.75 rem).
+    card:  { fontSize: '1.875rem', align: 'center', fontFamily: 'serif',
              imageDisplay: 'block', imageOpacity: 1, imageAlign: 'flex-start' },
-    read:  { fontSize: '1.875rem', align: 'left',   fontFamily: 'serif',
+    read:  { fontSize: '1.75rem', align: 'left',   fontFamily: 'serif',
              imageDisplay: 'none',  imageOpacity: 1, imageAlign: 'flex-start',
              // 'bg' = current behavior (translucent fill + underline);
              // 'text' = recolor the cue text only (less artifact-prone).
              highlightStyle: 'text' },
-    audio: { fontSize: '1.6rem', align: 'center', fontFamily: 'serif',
+    audio: { fontSize: '1.875rem', align: 'center', fontFamily: 'serif',
              imageDisplay: 'block', imageOpacity: 0.6, imageAlign: 'center' }
   };
 
@@ -71,7 +73,14 @@
       const fontKey = s.fontFamily || DEFAULTS[mode].fontFamily;
       root.style.setProperty(`--font-size-${mode}`,      s.fontSize     || DEFAULTS[mode].fontSize);
       root.style.setProperty(`--align-${mode}`,          s.align        || DEFAULTS[mode].align);
-      root.style.setProperty(`--font-family-${mode}`,    FONT_STACKS[fontKey] || FONT_STACKS.serif);
+      // Read mode is always serif per user request — appearance UI
+      // doesn't expose font family for read anymore. For card + audio
+      // the picker is limited to serif/sans; any other legacy stored
+      // value (system, mono, jpSans, jpSerif) falls back to serif.
+      let resolved = FONT_STACKS[fontKey];
+      if (mode === 'read') resolved = FONT_STACKS.serif;
+      else if (fontKey !== 'serif' && fontKey !== 'sans') resolved = FONT_STACKS.serif;
+      root.style.setProperty(`--font-family-${mode}`, resolved || FONT_STACKS.serif);
       root.style.setProperty(`--image-${mode}-display`,  s.imageDisplay || DEFAULTS[mode].imageDisplay);
       root.style.setProperty(`--image-${mode}-opacity`,  s.imageOpacity ?? DEFAULTS[mode].imageOpacity);
       const imgAlign = s.imageAlign || DEFAULTS[mode].imageAlign;

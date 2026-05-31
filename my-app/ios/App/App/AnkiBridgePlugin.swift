@@ -52,6 +52,25 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
 
     private var pendingLinkCall: CAPPluginCall?
 
+    // Listen for the AppDelegate's URL-open notification and forward to
+    // JS. Avoids the @capacitor/app dependency which isn't installed.
+    public override func load() {
+        super.load()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppUrlOpen(_:)),
+            name: Notification.Name("AnkiBridgeAppUrlOpen"),
+            object: nil
+        )
+        NSLog("[AnkiBridge] plugin loaded; AnkiBridgeAppUrlOpen observer attached")
+    }
+
+    @objc private func handleAppUrlOpen(_ notification: Notification) {
+        let url = (notification.userInfo?["url"] as? String) ?? ""
+        NSLog("[AnkiBridge] AnkiBridgeAppUrlOpen → \(url)")
+        notifyListeners("ankiCallbackUrl", data: ["url": url])
+    }
+
     // MARK: - availability + permission
 
     @objc func isAvailable(_ call: CAPPluginCall) {
@@ -282,7 +301,10 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
                         "mediaServerActive": serverStarted,
                         "mediaServerPort":   server.port,
                         "mediaServerPingOk": pingOk,
-                        "mediaServerRestartedThisSend": didRestart
+                        "mediaServerRestartedThisSend": didRestart,
+                        // Echo the constructed URL back so JS-side
+                        // diagnostics can show / copy it.
+                        "constructedUrl":    fullURL
                     ]
                     call.resolve(info)
                 } else {

@@ -215,6 +215,18 @@
     await persist();
   }
 
+  // Remember the last shell mode (card / read / audio) a Title was viewed in,
+  // so opening it (or restoring it on launch) reopens in that mode.
+  async function setMode(id, mode) {
+    if (!mode) return;
+    await load();
+    const i = titles.findIndex(t => t.id === id);
+    if (i < 0) return;
+    if (titles[i].lastMode === mode) return; // no-op write avoidance
+    titles[i].lastMode = mode;
+    await persist();
+  }
+
   // Returns which modes a Title enables based on its attachments.
   function enabledModes(title) {
     if (!title) return { card: false, read: false, audio: false };
@@ -238,6 +250,7 @@
     findByDeckName,
     findByName,
     setCardIndex,
+    setMode,
     enabledModes
   };
 })();

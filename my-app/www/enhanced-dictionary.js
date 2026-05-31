@@ -675,7 +675,44 @@
         const _t0 = performance.now();
         const ms = () => Math.round(performance.now() - _t0);
         const results = [];
-        const seen = new Set(); // dedupe by `${dictName}::${term}`
+        // Tracks which dicts dictStore is authoritative for. Used to
+        // prevent the in-memory path from re-pushing the same dict's
+        // entries — replaces a (dictName, term) seen-set whose collision
+        // semantics were too coarse: when JMDict has multiple entries
+        // for the same surface (e.g. 認める → みとめる + したためる), the
+        // (dict, term)-keyed dedup dropped all but the first record so
+        // the popup never showed the less-frequent reading at all.
+        const dictsHandledByStore = new Set();
+
+        // Rank entries within a dict by frequency / priority hints so
+        // common readings come first. Without this, JMDict returns
+        // entries in source-file order (≈ sequence ID), which has zero
+        // correlation with usage frequency — e.g. 誘う surfaces as
+        // いざなう before さそう, and 認める as したためる before みとめる.
+        function entryPriorityScore(dictName, entry) {
+            if (!entry) return 0;
+            if (dictName === 'JMDict') {
+                // Yomitan-converted JMDict marks common entries with a
+                // "P" tag on the kanji or kana objects. Some converters
+                // also preserve raw JMdict re_pri/ke_pri arrays under
+                // `.pri`. Sum both signals; higher = more common.
+                let s = 0;
+                const collect = (arr) => {
+                    for (const k of (arr || [])) {
+                        if (Array.isArray(k.tags) && k.tags.includes('P')) s += 10;
+                        if (Array.isArray(k.pri)) s += k.pri.length;
+                    }
+                };
+                collect(entry.kanji);
+                collect(entry.kana);
+                return s;
+            }
+            // Yomitan v3 array entry: [term, reading, defTags, rules,
+            // score, glossary, sequence, termTags]. score (index 4) is
+            // the dict's intrinsic ranking field — higher = better.
+            if (Array.isArray(entry)) return Number(entry[4]) || 0;
+            return 0;
+        }
 
         // ----- Fast path: dictStore (IDB-indexed) -----
         if (await isDictStoreReady()) {
@@ -683,6 +720,7 @@
                 const meta = await window.dictStore.list();
                 console.log(`⏱   [lookup] dictStore.list: +${ms()}ms`);
                 const allNames = meta.map(m => m.dictName);
+                for (const n of allNames) dictsHandledByStore.add(n);
                 const ordered = (window.dictPrefs?.orderedNames)
                   ? window.dictPrefs.orderedNames(allNames)
                   : allNames;
@@ -690,11 +728,16 @@
                 const records = await window.dictStore.lookup(term, { enabledDicts: enabled });
                 console.log(`⏱   [lookup] dictStore.lookup("${term}"): +${ms()}ms → ${records.length} records`);
                 const orderIdx = new Map(ordered.map((n, i) => [n, i]));
-                records.sort((a, b) => (orderIdx.get(a.dictName) ?? 999) - (orderIdx.get(b.dictName) ?? 999));
+                // Two-key sort: dict order first, then priority within
+                // each dict (descending — common entries first). JS sort
+                // is stable on V8/JSC so the within-dict order is honored.
+                records.sort((a, b) => {
+                    const dictDiff = (orderIdx.get(a.dictName) ?? 999) - (orderIdx.get(b.dictName) ?? 999);
+                    if (dictDiff !== 0) return dictDiff;
+                    return entryPriorityScore(b.dictName, b.entry) -
+                           entryPriorityScore(a.dictName, a.entry);
+                });
                 for (const r of records) {
-                    const key = `${r.dictName}::${r.term}`;
-                    if (seen.has(key)) continue;
-                    seen.add(key);
                     results.push({
                         dictionary: r.dictName,
                         term:       r.term,
@@ -708,10 +751,9 @@
         }
 
         // ----- Legacy path: in-memory `dictionaries` Map -----
-        // Try the in-memory map too. If JMDict was loaded into memory but
-        // not yet migrated to dictStore, this is the only place to find
-        // its entries. If a dict appears in BOTH paths, the seen-set
-        // ensures we don't duplicate.
+        // Only consult dicts that dictStore doesn't already own — when a
+        // dict has been migrated to dictStore, the records above are the
+        // authoritative copy and pushing again would duplicate everything.
         const _memT = performance.now();
         if (dictionaries.size > 0) {
             const allNames = Array.from(dictionaries.keys());
@@ -721,14 +763,16 @@
             const isEnabled = (n) => window.dictPrefs?.isEnabled
                 ? window.dictPrefs.isEnabled(n) : true;
             for (const dictName of ordered) {
+                if (dictsHandledByStore.has(dictName)) continue;
                 if (!isEnabled(dictName)) continue;
                 const entries = dictionaries.get(dictName);
                 if (!entries || !entries.has(term)) continue;
-                const key = `${dictName}::${term}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
                 const dictEntries = entries.get(term);
-                for (const entry of dictEntries) {
+                // Sort by priority score within this dict (stable copy).
+                const sortedEntries = [...dictEntries].sort((a, b) =>
+                    entryPriorityScore(dictName, b) - entryPriorityScore(dictName, a)
+                );
+                for (const entry of sortedEntries) {
                     results.push({
                         dictionary: dictName,
                         term: term,
@@ -983,6 +1027,11 @@
         // so the section is absent in non-reader popups.
         const inReadMode = document.body.classList.contains('mode-read');
         const ctx = window.lookupContext || {};
+        // Show whenever THIS lookup resolved to a real cue with audio (epub+SRT+
+        // audiobook titles). EPUB-only lookups resolve no cue → cueAudioPath /
+        // cueStartMs are null → hidden. The stale-context leak that made it
+        // appear on EPUB-only is handled by clearing window.lookupContext on
+        // title load (resetCrossTitlePositionState).
         const hasCue = inReadMode &&
                        !!ctx.cueAudioPath &&
                        Number.isFinite(ctx.cueStartMs);
@@ -1018,13 +1067,28 @@
                     <div class="manatan-term">${result.term}</div>
                 </div>
                 <div class="manatan-header-icons">
-                    <button id="audioBtn" type="button" title="Play audio" class="manatan-icon-btn" aria-label="Play audio">
-                      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M11 5L6 9H3v6h3l5 4V5z"/>
-                        <path d="M15.5 8.5a5 5 0 0 1 0 7"/>
-                        <path d="M18.5 5.5a9 9 0 0 1 0 13"/>
-                      </svg>
-                    </button>
+                    <div class="manatan-audio-group" style="display:flex;flex-direction:column;align-items:center;gap:2px;">
+                        <div class="manatan-audio-row" style="display:flex;align-items:center;gap:2px;">
+                            <button id="audioPrev" type="button" title="Previous audio source" class="manatan-icon-btn manatan-audio-nav" aria-label="Previous audio" style="display:none;">
+                              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="15 18 9 12 15 6"/>
+                              </svg>
+                            </button>
+                            <button id="audioBtn" type="button" title="Play audio" class="manatan-icon-btn" aria-label="Play audio">
+                              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M11 5L6 9H3v6h3l5 4V5z"/>
+                                <path d="M15.5 8.5a5 5 0 0 1 0 7"/>
+                                <path d="M18.5 5.5a9 9 0 0 1 0 13"/>
+                              </svg>
+                            </button>
+                            <button id="audioNext" type="button" title="Next audio source" class="manatan-icon-btn manatan-audio-nav" aria-label="Next audio" style="display:none;">
+                              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="9 18 15 12 9 6"/>
+                              </svg>
+                            </button>
+                        </div>
+                        <span id="audioCount" class="manatan-audio-count" style="display:none;font-size:.65rem;opacity:.7;line-height:1;white-space:nowrap;"></span>
+                    </div>
                     <button id="ankiBtn" class="manatan-anki-btn"
                             data-dictionary="${result.dictionary}"
                             data-term="${result.term}"
@@ -1123,11 +1187,21 @@
             return;
         }
 
+        // READ mode takes precedence over the card-subtitle branch. A title
+        // that has BOTH cards and an epub keeps its `.subtitle-text` element
+        // in the DOM while reading (the card view is layered behind the
+        // reader, not display:none), so without this guard the card branch
+        // below would hijack positioning in read mode — which is exactly why
+        // the avoid-content placement only worked on epub-ONLY titles and why
+        // combined titles dropped the popup in a fixed spot over the text.
+        const pagedView = document.getElementById('readingPagedView');
+        const pagedActive = pagedView && pagedView.style.display !== 'none';
+
         // Card mode: anchor below the subtitle text. Works for BOTH classic
         // image+subtitle cards AND SRT-cards (subtitle + waveform, no image).
         const subtitleEl = document.querySelector('.subtitle-text');
         const subtitleVisible = subtitleEl && subtitleEl.offsetParent !== null;
-        if (subtitleVisible) {
+        if (subtitleVisible && !pagedActive) {
             const subRect = subtitleEl.getBoundingClientRect();
             const top = Math.max(margin, subRect.bottom + margin);
             const maxH = Math.min(vh * 0.72, 520, Math.max(180, vh - top - margin * 2));
@@ -1145,8 +1219,6 @@
         // RIGHT edge of the screen — whichever side is farther from
         // the highlighted word's column — with a compact width that
         // leaves the highlight column clearly visible.
-        const pagedView = document.getElementById('readingPagedView');
-        const pagedActive = pagedView && pagedView.style.display !== 'none';
         if (pagedActive) {
             // Find a hlRect via increasingly-loose fallbacks. iOS WKWebView
             // is uneven across versions about what's actually available:
@@ -1223,95 +1295,76 @@
             // doesn't sit flush against the looked-up character. Lifts
             // the "almost touching" feel without breaking the picker.
             const gap = 14;
-            // Fallback when there's no highlight rect — center.
+            // No highlight rect at all → pin a narrow column to the LEFT edge.
+            // In vertical-rl the reader's current column is toward the right
+            // (text flows right-to-left), so a left column is the least likely
+            // to cover what's being read. This beats a bottom sheet (which
+            // obscured the continuation of the tapped word's column) and a
+            // centered box (which sat over the text).
             if (!hlRect) {
-                const fw = Math.min(420, vw * 0.7);
+                const fw = Math.min(360, Math.max(200, vw * 0.46));
                 popup.style.width  = `${fw}px`;
                 popup.style.height = 'auto';
                 popup.style.maxHeight = `${vh - safeTop - margin * 2}px`;
-                popup.style.left = `${(vw - fw) / 2}px`;
+                popup.style.left = `${margin}px`;
                 popup.style.top  = `${safeTop + margin}px`;
+                try { popup.dataset.posSide = 'fallback-left'; } catch (_) {}
                 return;
             }
-            // Compute the four candidate placements and pick the one
-            // whose available area best fits the popup. Each candidate
-            // reports its anchor rect (the empty zone the popup will
-            // occupy) so we can clamp the popup's width/height.
+            // Place the popup in the region FARTHEST from the looked-up word
+            // and pin it to the OUTER screen edge — never centered over the
+            // word. The old area-scoring picked full-width above/below
+            // strips (bigger area than the narrow vertical-rl side columns)
+            // and then centered within them, dropping the box mid-screen
+            // right on top of the context — exactly the recurring complaint.
+            // In vertical-rl a side column keeps the word's whole column
+            // readable, so prefer LEFT/RIGHT when a side is wide enough;
+            // otherwise fall into the top/bottom half that doesn't contain
+            // the word, flush to that edge.
             const minTop = safeTop + margin;
-            const candidates = [
-                { // ABOVE — full width strip from minTop to highlight top
-                    side: 'above',
-                    left: margin, top: minTop,
-                    width: vw - margin * 2,
-                    height: Math.max(0, hlRect.top - gap - minTop),
-                },
-                { // BELOW — full width strip from highlight bottom to viewport
-                    side: 'below',
-                    left: margin, top: hlRect.bottom + gap,
-                    width: vw - margin * 2,
-                    height: Math.max(0, vh - margin - (hlRect.bottom + gap)),
-                },
-                { // LEFT — column from viewport left to highlight left
-                    side: 'left',
-                    left: margin, top: minTop,
-                    width: Math.max(0, hlRect.left - gap - margin),
-                    height: vh - minTop - margin,
-                },
-                { // RIGHT — column from highlight right to viewport right
-                    side: 'right',
-                    left: hlRect.right + gap, top: minTop,
-                    width: Math.max(0, vw - margin - (hlRect.right + gap)),
-                    height: vh - minTop - margin,
-                },
-            ];
-            // Popup size targets — within bounds, prefer larger so the
-            // dict content has breathing room. Each candidate gets
-            // clamped to its available space. minW lowered to 180 so
-            // LEFT/RIGHT quadrants in vertical-rl (where each column
-            // is narrow) can win more often — picking LEFT/RIGHT
-            // keeps the user's current reading column unobstructed.
-            const targetW = Math.min(420, vw * 0.7);
-            const targetH = Math.min(520, vh * 0.7);
-            const minW = 180, minH = 180;
-            // Score each candidate by visible area (clamped to its
-            // available rect). Reject any whose available area is
-            // smaller than minW * minH.
-            let best = null;
-            for (const c of candidates) {
-                const w = Math.min(targetW, c.width);
-                const h = Math.min(targetH, c.height);
-                if (w < minW || h < minH) continue;
-                // Score = clamped area. Larger = better.
-                const score = w * h;
-                if (!best || score > best.score) {
-                    best = Object.assign({}, c, { w, h, score });
-                }
+            const targetH = Math.min(520, vh * 0.72);
+            const roomLeft  = hlRect.left - gap - margin;
+            const roomRight = vw - margin - (hlRect.right + gap);
+            const roomAbove = hlRect.top - gap - minTop;
+            const roomBelow = vh - margin - (hlRect.bottom + gap);
+            // PREFER a near-FULL-WIDTH popup pinned to the TOP or BOTTOM —
+            // whichever half is farther from the looked-up word. In vertical-rl
+            // a side column is too narrow (the recurring "dict is too narrow"
+            // complaint); top/bottom gives the entry the screen's full width and
+            // still leaves the word's column readable. Fall back to a side column
+            // ONLY when the word is vertically centered so neither half has
+            // usable height (top/bottom would obscure the word) AND a side is
+            // wide enough.
+            const TOPBOT_MIN = 200;                  // min usable height to take a top/bottom slot
+            const SIDE_MIN = Math.min(240, vw * 0.5);
+            const fullW = Math.min(vw - margin * 2, 600);
+            let boxW, boxH, boxLeft, boxTop, posSide;
+            if (Math.max(roomAbove, roomBelow) >= TOPBOT_MIN ||
+                Math.max(roomLeft, roomRight) < SIDE_MIN) {
+                // Full-width, flush to whichever edge is farther from the word.
+                const useAbove = roomAbove >= roomBelow;
+                const room = Math.max(140, useAbove ? roomAbove : roomBelow);
+                boxW = fullW;
+                boxH = Math.min(targetH, room);
+                boxLeft = (vw - boxW) / 2;
+                boxTop = useAbove ? minTop : (vh - margin - Math.min(targetH, room));
+                posSide = useAbove ? 'above' : 'below';
+            } else {
+                // Word vertically centered → narrow side column (last resort).
+                const useLeft = roomLeft >= roomRight;
+                const room = useLeft ? roomLeft : roomRight;
+                boxW = Math.min(420, room);
+                boxH = Math.min(targetH, vh - minTop - margin);
+                boxLeft = useLeft ? margin : (vw - margin - boxW);
+                boxTop = minTop;
+                posSide = useLeft ? 'left' : 'right';
             }
-            // Fallback: no candidate fits comfortably — pick the one
-            // with the largest raw area regardless.
-            if (!best) {
-                for (const c of candidates) {
-                    const score = c.width * c.height;
-                    if (!best || score > best.score) {
-                        best = Object.assign({}, c, {
-                            w: Math.max(minW, Math.min(targetW, c.width)),
-                            h: Math.max(minH, Math.min(targetH, c.height)),
-                            score
-                        });
-                    }
-                }
-            }
-            // Center the popup within the chosen candidate's
-            // available rect so it doesn't sit jammed against the
-            // viewport edge.
-            const finalW = best.w, finalH = best.h;
-            const finalLeft = best.left + Math.max(0, (best.width - finalW) / 2);
-            const finalTop  = best.top  + Math.max(0, (best.height - finalH) / 2);
-            popup.style.width = `${finalW}px`;
+            try { popup.dataset.posSide = posSide; } catch (_) {}
+            popup.style.width = `${boxW}px`;
             popup.style.height = 'auto';
-            popup.style.maxHeight = `${finalH}px`;
-            popup.style.left = `${finalLeft}px`;
-            popup.style.top  = `${finalTop}px`;
+            popup.style.maxHeight = `${boxH}px`;
+            popup.style.left = `${boxLeft}px`;
+            popup.style.top  = `${boxTop}px`;
             return;
         }
 
@@ -1635,18 +1688,50 @@
         try {
             hidePopup();
 
-            // Immediate visual feedback: show a "Looking up…" popup BEFORE
-            // any async wait so the user sees their tap registered. The
-            // termSet build (next step) can take 1–3 s on first launch and
-            // a silent wait reads as "the tap did nothing."
+            // Immediate visual feedback. If the user tapped before dicts
+            // finished loading (first-launch tap), the next two awaits can
+            // sit for several seconds while the legacy JMDict parser
+            // finishes + the termSet builds. Plain "Looking up…" reads as
+            // "the tap did nothing" — show a more honest "Initializing
+            // Dictionaries…" with a progress bar instead.
+            const dictsReady = dictLoaded &&
+                (!window.dictStore || window.dictStore.termSetReady?.());
             const earlyPopup = getOrCreatePopup();
-            earlyPopup.innerHTML = `
-                <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 0;">
-                    <div style="color:#4caf50;font-size:.9em;">Looking up…</div>
-                </div>`;
+            if (dictsReady) {
+                earlyPopup.innerHTML = `
+                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 0;">
+                        <div style="color:#4caf50;font-size:.9em;">Looking up…</div>
+                    </div>`;
+            } else {
+                earlyPopup.innerHTML = `
+                    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 12px;">
+                        <div style="color:#4caf50;font-size:1em;font-weight:600;margin-bottom:10px;">
+                            Initializing Dictionaries…
+                        </div>
+                        <div style="width:200px;height:4px;background:#333;border-radius:2px;overflow:hidden;margin-bottom:10px;">
+                            <div id="earlyLookupBar" style="width:0%;height:100%;background:#4caf50;transition:width .4s ease;"></div>
+                        </div>
+                        <div style="color:#666;font-size:.72em;">First lookup loads the term index — please wait.</div>
+                    </div>`;
+            }
             positionDictPopup(earlyPopup);
             earlyPopup.style.display = 'block';
-            lap('earlyPopup shown');
+            lap('earlyPopup shown (dictsReady=' + dictsReady + ')');
+
+            // Drive the bar through staged increments. The actual dict load
+            // doesn't expose a percentage at this scope, so this is paced
+            // progress — close to the typical 1.5–3 s wait. If it's still
+            // visible past 3 s we park at 90% so the user sees we're still
+            // working rather than a frozen 100%.
+            if (!dictsReady) {
+                const bar = document.getElementById('earlyLookupBar');
+                if (bar) {
+                    setTimeout(() => { if (bar.isConnected) bar.style.width = '25%'; }, 80);
+                    setTimeout(() => { if (bar.isConnected) bar.style.width = '55%'; }, 700);
+                    setTimeout(() => { if (bar.isConnected) bar.style.width = '80%'; }, 1500);
+                    setTimeout(() => { if (bar.isConnected) bar.style.width = '90%'; }, 3000);
+                }
+            }
 
             // Ensure dictionaries are loaded before deinflecting. Otherwise
             // first-tap returns single-char matches because hasTermAnywhere
@@ -1658,6 +1743,10 @@
                 try { await window.dictStore.buildTermSet(); } catch (e) {}
             }
             lap('after buildTermSet');
+            // Finish the bar so the transition to the next popup state
+            // doesn't look like it bailed at 90%.
+            const finishBar = document.getElementById('earlyLookupBar');
+            if (finishBar) finishBar.style.width = '100%';
 
             const text = spans.map(s => s.textContent).join('');
             const charIndex = spans.slice(0, index)
@@ -1836,7 +1925,6 @@
                         await bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
                     }
                 }
-                try { window.showToast?.('▶ cue', 1200); } catch (_) {}
                 // Dismiss the popup so the reader is visible.
                 try { window.hideDictPopup?.(); } catch (_) {}
             } catch (err) {
@@ -1900,15 +1988,15 @@
     }
     
     function setupAudioHandler(results) {
-        const btn = document.getElementById('audioBtn');
+        const btn      = document.getElementById('audioBtn');
+        const prevBtn  = document.getElementById('audioPrev');
+        const nextBtn  = document.getElementById('audioNext');
+        const countEl  = document.getElementById('audioCount');
         if (!btn || !results || results.length === 0) return;
         const result = results[currentResultIndex];
         const term = result.term;
         const reading = extractReadingFromResult(result);
 
-        // Preserve the SVG icon. Earlier versions clobbered btn.textContent
-        // on click/unavailable, which wiped the icon and made the button
-        // appear to disappear.
         const originalIconHTML = btn.innerHTML;
 
         const markUnavailable = () => {
@@ -1916,22 +2004,68 @@
             btn.style.cursor = 'default';
             btn.disabled = true;
             btn.title = 'No local audio for this word';
+            if (prevBtn) prevBtn.style.display = 'none';
+            if (nextBtn) nextBtn.style.display = 'none';
+            if (countEl) countEl.style.display = 'none';
+            // Clear popup-scope state so Anki path falls back cleanly
+            // when no audio is available.
+            window._currentAudioRefs = [];
+            window._currentAudioRefIndex = 0;
         };
 
+        const updateCycler = () => {
+            const refs = window._currentAudioRefs || [];
+            const idx  = window._currentAudioRefIndex || 0;
+            const showCycler = refs.length > 1;
+            if (prevBtn) {
+                prevBtn.style.display = showCycler ? '' : 'none';
+                prevBtn.disabled = !showCycler || idx <= 0;
+                prevBtn.style.opacity = prevBtn.disabled ? '0.35' : '1';
+            }
+            if (nextBtn) {
+                nextBtn.style.display = showCycler ? '' : 'none';
+                nextBtn.disabled = !showCycler || idx >= refs.length - 1;
+                nextBtn.style.opacity = nextBtn.disabled ? '0.35' : '1';
+            }
+            if (countEl) {
+                if (showCycler && refs[idx]) {
+                    const src = refs[idx].source?.id || '?';
+                    countEl.textContent = `${src} ${idx + 1}/${refs.length}`;
+                    countEl.style.display = '';
+                } else {
+                    countEl.style.display = 'none';
+                }
+            }
+        };
+
+        // Load refs up front so the Anki button (and the cycler) have
+        // them ready. Persisted on window for the Anki handler.
         if (typeof window.lookupLocalAudio === 'function') {
-            window.lookupLocalAudio(term, reading).then(urls => {
-                if (!urls || urls.length === 0) markUnavailable();
-            }).catch(() => { /* leave the icon as-is; click will report any error */ });
+            window.lookupLocalAudio(term, reading).then(refs => {
+                window._currentAudioRefs = refs || [];
+                window._currentAudioRefIndex = 0;
+                if (!refs || refs.length === 0) {
+                    markUnavailable();
+                } else {
+                    updateCycler();
+                }
+            }).catch(() => { /* leave the icon as-is */ });
         }
 
-        btn.addEventListener('click', async (e) => {
-            e.stopPropagation();
+        const playCurrent = async () => {
             if (btn.disabled) return;
-            if (typeof window.playLocalAudio !== 'function') return;
+            const refs = window._currentAudioRefs || [];
+            const idx  = window._currentAudioRefIndex || 0;
+            const ref  = refs[idx];
             btn.disabled = true;
             btn.style.opacity = '0.55';
             try {
-                const ok = await window.playLocalAudio(term, reading);
+                let ok = false;
+                if (ref && typeof window.playRef === 'function') {
+                    ok = await window.playRef(ref);
+                } else if (typeof window.playLocalAudio === 'function') {
+                    ok = await window.playLocalAudio(term, reading);
+                }
                 if (!ok) { markUnavailable(); return; }
             } catch (err) {
                 console.warn('Audio play error:', err);
@@ -1941,9 +2075,33 @@
                     btn.style.opacity = '1';
                 }
             }
-            // Defensive: if anything stripped the SVG, restore it.
             if (!btn.querySelector('svg')) btn.innerHTML = originalIconHTML;
+        };
+
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            playCurrent();
         });
+
+        if (prevBtn) {
+            prevBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (prevBtn.disabled) return;
+                window._currentAudioRefIndex = Math.max(0, (window._currentAudioRefIndex || 0) - 1);
+                updateCycler();
+                playCurrent();
+            });
+        }
+        if (nextBtn) {
+            nextBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (nextBtn.disabled) return;
+                const refs = window._currentAudioRefs || [];
+                window._currentAudioRefIndex = Math.min(refs.length - 1, (window._currentAudioRefIndex || 0) + 1);
+                updateCycler();
+                playCurrent();
+            });
+        }
     }
 
     function setupAnkiHandler(results) {
@@ -1996,13 +2154,28 @@
                     }
 
                     // Pull the word's local pronunciation audio so Anki gets
-                    // it in the Term Audio field. Quietly skipped if no match.
+                    // it in the Term Audio field. Use the ref the user is
+                    // CURRENTLY VIEWING in the cycler — falls back to the
+                    // first available ref if state isn't set (e.g. legacy
+                    // call path).
                     let wordAudio = null;
-                    if (typeof window.getLocalAudioBase64 === 'function') {
+                    const refsAtSend = window._currentAudioRefs || [];
+                    const selectedRef = refsAtSend[window._currentAudioRefIndex || 0];
+                    console.log(`[anki-send] refs in scope: ${refsAtSend.length}, idx=${window._currentAudioRefIndex || 0}, selectedRef=${selectedRef ? `${selectedRef.source?.id}/${selectedRef.filename}` : 'none'}`);
+                    if (selectedRef && typeof window.getRefAudioBase64 === 'function') {
+                        try {
+                            wordAudio = await window.getRefAudioBase64(selectedRef);
+                            console.log(`[anki-send] getRefAudioBase64 → ${wordAudio ? `${wordAudio.filename} (${wordAudio.base64?.length || 0} chars)` : 'null'}`);
+                        } catch (e) {
+                            console.warn('[anki-send] getRefAudioBase64 threw:', e);
+                        }
+                    }
+                    if (!wordAudio && typeof window.getLocalAudioBase64 === 'function') {
                         try {
                             wordAudio = await window.getLocalAudioBase64(result.term, reading);
+                            console.log(`[anki-send] getLocalAudioBase64 fallback → ${wordAudio ? `${wordAudio.filename}` : 'null'}`);
                         } catch (e) {
-                            console.warn('Word audio fetch failed:', e);
+                            console.warn('[anki-send] getLocalAudioBase64 fallback threw:', e);
                         }
                     }
 
@@ -2045,40 +2218,47 @@
                     if (!audioData && cueAudioPath &&
                         Number.isFinite(cueStartMs) && Number.isFinite(cueEndMs) &&
                         window.waveform?.edit && window.Capacitor?.Plugins?.AudioSlicer) {
-                      // Pass the tapped cue's text AS the title — the
-                      // editor uses this for its sentence preview AND as
-                      // the default value of `adjusted.text` when the
-                      // user just confirms. Without this, the editor's
-                      // own text computation would glob multiple cues'
-                      // text whose ranges overlapped the default
-                      // selection, producing the "Anki sent multiple
-                      // sentences" report.
+                      // Hand the full SRT cues array to the editor so its
+                      // +/- buttons have neighbors to walk to. Anchor on
+                      // the tapped cue — prefer ctx.cueIndex (set by the
+                      // paged reader's lookupContext) and fall back to
+                      // a startMs lookup if it's missing.
+                      const allCues = (window.pagedCues?.length
+                        ? window.pagedCues
+                        : (window.__abCues || []));
+                      let anchorIdx = Number.isFinite(ctx?.cueIndex) ? ctx.cueIndex : -1;
+                      if (anchorIdx < 0 || anchorIdx >= allCues.length) {
+                        anchorIdx = allCues.findIndex(c =>
+                          Number.isFinite(c.startMs) && Math.abs(c.startMs - cueStartMs) < 50
+                        );
+                      }
+                      // If we still can't locate the cue (e.g. dict popup
+                      // invoked outside an SRT-cards title), fall back to
+                      // the legacy single-cue array so the editor still
+                      // opens with valid bounds — +/- just stay disabled
+                      // in that case.
+                      const editCues = (anchorIdx >= 0 && allCues.length > 1)
+                        ? allCues
+                        : [{ startMs: cueStartMs, endMs: cueEndMs, text: sentence || result.term }];
+                      const editAnchor = (anchorIdx >= 0 && allCues.length > 1) ? anchorIdx : 0;
+                      console.log(`[anki] waveform cues: passing ${editCues.length} cues, anchor=${editAnchor} (ctx.cueIndex=${ctx?.cueIndex}, allCues=${allCues.length})`);
                       const adjusted = await window.waveform.edit({
                         srcPath: cueAudioPath,
                         startMs: Math.round(cueStartMs),
                         endMs:   Math.round(cueEndMs),
                         title: sentence || result.term,
-                        // Force the editor to anchor on JUST this one
-                        // cue — pass it as a single-element cues array
-                        // so the editor's range/text computation can't
-                        // pull from neighbors.
-                        cues: [{ startMs: cueStartMs, endMs: cueEndMs, text: sentence || result.term }],
-                        cueIndex: 0
+                        cues: editCues,
+                        cueIndex: editAnchor
                       });
                       if (!adjusted) return; // user cancelled
-                      // The waveform editor's `adjusted.text` is generated
-                      // from SRT cues whose time ranges overlap the
-                      // selected window, so even with a single-cue input
-                      // it can still glob adjacent cues. For reader-mode
-                      // sends we ALWAYS use the lookupContext sentence
-                      // (which is the exact cue text containing the
-                      // looked-up word). User can still tune the AUDIO
-                      // range freely in the editor — that's its real
-                      // purpose.
-                      const isReader = ctx?.source === 'paged-reader' || ctx?.source === 'reading';
-                      if (isReader) {
-                        finalSentence = sentence; // keep cue text verbatim
-                      } else if (adjusted.text && adjusted.text.trim() !== sentence.trim()) {
+                      // The editor's `adjusted.text` is the concatenation
+                      // of cues[leftIdx..rightIdx]. If the user didn't
+                      // touch the +/- buttons, leftIdx===rightIdx===anchor
+                      // and that text equals the tapped cue. If they DID
+                      // expand, the text grows to include the appended
+                      // neighbors — that's what the user asked for, so we
+                      // honor it.
+                      if (adjusted.text && adjusted.text.trim() !== sentence.trim()) {
                         finalSentence = adjusted.text.trim();
                       }
                       try {
@@ -2262,6 +2442,9 @@
                         dataBase64: wordAudio.base64,
                         field:      cfg.fields.termAudio
                     });
+                    console.log(`[anki-send] termAudio: ${wordAudioFilename} (${wordAudio.base64.length} chars b64) → field "${cfg.fields.termAudio}"`);
+                } else {
+                    console.log(`[anki-send] termAudio: no wordAudio (wordAudio=${!!wordAudio}, base64=${!!wordAudio?.base64})`);
                 }
                 const params = {
                     deckName:  cfg.deck,
@@ -2270,6 +2453,7 @@
                     tags: ['mining', 'dictionary', dictionary || 'unknown'].filter(Boolean)
                 };
                 if (audioList.length) params.audio = audioList;
+                console.log(`[anki-send] audioList.length=${audioList.length}, fields.termAudio="${cfg.fields.termAudio}"`);
                 if (imageData) {
                     params.picture = [{
                         filename:   imageFilename,
@@ -2282,13 +2466,45 @@
                 // iOS URL-scheme hop to AnkiMobile would halt the
                 // read-mode timer mid-dict-send.
                 try { window.stats?.markAnkiRoundtripActive?.(); } catch (_) {}
+                // Arm the x-callback listener BEFORE addNote — see
+                // sendToAnkiConnect.js for the rationale. addNote
+                // resolves on URL handoff, not actual card creation;
+                // the x-callback tells the truth.
+                // Android = synchronous AnkiDroid ContentProvider insert (no
+                // x-callback exists); iOS = async AnkiMobile URL handoff
+                // confirmed via the x-callback. Don't wait for a callback on
+                // Android — it always timed out as "No reply from AnkiMobile".
+                const isAndroid = window.Capacitor?.getPlatform?.() === 'android';
+                const cbPromise = (!isAndroid && typeof window.waitForAnkiCallback === 'function')
+                    ? window.waitForAnkiCallback(8000)
+                    : Promise.resolve('unknown');
                 const r = await ab.addNote(params);
                 console.log('✅ AnkiBridge.addNote ->', r);
                 if (r?.mediaServerRestartedThisSend) {
                     console.log('AnkiBridge: media server was restarted to complete this send');
                 }
+                if (isAndroid) {
+                    // Non-throwing addNote = AnkiDroid created the note.
+                    if (typeof window.showToast === 'function') {
+                        window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+                    }
+                    return r;
+                }
                 if (typeof window.showToast === 'function') {
-                    window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+                    window.showToast(`Sending to ${cfg.deck}…`, 1400);
+                }
+                const cbResult = await cbPromise;
+                console.log('AnkiBridge x-callback result:', cbResult);
+                if (typeof window.showToast === 'function') {
+                    if (cbResult === 'success') {
+                        window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+                    } else if (cbResult === 'error') {
+                        window.showToast(`✗ AnkiMobile rejected — model "${cfg.model}" likely doesn't exist`, 5500);
+                    } else if (cbResult === 'timeout') {
+                        window.showToast(`? No reply from AnkiMobile. Sent model="${cfg.model}". Verify it exists in AnkiMobile → Manage note types.`, 6500);
+                    } else {
+                        window.showToast(`✓ Sent to ${cfg.deck}`, 2200);
+                    }
                 }
                 return r;
             } catch (err) {
@@ -2814,7 +3030,7 @@
             left: 10% !important;
             right: 10% !important;
             position: absolute !important;
-            top: calc(env(safe-area-inset-top, 0px) + var(--subtitle-offset, 30px)) !important;
+            top: calc(env(safe-area-inset-top, 0px) + var(--subtitle-offset, 65px)) !important;
             padding: 12px 20px !important;
             box-sizing: border-box !important;
             text-align: center !important;

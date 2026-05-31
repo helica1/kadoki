@@ -535,6 +535,41 @@ body.chrome-hidden #cardCopyBtn {
   pointer-events: none;
 }
 
+/* ---- Landscape card-mode layout ----
+   In portrait the SRT-card waveform sits centered vertically inside
+   cardContainer via `margin: auto auto X auto` and COPY pills at
+   bottom-center. In landscape that puts the waveform at mid-height
+   (cardContainer is short) and centers COPY on top of it. Pin the
+   waveform to the bottom-left and COPY to the bottom-right so they
+   don't overlap. */
+@media (orientation: landscape) {
+  body.mode-card #srtCardWaveform {
+    position: fixed !important;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px) !important;
+    left:  calc(env(safe-area-inset-left,   0px) + 16px) !important;
+    /* Hold a fixed gap from the right edge so the COPY pill sits in
+       that gap, vertically centered on the waveform. */
+    right: 96px !important;
+    width: auto !important;
+    max-width: none !important;
+    margin: 0 !important;
+    z-index: 2810 !important;
+  }
+  body.mode-card #cardCopyBtn {
+    /* Sit on the same baseline as the waveform's Preview/Reset button
+       row. The waveform container's `bottom: env-bottom + 12px` IS the
+       bottom edge of those buttons (they're the last row), so matching
+       that value puts COPY inline with them. */
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px) !important;
+    left:  auto !important;
+    right: calc(env(safe-area-inset-right, 0px) + 8px) !important;
+    transform: none !important;
+  }
+  body.mode-card.chrome-hidden #cardCopyBtn {
+    transform: translateY(140%) !important;
+  }
+}
+
 /* #progressBar removed 2026-05-30 — the top-left position strip
    now serves as the single mode-aware position display + tap
    target. Force-hidden here in CSS too since the prior rule had
@@ -804,4 +839,16 @@ body.prefs-open #progressBar { pointer-events: none; }
   /* TIMER and PAUSED captions overflow the pill border on very narrow
      widths; shrink them so they don't break the layout. */
   #appHeader #shellTimerLabel::before { font-size: 7px; letter-spacing: 0.12em; }
+}
+
+/* ANDROID-ONLY narrow-header tweak. The generic ≤430px rules above over-shrink
+   the play + hamburger (min-width:0, tiny padding), so on a narrow Android
+   phone they look too small with empty space around them. iOS phones render
+   the same widths but look balanced and are left exactly as-is. Give the two
+   right-side buttons a comfortable size so they fill the header; the timer's
+   centered position is unchanged. */
+@media (max-width: 430px) {
+  body.platform-android #appHeader .shell-icon-btn { padding: 9px 13px !important; }
+  body.platform-android #appHeader #shellPlayBtn { min-width: 46px; }
+  body.platform-android #appHeader #shellMoreBtn { min-width: 44px; }
 }

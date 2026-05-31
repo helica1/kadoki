@@ -1,6 +1,6 @@
 {
   "appId": "com.example.app",
-  "appName": "AnkiDeckReader", 
+  "appName": "Kadoki",
   "webDir": "www",
   "server": {
     "hostname": "localhost",

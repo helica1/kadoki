@@ -35,17 +35,32 @@
   const KEY_PREFIX = 'STATS_V1_';
   const TIMEOUT_CARD_SEC = 20;
   const TIMEOUT_READ_SEC = 120;
+  // Max chars a single noteReadPosition step may credit. Continuous reading
+  // advances a few hundred chars between scroll events; a bigger jump is a
+  // seek/jump-to-percent and must NOT credit the skipped gap as read.
+  const READ_DELTA_CAP = 4000;
 
   const timers = {
     card:  { totalSec: 0, cards: 0, chars: 0, lastInteraction: 0, runningSince: 0 },
-    read:  { totalSec: 0,                      lastInteraction: 0, runningSince: 0 },
-    audio: { totalSec: 0,                                           runningSince: 0 },
+    // Read + audio gained `chars` per user request — chars-read was a
+    // card-only stat for too long. `maxCharOffsetSeen` is used by the
+    // read-mode scroll hook to compute deltas: only NEW territory adds
+    // to chars (scrolling back and re-passing already-read text does
+    // not double-count). `baselineSet` is the "have we anchored a
+    // starting position yet?" flag — the first call after a reset
+    // (or fresh session) anchors the baseline without crediting anything,
+    // so a user who resets at char 35,000 doesn't immediately get
+    // credited with 35k chars on the next scroll.
+    read:  { totalSec: 0, chars: 0, maxCharOffsetSeen: 0, baselineSet: false, lastInteraction: 0, runningSince: 0 },
+    audio: { totalSec: 0, chars: 0,                                           runningSince: 0 },
   };
 
   function persistableShape(mode) {
     const t = timers[mode];
     const out = { totalSec: t.totalSec };
-    if (mode === 'card') { out.cards = t.cards; out.chars = t.chars; }
+    if (mode === 'card')  { out.cards = t.cards; out.chars = t.chars; }
+    if (mode === 'read')  { out.chars = t.chars; out.maxCharOffsetSeen = t.maxCharOffsetSeen; out.baselineSet = t.baselineSet; }
+    if (mode === 'audio') { out.chars = t.chars; }
     return out;
   }
   function persist(mode) {
@@ -60,6 +75,12 @@
         if (Number.isFinite(o.totalSec)) timers[mode].totalSec = o.totalSec;
         if (mode === 'card' && Number.isFinite(o.cards)) timers[mode].cards = o.cards;
         if (mode === 'card' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
+        if (mode === 'read' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
+        if (mode === 'read' && Number.isFinite(o.maxCharOffsetSeen))
+          timers[mode].maxCharOffsetSeen = o.maxCharOffsetSeen;
+        if (mode === 'read' && typeof o.baselineSet === 'boolean')
+          timers[mode].baselineSet = o.baselineSet;
+        if (mode === 'audio' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
       } catch (e) {}
       timers[mode].runningSince = 0;
     }
@@ -225,7 +246,7 @@
     console.log('[stats] anki roundtrip END (background-stop resumed)');
   }
 
-  // Mode switch — stop the prior, queue new (it'll start on first touch).
+  // Mode switch — stop the prior interactive (card/read) timer.
   let lastMode = null;
   function handleModeChange(newMode) {
     if (newMode === lastMode) return;
@@ -233,11 +254,23 @@
     lastMode = newMode;
   }
 
-  // Periodic check: inactivity timeouts + audio-bg-state reconciliation.
+  // Reconcile every timer to the active mode. Stops the prior card/read timer
+  // the instant the mode changes, and makes the audio timer track "bg playing
+  // AND in audio mode" exactly (leaving audio mode stops it even if playback
+  // continues — e.g. card-mode SRT clips share the plugin). Called immediately
+  // on shell:mode-change AND every tick as a backstop.
+  function reconcileMode(newMode) {
+    if (!newMode) newMode = currentMode();
+    if (lastMode === null) lastMode = newMode;
+    handleModeChange(newMode);
+    const inAudio = newMode === 'audio';
+    if (window._bgPlaying && inAudio && !timers.audio.runningSince) startMode('audio');
+    if ((!window._bgPlaying || !inAudio) && timers.audio.runningSince) stopMode('audio');
+  }
+
+  // Periodic check: inactivity timeouts + a mode/audio reconciliation backstop.
   function tick() {
-    const mode = currentMode();
-    if (lastMode === null) lastMode = mode;
-    handleModeChange(mode);
+    reconcileMode(currentMode());
 
     const now = Date.now();
     // Card inactivity.
@@ -245,7 +278,7 @@
       const idleSec = (now - timers.card.lastInteraction) / 1000;
       if (idleSec > TIMEOUT_CARD_SEC) stopMode('card', { byInactivity: true });
     }
-    // Read inactivity — skipped while audio is playing.
+    // Read inactivity — skipped while audio is playing (passive listening).
     if (timers.read.runningSince) {
       const idleSec = (now - timers.read.lastInteraction) / 1000;
       const audioPlaying = !!window._bgPlaying;
@@ -253,21 +286,22 @@
         stopMode('read', { byInactivity: true });
       }
     }
-    // Audio mode — defensive: only run the audio timer when the user is
-    // currently in audio mode AND bg playback is on. Mode switch alone
-    // away from audio should stop it even if audio keeps playing.
-    const inAudioMode = mode === 'audio';
-    if (window._bgPlaying && inAudioMode && !timers.audio.runningSince) startMode('audio');
-    if ((!window._bgPlaying || !inAudioMode) && timers.audio.runningSince) stopMode('audio');
-
-    // Mark read mode as "active" while audio is playing — prevents the
-    // timeout from firing during long passive-listening stretches even
-    // though there's no touch.
+    // Keep read alive while audio plays so the timeout doesn't fire during
+    // long passive-listening stretches with no touch.
     if (window._bgPlaying && timers.read.runningSince) {
       timers.read.lastInteraction = now;
     }
   }
   setInterval(tick, 1000);
+
+  // Stop the prior mode's timer IMMEDIATELY on a mode switch — don't wait for
+  // the next 1 s tick. E.g. read→audio: the read timer stops the instant the
+  // switch happens (audio then starts when playback starts). The shell sets
+  // the body mode class before firing this event, so currentMode() is already
+  // correct; we prefer the event's explicit mode when present.
+  window.addEventListener('shell:mode-change', (e) => {
+    try { reconcileMode(e?.detail?.mode || currentMode()); } catch (_) {}
+  });
 
   // Hook BackgroundAudio state events so the audio-mode timer follows
   // playback exactly — BUT only count when the user is actively in
@@ -404,21 +438,67 @@
     timers.card.chars += n;
     persist('card');
   }
-  function resetAll() {
-    for (const m of Object.keys(timers)) {
-      const t = timers[m];
-      t.totalSec = 0;
-      t.runningSince = 0;
-      if (m === 'card') { t.cards = 0; t.chars = 0; }
-      persist(m);
+
+  // Update read.chars based on the highest charOffset+charLen the user
+  // has scrolled into view this session. Re-scrolling already-passed
+  // text is a no-op; only forward progress accrues. Stable across
+  // orientation changes since charOffset is per-chunk metadata, not a
+  // pixel calculation.
+  function noteReadPosition(charPosition) {
+    if (!Number.isFinite(charPosition) || charPosition <= 0) return;
+    const t = timers.read;
+    // First call after a reset (or first launch): just anchor the
+    // baseline. Don't credit chars retroactively — otherwise resetting
+    // at char 35,000 and then scrolling one line would jump the count
+    // to ~35,000 because the rightmost visible chunk's offset is
+    // already deep in the book.
+    if (!t.baselineSet) {
+      t.maxCharOffsetSeen = charPosition;
+      t.baselineSet = true;
+      persist('read');
+      return;
     }
+    if (charPosition <= t.maxCharOffsetSeen) return;
+    const delta = charPosition - t.maxCharOffsetSeen;
+    // Always advance the high-water mark…
+    t.maxCharOffsetSeen = charPosition;
+    // …but only CREDIT a plausible continuous-reading advance. A large jump is
+    // a seek / jump-to-percent / big flick, NOT reading every character in
+    // between — crediting it inflated the count into the hundreds of thousands.
+    // A page of vertical-rl text is well under this cap; a seek is far above it.
+    if (delta <= READ_DELTA_CAP) {
+      t.chars += delta;
+    }
+    persist('read');
+  }
+  function incrementAudioChars(n) {
+    if (!Number.isFinite(n) || n <= 0) return;
+    timers.audio.chars += n;
+    persist('audio');
+  }
+
+  // Re-anchor the read char baseline (called on title change). maxCharOffsetSeen
+  // is a per-BOOK char offset; without re-anchoring, switching books credits the
+  // inter-book offset jump as "read" (or undercounts) — the "chars jump around"
+  // symptom. The next noteReadPosition after this silently re-anchors.
+  function rebaselineRead() {
+    timers.read.baselineSet = false;
+  }
+
+  function resetAll() {
+    for (const m of Object.keys(timers)) resetMode(m);
   }
   function resetMode(mode) {
     const t = timers[mode];
     if (!t) return;
+    // Stop the timer first so a partial elapsed segment doesn't get
+    // credited after the reset.
+    if (t.runningSince) stopMode(mode);
     t.totalSec = 0;
     t.runningSince = 0;
-    if (mode === 'card') { t.cards = 0; t.chars = 0; }
+    if (mode === 'card')  { t.cards = 0; t.chars = 0; }
+    if (mode === 'read')  { t.chars = 0; t.maxCharOffsetSeen = 0; t.baselineSet = false; }
+    if (mode === 'audio') { t.chars = 0; }
     persist(mode);
   }
 
@@ -449,10 +529,15 @@
     getCardSec:  () => liveTotal('card'),
     getReadSec:  () => liveTotal('read'),
     getAudioSec: () => liveTotal('audio'),
-    getCardCount: () => timers.card.cards,
-    getCardChars: () => timers.card.chars,
+    getCardCount:  () => timers.card.cards,
+    getCardChars:  () => timers.card.chars,
+    getReadChars:  () => timers.read.chars,
+    getAudioChars: () => timers.audio.chars,
     incrementCardCount,
     incrementCardChars,
+    incrementAudioChars,
+    rebaselineRead,
+    noteReadPosition,
     touch, bumpCard, bumpRead, resetAll, resetMode, persist,
     markAnkiRoundtripActive, markAnkiRoundtripDone,
     stopAll, startMode, stopMode,
