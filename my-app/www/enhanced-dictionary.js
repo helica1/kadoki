@@ -929,7 +929,155 @@
     }
 
     // ==================== RENDERING FUNCTIONS ====================
-    
+
+    // ---- Furigana (ruby) for headwords --------------------------------------
+    // Port of Yomitan's furigana-distribution: align the term's kana runs
+    // (okurigana) against the reading and let the kanji runs absorb what's
+    // left. Handles 食べる→食[た]べる, 食べ物→食[た]べ物[もの]; when a kanji run
+    // can't be split unambiguously (e.g. 昨日→きのう) it falls back to ruby
+    // over the whole run. No external data needed (that's the Tier-2 upgrade).
+    function _isKanaCp(cp) {
+        return (cp >= 0x3040 && cp <= 0x309f) ||   // hiragana
+               (cp >= 0x30a0 && cp <= 0x30ff) ||   // katakana (+ prolonged mark)
+               (cp >= 0xff66 && cp <= 0xff9d);      // halfwidth katakana
+    }
+    function _kataToHira(s) {
+        let out = '';
+        for (const ch of s) {
+            const cp = ch.codePointAt(0);
+            out += (cp >= 0x30a1 && cp <= 0x30f6) ? String.fromCodePoint(cp - 0x60) : ch;
+        }
+        return out;
+    }
+    function _segmentizeFurigana(reading, readingNorm, groups, start) {
+        if (groups.length - start <= 0) return reading.length === 0 ? [] : null;
+        const g = groups[start];
+        if (g.isKana) {
+            if (!readingNorm.startsWith(_kataToHira(g.text))) return null;
+            const rest = _segmentizeFurigana(reading.slice(g.text.length),
+                readingNorm.slice(g.text.length), groups, start + 1);
+            if (rest === null) return null;
+            rest.unshift({ text: g.text, reading: '' });
+            return rest;
+        }
+        let result = null;
+        for (let end = reading.length; end >= g.text.length; --end) {
+            const rest = _segmentizeFurigana(reading.slice(end), readingNorm.slice(end), groups, start + 1);
+            if (rest === null) continue;
+            if (result !== null) return null;   // ambiguous → caller falls back to whole-run
+            rest.unshift({ text: g.text, reading: reading.slice(0, end) });
+            result = rest;
+        }
+        return result;
+    }
+    function distributeFurigana(term, reading) {
+        if (!term) return [];
+        if (!reading || reading === term) return [{ text: term, reading: '' }];
+        const groups = [];
+        let prev = null, isPrevKana = null;
+        for (const ch of term) {
+            const k = _isKanaCp(ch.codePointAt(0));
+            if (k === isPrevKana) prev.text += ch;
+            else { prev = { isKana: k, text: ch, reading: '' }; groups.push(prev); isPrevKana = k; }
+        }
+        const segs = _segmentizeFurigana(reading, _kataToHira(reading), groups, 0);
+        return (segs && segs.length) ? segs : [{ text: term, reading: reading }];
+    }
+    function _escapeHtml(s) {
+        return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    }
+    // → { html, hasRuby }. html is always the rendered headword (ruby where a
+    // segment has a reading, plain otherwise); hasRuby=false for kana-only /
+    // no-reading terms so callers can still show a plain reading line.
+    // ---- Tier-2: JmdictFurigana dataset (precise per-kanji furigana) --------
+    // 234k entries of `text|reading|spec` where spec is `idx:rt` or `start-end:rt`
+    // segments (a range covers jukujikun like 今日→0-1:きょう). Loaded lazily +
+    // parsed in chunks so it never blocks boot. When a (term,reading) is found
+    // we split furigana per-kanji exactly (図書館 → 図[と]書[しょ]館[かん]);
+    // otherwise we fall back to the okurigana algorithm above.
+    let _furiMap = null, _furiLoading = false;
+    async function loadFuriganaData() {
+        if (_furiMap || _furiLoading) return;
+        _furiLoading = true;
+        try {
+            const res = await fetch('assets/dictionaries/JmdictFurigana.txt');
+            if (!res || !res.ok) { _furiLoading = false; return; }
+            const text = await res.text();
+            const lines = text.split('\n');
+            const map = new Map();
+            let i = 0;
+            const CHUNK = 25000;
+            (function step() {
+                const end = Math.min(lines.length, i + CHUNK);
+                for (; i < end; i++) {
+                    let line = lines[i];
+                    if (!line) continue;
+                    if (i === 0 && line.charCodeAt(0) === 0xFEFF) line = line.slice(1);
+                    const p1 = line.indexOf('|'); if (p1 < 0) continue;
+                    const p2 = line.indexOf('|', p1 + 1); if (p2 < 0) continue;
+                    map.set(line.slice(0, p1) + '\t' + line.slice(p1 + 1, p2), line.slice(p2 + 1).trimEnd());
+                }
+                if (i < lines.length) { setTimeout(step, 0); }
+                else { _furiMap = map; _furiLoading = false; console.log('[furigana] dataset ready:', map.size, 'entries'); }
+            })();
+        } catch (e) { _furiLoading = false; console.warn('[furigana] load failed:', e?.message || e); }
+    }
+    window.loadFuriganaData = loadFuriganaData;
+    // Char-index-based spec → segments. Indices are UTF-16 code units (matches
+    // the dataset's .NET origin), so slice() on the raw string aligns correctly.
+    function _segmentsFromSpec(text, spec) {
+        const ranges = [];
+        for (const part of spec.split(';')) {
+            const c = part.indexOf(':'); if (c < 0) continue;
+            const loc = part.slice(0, c), rt = part.slice(c + 1);
+            const dash = loc.indexOf('-');
+            let start, end;
+            if (dash >= 0) { start = +loc.slice(0, dash); end = +loc.slice(dash + 1); }
+            else { start = end = +loc; }
+            if (Number.isInteger(start) && Number.isInteger(end)) ranges.push({ start, end, rt });
+        }
+        ranges.sort((a, b) => a.start - b.start);
+        const segs = [];
+        let idx = 0, ri = 0;
+        while (idx < text.length) {
+            if (ri < ranges.length && ranges[ri].start <= idx) {
+                const r = ranges[ri++];
+                const s = Math.max(idx, r.start), e = Math.min(r.end, text.length - 1);
+                if (e >= s) segs.push({ text: text.slice(s, e + 1), reading: r.rt });
+                idx = e + 1;
+            } else {
+                const nextStart = (ri < ranges.length) ? ranges[ri].start : text.length;
+                if (nextStart > idx) { segs.push({ text: text.slice(idx, nextStart), reading: '' }); idx = nextStart; }
+                else idx++;
+            }
+        }
+        return segs;
+    }
+    function buildFuriganaRuby(term, reading) {
+        let segs = null;
+        // Precise per-kanji from the dataset when we have it; else the algorithm.
+        if (_furiMap && term) {
+            const spec = _furiMap.get(term + '\t' + (reading || ''));
+            if (spec) { try { segs = _segmentsFromSpec(term, spec); } catch (_) {} }
+        }
+        if (!segs || !segs.length) segs = distributeFurigana(term, reading);
+        let hasRuby = false, html = '';
+        for (const s of segs) {
+            const t = _escapeHtml(s.text);
+            if (s.reading && s.reading !== s.text) {
+                hasRuby = true;
+                html += `<ruby>${t}<rt>${_escapeHtml(s.reading)}</rt></ruby>`;
+            } else {
+                html += t;
+            }
+        }
+        return { html: html || _escapeHtml(term), hasRuby };
+    }
+    window.distributeFurigana = distributeFurigana;
+    window.buildFuriganaRuby = buildFuriganaRuby;
+    // Warm the dataset shortly after boot so the first lookup is already precise.
+    setTimeout(() => { try { loadFuriganaData(); } catch (_) {} }, 2500);
+
     function renderYomitanEntry(result) {
         const { dictionary, term, entry, type } = result;
         
@@ -940,9 +1088,12 @@
         // Yomitan entry format: [term, reading, definitionTags, ruleTags, score, definitions, sequence, termTags]
         const [entryTerm, reading, defTags, ruleTags, score, definitions] = entry;
         
-        let content = `<div style="font-size:1.2em;font-weight:700">${entryTerm}</div>`;
-        
-        if (reading && reading !== entryTerm) {
+        const _ruby = (typeof buildFuriganaRuby === 'function')
+            ? buildFuriganaRuby(entryTerm, (reading || '').split('・')[0] || '')
+            : { html: entryTerm, hasRuby: false };
+        let content = `<div style="font-size:1.2em;font-weight:700">${_ruby.html}</div>`;
+
+        if (reading && reading !== entryTerm && !_ruby.hasRuby) {
             content += `<div style="color:#ffa726;margin:4px 0">【${reading}】</div>`;
         }
         
@@ -986,9 +1137,12 @@
             .map(g => `<li>${g}</li>`)
             .join('');
 
-        let content = `<div style="font-size:1.2em;font-weight:700">${term}</div>`;
-        
-        if (reading) {
+        const _ruby = (typeof buildFuriganaRuby === 'function')
+            ? buildFuriganaRuby(term, (reading || '').split('・')[0] || '')
+            : { html: term, hasRuby: false };
+        let content = `<div style="font-size:1.2em;font-weight:700">${_ruby.html}</div>`;
+
+        if (reading && !_ruby.hasRuby) {
             content += `<div style="color:#ffa726;margin:4px 0">【${reading}】</div>`;
         }
         
@@ -1060,11 +1214,22 @@
             : (result.entry[1] && result.entry[1] !== result.term ? result.entry[1] : '');
         const dictTag = result.dictionary || (isJmdict ? 'JMdict' : '');
 
+        // Furigana ruby over the headword. The reading list may be '・'-joined
+        // (JMdict alternates) — distribute the FIRST reading as ruby; surviving
+        // alternates stay on the small reading line. Kana-only terms produce no
+        // ruby, so the plain reading line is kept for them.
+        const primaryReading = (reading || '').split('・')[0] || '';
+        const ruby = (typeof buildFuriganaRuby === 'function')
+            ? buildFuriganaRuby(result.term, primaryReading)
+            : { html: result.term, hasRuby: false };
+        const altReadings = (reading || '').split('・').slice(1).join('・');
+        const readingLine = ruby.hasRuby ? altReadings : reading;
+
         let content = playheadSection + `
             <div class="manatan-header">
                 <div class="manatan-title-block">
-                    ${reading ? `<div class="manatan-reading">${reading}</div>` : ''}
-                    <div class="manatan-term">${result.term}</div>
+                    ${readingLine ? `<div class="manatan-reading">${readingLine}</div>` : ''}
+                    <div class="manatan-term">${ruby.html}</div>
                 </div>
                 <div class="manatan-header-icons">
                     <div class="manatan-audio-group" style="display:flex;flex-direction:column;align-items:center;gap:2px;">
@@ -2418,33 +2583,52 @@
                 // audio land on the same note. The native plugin splices
                 // [sound:...] tokens into the matching field for each.
                 const audioList = [];
+                // Track a codec iOS can't decode at all (Opus/OGG/WebM) so we
+                // can warn rather than ship a silently-unplayable card.
+                let iosUnplayableAudio = null;
                 if (audioSrcPath) {
                     // Native AnkiBridge reads bytes straight off disk —
                     // skips the base64-via-WKWebView round-trip that was
                     // silently returning empty data URIs on iOS tmp/ files.
+                    // The iOS slicer outputs AAC/.m4a (Android outputs .mp3) —
+                    // name the delivery to match the slice's real extension so
+                    // AnkiMobile doesn't reject "an mp3 file" that's actually m4a.
                     audioList.push({
-                        filename: sentenceAudioFilename,
+                        filename: window.ankiAudioFilename(sentenceAudioFilename, { srcPath: audioSrcPath }),
                         srcPath:  audioSrcPath,
                         field:    cfg.fields.sentenceAudio
                     });
                 } else if (audioData) {
+                    const sMime = window.sniffAudioBase64?.(audioData) || '';
+                    if (sMime && window.isIosPlayableAudio && !window.isIosPlayableAudio(sMime)) iosUnplayableAudio = sMime;
                     audioList.push({
-                        filename:   sentenceAudioFilename,
+                        filename:   window.ankiAudioFilename(sentenceAudioFilename, { mime: sMime }),
                         dataBase64: audioData.split(',')[1],
                         field:      cfg.fields.sentenceAudio
                     });
                 }
                 if (wordAudio && wordAudio.base64) {
-                    const wordAudioFilename =
-                        `word_${Date.now()}_${wordAudio.filename || 'audio.mp3'}`;
+                    // Word/term audio comes from the local-audio library and
+                    // keeps its source name — which often lies about the codec.
+                    // Sniff the real bytes and fix the extension so iOS accepts it.
+                    const wMime = window.sniffAudioBase64?.(wordAudio.base64) || '';
+                    if (wMime && window.isIosPlayableAudio && !window.isIosPlayableAudio(wMime)) iosUnplayableAudio = wMime;
+                    const wordAudioFilename = window.ankiAudioFilename(
+                        `word_${Date.now()}_${wordAudio.filename || 'audio.mp3'}`, { mime: wMime });
                     audioList.push({
                         filename:   wordAudioFilename,
                         dataBase64: wordAudio.base64,
                         field:      cfg.fields.termAudio
                     });
-                    console.log(`[anki-send] termAudio: ${wordAudioFilename} (${wordAudio.base64.length} chars b64) → field "${cfg.fields.termAudio}"`);
+                    console.log(`[anki-send] termAudio: ${wordAudioFilename} sniffed=${wMime || '?'} (${wordAudio.base64.length} chars b64) → field "${cfg.fields.termAudio}"`);
                 } else {
                     console.log(`[anki-send] termAudio: no wordAudio (wordAudio=${!!wordAudio}, base64=${!!wordAudio?.base64})`);
+                }
+                if (iosUnplayableAudio && window.Capacitor?.getPlatform?.() === 'ios') {
+                    console.warn(`[anki-send] audio codec ${iosUnplayableAudio} is not decodable by iOS AVFoundation — AnkiMobile won't play it (Android will).`);
+                    setTimeout(() => {
+                        try { window.showToast?.(`⚠ Audio is ${iosUnplayableAudio}; AnkiMobile (iOS) can't play this codec — it will play on Android. Use an MP3 audio source for both.`, 7000); } catch (_) {}
+                    }, 1600);
                 }
                 const params = {
                     deckName:  cfg.deck,
@@ -2499,7 +2683,10 @@
                     if (cbResult === 'success') {
                         window.showToast(`✓ Added to ${cfg.deck}`, 2200);
                     } else if (cbResult === 'error') {
-                        window.showToast(`✗ AnkiMobile rejected — model "${cfg.model}" likely doesn't exist`, 5500);
+                        const real = window.describeAnkiError?.();
+                        window.showToast(real
+                            ? `✗ AnkiMobile: ${real}`
+                            : `✗ AnkiMobile rejected the note. Check that model "${cfg.model}" and its fields exist.`, 6000);
                     } else if (cbResult === 'timeout') {
                         window.showToast(`? No reply from AnkiMobile. Sent model="${cfg.model}". Verify it exists in AnkiMobile → Manage note types.`, 6500);
                     } else {
@@ -3119,6 +3306,13 @@
         .manatan-term {
             font-size: 2em; font-weight: 700; color: #fff;
             line-height: 1.1; letter-spacing: -0.01em;
+        }
+        /* Furigana ruby over the headword (Tier-1 dictionary ruby). */
+        .manatan-term ruby { ruby-position: over; ruby-align: center; }
+        .manatan-term ruby rt {
+            font-size: 0.5em; color: #ffa726; font-weight: 500;
+            line-height: 1.05; letter-spacing: 0.02em; text-align: center;
+            user-select: none; -webkit-user-select: none;
         }
         .manatan-header-icons {
             display: flex; flex-direction: row; align-items: center; gap: 8px;

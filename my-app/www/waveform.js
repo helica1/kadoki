@@ -513,6 +513,13 @@
   window.waveform = {
     async show({ container, srcPath, startMs, endMs, onChange }) {
       if (!container) return;
+      // Carry the playhead across a same-source re-show (continuous card play
+      // re-shows the waveform for each new cue). Without this, hide() cleared
+      // the warmup gate so the cursor cold-started — stepping for ~1-2 position
+      // events at every cue boundary, which was the continuous-play jitter.
+      const carry = (state && state.srcPath === srcPath && state.playheadPlaying)
+        ? { ms: state.playheadMs, disp: state.playheadDispMs }
+        : null;
       this.hide();
       const wfStartMs = Math.max(0, startMs - VIEWPORT_PAD_MS);
       const wfEndMs = endMs + VIEWPORT_PAD_MS;
@@ -544,7 +551,15 @@
         endMs,
         origStartMs: startMs,
         origEndMs: endMs,
-        onChange
+        onChange,
+        // Seed the playhead from the prior cue's waveform on a same-src re-show
+        // so the cursor keeps gliding (no warmup cold-start) across boundaries.
+        playheadWarmed:  !!carry,
+        playheadPlaying: !!carry,
+        playheadMs:       carry ? carry.ms   : undefined,
+        playheadDispMs:   carry ? carry.disp : undefined,
+        playheadInterpMs: carry ? carry.ms   : undefined,
+        playheadLastTs:   carry ? performance.now() : 0
       };
       container.querySelector('[data-role="preview"]').addEventListener('click', () => this.preview());
       container.querySelector('[data-role="reset"]').addEventListener('click', () => {
@@ -554,6 +569,7 @@
         if (state.onChange) state.onChange({ startMs: state.startMs, endMs: state.endMs });
       });
       attachInteractions();
+      if (carry) startPlayheadAnim();   // resume the glide immediately (skip warmup wait)
       requestAnimationFrame(render);
       // Kick off the actual waveform decode in the background.
       loadWaveform(srcPath, wfStartMs, wfEndMs).then(buckets => {
@@ -591,7 +607,6 @@
                                   prevInterp - d.positionMs < 250;
           if (!isMinorBackstep) {
             state.playheadMs = d.positionMs;
-            state.playheadInterpMs = d.positionMs;
           }
           state.playheadLastTs = nowTs;
           state.playheadPlaying = !!d.playing;
@@ -604,9 +619,23 @@
           if (Number.isFinite(prevPos) && d.positionMs > prevPos + 5) {
             state.playheadWarmed = true;
           }
-          if (d.playing && state.playheadWarmed) startPlayheadAnim();
-          else if (!d.playing) { stopPlayheadAnim(); render(); }
-          else render();
+          if (d.playing && state.playheadWarmed) {
+            // Steady playback: the rAF loop (tickPlayhead) owns the displayed
+            // position. Do NOT also hard-set playheadInterpMs to d.positionMs
+            // here — that jumped the cursor forward on each 150 ms event and
+            // the very next frame snapped it back to the lagging smoothed
+            // value (playheadDispMs), which was the visible jitter. tick eases
+            // playheadDispMs toward playheadMs + dt*measuredRate.
+            startPlayheadAnim();
+          } else {
+            // Pre-warmup or paused: snap the smoothed accumulator to the
+            // authoritative position so the static render() is correct and the
+            // rAF loop, when it starts, eases from the right value (no snap).
+            state.playheadDispMs = state.playheadMs;
+            state.playheadInterpMs = state.playheadMs;
+            if (!d.playing) { stopPlayheadAnim(); render(); }
+            else render();
+          }
         }).then(h => { if (state) state.playheadHandle = h; }).catch(() => {});
         // Also listen for state changes — pause should freeze the playhead
         // immediately rather than waiting for the next stale position event.
@@ -615,7 +644,12 @@
         bg.addListener('state', (d) => {
           if (!state) return;
           state.playheadPlaying = !!d.playing;
-          if (!d.playing) { stopPlayheadAnim(); render(); }
+          if (!d.playing) {
+            // Freeze the cursor at the true last position (not the lagging
+            // smoothed value) the instant we pause.
+            state.playheadInterpMs = state.playheadDispMs = state.playheadMs;
+            stopPlayheadAnim(); render();
+          }
           else {
             state.playheadWarmed = false;
             state.playheadLastTs = performance.now();

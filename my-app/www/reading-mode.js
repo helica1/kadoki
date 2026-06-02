@@ -2298,14 +2298,28 @@
     const view = document.getElementById('audiobookModeView');
     if (!view || view.dataset.swipeWired === '1') return;
     view.dataset.swipeWired = '1';
-    let startX = 0, startY = 0, startT = 0, started = false;
+    let startX = 0, startY = 0, startT = 0, started = false, fired = false;
+    // Advance/rewind one cue. swipe-LEFT (dx<0) → next, swipe-RIGHT → prev.
+    const navByDx = (dx) => {
+      if (typeof window.updateCardIndex !== 'function' ||
+          !Array.isArray(window.allNotes) || !window.allNotes.length) return;
+      const cur = window.currentCardIndex ?? 0;
+      if (dx < 0 && cur < window.allNotes.length - 1) window.updateCardIndex(cur + 1);
+      else if (dx > 0 && cur > 0) window.updateCardIndex(cur - 1);
+    };
     view.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
-      // Bail if the touch is on an interactive control. The cue text
-      // owns dict-frag taps; the transport buttons + scrub bar own
-      // their own gestures.
+      fired = false;
+      // Bail only on interactive controls that own their own gestures
+      // (transport buttons + scrub bar). We DON'T bail on #audiobookCueText
+      // anymore: a horizontal swipe that starts on the subtitle text must
+      // still navigate cues. The dict-frag lookup fires on `click`, which
+      // iOS only synthesizes for a tap (minimal movement) — a swipe/drag
+      // never produces a click — so tracking swipes over the text can't
+      // trigger a stray lookup. (Bug: swipes only worked over the cover art
+      // because the text was excluded here.)
       const t = e.target;
-      if (t?.closest?.('#audiobookCueText, .transport-row, button, input, [data-role="scrub"]')) {
+      if (t?.closest?.('.transport-row, button, input, [data-role="scrub"]')) {
         started = false;
         return;
       }
@@ -2314,9 +2328,30 @@
       startT = Date.now();
       started = true;
     }, { passive: true });
-    view.addEventListener('touchend', (e) => {
+    // Responsiveness: fire the cue jump the INSTANT a horizontal swipe is
+    // recognized mid-gesture, rather than waiting for the finger to lift. The
+    // touchend delay (plus iOS's gesture disambiguation) was the perceived
+    // lag/choppiness. `fired` latches so one swipe = one cue and touchend
+    // doesn't double-fire.
+    view.addEventListener('touchmove', (e) => {
+      if (!started || fired || !e.touches?.[0]) return;
+      const t = e.touches[0];
+      const dx = t.clientX - startX, dy = t.clientY - startY;
+      const ax = Math.abs(dx), ay = Math.abs(dy);
+      if (ax > 30 && ax > ay * 1.5) { fired = true; navByDx(dx); }
+    }, { passive: true });
+    // iOS WKWebView: when a gesture starts inside a scrollable element
+    // (#audiobookContent has overflow:auto), the native scroll engine can
+    // claim a horizontal swipe and fire `touchcancel` INSTEAD OF `touchend`
+    // — so the left/right swipe was silently lost on iOS while it worked on
+    // Android (which always delivers touchend). The `touch-action:pan-y` now
+    // set on the audiobook containers keeps horizontal gestures in JS; binding
+    // `touchcancel` to the same handler is the belt-and-suspenders so a swipe
+    // is still acted on even if iOS ends the sequence with cancel.
+    const onAudiobookSwipeEnd = (e) => {
       if (!started) return;
       started = false;
+      if (fired) return; // horizontal cue jump already handled live in touchmove
       const dt = Date.now() - startT;
       if (dt > 600) return; // not a quick swipe
       const t = e.changedTouches?.[0];
@@ -2324,23 +2359,9 @@
       const dx = t.clientX - startX;
       const dy = t.clientY - startY;
       const ax = Math.abs(dx), ay = Math.abs(dy);
-      // Horizontal swipe (>30 px, mostly horizontal) → prev/next cue.
-      // Mirrors the card-mode swipe contract: swipe-LEFT advances
-      // (deltaX is negative), swipe-RIGHT goes back. For SRT-cards
-      // titles `currentCardIndex` IS the cue index, so updateCardIndex
-      // handles the seek/audio restart in one call.
-      if (ax > 30 && ax > ay * 1.5) {
-        if (typeof window.updateCardIndex === 'function' &&
-            Array.isArray(window.allNotes) && window.allNotes.length) {
-          const cur = window.currentCardIndex ?? 0;
-          if (dx < 0 && cur < window.allNotes.length - 1) {
-            window.updateCardIndex(cur + 1);
-          } else if (dx > 0 && cur > 0) {
-            window.updateCardIndex(cur - 1);
-          }
-        }
-        return;
-      }
+      // Fallback horizontal detection — a quick flick that lifted before the
+      // touchmove threshold tripped. swipe-LEFT advances, swipe-RIGHT goes back.
+      if (ax > 30 && ax > ay * 1.5) { navByDx(dx); return; }
       // Down-swipe (> 50 px vertical, mostly vertical) → play/pause toggle.
       // Skip if it began in the OS notification-shade / app-switcher edge zone.
       if (dy > 50 && ay > ax * 1.5 && !window._inSystemGestureZone?.(startY)) {
@@ -2351,7 +2372,9 @@
           else if (s?.ready) bg.resume();
         }).catch(() => {});
       }
-    }, { passive: true });
+    };
+    view.addEventListener('touchend', onAudiobookSwipeEnd, { passive: true });
+    view.addEventListener('touchcancel', onAudiobookSwipeEnd, { passive: true });
   }
 
   // Tap handler for the audiobook subtitle: on dict-frag tap, set up

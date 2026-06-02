@@ -108,6 +108,84 @@ function waitForAnkiCallback(timeoutMs) {
 }
 window.waitForAnkiCallback = waitForAnkiCallback;
 
+// AnkiMobile's x-error callback carries the REAL reason in standard
+// x-callback-url params (errorCode / errorMessage). The old code ignored
+// these and always blamed the model name ("model likely doesn't exist"),
+// which is what made the app claim the deck/model was wrong when it was
+// 100% correct — the actual failure (e.g. a media/field/duplicate problem)
+// was hidden. Parse the genuine message off the last callback URL so the
+// toast can tell the truth. Returns null when there's nothing useful.
+function describeAnkiError() {
+  try {
+    const u = window._lastAnkiCallbackUrl || '';
+    const qIdx = u.indexOf('?');
+    if (qIdx < 0) return null;
+    const params = new URLSearchParams(u.slice(qIdx + 1));
+    const msg = params.get('errorMessage') || params.get('error_message') ||
+                params.get('message')      || params.get('error');
+    const code = params.get('errorCode') || params.get('error_code');
+    let out = msg ? msg.trim() : '';
+    if (out && code) out += ` (code ${code})`;
+    else if (!out && code) out = `error code ${code}`;
+    return out || null;
+  } catch (_) { return null; }
+}
+window.describeAnkiError = describeAnkiError;
+
+// --- Audio format normalization for Anki delivery ---------------------------
+// iOS AnkiMobile (AVFoundation) refuses to play a file whose extension lies
+// about its codec — e.g. AAC/m4a bytes named ".mp3" → its "an mp3 file
+// incorrectly named" / "a file iOS does not support" error. Android's player
+// sniffs the content and is forgiving, which is exactly why this only broke on
+// iOS. The kicker: the iOS AudioSlicer emits AAC/.m4a while the Android one
+// emits .mp3, yet both sliced clips were delivered hardcoded as
+// "sentence_*.mp3". These helpers make the delivered filename's extension match
+// the REAL bytes (from the slice's on-disk path, or by sniffing base64), so
+// AnkiMobile accepts it on both platforms.
+const _AUDIO_MIME_EXT = {
+  'audio/mpeg': 'mp3', 'audio/mp3': 'mp3',
+  'audio/mp4': 'm4a', 'audio/aac': 'm4a', 'audio/x-m4a': 'm4a',
+  'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/wave': 'wav',
+  'audio/ogg': 'ogg', 'audio/opus': 'ogg', 'audio/webm': 'webm', 'audio/flac': 'flac',
+};
+function _replaceExt(name, ext) {
+  return String(name).replace(/\.[^./\\]+$/, '') + '.' + ext;
+}
+function _extFromPath(p) {
+  const m = /\.([a-z0-9]+)(?:[?#].*)?$/i.exec(p || '');
+  return m ? m[1].toLowerCase() : '';
+}
+// Sniff a base64 payload (data-URI or bare) via the shared magic-byte sniffer.
+function sniffAudioBase64(b64) {
+  try {
+    if (!b64) return '';
+    const comma = b64.indexOf(',');
+    const bare = (b64.startsWith('data:') && comma >= 0) ? b64.slice(comma + 1) : b64;
+    const head = atob(bare.slice(0, 24)); // ~18 bytes — covers every audio magic
+    const bytes = new Uint8Array(head.length);
+    for (let i = 0; i < head.length; i++) bytes[i] = head.charCodeAt(i);
+    return window.ApkgReader?.sniffMime ? window.ApkgReader.sniffMime(bytes, '') : '';
+  } catch (_) { return ''; }
+}
+// True if AVFoundation (AnkiMobile + Kadoki's own iOS player) can decode it.
+function isIosPlayableAudio(mime) {
+  return mime === 'audio/mpeg' || mime === 'audio/mp3' ||
+         mime === 'audio/mp4'  || mime === 'audio/aac' || mime === 'audio/x-m4a' ||
+         mime === 'audio/wav'  || mime === 'audio/x-wav' || mime === 'audio/wave';
+}
+// Return `name` with an extension matching the real codec. opts.srcPath wins
+// (trust the slice's own extension), else opts.mime is mapped. Unknown → as-is.
+function ankiAudioFilename(name, opts) {
+  opts = opts || {};
+  let ext = '';
+  if (opts.srcPath) ext = _extFromPath(opts.srcPath);
+  if (!ext && opts.mime) ext = _AUDIO_MIME_EXT[opts.mime] || '';
+  return ext ? _replaceExt(name, ext) : name;
+}
+window.sniffAudioBase64    = sniffAudioBase64;
+window.isIosPlayableAudio  = isIosPlayableAudio;
+window.ankiAudioFilename   = ankiAudioFilename;
+
 async function getPref(key) {
   if (await isCap()) {
     try {
@@ -324,8 +402,15 @@ async function sendToAnki({ expression, imageData, audioData }) {
         tags:      ['android'],
       };
       if (audioData) {
+        // Match the delivered extension to the real codec so iOS AnkiMobile
+        // (AVFoundation) accepts it — an mp3-named-but-AAC file is rejected.
+        const aMime = sniffAudioBase64(audioData);
+        if (aMime && !isIosPlayableAudio(aMime) && window.Capacitor?.getPlatform?.() === 'ios') {
+          console.warn(`[anki] audio codec ${aMime} not decodable by iOS AVFoundation — AnkiMobile won't play it.`);
+          setTimeout(() => { try { window.showToast?.(`⚠ Audio is ${aMime}; AnkiMobile (iOS) can't play this codec — plays on Android. Use MP3 for both.`, 7000); } catch (_) {} }, 1600);
+        }
         params.audio = [{
-          filename:   audioFilename,
+          filename:   ankiAudioFilename(audioFilename, { mime: aMime }),
           dataBase64: audioData.split(',')[1],
           field:      cfg.fields.audio
         }];
@@ -379,7 +464,10 @@ async function sendToAnki({ expression, imageData, audioData }) {
         if (cbResult === 'success') {
           window.showToast(`✓ Added to ${cfg.deck}`, 2200);
         } else if (cbResult === 'error') {
-          window.showToast(`✗ AnkiMobile rejected — model "${cfg.model}" likely doesn't exist`, 5500);
+          const real = window.describeAnkiError?.();
+          window.showToast(real
+            ? `✗ AnkiMobile: ${real}`
+            : `✗ AnkiMobile rejected the note. Check that model "${cfg.model}" and its fields exist.`, 6000);
         } else if (cbResult === 'timeout') {
           // Most common cause of a silent timeout (no x-error fired)
           // is the model name mismatching what's in AnkiMobile. Surface

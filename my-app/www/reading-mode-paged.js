@@ -2128,6 +2128,109 @@
 
     writeStripText('—');
   }
+  // Visible base-text length of a chunk (ruby <rt>/<rp> readings excluded).
+  function _chunkBaseLen(chunk) {
+    try {
+      let n = 0;
+      (function walk(node) {
+        for (const c of node.childNodes) {
+          if (c.nodeType === 3) n += c.nodeValue.length;
+          else if (c.nodeType === 1 && c.tagName !== 'RT' && c.tagName !== 'RP') walk(c);
+        }
+      })(chunk);
+      return n;
+    } catch (_) { return (chunk.textContent || '').length; }
+  }
+  // Print support: extract a slice of the reading as EPUB HTML (native <ruby>
+  // intact) starting at the current position, sized to ~charBudget base chars.
+  // Returns { html, endCue, chars } — endCue is the cue index at the end of the
+  // segment (to advance the playhead after a printed-reading session), or null
+  // when the title has no cues. Lives here so it can read the chunk/cue maps.
+  window.printGetReadingSegment = function (charBudget) {
+    try {
+      const el = innerEl || document.getElementById('readingPagedInner');
+      if (!el) return null;
+      const all = Array.from(el.querySelectorAll('.reading-chunk'));
+      if (!all.length) return null;
+      // Start at the reader's CURRENT page — the rightmost chunk visible in the
+      // viewport (vertical-rl reads from the right) — so the printout continues
+      // from where the user is, not the EPUB's front matter. Falls back to the
+      // audio-follow active chunk, then the current cue's chunk, then the top.
+      let startIdx = -1;
+      try {
+        if (scrollEl) {
+          const sr = scrollEl.getBoundingClientRect();
+          if (sr.width >= 40) {
+            let bestRight = -Infinity;
+            for (let i = 0; i < all.length; i++) {
+              const r = all[i].getBoundingClientRect();
+              if (r.width < 1 || r.height < 1) continue;
+              if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
+              if (r.right > bestRight) { bestRight = r.right; startIdx = i; }
+            }
+          }
+        }
+      } catch (_) {}
+      if (startIdx < 0) {
+        const act = el.querySelector('.reading-chunk.active');
+        startIdx = act ? all.indexOf(act) : -1;
+      }
+      if (startIdx < 0) {
+        const ci = Number.isFinite(window.currentCardIndex) ? window.currentCardIndex : -1;
+        const mapped = (ci >= 0 && pagedCueToChunk && ci < pagedCueToChunk.length) ? pagedCueToChunk[ci] : -1;
+        if (mapped != null && mapped >= 0) startIdx = mapped;
+      }
+      if (startIdx < 0) startIdx = 0;
+      const budget = Math.max(1, charBudget | 0);
+      let chars = 0, endIdx = startIdx;
+      for (let i = startIdx; i < all.length; i++) {
+        endIdx = i;
+        chars += _chunkBaseLen(all[i]);
+        if (chars >= budget) break;
+      }
+      // Per-chunk list (inner HTML with ruby + base-text length + a
+      // paragraph-boundary flag) so the print layout can pack chunks into
+      // side-by-side vertical half-pages and preserve paragraph breaks.
+      const blockOf = (el) => el.closest('p,div,li,blockquote,h1,h2,h3,h4,h5,h6,section,article') || el.parentElement;
+      // The cue a chunk belongs to (forward-nearest mapped cue), so the print
+      // layout can advance the playhead to the LAST cue it actually placed.
+      const cueForChunk = (gi) => {
+        if (!pagedChunkToCue || !Array.isArray(pagedChunkToCue)) return null;
+        for (let k = gi; k < pagedChunkToCue.length; k++) if (pagedChunkToCue[k] >= 0) return pagedChunkToCue[k];
+        for (let k = Math.min(gi, pagedChunkToCue.length - 1); k >= 0; k--) if (pagedChunkToCue[k] >= 0) return pagedChunkToCue[k];
+        return null;
+      };
+      const chunks = [];
+      let prevBlock = null;
+      for (let i = startIdx; i <= endIdx; i++) {
+        const cel = all[i];
+        const blk = blockOf(cel);
+        chunks.push({
+          html: cel.innerHTML, len: _chunkBaseLen(cel), para: blk !== prevBlock, cue: cueForChunk(i),
+          charOffset: parseInt(cel.dataset.charOffset) || 0,
+          charLen: parseInt(cel.dataset.charLen) || _chunkBaseLen(cel)
+        });
+        prevBlock = blk;
+      }
+      const range = document.createRange();
+      range.setStartBefore(all[startIdx]);
+      range.setEndAfter(all[endIdx]);
+      const holder = document.createElement('div');
+      holder.appendChild(range.cloneContents());
+      let endCue = null;
+      if (pagedChunkToCue && Array.isArray(pagedChunkToCue)) {
+        for (let i = endIdx; i < pagedChunkToCue.length; i++) {
+          if (pagedChunkToCue[i] != null && pagedChunkToCue[i] >= 0) { endCue = pagedChunkToCue[i]; break; }
+        }
+        if (endCue == null) {
+          for (let i = Math.min(endIdx, pagedChunkToCue.length - 1); i >= 0; i--) {
+            if (pagedChunkToCue[i] != null && pagedChunkToCue[i] >= 0) { endCue = pagedChunkToCue[i]; break; }
+          }
+        }
+      }
+      return { html: holder.innerHTML, chunks, endCue, chars };
+    } catch (e) { console.warn('[print] getReadingSegment failed:', e?.message || e); return null; }
+  };
   // Externally callable from card / audio mode so the progress strip
   // tracks the current playhead even when the reader view is hidden.
   window.pagedUpdateProgressForCue = function (cueIdx) {

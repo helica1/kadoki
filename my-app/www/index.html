@@ -1022,12 +1022,12 @@ body.dimmed .card-image {
   </div>
 
   <!-- Audiobook Mode View -->
-  <div id="audiobookModeView" style="display:none;position:fixed;inset:0;background:#0d0d0d;z-index:2750;flex-direction:column;color:#e8e8e8;">
+  <div id="audiobookModeView" style="display:none;position:fixed;inset:0;background:#0d0d0d;z-index:2750;flex-direction:column;color:#e8e8e8;touch-action:pan-y;">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 14px;padding-top:calc(12px + env(safe-area-inset-top, 0px));background:rgba(17,17,17,0.95);border-bottom:1px solid #333;flex-shrink:0;">
       <span id="audiobookTitle" style="color:#ccc;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No audiobook loaded</span>
       <span id="audiobookTimeLabel" style="color:#00ffcc;font-size:14px;font-variant-numeric:tabular-nums;min-width:110px;text-align:right;">–:–– / –:––</span>
     </div>
-    <div id="audiobookContent" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:calc(56px + env(safe-area-inset-top, 0px)) 24px calc(20px + env(safe-area-inset-bottom, 0px));overflow:auto;gap:16px;">
+    <div id="audiobookContent" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:calc(56px + env(safe-area-inset-top, 0px)) 24px calc(20px + env(safe-area-inset-bottom, 0px));overflow:auto;gap:16px;touch-action:pan-y;">
       <!-- Fixed-height image slot so cue-text length changes don't reflow
            the image (the "jiggle" the user noticed when subtitles grew /
            shrank). Smaller default (35vh) since the cue is the focus. -->
@@ -1247,7 +1247,8 @@ body.dimmed .card-image {
   <script src="reading-mode-paged.js"></script>
 
   <script src="shell.js"></script>
-  
+  <script src="print-reading.js"></script>
+
   <script>
     // Simple debug function that only logs to console
     function debugLog(message) {

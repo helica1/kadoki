@@ -583,6 +583,36 @@
   // reverts.
   const SHELL_PLAY_OPTIMISTIC_MS = 2000;
 
+  // -------- Two-finger horizontal swipe → cycle modes (card → read → audio) --
+  // Circular both directions; coarser threshold than one-finger gestures since
+  // two-finger swipes are less precise. Fires once per gesture (latched).
+  (function installTwoFingerModeSwitch() {
+    const ORDER = ['card', 'read', 'audio'];
+    const curMode = () => document.body.classList.contains('mode-audio') ? 'audio'
+                        : document.body.classList.contains('mode-read')  ? 'read' : 'card';
+    const cycle = (dir) => {
+      const i = ORDER.indexOf(curMode());
+      const next = ORDER[(i + dir + ORDER.length) % ORDER.length];
+      if (typeof window.setShellMode === 'function') { try { window.setShellMode(next); } catch (_) {} }
+    };
+    let sx = 0, sy = 0, active = false, fired = false;
+    const cx = (t) => (t[0].clientX + t[1].clientX) / 2;
+    const cy = (t) => (t[0].clientY + t[1].clientY) / 2;
+    document.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2) { active = true; fired = false; sx = cx(e.touches); sy = cy(e.touches); }
+      else if (e.touches.length > 2) { active = false; }
+    }, { passive: true, capture: true });
+    document.addEventListener('touchmove', (e) => {
+      if (!active || fired || e.touches.length !== 2) return;
+      const dx = cx(e.touches) - sx, dy = cy(e.touches) - sy;
+      if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+        fired = true;
+        cycle(dx < 0 ? 1 : -1);   // swipe LEFT → next mode, RIGHT → previous
+      }
+    }, { passive: true, capture: true });
+    document.addEventListener('touchend', (e) => { if (e.touches.length < 2) active = false; }, { passive: true, capture: true });
+  })();
+
   window.shellTogglePlay = function () {
     if (_shellPlayFiring) return;
     _shellPlayFiring = true;
@@ -709,6 +739,13 @@
     menu.appendChild(mkItem('Library…',        () => { if (typeof openLibrary === 'function') openLibrary(); }));
     menu.appendChild(mkDivider());
     menu.appendChild(mkItem('Playback Speed…', () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
+    menu.appendChild(mkDivider());
+    menu.appendChild(mkItem('Print…', () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); }));
+    // "Log printed reading…" only appears once a print is pending (set by the
+    // print flow, cleared after logging).
+    if (typeof window.hasPendingPrintedReading === 'function' && window.hasPendingPrintedReading()) {
+      menu.appendChild(mkItem('Log printed reading…', () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); }));
+    }
     menu.appendChild(mkDivider());
     menu.appendChild(mkItem('Preferences…',    () => { if (typeof openPreferences === 'function') openPreferences(); }));
 

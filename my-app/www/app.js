@@ -904,41 +904,50 @@ function showToast(message, duration = 3000) {
   const toast = document.createElement('div');
   toast.id = 'toast';
   toast.textContent = message;
-  // Center-of-screen so toasts can't hide behind chrome:
-  //   - Top placement was the original spot, but it sits exactly where
-  //     the shell header (#appHeader, z-index 3500) lives on iOS, and
-  //     a z-index of 3000 left toasts invisible behind the header on
-  //     iPhone — diagnosed 2026-05-29 when the down-swipe gesture
-  //     diagnostics silently disappeared. See
-  //     [[reference-toast-hidden-by-shell-header]].
-  //   - z-index 9500 puts toasts above the header (3500), the shell
-  //     menus (3600), the dict popup, etc. — anything not at
-  //     "showProgress modal" level (cue-alignment overlay is 99999).
+  // Dictionary-popup aesthetic: dark, slightly-shaded, blurred panel with a
+  // subtle neutral border (no green/cyan accent), centered above all chrome.
+  //   - z-index 9500 puts toasts above the header (3500), the shell menus
+  //     (3600), the dict popup, etc. (cue-alignment overlay is 99999).
+  //   - Animates in/out by transitioning opacity + a small lift/scale, so it
+  //     fades smoothly instead of snapping in and vanishing.
   toast.style.cssText = `
     position: fixed;
     top: 50%;
     left: 50%;
-    transform: translate(-50%, -50%);
-    background: rgba(0, 0, 0, 0.9);
-    color: white;
-    padding: 14px 22px;
-    border-radius: 8px;
+    transform: translate(-50%, calc(-50% + 8px)) scale(0.96);
+    background: rgba(24, 24, 27, 0.94);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    color: #f1f1f3;
+    padding: 13px 20px;
+    border-radius: 14px;
     font-size: 14px;
+    line-height: 1.45;
+    font-weight: 500;
     z-index: 9500;
-    border: 1px solid #00ffcc;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
     max-width: 80%;
     text-align: center;
     pointer-events: none;
+    opacity: 0;
+    transition: opacity 180ms ease-out, transform 180ms ease-out;
   `;
-  
+
   document.body.appendChild(toast);
-  
-  setTimeout(() => {
-    if (toast.parentNode) {
-      toast.remove();
-    }
-  }, duration);
+
+  // Enter on the next frame so the transition animates from the initial state.
+  requestAnimationFrame(() => {
+    toast.style.opacity = '1';
+    toast.style.transform = 'translate(-50%, -50%) scale(1)';
+  });
+
+  const EXIT_MS = 200;
+  toast._hideTimer = setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translate(-50%, calc(-50% + 8px)) scale(0.96)';
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, EXIT_MS);
+  }, Math.max(0, duration));
 }
 
 // Update card index and save state
@@ -2795,7 +2804,11 @@ async function displayCard() {
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (bg && card.audiobookPath && card.audiobookStartMs != null) {
       const url = card.audiobookPath.startsWith('file://') ? card.audiobookPath : 'file://' + card.audiobookPath;
-      _srtCardEndMs = card.audiobookEndMs || 0;
+      // Continuous play-through (PLAY button → audioAutoAdvance) lets the
+      // audiobook flow through the inter-cue silence like audio mode, so don't
+      // arm the per-cue end-stop. Single-card playback (navigating to a card
+      // while paused) still stops at the cue's endMs.
+      _srtCardEndMs = window.audioAutoAdvance ? 0 : (card.audiobookEndMs || 0);
       _ensureBgListenersForSrtCards();
       // When a cross-mode sync (e.g., switching to card mode while audio
       // was already playing) brought us here, audio is already at the
@@ -2823,7 +2836,9 @@ async function displayCard() {
     }
     // Render the per-card waveform with draggable endpoints. Adjusting the
     // bounds updates the card object in-memory; auto-advance and Anki sends
-    // will use the adjusted bounds.
+    // will use the adjusted bounds. Continuous play re-shows this for each new
+    // cue; waveform.show() carries the playhead across a same-source re-show so
+    // the cursor glides through cue boundaries instead of cold-starting.
     if (window.waveform && card.audiobookPath) {
       window.waveform.show({
         container: document.getElementById('srtCardWaveform'),
@@ -3598,16 +3613,30 @@ function _ensureBgListenersForSrtCards() {
       window._lastStripUpdateAt = now;
       try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
     }
+    // Continuous play-through (card mode, PLAY pressed): the audiobook flows
+    // past cue boundaries — including the silences between sentences — and we
+    // advance the DISPLAYED card to track the playhead WITHOUT restarting audio
+    // (silent display), so it listens straight through like audio mode.
+    if (window.audioAutoAdvance && !_srtCardEndMs &&
+        document.body.classList.contains('mode-card') &&
+        Array.isArray(allNotes) && allNotes.length && allNotes[0]?.isSrtCard) {
+      const pos = d.positionMs || 0;
+      let idx = currentCardIndex;
+      while (idx + 1 < allNotes.length && (allNotes[idx + 1].audiobookStartMs || 0) <= pos) idx++;
+      while (idx > 0 && (allNotes[idx].audiobookStartMs || 0) > pos + 1) idx--;
+      if (idx !== currentCardIndex && typeof updateCardIndex === 'function') {
+        window._skipNextCardAudioRestart = true; // update the card UI, keep audio flowing
+        updateCardIndex(idx);
+      }
+      return;
+    }
     if (!_srtCardEndMs) return;
-    // Auto-pause / auto-advance is only for CARD mode. In read or audio
-    // mode the user expects audio to flow past cue boundaries.
+    // Single-clip playback (paused → navigate to a card): stop at the cue's
+    // end. In read or audio mode the user expects audio to flow past cues.
     if (!document.body.classList.contains('mode-card')) return;
     if ((d.positionMs || 0) >= _srtCardEndMs - 50) {
       _srtCardEndMs = 0; // disarm
       try { bg.pause(); } catch (e) {}
-      if (window.audioAutoAdvance && Array.isArray(allNotes) && currentCardIndex < allNotes.length - 1) {
-        if (typeof goToNextCard === 'function') goToNextCard();
-      }
     }
   });
 }

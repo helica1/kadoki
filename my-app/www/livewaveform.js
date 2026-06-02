@@ -40,15 +40,35 @@
   let viewStart = -1, viewEnd = -1;
 
   let running = false, rafHandle = null;
+  // Battery: the rAF loop only needs to run while audio is actually advancing.
+  // `lastWakeAt` is stamped on every (re)start/wake; once we're paused AND the
+  // post-wake settle window has elapsed, frame() stops rescheduling instead of
+  // burning 60 fps redrawing a static waveform the whole time the user has it
+  // paused to read. Any wake source (play/position/state/src-change/mode-enter)
+  // calls scheduleDraw() → startLoop() and brings it back.
+  let lastWakeAt = 0;
+  const SETTLE_MS = 1100; // let the eased view-window + playhead settle after a
+                          // pause/seek/cue-jump, then idle.
 
   function log(...a) { try { console.log('[livewf]', ...a); } catch (_) {} }
   function clamp01(x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
 
   // ---------- color ----------
-  function getAccent() {
+  // Cache the accent so the 60 fps draw() loop doesn't run getComputedStyle on
+  // the document element every single frame (forced style recalc = needless
+  // battery). Refreshed on mode-enter (refreshAccent) — which is when the
+  // user could have changed the audio accent in preferences — and the film
+  // rebuild already keys off filmAccent so a stale value can't desync visuals.
+  let _accentCache = '';
+  function readAccent() {
     const v = getComputedStyle(document.documentElement).getPropertyValue('--accent-audio').trim();
     return v || '#b794f6';
   }
+  function getAccent() {
+    if (!_accentCache) _accentCache = readAccent();
+    return _accentCache;
+  }
+  function refreshAccent() { _accentCache = readAccent(); }
   function toRgba(color, alpha) {
     let r = 183, g = 148, b = 246;
     const m6 = color.match(/^#([0-9a-f]{6})$/i);
@@ -317,12 +337,25 @@
   // ---------- continuous rAF loop (visible only) ----------
   function frame() {
     if (!running) { rafHandle = null; return; }
-    if (document.body.classList.contains('mode-audio')) {
-      try { draw(); } catch (e) {}
+    const inAudio = document.body.classList.contains('mode-audio');
+    if (inAudio) { try { draw(); } catch (e) {} }
+    // Keep the loop alive only while playing, or briefly after a wake so the
+    // ease settles; otherwise idle to save battery. Leaving audio mode also
+    // idles it (setVisible(false) calls stopLoop, this is the backstop).
+    const settling = (performance.now() - lastWakeAt) < SETTLE_MS;
+    if (inAudio && (playing || settling)) {
+      rafHandle = requestAnimationFrame(frame);
+    } else {
+      running = false;
+      rafHandle = null;
     }
+  }
+  function startLoop() {
+    lastWakeAt = performance.now();           // refresh the settle window on every wake
+    if (running) return;
+    running = true;
     rafHandle = requestAnimationFrame(frame);
   }
-  function startLoop() { if (running) return; running = true; rafHandle = requestAnimationFrame(frame); }
   function stopLoop() { running = false; if (rafHandle) cancelAnimationFrame(rafHandle); rafHandle = null; }
   function scheduleDraw() { startLoop(); }
 
@@ -394,6 +427,7 @@
       const visible = e?.detail?.mode === 'audio';
       setVisible(visible);
       if (!visible) return;
+      refreshAccent();
       const p = resolveSrcPath();
       if (p !== currentSrcPath) { currentSrcPath = p; resetFilm(); }
       refreshFromGlobals();
@@ -401,6 +435,7 @@
       scheduleDraw();
     });
     if (document.body.classList.contains('mode-audio')) {
+      refreshAccent();
       currentSrcPath = resolveSrcPath();
       refreshFromGlobals();
       setVisible(true);

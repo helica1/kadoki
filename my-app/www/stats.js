@@ -392,9 +392,24 @@
     }
   }
 
+  // Audio mode is the ONLY mode that should keep playing with the screen off.
+  // In card / read mode, pause playback the moment the screen turns off or the
+  // app backgrounds. An in-flight anki round-trip is exempt (that's a
+  // deliberate hop to AnkiMobile, not the user putting the phone down).
+  function pauseAudioForBackgroundIfInteractive() {
+    if (_ankiRoundtripActive) return;
+    if (document.body.classList.contains('mode-audio')) return;
+    if (!window._bgPlaying) return;
+    try { window.Capacitor?.Plugins?.BackgroundAudio?.pause?.(); } catch (e) {}
+  }
+
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') scheduleBackgroundStop();
-    else if (document.visibilityState === 'visible') cancelBackgroundStop();
+    if (document.visibilityState === 'hidden') {
+      pauseAudioForBackgroundIfInteractive();
+      scheduleBackgroundStop();
+    } else if (document.visibilityState === 'visible') {
+      cancelBackgroundStop();
+    }
   });
   // Capacitor App plugin gives us authoritative app-active state — fires
   // even when the WebView's visibilitychange is unreliable (e.g., app
@@ -412,6 +427,7 @@
       App.addListener('appStateChange', (state) => {
         if (!state) return;
         if (state.isActive === false) {
+          pauseAudioForBackgroundIfInteractive();
           scheduleBackgroundStop();
         } else if (state.isActive === true) {
           cancelBackgroundStop();
@@ -476,6 +492,14 @@
     timers.audio.chars += n;
     persist('audio');
   }
+  // Credit an off-screen printed-reading session to the READ bucket: the user
+  // read a printed segment for `sec` seconds covering `chars` characters.
+  function addPrintedReading(sec, chars) {
+    if (Number.isFinite(sec) && sec > 0) timers.read.totalSec += sec;
+    if (Number.isFinite(chars) && chars > 0) timers.read.chars += chars;
+    persist('read');
+    console.log('[stats] printed reading +' + Math.round(sec || 0) + 's +' + Math.round(chars || 0) + ' chars');
+  }
 
   // Re-anchor the read char baseline (called on title change). maxCharOffsetSeen
   // is a per-BOOK char offset; without re-anchoring, switching books credits the
@@ -536,6 +560,7 @@
     incrementCardCount,
     incrementCardChars,
     incrementAudioChars,
+    addPrintedReading,
     rebaselineRead,
     noteReadPosition,
     touch, bumpCard, bumpRead, resetAll, resetMode, persist,
