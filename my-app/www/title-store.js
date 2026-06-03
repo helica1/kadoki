@@ -235,6 +235,16 @@
     return titles.find(t => t.name === name) || null;
   }
 
+  // Fetch one Title (with full attachments, incl. cover.dataUri) by id.
+  // Callers (lock-screen artwork, shell restore) were calling titleStore.get()
+  // which never existed — the call threw, got swallowed, and silently yielded
+  // no cover. Mirrors the findByName pattern.
+  async function get(id) {
+    if (!id) return null;
+    await load();
+    return titles.find(t => t.id === id) || null;
+  }
+
   async function setCardIndex(id, idx) {
     await load();
     const i = titles.findIndex(t => t.id === id);
@@ -270,6 +280,7 @@
   window.titleStore = {
     list,
     load,
+    get,
     create,
     createMany,
     update,

@@ -2317,13 +2317,25 @@
     if (!view || view.dataset.swipeWired === '1') return;
     view.dataset.swipeWired = '1';
     let startX = 0, startY = 0, startT = 0, started = false, fired = false;
-    // Advance/rewind one cue. swipe-LEFT (dx<0) → next, swipe-RIGHT → prev.
+    // Advance/rewind one subtitle by SEEKING the LIVE audiobook playhead
+    // (window._lastAudioCueIdx, written every position tick) and letting the
+    // position listener repaint the cue — NOT via window.currentCardIndex,
+    // which is FROZEN in audio mode and made this seek the audiobook to ~0
+    // (jumping to the very start of the book). swipe-RIGHT (dx>0) → previous
+    // cue, swipe-LEFT (dx<0) → next. Mirrors window.lockScreenCueJump.
     const navByDx = (dx) => {
-      if (typeof window.updateCardIndex !== 'function' ||
-          !Array.isArray(window.allNotes) || !window.allNotes.length) return;
-      const cur = window.currentCardIndex ?? 0;
-      if (dx < 0 && cur < window.allNotes.length - 1) window.updateCardIndex(cur + 1);
-      else if (dx > 0 && cur > 0) window.updateCardIndex(cur - 1);
+      const cues = (window.pagedCues?.length ? window.pagedCues : window.__abCues) || [];
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!cues.length || !bg) return;                    // can't resolve → stay put
+      const cur = window._lastAudioCueIdx;                // live playhead cue
+      if (!Number.isFinite(cur) || cur < 0) return;       // playhead unknown → STAY PUT, never seek 0
+      const target = cur + (dx > 0 ? -1 : 1);             // RIGHT = prev, LEFT = next
+      if (target < 0 || target > cues.length - 1) return; // at an edge → no wrap, no clamp-to-0
+      const cue = cues[target];
+      if (!cue || !Number.isFinite(cue.startMs)) return;
+      window._lastAudioCueIdx = target;
+      const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
+      try { bg.seek({ ms }); } catch (_) {}
     };
     view.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
@@ -2428,6 +2440,59 @@
     });
   }
 
+  // ---- Lock-screen subtitle artwork --------------------------------------
+  // Render the current subtitle into a square image and push it as the Now
+  // Playing artwork, so the sentence is BIG and readable on the lock screen /
+  // Always-On Display (the artist-slot text is tiny). Driven from the cue-
+  // change path below, so it only re-renders when the subtitle changes.
+  // Toggle off with localStorage.LOCKSCREEN_SUBTITLE_ART = '0' (uses cover art).
+  let _subArtCanvas = null;
+  function _subtitleArtEnabled() {
+    try { return localStorage.getItem('LOCKSCREEN_SUBTITLE_ART') !== '0'; } catch (_) { return true; }
+  }
+  function _wrapToWidth(ctx, text, maxW) {
+    // Character-based wrap — correct for Japanese (no spaces) and fine for
+    // romaji. Each line is grown until the next char would overflow maxW.
+    const lines = [];
+    let line = '';
+    for (const ch of text) {
+      const test = line + ch;
+      if (line && ctx.measureText(test).width > maxW) { lines.push(line); line = ch; }
+      else line = test;
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+  function renderSubtitleArtwork(rawText) {
+    try {
+      const text = String(rawText || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      if (!text) return '';
+      const S = 600, PAD = 48, maxW = S - PAD * 2, maxH = S - PAD * 2;
+      let cv = _subArtCanvas;
+      if (!cv) { cv = _subArtCanvas = document.createElement('canvas'); cv.width = S; cv.height = S; }
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, S, S);
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const font = (px) => `600 ${px}px "Hiragino Mincho ProN", "YuMincho", Georgia, serif`;
+      // Largest font (80→24px) at which every wrapped line fits the box.
+      let lines = [], fontPx = 24;
+      for (let px = 80; px >= 24; px -= 2) {
+        ctx.font = font(px);
+        const wrapped = _wrapToWidth(ctx, text, maxW);
+        lines = wrapped; fontPx = px;
+        if (wrapped.length * (px * 1.35) <= maxH) break;
+      }
+      ctx.font = font(fontPx);
+      const lineH = fontPx * 1.35;
+      let y = (S - lines.length * lineH) / 2 + lineH / 2;
+      for (const ln of lines) { ctx.fillText(ln, S / 2, y); y += lineH; }
+      return cv.toDataURL('image/jpeg', 0.9);
+    } catch (_) { return ''; }
+  }
+
   // Synchronous path: cue idx → text, chunk highlight, cue-precise paint.
   // Runs every position event. Nothing here can await — that was the bug
   // where a hung await on titleStore.list() (Preferences plugin slowness)
@@ -2512,7 +2577,24 @@
     // highlight path above.
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (bg && idx >= 0) {
-      bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: abCues[idx].text }).catch(() => {});
+      const cueText = abCues[idx].text;
+      const meta = { title: abAudioName || 'Audiobook', subtitle: cueText };
+      // Sentence in the lock-screen ARTWORK space, big + serif. Cue-gated by the
+      // early-return at the top of this function, so it only renders when the
+      // subtitle changes (not every 150ms tick).
+      if (_subtitleArtEnabled()) {
+        if (bg.setSubtitleArt) {
+          // Preferred: NATIVE renders serif text over the dimmed cover — robust
+          // in the background, tiny bridge payload (just the text). The cover
+          // was handed to native via setMetadata's artwork at play-start.
+          bg.setSubtitleArt({ text: cueText }).catch(() => {});
+        } else {
+          // Fallback (older native build): JS-canvas serif on black.
+          const art = renderSubtitleArtwork(cueText);
+          if (art) meta.artwork = art;
+        }
+      }
+      bg.setMetadata(meta).catch(() => {});
     }
     updateAudiobookCardImage(idx);
   }
@@ -2993,6 +3075,26 @@
         if (Number.isFinite(abCurrentCueIdx) && abCurrentCueIdx >= 0) {
           window._reentryAudioJumpCueIdx = abCurrentCueIdx;
         }
+      } catch (_) {}
+    }
+    if (choice === 'cursor') {
+      // Capture the CURRENT read position as a one-shot "stay" anchor NOW,
+      // while it is still valid: openReadingMode (which shell calls right after
+      // this) runs loadAudiobookCues, which wipes the paged reader's
+      // lastReadCueIdx to -1 BEFORE it paints. Without this, "stay" fell
+      // through to the audio-ahead _lastAudioCueIdx and jumped mid-book.
+      // Only ever store a validated read anchor (>=0); never 0/-1 as a guess.
+      try {
+        let stayCue = -1;
+        if (typeof window._pagedReadCueIdx === 'function') {
+          const c = window._pagedReadCueIdx();
+          if (Number.isFinite(c) && c >= 0) stayCue = c;
+        }
+        if (stayCue < 0 && Array.isArray(window.allNotes) && window.allNotes[0]?.isSrtCard) {
+          const ci = window.currentCardIndex;
+          if (Number.isFinite(ci) && ci >= 0) stayCue = ci;
+        }
+        if (stayCue >= 0) window._reentryStayCueIdx = stayCue;
       } catch (_) {}
     }
     // 'cursor' → no-op (user wants to stay where reader currently is)

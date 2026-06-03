@@ -4,6 +4,17 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.2.1 — 2026-06-03
+
+### Added
+- **Audiobook subtitles on the lock screen** (iOS): while you listen, the current sentence shows large and centered — serif, on a soft dark backdrop — in the lock-screen / Always-On Display Now Playing artwork, updating line-by-line as the audio plays.
+
+### Fixed
+- **Reading position could be lost or jump** — a cluster of place-keeping fixes: choosing **"resume from your reading position"** when switching from Audio back to Read now reliably keeps your line instead of jumping into the middle of the book; reopening a book returns to the exact spot you left off; and EPUB-only titles now save their position reliably (even if you close right after turning a page).
+- **Audio mode — swiping back one subtitle jumped to the very start of the book.** It now steps back exactly one line from the current playhead.
+- **Read-mode character counter stuck at 0** — it now advances as you read.
+- **Lock-screen ⏮ / ⏭ could jump to the start of the book** — they now move one subtitle relative to the current position.
+
 ## v1.2.0 — 2026-06-03
 
 ### Added

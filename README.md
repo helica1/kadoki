@@ -98,6 +98,7 @@ Listen to the audiobook while staying synchronized with the reading modes.
 - Background playback
 - Continuous listening statistics
 - Sync with reading progress
+- Lock-screen subtitles — the current sentence shows large on the lock screen / Always-On Display while you listen (iOS)
 
 When returning to reading, Kadoki lets you choose to **continue from the audiobook position** or **resume from your previous reading position** — making it easy to alternate between intensive reading and passive listening.
 

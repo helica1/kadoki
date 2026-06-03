@@ -3481,8 +3481,11 @@ window.lockScreenCueJump = function (dir) {
   const cues = (window.pagedCues?.length ? window.pagedCues : window.__abCues) || [];
   const bg = window.Capacitor?.Plugins?.BackgroundAudio;
   if (!cues.length || !bg) return;
-  let cur = window._lastAudioCueIdx;
-  if (!Number.isFinite(cur) || cur < 0) cur = 0;
+  const cur = window._lastAudioCueIdx;
+  // Playhead unknown → STAY PUT. Never coerce to 0 and seek the book start:
+  // the lock-screen ⏮⏭ used to jump to the very beginning when the cursor was
+  // -1/NaN. prev/next only navigates relative to a real, known playhead.
+  if (!Number.isFinite(cur) || cur < 0) return;
   const target = Math.max(0, Math.min(cues.length - 1, cur + dir));
   const cue = cues[target];
   if (!cue || !Number.isFinite(cue.startMs)) return;

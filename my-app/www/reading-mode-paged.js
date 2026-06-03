@@ -1270,9 +1270,29 @@
         if (Number.isFinite(ci) && ci >= 0 && cues[ci]?.text &&
             window.allNotes?.[ci]?.expression === cues[ci].text) want = ci;
       }
-      if (want < 0) want = 0;
-      // 2. snap to nearest matched cue so we can paint exact green text
-      const matchCue = nearestMatchedCue(want);
+      // NEVER fall back to cue 0 here. That was the worst place-loss bug:
+      // on a cold/post-wipe enter with no resolvable cursor it painted cue 0,
+      // scrolled to the book START, and clobbered the shared playhead to 0 —
+      // discarding the scroll position loadEpub/centerOnActiveCard restored.
+      // Instead, paint nothing and leave the user exactly where they are. (The
+      // retry loop in runReaderEnterSetup just no-ops; the next user scroll
+      // sets lastReadCueIdx via _creditReadCharsFromVisible, so a later enter
+      // paints correctly.)
+      if (want < 0) return false;
+      // 2. Snap to the nearest MATCHED cue so exact green text paints even when
+      //    the intended cue is alignment-unmatched. Bias STRICTLY BACKWARD: on
+      //    reopen we must never paint the line AHEAD of where the user stopped
+      //    (skipping a subtitle is a small place-loss; re-reading one is safe).
+      //    Prefer the matched cue at-or-before `want`; only if NONE exists
+      //    behind do we fall back to the symmetric search, purely so the
+      //    viewport is never left blank. (want is >=0 here — guarded above.)
+      let matchCue = -1;
+      if (pagedCueToChunk && pagedCueToChunk.length) {
+        for (let i = Math.min(want, pagedCueToChunk.length - 1); i >= 0; i--) {
+          if (pagedCueToChunk[i] >= 0) { matchCue = i; break; }
+        }
+      }
+      if (matchCue < 0) matchCue = nearestMatchedCue(want);
       let chunk = (matchCue >= 0) ? chunks[pagedCueToChunk[matchCue]] : null;
       let paintText = (matchCue >= 0) ? cues[matchCue].text : (cues[want]?.text || '');
       // 3. absolute fallback — no matched cue (alignment empty / legacy map):
@@ -1305,6 +1325,9 @@
     } catch (e) { log('ensureGreenOnEnter err: ' + e.message); return false; }
   }
   window.pagedEnsureGreenOnEnter = ensureGreenOnEnter;
+  // Expose the paged reader's live read cursor so the reentry dialog can
+  // capture a "stay at read position" anchor BEFORE loadAudiobookCues wipes it.
+  window._pagedReadCueIdx = function () { return lastReadCueIdx; };
 
   // Scroll the chunk into view. In vertical-rl, that means aligning the
   // chunk's right edge with the viewport's right edge (where new content
@@ -1653,10 +1676,10 @@
         // instant scrollBy was the "rough, unnatural stop" on iPhone — and
         // since each turn advances by WHOLE columns, an already-aligned page
         // stays aligned without it; the next autoscroll re-aligns regardless.)
-        _physAnimateTo(anchor - PHYS.DIR * sign * cols * W, PHYS.TURN_MS, () => _scheduleEdgeMask());
+        _physAnimateTo(anchor - PHYS.DIR * sign * cols * W, PHYS.TURN_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); });
       } else {
         // Slow drag → spring back to where you started.
-        _physAnimateTo(anchor, PHYS.SNAP_MS, () => _scheduleEdgeMask());
+        _physAnimateTo(anchor, PHYS.SNAP_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); });
       }
       // Keep physDragging true through the settle so the tap handler doesn't
       // fire a dict lookup; clear shortly after.
@@ -1664,6 +1687,58 @@
     };
     scrollEl.addEventListener('touchend', onEnd, { passive: true });
     scrollEl.addEventListener('touchcancel', onEnd, { passive: true });
+  }
+
+  // Credit read-mode char progress + advance the read cursor (lastReadCueIdx)
+  // from the leftmost visible chunk. Safe to call repeatedly and from anywhere:
+  // noteReadPosition is a monotonic max (backward scroll = no-op) and this does
+  // NO scroll / seek / DOM move, so it can never relocate the user. The physics
+  // page-turn settle calls this directly because, under the physics engine,
+  // every scrollLeft write is tagged programmatic (lastProgrammaticScrollTime),
+  // so the gated scroll-listener path below NEVER runs while paging — which is
+  // why the read char counter sat at 0 and lastReadCueIdx never advanced.
+  function _creditReadCharsFromVisible() {
+    try {
+      if (!document.body.classList.contains('mode-read')) return;
+      if (!window.stats?.noteReadPosition || !chunks?.length) return;
+      const sr = scrollEl.getBoundingClientRect();
+      // One scan, TWO different anchors — they are genuinely different things:
+      //  • leftChunk (leftmost visible)   → CHAR PROGRESS ("how far have I read").
+      //    In vertical-rl the leftmost on-screen column is the furthest-advanced
+      //    text, and it stays ~stable across orientation changes (landscape fits
+      //    many more columns), so the progress % doesn't jump on rotation.
+      //  • edgeChunk (the RIGHT reading edge) → READ CURSOR ("where am I").
+      //    Japanese vertical text reads RIGHT-to-left, so the line the user is
+      //    actually on is the column at the right edge (the same place the reader
+      //    parks the active/green line). Anchoring the cursor on the leftmost
+      //    peek-ahead column was what reopened the book 1-2 subtitles AHEAD.
+      let leftChunk = null, leftMin = Infinity;
+      let edgeChunk = null, edgeDist = Infinity;
+      for (const ch of chunks) {
+        const r = ch.getBoundingClientRect();
+        if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
+        if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
+        if (r.left < leftMin) { leftChunk = ch; leftMin = r.left; }
+        const d = Math.abs(r.right - sr.right); // closest to the right reading edge
+        if (d < edgeDist) { edgeChunk = ch; edgeDist = d; }
+      }
+      // Char progress: credit through the END of the furthest-read (left) chunk.
+      // JP-only unit so the read counter matches the card / audio counters.
+      if (leftChunk) {
+        const off = parseInt(leftChunk.dataset.jpOff) || 0;
+        const len = parseInt(leftChunk.dataset.jpLen) || 0;
+        window.stats.noteReadPosition(off + len);
+      }
+      // Read cursor: the current reading line is the chunk at the RIGHT edge, so
+      // "stay at read position" + restore-on-open land where the user actually is.
+      if (edgeChunk && pagedChunkToCue) {
+        const ci = chunks.indexOf(edgeChunk);
+        if (ci >= 0 && ci < pagedChunkToCue.length && pagedChunkToCue[ci] >= 0) {
+          lastReadCueIdx = pagedChunkToCue[ci];
+          window._lastAudioCueIdx = lastReadCueIdx;
+        }
+      }
+    } catch (_) {}
   }
 
   function setupScrollTracking() {
@@ -1680,44 +1755,11 @@
         // refreshes lastInteraction. If it had been stopped by the
         // inactivity timeout, a small jiggle is enough to restart it.
         try { window.stats?.bumpRead?.(); } catch (_) {}
-        // Feed the read stats char tracker with whatever forward
-        // progress the user has just made. noteReadPosition is a
-        // monotonic max + delta — scrolling back is a no-op.
-        try {
-          if (document.body.classList.contains('mode-read') &&
-              window.stats?.noteReadPosition && chunks?.length) {
-            const sr = scrollEl.getBoundingClientRect();
-            let chosen = null;
-            let chosenLeft = Infinity;
-            for (const ch of chunks) {
-              const r = ch.getBoundingClientRect();
-              if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
-              if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
-              if (r.left < chosenLeft) { chosen = ch; chosenLeft = r.left; }
-            }
-            if (chosen) {
-              // JP-only position so the read counter is the same unit as the
-              // card / audio counters.
-              const off = parseInt(chosen.dataset.jpOff) || 0;
-              const len = parseInt(chosen.dataset.jpLen) || 0;
-              // Credit chars up through the END of the leftmost visible
-              // chunk so the running total advances as the user enters
-              // new territory, even when their "current cursor" lands
-              // mid-chunk.
-              window.stats.noteReadPosition(off + len);
-              // Track the reading location as a CUE so the shared position
-              // (and restore-on-launch) follows reading, not just audio. Maps
-              // the leftmost visible chunk → its first cue via the alignment.
-              if (pagedChunkToCue) {
-                const ci = chunks.indexOf(chosen);
-                if (ci >= 0 && ci < pagedChunkToCue.length && pagedChunkToCue[ci] >= 0) {
-                  lastReadCueIdx = pagedChunkToCue[ci];
-                  window._lastAudioCueIdx = lastReadCueIdx;
-                }
-              }
-            }
-          }
-        } catch (_) {}
+        // Feed the read stats char tracker + advance the read cursor from the
+        // leftmost visible chunk. (Extracted to _creditReadCharsFromVisible so
+        // the physics page-turn settle can call it too — under that engine this
+        // gated scroll path never fires.)
+        _creditReadCharsFromVisible();
       }
       updateProgress();
       if (suppressScrollSave) return;
@@ -2627,7 +2669,14 @@
     pagedCues = []; pagedCueToChunk = null; pagedChunkToCue = null; pagedAudioPath = null;
     window._pagedAudioPath = null; // expose for read-mode PLAY (toggleReadingPlayback)
     pagedCueMapFromAlignment = false;
-    lastReadCueIdx = -1; // new book/title → drop any stale read-cue from the prior one
+    // Drop the stale read-cue ONLY when the title actually changed. Preserving
+    // it across a same-title reload (mode round-trips, re-open) keeps the user's
+    // read place instead of resetting the cursor to -1 on every cue (re)load —
+    // which was the structural reason the read anchor kept vanishing.
+    if (!window._activeTitleId || window._activeTitleId !== window._pagedCuesTitleId) {
+      lastReadCueIdx = -1;
+    }
+    window._pagedCuesTitleId = window._activeTitleId || null;
     if (!window.srtParser?.parseSrt) { log('srtParser missing'); return false; }
 
     // Get audio + SRT paths. Try title-store first (newer), fall back to
@@ -3117,7 +3166,14 @@
       lastUserScrollTime = 0; // deliberate enter → always allow centering
       const jumpCue = window._reentryAudioJumpCueIdx;
       window._reentryAudioJumpCueIdx = null;
-      const preferred = Number.isFinite(jumpCue) ? jumpCue : -1;
+      // "Stay at read position" captures the read cue at dialog time (before
+      // this function's loadAudiobookCues wipes lastReadCueIdx). Honor it with
+      // TOP priority so STAY lands on the read position, not the audio-ahead cue.
+      const stayCue = window._reentryStayCueIdx;
+      window._reentryStayCueIdx = null;
+      const preferred = (Number.isFinite(stayCue) && stayCue >= 0)
+        ? stayCue
+        : (Number.isFinite(jumpCue) ? jumpCue : -1);
       const cueN = (pagedCues?.length ? pagedCues : (window.__abCues || [])).length;
       if (cueN <= 0) { centerOnActiveCard(); return; }
       // GUARANTEED green-on-enter, WITH RETRY. chunks, cues, and the alignment
@@ -3142,7 +3198,23 @@
     };
     setTimeout(runReaderEnterSetup, 80);
   }
+  // Synchronously persist the reader's current position. Called on EVERY exit
+  // from the reader (closeView, mode-switch away, app background) because the
+  // 400ms debounced save in setupScrollTracking is otherwise LOST if the user
+  // closes/switches within 400ms of their last page-turn — the EPUB-only
+  // "position not saved reliably" cause (EPUB-only has no cue cursor, so the
+  // per-book scrollLeft is its ONLY restore anchor; it restores pixel-exact).
+  function flushReadPosition() {
+    try {
+      if (!currentName || !scrollEl) return;
+      setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft);
+      if (lastReadCueIdx >= 0 && typeof window.persistReadCue === 'function') {
+        window.persistReadCue(lastReadCueIdx);
+      }
+    } catch (_) {}
+  }
   function closeView() {
+    flushReadPosition();
     if (viewEl) viewEl.style.display = 'none';
     document.body.classList.remove('has-paged-progress');
   }
@@ -3191,7 +3263,9 @@
         // Show progress strip only when paged reader is the active view.
         if (pagedShown) document.body.classList.add('has-paged-progress');
       } else {
-        if (pagedShown) viewEl.style.display = 'none';
+        // Leaving read mode → flush position BEFORE hiding, so a quick
+        // read→audio/card switch can't drop the last page-turn.
+        if (pagedShown) { flushReadPosition(); viewEl.style.display = 'none'; }
         document.body.classList.remove('has-paged-progress');
       }
     });

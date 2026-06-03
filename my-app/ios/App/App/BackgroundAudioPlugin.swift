@@ -1,5 +1,6 @@
 import Foundation
 import Capacitor
+import UIKit
 import AVFoundation
 import MediaPlayer
 
@@ -48,6 +49,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setRate",     returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getState",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setMetadata", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setSubtitleArt", returnType: CAPPluginReturnPromise),
     ]
 
     // MARK: - Constants
@@ -69,6 +71,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var nowPlayingTitle: String = "Audiobook"
     private var nowPlayingSubtitle: String = ""
     private var nowPlayingArtwork: MPMediaItemArtwork?
+    /// Decoded cover image (from setMetadata's artwork), kept so the subtitle
+    /// renderer can composite serif text over a dimmed copy of it.
+    private var nowPlayingCoverImage: UIImage?
     private var remoteCommandsConfigured = false
     /// Bumped on every pause/resume/play so a faded pause's deferred
     /// pause() closure can detect that a resume/play raced in during the
@@ -343,7 +348,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     private func setArtwork(from s: String) {
-        if s.isEmpty { nowPlayingArtwork = nil; return }
+        if s.isEmpty { nowPlayingArtwork = nil; nowPlayingCoverImage = nil; return }
         var b64 = s
         if s.hasPrefix("data:"), let comma = s.firstIndex(of: ",") {
             b64 = String(s[s.index(after: comma)...])
@@ -351,7 +356,114 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let data = Data(base64Encoded: b64), let img = UIImage(data: data) else {
             return // decode failed — keep whatever artwork we had
         }
+        nowPlayingCoverImage = img
         nowPlayingArtwork = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+    }
+
+    // MARK: - Subtitle artwork (serif sentence over the dimmed cover)
+
+    /// Render the current subtitle as the Now Playing artwork: the book cover
+    /// (aspect-filled + darkened) behind large centered SERIF text. Called on
+    /// each cue change from JS. Runs on the plugin's background queue, which is
+    /// fine — UIGraphicsImageRenderer is safe off the main thread and this keeps
+    /// the per-sentence render off the audio/UI path.
+    @objc func setSubtitleArt(_ call: CAPPluginCall) {
+        renderSubtitleArtwork(text: call.getString("text") ?? "")
+        call.resolve()
+    }
+
+    private func renderSubtitleArtwork(text: String) {
+        guard player != nil else { return }   // a setSubtitleArt racing stop() teardown — skip the raster
+        let clean = text
+            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let side: CGFloat = 600
+        let size = CGSize(width: side, height: side)
+        let pad: CGFloat = 48
+        let maxW = side - pad * 2
+        let maxH = side - pad * 2
+
+        // Serif (mincho) face that renders Japanese. Hiragino Mincho first; if a
+        // weight isn't instantiable by name, fall back to the system SERIF design
+        // (still serif + CJK cascade), NOT sans-serif San Francisco.
+        func serifFont(_ pt: CGFloat) -> UIFont {
+            if let f = UIFont(name: "HiraMinProN-W6", size: pt) { return f }
+            if let f = UIFont(name: "HiraMinProN-W3", size: pt) { return f }
+            let base = UIFont.systemFont(ofSize: pt, weight: .semibold)
+            if let d = base.fontDescriptor.withDesign(.serif) { return UIFont(descriptor: d, size: pt) }
+            return base
+        }
+        // scale=1 (a 600x600 @1x is ample for lock-screen art) keeps each render
+        // ~1.4 MB instead of ~12 MB at the default @3x, and avoids the default
+        // format's main-thread UIScreen.scale lookup (we run on a background queue).
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1
+        fmt.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: size, format: fmt)
+        let img = renderer.image { ctx in
+            let rect = CGRect(origin: .zero, size: size)
+            // Near-black background with a subtle radial vignette — a touch
+            // lighter at the centre, darkening toward the edges — for a soft
+            // shadow/depth effect behind the text.
+            UIColor(white: 0.06, alpha: 1).setFill()
+            ctx.fill(rect)
+            let colors = [UIColor(red: 0.14, green: 0.14, blue: 0.14, alpha: 1).cgColor,
+                          UIColor(red: 0.02, green: 0.02, blue: 0.02, alpha: 1).cgColor] as CFArray
+            if let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                     colors: colors, locations: [0, 1]) {
+                let c = CGPoint(x: side / 2, y: side / 2)
+                ctx.cgContext.drawRadialGradient(
+                    grad, startCenter: c, startRadius: 0,
+                    endCenter: c, endRadius: side * 0.70,
+                    options: [.drawsAfterEndLocation])
+            }
+            guard !clean.isEmpty else { return }
+
+            let para = NSMutableParagraphStyle()
+            para.alignment = .center
+            para.lineBreakMode = .byCharWrapping   // Japanese has no spaces to break on
+
+            let shadow = NSShadow()
+            shadow.shadowColor = UIColor(white: 0, alpha: 0.9)
+            shadow.shadowBlurRadius = 4
+            shadow.shadowOffset = CGSize(width: 0, height: 1)
+
+            // Largest font (80→24 pt) whose wrapped text fits the padded box.
+            // Capture the winning wrapped height so we don't re-measure for
+            // vertical centering (boundingRect ignores .shadow, so it matches).
+            var chosen = serifFont(24)
+            var fitH = maxH
+            var pt: CGFloat = 80
+            while pt >= 24 {
+                let f = serifFont(pt)
+                let h = (clean as NSString).boundingRect(
+                    with: CGSize(width: maxW, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: f, .paragraphStyle: para],
+                    context: nil).height
+                chosen = f
+                fitH = h
+                if h <= maxH { break }
+                pt -= 4
+            }
+
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: chosen,
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: para,
+                .shadow: shadow
+            ]
+            let y = pad + max(0, (maxH - min(fitH, maxH)) / 2)
+            (clean as NSString).draw(
+                with: CGRect(x: pad, y: y, width: maxW, height: maxH),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attrs, context: nil)
+        }
+
+        nowPlayingArtwork = MPMediaItemArtwork(boundsSize: img.size) { _ in img }
+        updateNowPlaying()
     }
 
     // MARK: - Position events
