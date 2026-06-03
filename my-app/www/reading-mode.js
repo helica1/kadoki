@@ -2003,6 +2003,11 @@
   let abCueToChunk = null;
   let abChunkToCue = null;
   let abCurrentCueIdx = -1;
+  // Post-swipe seek guard (wall-clock deadline). A swipe seeks the playhead, but
+  // it only ARRIVES at the target after the fade + 150ms lead-in + poll latency;
+  // until then, lagging position events would repaint the old/lead-in cue and
+  // flicker the display. While set, abUpdateCueDisplay holds the swipe target.
+  let _abSeekGuardUntil = 0;
   // Let the paged reader's Set-Playhead jump force the NEXT position event to
   // re-render and re-fire __onPagedCueUpdate, even when the audio lands on the
   // SAME cue index that was already current. Without this, abUpdateCueDisplay's
@@ -2348,10 +2353,13 @@
       window._lastAudioCueIdx = target;
       const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
       try { bg.seek({ ms, fadeMs: 40 }); } catch (_) {}   // brief fade so the jump doesn't click
-      // Repaint the cue display + advance abCurrentCueIdx now, so the jump is
-      // visible immediately (incl. when paused) and a quick second swipe steps
-      // from the new line. The next live position event no-ops on the gate.
+      // Show the target subtitle immediately (works even while paused), then HOLD
+      // it ~0.55s so the lagging position events (fade + lead-in + poll) can't
+      // flicker the cue back to the old/previous line while the playhead catches
+      // up. Consecutive swipes re-point and re-arm this.
+      _abSeekGuardUntil = 0;                                 // let the immediate repaint through
       try { abUpdateCueDisplay(Math.round(cue.startMs)); } catch (_) {}
+      _abSeekGuardUntil = Date.now() + 550;
     };
     view.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
@@ -2519,6 +2527,12 @@
       return;
     }
     const idx = window.srtParser.findCueAtTime(abCues, positionMs);
+    // Hold the swipe target until the playhead catches up (see _abSeekGuardUntil),
+    // so a mid-playback swipe doesn't flicker between cues while the seek lands.
+    if (_abSeekGuardUntil > 0) {
+      if (Date.now() > _abSeekGuardUntil) _abSeekGuardUntil = 0;
+      else return;
+    }
     if (idx === abCurrentCueIdx) return;
     abCurrentCueIdx = idx;
     const cueEl = document.getElementById('audiobookCueText');
