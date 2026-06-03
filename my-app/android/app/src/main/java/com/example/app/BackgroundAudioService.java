@@ -344,7 +344,39 @@ public class BackgroundAudioService extends Service {
     }
 
     public void seekToMs(int ms) {
-        tryRun(() -> { if (player != null && prepared) player.seekTo(ms); });
+        seekToMs(ms, 0);
+    }
+
+    // Opt-in CLICK-FREE seek: callers that pass fadeMs > 0 (subtitle swipes,
+    // lock-screen prev/next) get a brief volume dip — ramp out, jump the playhead
+    // while silent, ramp back in — to mask the amplitude-discontinuity click an
+    // abrupt seekTo makes mid-playback. fadeMs == 0 (or while paused → nothing
+    // audible) seeks immediately, so continuous scrub-bar dragging stays instant.
+    // Mirrors the iOS fade and reuses the same fadeHandler/rampVolume the play/
+    // pause fades use. A racing pause/play/seek cancels via cancelFade — the seek
+    // may then be dropped, but consecutive swipes recompute the target so the end
+    // position is still right, and whatever cancelled it restores the volume.
+    public void seekToMs(int ms, int fadeMs) {
+        tryRun(() -> {
+            if (player == null || !prepared) return;
+            boolean playing = false;
+            try { playing = player.isPlaying(); } catch (Exception ignored) {}
+            if (playing && fadeMs > 0) {
+                final MediaPlayer mp = player;
+                final int target = ms;
+                final int f = fadeMs;
+                rampVolume(mp, 1f, 0f, f);
+                fadeHandler.postDelayed(() -> {
+                    try {
+                        mp.setVolume(0f, 0f);      // ensure silence even if the ramp didn't quite finish
+                        mp.seekTo(target);         // land the seek while muted
+                        rampVolume(mp, 0f, 1f, f); // fade back in
+                    } catch (Exception ignored) {}
+                }, f);
+            } else {
+                player.seekTo(ms);
+            }
+        });
     }
 
     public void setRate(float rate) {

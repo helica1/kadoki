@@ -11,7 +11,7 @@ All notable changes to Kadoki are documented here. Newest first.
 
 ### Fixed
 - **Reading position could be lost or jump** — a cluster of place-keeping fixes: choosing **"resume from your reading position"** when switching from Audio back to Read now reliably keeps your line instead of jumping into the middle of the book; reopening a book returns to the exact spot you left off; and EPUB-only titles now save their position reliably (even if you close right after turning a page).
-- **Audio mode — left/right swipe now moves exactly one subtitle.** It previously jumped to the very start of the book; each swipe now steps one subtitle from the line you're hearing, with a brief fade across the jump so it doesn't click (iOS).
+- **Audio mode — left/right swipe now moves exactly one subtitle.** It previously jumped to the very start of the book; each swipe now steps one subtitle from the line you're hearing, with a brief fade across the jump so it doesn't click.
 - **Read-mode character counter stuck at 0** — it now advances as you read.
 - **Lock-screen ⏮ / ⏭ could jump to the start of the book** — they now move one subtitle relative to the current position.
 

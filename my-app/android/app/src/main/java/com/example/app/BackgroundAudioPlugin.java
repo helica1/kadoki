@@ -205,8 +205,11 @@ public class BackgroundAudioPlugin extends Plugin {
     public void seek(PluginCall call) {
         Double msD = call.getDouble("ms");
         int ms = (msD != null) ? msD.intValue() : 0;
+        // Optional fade for a click-free seek (subtitle swipes / lock-screen
+        // prev-next pass fadeMs); absent → instant seek (e.g. scrub-bar drag).
+        Integer fadeMs = call.getInt("fadeMs");
         BackgroundAudioService s = BackgroundAudioService.getInstance();
-        if (s != null) s.seekToMs(ms);
+        if (s != null) s.seekToMs(ms, fadeMs != null ? fadeMs : 0);
         call.resolve();
     }
 
