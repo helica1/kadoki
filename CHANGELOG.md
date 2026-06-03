@@ -8,6 +8,8 @@ All notable changes to Kadoki are documented here. Newest first.
 
 ### Added
 - **Import folder** (Library → **📁 Import folder**): pick a folder and Kadoki imports every book inside in one step. A folder can hold a single book's **epub / audio / SRT**, or contain many such sub-folders — each becomes its own Library title, with the epub paired to its matching audio and subtitles by filename. Files are **linked, not copied**, so even a large library imports instantly; each book's media is pulled into the cache the first time you open it, and re-importing skips books already in your library. Embedded cover art (epub cover / audio tag) is filled in shortly after import. Available on Android and iOS.
+- **Continuous mode** (Preferences → Playback, with a quick toggle in the hamburger menu): keeps Card, Read & Audio synced to one playhead — audio keeps playing as you switch modes and each view snaps to the live position, with no "where to resume?" prompt. When off, switching out of Audio still prompts as before. Applies to audiobook / SRT titles.
+- **Richer Anki dictionary cards** (optional): two new field mappings in Preferences → Anki: dictionary add-word — **Glossary** (the full multi-sense definition HTML — numbered senses, part-of-speech + dictionary pills, gloss list, identical to the in-app popup) and **Furigana** (per-kanji ruby over the headword). Both off by default; leave them unmapped to keep the plain `Meaning` behavior. Ships with a Kadoki-styled card template (front/back/styling).
 
 ### Changed
 - **A title that contains an EPUB now opens directly in Read mode** instead of Card mode — straight to the book, with no card-mode initialization flash (the brief font/color flicker). You can still switch to Card or Audio, and whichever mode you last used for a title is remembered.
@@ -23,8 +25,6 @@ All notable changes to Kadoki are documented here. Newest first.
 - **Log printed reading** (hamburger menu, appears after a Print): enter the minutes you spent reading the printout — added to your reading stats — and the playhead jumps to where the paper left off.
 - **Furigana in the dictionary**: per-kanji readings rendered over the headword (e.g. 図書館 → 図[と]書[しょ]館[かん]), from the JmdictFurigana dataset, with an algorithmic fallback.
 - **Two-finger swipe to switch modes** — Card → Read → Audio (circular, both directions).
-- **Continuous mode** (Preferences → Playback, with a quick toggle in the hamburger menu): keeps Card, Read & Audio synced to one playhead — audio keeps playing as you switch modes and each view snaps to the live position, with no "where to resume?" prompt. When off, switching out of Audio still prompts as before. Applies to audiobook / SRT titles.
-- **Richer Anki dictionary cards** (optional): two new field mappings in Preferences → Anki: dictionary add-word — **Glossary** (the full multi-sense definition HTML — numbered senses, part-of-speech + dictionary pills, gloss list, identical to the in-app popup) and **Furigana** (per-kanji ruby over the headword). Both off by default; leave them unmapped to keep the plain `Meaning` behavior. Ships with a Kadoki-styled card template (front/back/styling).
 
 ### Changed
 - **Tap the timer to pause/resume it** — the timer pill now toggles the timer directly instead of opening a menu. **Stats…** moved to the hamburger menu.
