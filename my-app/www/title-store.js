@@ -49,8 +49,11 @@
    *   attachments: {
    *     deck?:      { uri?: string, name: string, cardIndex?: number, totalCards?: number },
    *     epub?:      { uri: string,  name: string },
-   *     audiobook?: { cachePath: string, name: string },
-   *     srt?:       { cachePath: string, name: string }
+   *     // audiobook/srt may be stored eagerly ({cachePath}) or LAZILY ({uri}):
+   *     // folder-import stores {uri,name} and rehydrateTitleCachePaths fills
+   *     // cachePath from uri on first open (index.html).
+   *     audiobook?: { uri?: string, cachePath?: string, name: string },
+   *     srt?:       { uri?: string, cachePath?: string, name: string }
    *   }
    * }} Title
    */
@@ -159,6 +162,32 @@
     return tit;
   }
 
+  // Bulk-create several Titles with a SINGLE persist round-trip. Used by the
+  // folder importer, where creating N titles via create() would rewrite the
+  // whole TITLES_V1 blob N times. Returns the created Title objects.
+  async function createMany(partials) {
+    await load();
+    const created = [];
+    const list = partials || [];
+    for (let i = 0; i < list.length; i++) {
+      const partial = list[i];
+      const tit = {
+        // genId() is time+random; in a tight same-millisecond loop the random
+        // suffix could (very rarely) collide. Append the batch index so every
+        // id in a single createMany is guaranteed unique.
+        id: genId() + (i ? '_' + i : ''),
+        name: partial?.name || 'Untitled',
+        createdAt: Date.now(),
+        lastOpenedAt: Date.now(),
+        attachments: partial?.attachments || {}
+      };
+      titles.push(tit);
+      created.push(tit);
+    }
+    await persist();
+    return created;
+  }
+
   async function update(id, patch) {
     await load();
     const i = titles.findIndex(t => t.id === id);
@@ -242,6 +271,7 @@
     list,
     load,
     create,
+    createMany,
     update,
     attach,
     detach,

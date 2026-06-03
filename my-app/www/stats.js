@@ -40,6 +40,33 @@
   // seek/jump-to-percent and must NOT credit the skipped gap as read.
   const READ_DELTA_CAP = 4000;
 
+  // Japanese-only character count — the ッツ/ttu-reader standard. Counts kana,
+  // kanji, ideographs, and a few fullwidth alphanumerics; drops punctuation,
+  // whitespace, and latin. Mirrors ebook-reader-2.0.0's get-character-count.ts
+  // so a book's reported total matches ttu (e.g. 秘密 → ~200,9xx, not 223k).
+  // Callers pass ruby-free text, so furigana is already excluded.
+  const JP_ONLY_RE = /[^0-9A-Z○◯々-〇〻ぁ-ゖゝ-ゞァ-ヺー０-９Ａ-Ｚｦ-ﾝ\p{Radical}\p{Unified_Ideograph}]+/gimu;
+  function jpCharCount(s) {
+    if (!s) return 0;
+    // Spread so surrogate pairs (e.g. 𠮟) count as one character.
+    return [...String(s).replace(JP_ONLY_RE, '')].length;
+  }
+  // HTML/ruby-aware variant: strips <rt>/<rp> (furigana) and all markup first,
+  // then counts Japanese chars. Used for card expressions, which carry HTML.
+  function jpCharCountHtml(html) {
+    if (typeof html !== 'string' || html.indexOf('<') < 0) return jpCharCount(html);
+    try {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      tmp.querySelectorAll('rt, rp').forEach(n => n.remove());
+      return jpCharCount(tmp.textContent || '');
+    } catch (_) {
+      return jpCharCount(html.replace(/<[^>]+>/g, ''));
+    }
+  }
+  window.jpCharCount = jpCharCount;
+  window.jpCharCountHtml = jpCharCountHtml;
+
   const timers = {
     card:  { totalSec: 0, cards: 0, chars: 0, lastInteraction: 0, runningSince: 0 },
     // Read + audio gained `chars` per user request — chars-read was a

@@ -32,12 +32,21 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
     public let jsName = "FileAccess"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "pickFileWithUri",           returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "pickFolderTree",            returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "materializeToCache",        returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getPersistedUriPermissions", returnType: CAPPluginReturnPromise),
     ]
 
     private static let bookmarksKey = "FileAccess.bookmarks.v1"
     private var pendingPickCall: CAPPluginCall?
+    // Set when the in-flight document picker is a FOLDER pick, so the shared
+    // delegate routes the result to folder enumeration instead of file pick.
+    private var pendingPickIsFolder = false
+
+    // Media extensions surfaced from a folder scan (lowercase, no dot).
+    private static let mediaExts: Set<String> = [
+        "epub", "mp3", "m4a", "m4b", "ogg", "oga", "opus", "wav", "flac", "aac", "srt", "vtt", "ass"
+    ]
 
     public override func load() {
         NSLog("[FileAccess] plugin loaded — jsName=\(jsName) methods=\(pluginMethods.count)")
@@ -53,14 +62,102 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
                 call.reject("No root view controller to present from")
                 return
             }
+            guard self.pendingPickCall == nil else {
+                call.reject("A file or folder pick is already in progress")
+                return
+            }
             let picker = UIDocumentPickerViewController(
                 forOpeningContentTypes: contentTypes, asCopy: false
             )
             picker.allowsMultipleSelection = false
             picker.delegate = self
             self.pendingPickCall = call
+            self.pendingPickIsFolder = false
             viewController.present(picker, animated: true)
         }
+    }
+
+    // MARK: - pickFolderTree
+
+    /// Present a FOLDER picker, persist a security-scoped bookmark for the
+    /// chosen folder, then recursively enumerate it. Returns
+    /// { rootUri, rootName, files:[{uri,name,dir,relPath,ext}] }. Each file's
+    /// `uri` is a synthetic `folder-child://` URI that materializeToCache
+    /// resolves via the folder bookmark + relPath — so folder children flow
+    /// through the exact same open/materialize path as individually-picked
+    /// files, no per-file bookmark needed.
+    @objc func pickFolderTree(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            guard let viewController = self.bridge?.viewController else {
+                call.reject("No root view controller to present from")
+                return
+            }
+            guard self.pendingPickCall == nil else {
+                call.reject("A file or folder pick is already in progress")
+                return
+            }
+            let picker = UIDocumentPickerViewController(
+                forOpeningContentTypes: [UTType.folder], asCopy: false
+            )
+            picker.allowsMultipleSelection = false
+            picker.delegate = self
+            self.pendingPickCall = call
+            self.pendingPickIsFolder = true
+            viewController.present(picker, animated: true)
+        }
+    }
+
+    private func handlePickedFolder(_ folderURL: URL, _ call: CAPPluginCall) {
+        let didStart = folderURL.startAccessingSecurityScopedResource()
+        defer { if didStart { folderURL.stopAccessingSecurityScopedResource() } }
+
+        // Persist a security-scoped bookmark for the FOLDER. Children are
+        // materialized later by resolving this bookmark and appending relPath
+        // (see materializeToCache's folder-child:// branch). One folder grant
+        // covers every descendant — cleaner than a bookmark per file.
+        let folderUri = folderURL.absoluteString
+        do {
+            let bm = try folderURL.bookmarkData(
+                options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+            addOrUpdateBookmark(uri: folderUri, name: folderURL.lastPathComponent, bookmark: bm)
+        } catch {
+            call.reject("Folder bookmark failed: \(error.localizedDescription)")
+            return
+        }
+
+        var files: [[String: Any]] = []
+        var count = 0
+        if let en = FileManager.default.enumerator(
+            at: folderURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) {
+            for case let fileURL as URL in en {
+                let isReg = (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) ?? false
+                if !isReg { continue }
+                let ext = fileURL.pathExtension.lowercased()
+                if !Self.mediaExts.contains(ext) { continue }
+                let relPath = Self.relativePath(of: fileURL, under: folderURL)
+                let dir = (relPath as NSString).deletingLastPathComponent
+                files.append([
+                    "uri":     Self.folderChildUri(folderUri: folderUri, relPath: relPath),
+                    "name":    fileURL.lastPathComponent,
+                    "dir":     dir,
+                    "relPath": relPath,
+                    "ext":     ext
+                ])
+                count += 1
+                if count % 10 == 0 {
+                    self.notifyListeners("folderScanProgress", data: ["count": count])
+                }
+            }
+        }
+
+        call.resolve([
+            "rootUri":  folderUri,
+            "rootName": folderURL.lastPathComponent,
+            "files":    files
+        ])
     }
 
     // MARK: - materializeToCache
@@ -70,19 +167,52 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("uri required")
             return
         }
-        guard let entry = findBookmark(forUri: uri) else {
-            call.reject("uri not found in saved bookmarks — re-pick the file")
-            return
-        }
-        guard let url = resolveBookmark(entry.bookmark) else {
-            call.reject("Bookmark stale — re-pick the file")
-            return
+
+        // Resolve the URI to a concrete source file plus the security-scoped
+        // URL we must hold open while copying. For a normally-picked file these
+        // are the same. For a folder-child:// URI, the scope is the FOLDER
+        // bookmark and the source is folderURL + relPath.
+        let sourceURL: URL
+        let scopeURL: URL
+        let touchUri: String      // which bookmark-store entry to keep fresh
+        if let parsed = Self.parseFolderChildUri(uri) {
+            guard let entry = findBookmark(forUri: parsed.folderUri) else {
+                call.reject("Folder not found in saved bookmarks — re-import the folder")
+                return
+            }
+            guard let folderURL = resolveBookmark(entry.bookmark) else {
+                call.reject("Folder bookmark stale — re-import the folder")
+                return
+            }
+            scopeURL  = folderURL
+            sourceURL = folderURL.appendingPathComponent(parsed.relPath)
+            touchUri  = parsed.folderUri
+            // Path-traversal guard: the resolved child must stay inside the
+            // granted folder (reject a crafted relPath like "../../etc/...").
+            let folderStd = folderURL.standardizedFileURL.path
+            let childStd  = sourceURL.standardizedFileURL.path
+            if !(childStd == folderStd || childStd.hasPrefix(folderStd + "/")) {
+                call.reject("Resolved path escapes the imported folder")
+                return
+            }
+        } else {
+            guard let entry = findBookmark(forUri: uri) else {
+                call.reject("uri not found in saved bookmarks — re-pick the file")
+                return
+            }
+            guard let url = resolveBookmark(entry.bookmark) else {
+                call.reject("Bookmark stale — re-pick the file")
+                return
+            }
+            scopeURL  = url
+            sourceURL = url
+            touchUri  = uri
         }
 
-        let didStart = url.startAccessingSecurityScopedResource()
-        defer { if didStart { url.stopAccessingSecurityScopedResource() } }
+        let didStart = scopeURL.startAccessingSecurityScopedResource()
+        defer { if didStart { scopeURL.stopAccessingSecurityScopedResource() } }
 
-        let ext = url.pathExtension.isEmpty ? "bin" : url.pathExtension
+        let ext = sourceURL.pathExtension.isEmpty ? "bin" : sourceURL.pathExtension
         let hash = stableHash(uri)
         let cacheDir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("decks", isDirectory: true)
@@ -90,14 +220,14 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         let cacheURL = cacheDir.appendingPathComponent("deck_\(hash).\(ext)")
 
         // Cache-hit path: cache file exists AND its mtime is >= source mtime.
-        if let srcAttrs   = try? FileManager.default.attributesOfItem(atPath: url.path),
+        if let srcAttrs   = try? FileManager.default.attributesOfItem(atPath: sourceURL.path),
            let cacheAttrs = try? FileManager.default.attributesOfItem(atPath: cacheURL.path),
            let srcMod   = srcAttrs[.modificationDate]   as? Date,
            let cacheMod = cacheAttrs[.modificationDate] as? Date,
            cacheMod >= srcMod {
             let size = (cacheAttrs[.size] as? Int) ?? 0
             // Bump lastUsed so getPersistedUriPermissions sorting is fresh.
-            touchLastUsed(uri: uri)
+            touchLastUsed(uri: touchUri)
             call.resolve([
                 "path":   cacheURL.path,
                 "size":   size,
@@ -109,10 +239,10 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         // Fresh copy.
         do {
             try? FileManager.default.removeItem(at: cacheURL)
-            try FileManager.default.copyItem(at: url, to: cacheURL)
+            try FileManager.default.copyItem(at: sourceURL, to: cacheURL)
             let attrs = try FileManager.default.attributesOfItem(atPath: cacheURL.path)
             let size = (attrs[.size] as? Int) ?? 0
-            touchLastUsed(uri: uri)
+            touchLastUsed(uri: touchUri)
             NSLog("[FileAccess] materialized \(cacheURL.lastPathComponent) size=\(size)")
             call.resolve([
                 "path":   cacheURL.path,
@@ -243,9 +373,17 @@ extension FileAccessNativePlugin: UIDocumentPickerDelegate {
                                 didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first, let call = pendingPickCall else {
             pendingPickCall = nil
+            pendingPickIsFolder = false
             return
         }
         pendingPickCall = nil
+        let isFolder = pendingPickIsFolder
+        pendingPickIsFolder = false
+
+        if isFolder {
+            handlePickedFolder(url, call)
+            return
+        }
 
         let didStart = url.startAccessingSecurityScopedResource()
         defer { if didStart { url.stopAccessingSecurityScopedResource() } }
@@ -269,5 +407,53 @@ extension FileAccessNativePlugin: UIDocumentPickerDelegate {
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         pendingPickCall?.resolve(["cancelled": true])
         pendingPickCall = nil
+        pendingPickIsFolder = false
+    }
+}
+
+// MARK: - folder-child URI helpers
+
+extension FileAccessNativePlugin {
+    /// Relative path of `fileURL` beneath `base`, using standardized paths.
+    static func relativePath(of fileURL: URL, under base: URL) -> String {
+        var basePath = base.standardizedFileURL.path
+        let filePath = fileURL.standardizedFileURL.path
+        if !basePath.hasSuffix("/") { basePath += "/" }   // require a path-component boundary
+        if filePath.hasPrefix(basePath) {
+            return String(filePath.dropFirst(basePath.count))
+        }
+        if filePath == String(basePath.dropLast()) { return "" }
+        return fileURL.lastPathComponent
+    }
+
+    /// folder-child://<base64url(folderUri)>/<base64url(relPath)>
+    static func folderChildUri(folderUri: String, relPath: String) -> String {
+        return "folder-child://" + b64url(folderUri) + "/" + b64url(relPath)
+    }
+
+    static func parseFolderChildUri(_ uri: String) -> (folderUri: String, relPath: String)? {
+        let prefix = "folder-child://"
+        guard uri.hasPrefix(prefix) else { return nil }
+        let rest = String(uri.dropFirst(prefix.count))
+        let parts = rest.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let folderUri = unb64url(String(parts[0])),
+              let relPath   = unb64url(String(parts[1])) else { return nil }
+        return (folderUri, relPath)
+    }
+
+    private static func b64url(_ s: String) -> String {
+        return Data(s.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func unb64url(_ s: String) -> String? {
+        var t = s.replacingOccurrences(of: "-", with: "+")
+                 .replacingOccurrences(of: "_", with: "/")
+        while t.count % 4 != 0 { t += "=" }
+        guard let d = Data(base64Encoded: t) else { return nil }
+        return String(data: d, encoding: .utf8)
     }
 }

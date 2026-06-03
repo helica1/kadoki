@@ -341,7 +341,7 @@ public class AnkiBridgePlugin extends Plugin {
             // Notes table has no deck_id column — adding it makes AnkiDroid
             // silently reject the insert. The note lands in the default deck;
             // we move its cards to the target deck below via the dedicated
-            // notes/{id}/cards endpoint (same pattern Manatan uses).
+            // notes/{id}/cards endpoint.
             ContentValues values = new ContentValues();
             values.put("mid", modelId);
             values.put("flds", flds.toString());
@@ -426,7 +426,7 @@ public class AnkiBridgePlugin extends Plugin {
     /**
      * Move every card of `noteId` into `deckId`. AnkiDroid's notes provider
      * doesn't accept a deck_id at insert time; you have to set it per card
-     * after the fact via notes/{noteId}/cards. Same flow Manatan uses.
+     * after the fact via notes/{noteId}/cards.
      */
     private void moveCardsToDeck(long noteId, long deckId) {
         Uri cardsUri = Uri.withAppendedPath(NOTES_URI, noteId + "/cards");

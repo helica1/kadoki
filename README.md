@@ -101,6 +101,8 @@ Listen to the audiobook while staying synchronized with the reading modes.
 
 When returning to reading, Kadoki lets you choose to **continue from the audiobook position** or **resume from your previous reading position** — making it easy to alternate between intensive reading and passive listening.
 
+**Continuous mode** (Preferences → Playback, or the quick toggle in the hamburger menu) removes that prompt: audio keeps playing as you switch between Card, Read, and Audio, and every view stays locked to the same playhead. When off, the choose-where-to-resume prompt behaves as above. Applies to audiobook / SRT titles.
+
 <p align="center">
   <img src="docs/screenshots/screenshot5.jpeg" width="300" alt="Audiobook playback fully synchronized with reading modes">
 </p>
@@ -132,8 +134,8 @@ Tap any empty space to show or hide the toolbar.
 
 - **Top left** — mode switching: Card / Read / Audio
 - **Location indicator** — changes with the active mode; tap it to jump to a specific location
-- **Timer** — tap to start/stop timing or open statistics; includes intelligent auto-timeout logic for accuracy
-- **Top right menu** (hamburger) — Library · Playback Speed · Preferences
+- **Timer** — tap to pause/resume timing; includes intelligent auto-timeout logic for accuracy (and a slight scroll in Read mode resumes it automatically)
+- **Top right menu** (hamburger) — Library · Stats · Playback Speed · Continuous mode · Print · Preferences
 
 ---
 
@@ -145,6 +147,12 @@ Each Library entry is called a **Title**. A Title may contain:
 - A narrated audiobook set (epub + audio + SRT)
 
 Features: custom cover image support · one-tap activation · swipe-to-edit · swipe-to-delete.
+
+### Import a folder
+
+**Library → 📁 Import folder** bulk-imports a whole folder of books in one step. The folder can either hold a single book's `epub` / audio / `srt`, or contain many such sub-folders — each book becomes its own Title, with the epub automatically paired to its matching audio and subtitles by filename. Files are **linked, not copied**, so even a large library imports instantly; each book's media is pulled into the cache the first time you open it, and re-importing skips books already in your library. Embedded cover art (the epub cover image or the audio file's tag) is filled in shortly after import.
+
+A Title that contains an epub opens directly in **Read** mode.
 
 To use Kadoki as a standard epub reader, simply load an epub into a Title. However, it is not optimized for epub only reading, and Hoshi reader has much more mature support.
 
@@ -160,6 +168,7 @@ Playback speed can be configured globally across all modes, or separately for ea
 
 - Mode color customization
 - Font size adjustment
+- Continuous mode (Playback) — keep Card / Read / Audio synced to one playhead
 - Dictionary import
 - Audio archive import
 - Anki configuration
@@ -198,6 +207,10 @@ Words can be added to Anki directly from the dictionary in any mode. Supported f
 - Image
 - Sentence audio
 - Term audio
+- **Glossary** *(optional)* — the full multi-sense definition HTML (numbered senses, part-of-speech + dictionary pills, gloss list), identical to the in-app dictionary popup
+- **Furigana** *(optional)* — per-kanji ruby over the headword
+
+The two optional fields are off by default; map them in Preferences (and add matching fields to your note type) for a card that mirrors the in-app dictionary popup. A ready-to-paste, Kadoki-styled card template is provided.
 
 **Audio support.** For narrated audiobooks, context audio boundaries can be adjusted before export. If the local audio archive is installed, native pronunciation audio can also be added automatically.
 
@@ -223,6 +236,8 @@ When the dictionary is open, narration pauses automatically and resumes when dis
 ## Statistics
 
 Detailed statistics including time spent reading, characters read, and characters listened to per hour.
+
+**Character counting.** Counts use the Japanese-only standard from [TTU Reader](https://github.com/ttu-ttu/ebook-reader) — only kana, kanji, and ideographs are counted; punctuation, whitespace, Latin text, and furigana (ruby) are excluded. The same rule applies across **all three modes** (Read, Card, Audio), so the book total, the location indicator, and chars/hr are directly comparable to each other and to the desktop TTU reader. (A book may therefore report a noticeably lower total than its raw character count — e.g. ~201k rather than ~223k — because punctuation and spacing are not counted.)
 
 <p align="center">
   <img src="docs/screenshots/screenshot6.jpeg" width="300" alt="Detailed reading, listening, and card statistics">

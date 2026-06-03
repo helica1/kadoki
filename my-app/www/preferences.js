@@ -21,6 +21,8 @@
     ANKI_DICT_F_IMAGE:          'ANKI_DICT_F_IMAGE',
     ANKI_DICT_F_SENTENCE_AUDIO: 'ANKI_DICT_F_SENTENCE_AUDIO',
     ANKI_DICT_F_TERM_AUDIO:     'ANKI_DICT_F_TERM_AUDIO',
+    ANKI_DICT_F_GLOSSARY:       'ANKI_DICT_F_GLOSSARY',
+    ANKI_DICT_F_TERM_FURIGANA:  'ANKI_DICT_F_TERM_FURIGANA',
   };
 
   // Defaults preserve the user's current hardcoded behavior so legacy decks
@@ -36,7 +38,10 @@
       model: 'jidoujisho Kinomoto',
       fields: {
         term: 'Term', reading: 'Reading', sentence: 'Sentence', meaning: 'Meaning',
-        image: 'Image', sentenceAudio: 'Sentence Audio', termAudio: 'Term Audio'
+        image: 'Image', sentenceAudio: 'Sentence Audio', termAudio: 'Term Audio',
+        // Optional rich extras — default unmapped so nothing changes until the
+        // user picks a field for them.
+        glossary: '', termFurigana: ''
       }
     }
   };
@@ -526,6 +531,8 @@
       const v = localStorage.getItem('DICT_PAUSE_ON_LOOKUP');
       pauseToggle.checked = v === null || v === 'true';
     }
+    const contToggle = document.getElementById('continuousModeToggle');
+    if (contToggle) contToggle.checked = localStorage.getItem('CONTINUOUS_MODE_V1') === 'true';
     if (typeof window.syncModeColorPickers === 'function') window.syncModeColorPickers();
   };
 
@@ -557,6 +564,8 @@
     await setPref(PREF_KEYS.ANKI_DICT_F_IMAGE,          document.getElementById('ankiDictFieldImage').value);
     await setPref(PREF_KEYS.ANKI_DICT_F_SENTENCE_AUDIO, document.getElementById('ankiDictFieldSentenceAudio').value);
     await setPref(PREF_KEYS.ANKI_DICT_F_TERM_AUDIO,     document.getElementById('ankiDictFieldTermAudio').value);
+    await setPref(PREF_KEYS.ANKI_DICT_F_GLOSSARY,       document.getElementById('ankiDictFieldGlossary').value);
+    await setPref(PREF_KEYS.ANKI_DICT_F_TERM_FURIGANA,  document.getElementById('ankiDictFieldFurigana').value);
 
     const timeoutInput = document.getElementById('timeoutInput');
     const audioSpeedSlider = document.getElementById('audioSpeedSlider');
@@ -581,6 +590,11 @@
     const pauseToggle = document.getElementById('pauseOnLookupToggle');
     if (pauseToggle) {
       localStorage.setItem('DICT_PAUSE_ON_LOOKUP', pauseToggle.checked ? 'true' : 'false');
+    }
+    const contToggle = document.getElementById('continuousModeToggle');
+    if (contToggle) {
+      localStorage.setItem('CONTINUOUS_MODE_V1', contToggle.checked ? 'true' : 'false');
+      window._continuousMode = contToggle.checked;
     }
     window.closePreferences();
     if (typeof showToast === 'function') showToast('Preferences saved', 2000);
@@ -789,6 +803,8 @@
     image:         'ankiDictFieldImage',
     sentenceAudio: 'ankiDictFieldSentenceAudio',
     termAudio:     'ankiDictFieldTermAudio',
+    glossary:      'ankiDictFieldGlossary',
+    termFurigana:  'ankiDictFieldFurigana',
   };
   const SWIPE_FIELD_PREFS = {
     expression: PREF_KEYS.ANKI_SWIPE_F_EXPRESSION,
@@ -803,6 +819,8 @@
     image:         PREF_KEYS.ANKI_DICT_F_IMAGE,
     sentenceAudio: PREF_KEYS.ANKI_DICT_F_SENTENCE_AUDIO,
     termAudio:     PREF_KEYS.ANKI_DICT_F_TERM_AUDIO,
+    glossary:      PREF_KEYS.ANKI_DICT_F_GLOSSARY,
+    termFurigana:  PREF_KEYS.ANKI_DICT_F_TERM_FURIGANA,
   };
 
   async function refreshFieldDropdowns(target) {
@@ -915,6 +933,8 @@
           image:         await getOr(PREF_KEYS.ANKI_DICT_F_IMAGE,          ANKI_DEFAULTS.dict.fields.image),
           sentenceAudio: await getOr(PREF_KEYS.ANKI_DICT_F_SENTENCE_AUDIO, ANKI_DEFAULTS.dict.fields.sentenceAudio),
           termAudio:     await getOr(PREF_KEYS.ANKI_DICT_F_TERM_AUDIO,     ANKI_DEFAULTS.dict.fields.termAudio),
+          glossary:      await getOr(PREF_KEYS.ANKI_DICT_F_GLOSSARY,       ANKI_DEFAULTS.dict.fields.glossary),
+          termFurigana:  await getOr(PREF_KEYS.ANKI_DICT_F_TERM_FURIGANA,  ANKI_DEFAULTS.dict.fields.termFurigana),
         }
       };
     }
@@ -952,6 +972,11 @@
       applySubtitleOffset(65);
     }
   }
+
+  // Continuous-mode flag — read synchronously at load so shell.js mode
+  // switches (which can run before applyStartupPrefs resolves) see the saved
+  // value. Defaults to false (today's behavior) when never set.
+  try { window._continuousMode = localStorage.getItem('CONTINUOUS_MODE_V1') === 'true'; } catch (_) {}
 
   applyStartupPrefs();
   if (document.readyState !== 'complete') {

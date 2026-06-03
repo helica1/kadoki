@@ -22,7 +22,7 @@ target 'App' do
   capacitor_pods
   # Embedded HTTP server used by AnkiBridgePlugin to expose media files
   # at http://127.0.0.1:<port>/... so AnkiMobile can fetch them via the
-  # anki://x-callback-url/addnote field URLs. Same approach Manatan uses.
+  # anki://x-callback-url/addnote field URLs.
   pod 'GCDWebServer', '~> 3.5.4'
 end
 

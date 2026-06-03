@@ -147,8 +147,7 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
         let audioArr   = mediaArrayParam(call, key: "audio")
         let pictureArr = mediaArrayParam(call, key: "picture")
 
-        // Primary media delivery: embedded HTTP server on 127.0.0.1. Manatan's
-        // decoded approach (see reference-manatan-ios-strategy memory). Each
+        // Primary media delivery: embedded HTTP server on 127.0.0.1. Each
         // media blob gets written to NSTemporaryDirectory, then exposed via
         // http://127.0.0.1:<port>/<filename> for AnkiMobile to fetch.
         // The bookmarked-media-folder path is kept as a fallback for users
@@ -176,7 +175,7 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
             if let urlStr = stored.httpURL {
                 // For the URL path we DON'T wrap in [sound:]; AnkiMobile
                 // recognizes a bare http://… in the audio field and
-                // downloads + plays the file. (Same as Manatan's pattern.)
+                // downloads + plays the file.
                 if urlAppends[f] == nil { urlAppends[f] = urlStr }
                 else { urlAppends[f]! += " " + urlStr }
             } else {
@@ -378,7 +377,7 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
         //      WKWebView can't access the path).
         //   2) `srcPath`: NEW — JS just passes the absolute on-disk path
         //      (e.g. a fresh AudioSlicer output). Native reads it directly,
-        //      skips the base64 round-trip. Same trick Manatan uses.
+        //      skips the base64 round-trip.
         let data: Data
         if let base64 = attachment["dataBase64"] as? String,
            let decoded = Data(base64Encoded: base64), !decoded.isEmpty {

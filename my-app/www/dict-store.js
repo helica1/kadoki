@@ -1,7 +1,7 @@
 // dict-store.js — indexed-IDB dictionary store.
 //
 // Replaces the old "load every entry into a JS Map at boot" pattern with
-// the same architecture Yomitan / Manatan / Jidoujisho use: keep entries
+// the same architecture Yomitan / Jidoujisho use: keep entries
 // on disk, query directly via an IDB index on the term. ~5–10 ms per
 // lookup regardless of dict size, and the JS heap stays under 50 MB even
 // with several large dicts imported.

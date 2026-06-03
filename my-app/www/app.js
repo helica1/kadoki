@@ -994,7 +994,10 @@ function updateCardIndex(newIndex) {
     if (window.stats?.incrementCardChars) {
       const newCard = allNotes[newIndex];
       const txt = newCard?.expression || '';
-      if (txt) window.stats.incrementCardChars(txt.length);
+      // expression is HTML — count JP-only chars (strips markup + furigana) so
+      // the card counter is the same unit as the read / audio counters.
+      if (txt) window.stats.incrementCardChars(
+        window.jpCharCountHtml ? window.jpCharCountHtml(txt) : txt.length);
     }
 
     displayCard();
@@ -3649,10 +3652,23 @@ function _ensureBgListenersForSrtCards() {
 // Tracks which Title is currently active so we can persist lastCardIndex.
 window._activeTitleId = null;
 
-window.loadTitleAsSrtCards = async function (title) {
+window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   const ab = title?.attachments?.audiobook;
   const srtAtt = title?.attachments?.srt;
   if (!ab || !srtAtt || !window.srtParser) return false;
+  // Folder-imported titles carry {uri,name} lazily. rehydrateTitleCachePaths
+  // normally fills cachePath before we get here, but be robust to ordering /
+  // a silent rehydrate failure: materialize straight from the uri if needed.
+  const _fa = window.Capacitor?.Plugins?.FileAccess;
+  for (const att of [ab, srtAtt]) {
+    if (!att.cachePath && att.uri && _fa?.materializeToCache) {
+      try { const m = await _fa.materializeToCache({ uri: att.uri }); if (m?.path) att.cachePath = m.path; } catch (e) {}
+    }
+  }
+  if (!ab.cachePath || !srtAtt.cachePath) {
+    alert('Could not load the audio/subtitles for this title.');
+    return false;
+  }
   resetCrossTitlePositionState();
 
   // Read + parse SRT.
@@ -3744,7 +3760,9 @@ window.loadTitleAsSrtCards = async function (title) {
   // Stop any prior card audio.
   if (typeof window.stopCardAudio === 'function') window.stopCardAudio();
 
-  displayCard();
+  // Skip the card render when opening straight into read mode — rendering a
+  // card then switching modes is what causes the font/color flash.
+  if (!skipCardDisplay) displayCard();
   updateProgressBar();
   return true;
 };

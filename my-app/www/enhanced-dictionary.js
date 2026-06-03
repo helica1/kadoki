@@ -608,8 +608,8 @@
     // Two paths:
     //   FAST: window.dictStore (IDB-indexed) is populated → single
     //         async getAll() into the on-disk index, ~5-10 ms regardless
-    //         of dictionary count or size. Same architecture Yomitan /
-    //         Manatan / Jidoujisho use. No in-memory entry maps.
+    //         of dictionary count or size. Same on-disk-index architecture
+    //         Yomitan / Jidoujisho use. No in-memory entry maps.
     //   SLOW: legacy in-memory Map (dictionaries) populated by ensureJM().
     //         Triggered on first launch / after re-import.
     //
@@ -1193,26 +1193,25 @@
         if (hasCue) {
             const mmss = _formatMs(ctx.cueStartMs);
             playheadSection = `
-                <div class="manatan-playhead-section">
-                    <button id="setPlayheadBtn" type="button" class="manatan-playhead-btn">
-                        <span class="manatan-playhead-icon">▶▌</span>
-                        <span class="manatan-playhead-label">Set playhead</span>
-                        <span class="manatan-playhead-time">${mmss}</span>
+                <div class="dict-popup-playhead-section">
+                    <button id="setPlayheadBtn" type="button" class="dict-popup-playhead-btn">
+                        <span class="dict-popup-playhead-icon">▶▌</span>
+                        <span class="dict-popup-playhead-label">Set playhead</span>
+                        <span class="dict-popup-playhead-time">${mmss}</span>
                     </button>
                 </div>
             `;
         }
 
         if (!results || results.length === 0) {
-            return playheadSection + `<div class="manatan-empty">No dictionary entries found
-                <div class="manatan-hint">Tap anywhere to close</div></div>`;
+            return playheadSection + `<div class="dict-popup-empty">No dictionary entries found
+                <div class="dict-popup-hint">Tap anywhere to close</div></div>`;
         }
         const result = results[currentIndex];
         const isJmdict = result.type === 'jmdict';
         const reading = isJmdict
             ? (result.entry.kana || []).map(k => k.text).join('・')
             : (result.entry[1] && result.entry[1] !== result.term ? result.entry[1] : '');
-        const dictTag = result.dictionary || (isJmdict ? 'JMdict' : '');
 
         // Furigana ruby over the headword. The reading list may be '・'-joined
         // (JMdict alternates) — distribute the FIRST reading as ruby; surviving
@@ -1226,35 +1225,35 @@
         const readingLine = ruby.hasRuby ? altReadings : reading;
 
         let content = playheadSection + `
-            <div class="manatan-header">
-                <div class="manatan-title-block">
-                    ${readingLine ? `<div class="manatan-reading">${readingLine}</div>` : ''}
-                    <div class="manatan-term">${ruby.html}</div>
+            <div class="dict-popup-header">
+                <div class="dict-popup-title-block">
+                    ${readingLine ? `<div class="dict-popup-reading">${readingLine}</div>` : ''}
+                    <div class="dict-popup-term">${ruby.html}</div>
                 </div>
-                <div class="manatan-header-icons">
-                    <div class="manatan-audio-group" style="display:flex;flex-direction:column;align-items:center;gap:2px;">
-                        <div class="manatan-audio-row" style="display:flex;align-items:center;gap:2px;">
-                            <button id="audioPrev" type="button" title="Previous audio source" class="manatan-icon-btn manatan-audio-nav" aria-label="Previous audio" style="display:none;">
+                <div class="dict-popup-header-icons">
+                    <div class="dict-popup-audio-group" style="display:flex;flex-direction:column;align-items:center;gap:2px;">
+                        <div class="dict-popup-audio-row" style="display:flex;align-items:center;gap:2px;">
+                            <button id="audioPrev" type="button" title="Previous audio source" class="dict-popup-icon-btn dict-popup-audio-nav" aria-label="Previous audio" style="display:none;">
                               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                 <polyline points="15 18 9 12 15 6"/>
                               </svg>
                             </button>
-                            <button id="audioBtn" type="button" title="Play audio" class="manatan-icon-btn" aria-label="Play audio">
+                            <button id="audioBtn" type="button" title="Play audio" class="dict-popup-icon-btn" aria-label="Play audio">
                               <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M11 5L6 9H3v6h3l5 4V5z"/>
                                 <path d="M15.5 8.5a5 5 0 0 1 0 7"/>
                                 <path d="M18.5 5.5a9 9 0 0 1 0 13"/>
                               </svg>
                             </button>
-                            <button id="audioNext" type="button" title="Next audio source" class="manatan-icon-btn manatan-audio-nav" aria-label="Next audio" style="display:none;">
+                            <button id="audioNext" type="button" title="Next audio source" class="dict-popup-icon-btn dict-popup-audio-nav" aria-label="Next audio" style="display:none;">
                               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                 <polyline points="9 18 15 12 9 6"/>
                               </svg>
                             </button>
                         </div>
-                        <span id="audioCount" class="manatan-audio-count" style="display:none;font-size:.65rem;opacity:.7;line-height:1;white-space:nowrap;"></span>
+                        <span id="audioCount" class="dict-popup-audio-count" style="display:none;font-size:.65rem;opacity:.7;line-height:1;white-space:nowrap;"></span>
                     </div>
-                    <button id="ankiBtn" class="manatan-anki-btn"
+                    <button id="ankiBtn" class="dict-popup-anki-btn"
                             data-dictionary="${result.dictionary}"
                             data-term="${result.term}"
                             data-type="${result.type}">+ Anki</button>
@@ -1263,57 +1262,19 @@
         `;
         if (results.length > 1) {
             content += `
-                <div class="manatan-nav">
-                    <button id="prevResult" class="manatan-nav-btn" ${currentIndex === 0 ? 'disabled' : ''}>← Prev</button>
-                    <span class="manatan-nav-count">${currentIndex + 1} / ${results.length}</span>
-                    <button id="nextResult" class="manatan-nav-btn" ${currentIndex === results.length - 1 ? 'disabled' : ''}>Next →</button>
+                <div class="dict-popup-nav">
+                    <button id="prevResult" class="dict-popup-nav-btn" ${currentIndex === 0 ? 'disabled' : ''}>← Prev</button>
+                    <span class="dict-popup-nav-count">${currentIndex + 1} / ${results.length}</span>
+                    <button id="nextResult" class="dict-popup-nav-btn" ${currentIndex === results.length - 1 ? 'disabled' : ''}>Next →</button>
                 </div>
             `;
         }
 
-        if (isJmdict) {
-            const senses = (result.entry.sense || []);
-            senses.forEach((s, i) => {
-                const pos = (s.partOfSpeech || []).slice(0, 2).join(', ');
-                const glosses = (s.gloss || []).map(g => `<li>${g.text}</li>`).join('');
-                if (!glosses) return;
-                content += `
-                    <div class="manatan-sense">
-                        <div class="manatan-sense-head">
-                            <span class="manatan-sense-num">${i + 1}.</span>
-                            ${pos ? `<span class="manatan-pill manatan-pill-pos">${pos}</span>` : ''}
-                            <span class="manatan-pill manatan-pill-dict">${dictTag}</span>
-                        </div>
-                        <ul class="manatan-glosses">${glosses}</ul>
-                    </div>
-                `;
-            });
-        } else {
-            const defs = result.entry[5] || [];
-            let count = 0;
-            for (const def of defs) {
-                if (count >= 5) break;
-                let text = '';
-                if (def?.type === 'structured-content') {
-                    text = extractSimpleTextFromStructured(def.content);
-                } else if (typeof def === 'string') {
-                    text = def;
-                }
-                if (!text || text.length < 2) continue;
-                count++;
-                content += `
-                    <div class="manatan-sense">
-                        <div class="manatan-sense-head">
-                            <span class="manatan-sense-num">${count}.</span>
-                            <span class="manatan-pill manatan-pill-dict">${dictTag}</span>
-                        </div>
-                        <ul class="manatan-glosses"><li>${text}</li></ul>
-                    </div>
-                `;
-            }
-        }
+        // Sense blocks — shared with the Anki "Glossary" field builder
+        // (buildGlossaryHtml) so the card and the popup stay byte-identical.
+        content += buildGlossaryHtml(result);
 
-        content += `<div class="manatan-hint">Tap anywhere to close</div>`;
+        content += `<div class="dict-popup-hint">Tap anywhere to close</div>`;
         return content;
     }
 
@@ -2285,6 +2246,12 @@
                     // Extract meaning and reading from current result
                     const meaning = extractMeaningFromResult(result);
                     const reading = extractReadingFromResult(result);
+                    // Rich, optional extras for a 1:1 dictionary card: the full
+                    // multi-sense glossary HTML (pills + POS + numbered senses,
+                    // identical to the popup) and per-kanji furigana ruby. Only
+                    // written to Anki if the user has mapped a field for them.
+                    const glossaryHtml = buildGlossaryHtml(result);
+                    const termFurigana = buildTermRubyHtml(result);
                     
                     // Anki sentence + audio come from where the TAPPED WORD
                     // actually lives, never from the currently-playing cue or
@@ -2469,7 +2436,9 @@
                         // issue. Consumed by sendWordToAnki below.
                         audioSrcPath: window._lastDictSliceSrcPath || null,
                         wordAudio: wordAudio,
-                        dictionary: result.dictionary
+                        dictionary: result.dictionary,
+                        glossary: glossaryHtml,
+                        termFurigana: termFurigana
                     };
                     window._lastDictSliceSrcPath = null;
 
@@ -2550,16 +2519,86 @@
         }
     }
 
+    // Build the structured glossary HTML — the SAME numbered, pill-tagged sense
+    // blocks the popup renders (see renderResults below, which now also calls
+    // this) — so an Anki "Glossary" field can be styled 1:1 with the in-app
+    // popup. Returns the concatenated .dict-popup-sense blocks (no outer wrapper).
+    function buildGlossaryHtml(result) {
+        if (!result) return '';
+        const isJmdict = result.type === 'jmdict';
+        const dictTag = result.dictionary || (isJmdict ? 'JMdict' : '');
+        let html = '';
+        if (isJmdict) {
+            const senses = (result.entry.sense || []);
+            senses.forEach((s, i) => {
+                const pos = (s.partOfSpeech || []).slice(0, 2).join(', ');
+                const glosses = (s.gloss || []).map(g => `<li>${g.text}</li>`).join('');
+                if (!glosses) return;
+                html += `
+                    <div class="dict-popup-sense">
+                        <div class="dict-popup-sense-head">
+                            <span class="dict-popup-sense-num">${i + 1}.</span>
+                            ${pos ? `<span class="dict-popup-pill dict-popup-pill-pos">${pos}</span>` : ''}
+                            <span class="dict-popup-pill dict-popup-pill-dict">${dictTag}</span>
+                        </div>
+                        <ul class="dict-popup-glosses">${glosses}</ul>
+                    </div>
+                `;
+            });
+        } else {
+            const defs = result.entry[5] || [];
+            let count = 0;
+            for (const def of defs) {
+                if (count >= 5) break;
+                let text = '';
+                if (def?.type === 'structured-content') {
+                    text = extractSimpleTextFromStructured(def.content);
+                } else if (typeof def === 'string') {
+                    text = def;
+                }
+                if (!text || text.length < 2) continue;
+                count++;
+                html += `
+                    <div class="dict-popup-sense">
+                        <div class="dict-popup-sense-head">
+                            <span class="dict-popup-sense-num">${count}.</span>
+                            <span class="dict-popup-pill dict-popup-pill-dict">${dictTag}</span>
+                        </div>
+                        <ul class="dict-popup-glosses"><li>${text}</li></ul>
+                    </div>
+                `;
+            }
+        }
+        return html;
+    }
+
+    // Headword furigana ruby (per-kanji), for an Anki "Furigana" field. Returns
+    // ruby HTML only when real ruby was produced; otherwise '' so the card can
+    // fall back to the plain Term (matches the popup, which shows no ruby then).
+    function buildTermRubyHtml(result) {
+        if (!result) return '';
+        const isJmdict = result.type === 'jmdict';
+        const reading = isJmdict
+            ? (result.entry.kana || []).map(k => k.text).join('・')
+            : (result.entry[1] && result.entry[1] !== result.term ? result.entry[1] : '');
+        const primaryReading = (reading || '').split('・')[0] || '';
+        const ruby = (typeof buildFuriganaRuby === 'function')
+            ? buildFuriganaRuby(result.term, primaryReading)
+            : { html: result.term, hasRuby: false };
+        return ruby.hasRuby ? ruby.html : '';
+    }
+
     // ==================== ANKI INTEGRATION (FROM EXISTING CODE) ====================
     
-    async function sendWordToAnki({ expression, reading, sentence, meaning, imageData, audioData, audioSrcPath, wordAudio, dictionary }) {
+    async function sendWordToAnki({ expression, reading, sentence, meaning, imageData, audioData, audioSrcPath, wordAudio, dictionary, glossary, termFurigana }) {
         // Pull live settings; fall back to the prior hardcoded mapping.
         const cfg = (typeof window.getAnkiSettings === 'function')
           ? await window.getAnkiSettings('dict')
           : { deck: 'Mining', model: 'jidoujisho Kinomoto',
               fields: { term:'Term', reading:'Reading', sentence:'Sentence',
                         meaning:'Meaning', image:'Image',
-                        sentenceAudio:'Sentence Audio', termAudio:'Term Audio' } };
+                        sentenceAudio:'Sentence Audio', termAudio:'Term Audio',
+                        glossary:'', termFurigana:'' } };
 
         const imageFilename = `mining_${Date.now()}.jpg`;
         const sentenceAudioFilename = `sentence_${Date.now()}.mp3`;
@@ -2572,6 +2611,11 @@
         fields[cfg.fields.image]         = '';
         fields[cfg.fields.sentenceAudio] = '';
         fields[cfg.fields.termAudio]     = '';
+        // Optional rich fields — only written when the user has mapped a field
+        // for them (left "(none)" by default), so the add path is unchanged for
+        // anyone who hasn't opted in.
+        if (cfg.fields.glossary)     fields[cfg.fields.glossary]     = glossary || '';
+        if (cfg.fields.termFurigana) fields[cfg.fields.termFurigana] = termFurigana || '';
 
         // --- AnkiBridge path (default on Android) ---
         const ab = (typeof window.viaAnkiBridge === 'function')
@@ -3257,18 +3301,18 @@
             overflow-y: auto !important;
             overflow-x: hidden;
         }
-        /* Manatan-style dictionary card. Compact, dark, type-forward.
+        /* In-app dictionary popup card. Compact, dark, type-forward.
            Reading sits above the term, source pill in mode color, sense
            cards with a numbered head row. */
         #dictPopup {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
         }
-        .manatan-playhead-section {
+        .dict-popup-playhead-section {
             margin: -4px 0 12px;
             padding-bottom: 12px;
             border-bottom: 1px solid #2a2a2a;
         }
-        .manatan-playhead-btn {
+        .dict-popup-playhead-btn {
             width: 100%;
             background: rgba(76, 175, 80, 0.10);
             border: 1px solid rgba(76, 175, 80, 0.45);
@@ -3282,106 +3326,106 @@
             font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Helvetica Neue", system-ui, sans-serif;
             letter-spacing: 0.02em;
         }
-        .manatan-playhead-btn:active { background: rgba(76, 175, 80, 0.18); }
-        .manatan-playhead-btn[disabled] {
+        .dict-popup-playhead-btn:active { background: rgba(76, 175, 80, 0.18); }
+        .dict-popup-playhead-btn[disabled] {
             opacity: 0.4;
             cursor: default;
         }
-        .manatan-playhead-icon { font-size: 14px; }
-        .manatan-playhead-label { flex: 1; text-align: left; }
-        .manatan-playhead-time {
+        .dict-popup-playhead-icon { font-size: 14px; }
+        .dict-popup-playhead-label { flex: 1; text-align: left; }
+        .dict-popup-playhead-time {
             font-variant-numeric: tabular-nums;
             font-size: 12px;
             color: #b0b0b0;
         }
-        .manatan-header {
+        .dict-popup-header {
             display: flex; justify-content: space-between; align-items: flex-start;
             gap: 12px; margin-bottom: 12px;
         }
-        .manatan-title-block { flex: 1; min-width: 0; }
-        .manatan-reading {
+        .dict-popup-title-block { flex: 1; min-width: 0; }
+        .dict-popup-reading {
             color: #b0b0b0; font-size: 0.75em; letter-spacing: 0.04em;
             margin-bottom: 2px; font-weight: 400;
         }
-        .manatan-term {
+        .dict-popup-term {
             font-size: 2em; font-weight: 700; color: #fff;
             line-height: 1.1; letter-spacing: -0.01em;
         }
         /* Furigana ruby over the headword (Tier-1 dictionary ruby). */
-        .manatan-term ruby { ruby-position: over; ruby-align: center; }
-        .manatan-term ruby rt {
+        .dict-popup-term ruby { ruby-position: over; ruby-align: center; }
+        .dict-popup-term ruby rt {
             font-size: 0.5em; color: #ffa726; font-weight: 500;
             line-height: 1.05; letter-spacing: 0.02em; text-align: center;
             user-select: none; -webkit-user-select: none;
         }
-        .manatan-header-icons {
+        .dict-popup-header-icons {
             display: flex; flex-direction: row; align-items: center; gap: 8px;
             flex-shrink: 0;
         }
-        .manatan-icon-btn {
+        .dict-popup-icon-btn {
             background: transparent; color: #d0d0d0;
             border: 1px solid transparent;
             padding: 4px 6px; cursor: pointer;
             border-radius: 6px;
             display: inline-flex; align-items: center; justify-content: center;
         }
-        .manatan-icon-btn:active { background: rgba(255,255,255,0.06); }
-        .manatan-icon-btn svg { display: block; }
-        .manatan-anki-btn {
+        .dict-popup-icon-btn:active { background: rgba(255,255,255,0.06); }
+        .dict-popup-icon-btn svg { display: block; }
+        .dict-popup-anki-btn {
             background: var(--accent-read, #4caf50); color: #000;
             border: none; padding: 6px 12px; border-radius: 999px;
             font-size: 0.78em; font-weight: 700; letter-spacing: 0.06em;
             cursor: pointer; text-transform: uppercase;
         }
-        .manatan-anki-btn:disabled { opacity: 0.4; cursor: default; }
-        .manatan-nav {
+        .dict-popup-anki-btn:disabled { opacity: 0.4; cursor: default; }
+        .dict-popup-nav {
             display: flex; align-items: center; justify-content: center;
             gap: 12px; padding: 6px 0 12px 0;
             border-bottom: 1px solid #1f1f1f; margin-bottom: 12px;
         }
-        .manatan-nav-btn {
+        .dict-popup-nav-btn {
             background: transparent; color: #aaa;
             border: 1px solid #333; padding: 4px 10px; border-radius: 999px;
             font-size: 0.75em; letter-spacing: 0.05em; cursor: pointer;
         }
-        .manatan-nav-btn:disabled { color: #444; border-color: #1f1f1f; cursor: default; }
-        .manatan-nav-count {
+        .dict-popup-nav-btn:disabled { color: #444; border-color: #1f1f1f; cursor: default; }
+        .dict-popup-nav-count {
             color: #888; font-size: 0.8em; font-variant-numeric: tabular-nums;
             letter-spacing: 0.05em;
         }
-        .manatan-sense {
+        .dict-popup-sense {
             margin-bottom: 16px;
         }
-        .manatan-sense-head {
+        .dict-popup-sense-head {
             display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
             margin-bottom: 6px;
         }
-        .manatan-sense-num {
+        .dict-popup-sense-num {
             font-size: 1.05em; font-weight: 700; color: #fff;
             margin-right: 4px;
         }
-        .manatan-pill {
+        .dict-popup-pill {
             display: inline-block; padding: 2px 8px; border-radius: 4px;
             font-size: 0.7em; font-weight: 600; letter-spacing: 0.03em;
             line-height: 1.5;
         }
-        .manatan-pill-pos {
+        .dict-popup-pill-pos {
             background: #2a2a2a; color: #d0d0d0;
         }
-        .manatan-pill-dict {
+        .dict-popup-pill-dict {
             background: #6b4ea3; color: #fff;
         }
-        .manatan-glosses {
+        .dict-popup-glosses {
             margin: 0; padding-left: 22px; list-style: disc;
             color: #ddd; line-height: 1.45;
         }
-        .manatan-glosses li {
+        .dict-popup-glosses li {
             font-size: 0.95em; margin-bottom: 2px;
         }
-        .manatan-empty {
+        .dict-popup-empty {
             font-size: 1em; color: #ccc; text-align: center; padding: 8px 0;
         }
-        .manatan-hint {
+        .dict-popup-hint {
             color: #555; font-size: 0.72em; text-align: center;
             margin-top: 14px; padding-top: 8px; border-top: 1px solid #1f1f1f;
             letter-spacing: 0.04em;

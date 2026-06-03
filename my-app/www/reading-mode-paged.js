@@ -78,7 +78,8 @@
   let undoMs = null;               // previous playhead ms to revert to
   let undoTimer = null;            // setTimeout handle to auto-hide undo chip
   let progressEl = null;
-  let totalChars = 0;
+  let totalChars = 0;     // RAW char total — flat-text coordinate (cue align / highlight)
+  let totalJpChars = 0;   // Japanese-only total (ttu standard) — what we DISPLAY
   // Auto-scroll grace period: don't yank the view back if the user
   // manually scrolled within the last 5 seconds.
   let lastUserScrollTime = 0;
@@ -1607,7 +1608,15 @@
       const dx = t.clientX - sx, dy = t.clientY - sy;
       const adx = Math.abs(dx), ady = Math.abs(dy);
       if (!committed) {
-        if (adx > PHYS.COMMIT_PX && adx > ady) { committed = true; physDragging = true; }
+        if (adx > PHYS.COMMIT_PX && adx > ady) {
+          committed = true; physDragging = true;
+          // A committed horizontal drag is the user actively reading — start
+          // (or keep alive) the read timer even for a slight jiggle that
+          // springs back. The native 'scroll' listener can't catch this: the
+          // physics drag tags its own scrollLeft writes as programmatic
+          // (lastProgrammaticScrollTime), which suppresses its bumpRead.
+          try { if (document.body.classList.contains('mode-read')) window.stats?.bumpRead?.(); } catch (_) {}
+        }
         else return; // vertical-first or still a tap → leave it to the other handlers
       }
       if (e.cancelable) e.preventDefault();
@@ -1687,8 +1696,10 @@
               if (r.left < chosenLeft) { chosen = ch; chosenLeft = r.left; }
             }
             if (chosen) {
-              const off = parseInt(chosen.dataset.charOffset) || 0;
-              const len = parseInt(chosen.dataset.charLen) || 0;
+              // JP-only position so the read counter is the same unit as the
+              // card / audio counters.
+              const off = parseInt(chosen.dataset.jpOff) || 0;
+              const len = parseInt(chosen.dataset.jpLen) || 0;
               // Credit chars up through the END of the leftmost visible
               // chunk so the running total advances as the user enters
               // new territory, even when their "current cursor" lands
@@ -1977,7 +1988,9 @@
       const n = parseFloat(String(input.value || '').trim().replace(/[, %]/g, ''));
       close();
       if (!Number.isFinite(n) || n < 0) return;
-      const frac = Math.min(1, Math.max(0, n <= 100 ? n / 100 : n / totalChars));
+      // A bare number >100 is a character count — interpret it in the same
+      // JP-only unit the position strip shows.
+      const frac = Math.min(1, Math.max(0, n <= 100 ? n / 100 : n / totalJpChars));
       const target = frac * sw;
       const sign = scrollEl.scrollLeft < 0 ? -1 : 1;
       lastUserScrollTime = Date.now();
@@ -2063,7 +2076,9 @@
     }
 
     // --- READ MODE (or any mode with EPUB loaded): char position ---
-    if (totalChars) {
+    // Displayed in JP-only chars (ttu unit), via the parallel jpOff/jpLen
+    // table — the raw charOffset coordinate is reserved for cue alignment.
+    if (totalJpChars) {
       let cur = -1;
       // Prefer the explicit cueIdx ONLY when in audio mode — that's
       // where "show me where the audio cue is in the text" actually
@@ -2077,8 +2092,8 @@
         if (pagedCueToChunk && pagedCueToChunk[opts.cueIdx] >= 0) {
           const chunk = chunks[pagedCueToChunk[opts.cueIdx]];
           if (chunk) {
-            const off = parseInt(chunk.dataset.charOffset) || 0;
-            const len = parseInt(chunk.dataset.charLen) || 0;
+            const off = parseInt(chunk.dataset.jpOff) || 0;
+            const len = parseInt(chunk.dataset.jpLen) || 0;
             cur = off + len;
           }
         }
@@ -2106,8 +2121,8 @@
           }
         }
         if (chosen) {
-          const off = parseInt(chosen.dataset.charOffset) || 0;
-          const len = parseInt(chosen.dataset.charLen) || 0;
+          const off = parseInt(chosen.dataset.jpOff) || 0;
+          const len = parseInt(chosen.dataset.jpLen) || 0;
           // Use the chunk's start offset (not end). The user is
           // CURRENTLY reading this chunk's first lines, so off ≈
           // their position. off+len would put them past it.
@@ -2120,8 +2135,8 @@
         }
       }
       if (cur >= 0) {
-        const pct = Math.round((cur / totalChars) * 1000) / 10;
-        writeStripText(`${cur.toLocaleString()} / ${totalChars.toLocaleString()} · ${pct}%`);
+        const pct = Math.round((cur / totalJpChars) * 1000) / 10;
+        writeStripText(`${cur.toLocaleString()} / ${totalJpChars.toLocaleString()} · ${pct}%`);
         return;
       }
     }
@@ -2535,6 +2550,7 @@
       // indicator (treat ruby <rt>/<rp> as zero-cost — count base text only).
       let chunkCount = 0;
       let charAcc = 0;
+      let jpAcc = 0;
       innerEl.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6').forEach(el => {
         if (el.textContent.trim().length < 2) return;
         const onlyBlockKids = Array.from(el.children).every(c =>
@@ -2546,13 +2562,18 @@
         el.querySelectorAll('rt, rp').forEach(r => {
           txt = txt.replace(r.textContent, '');
         });
-        const len = txt.length;
+        const len = txt.length;                                       // RAW: flat-text coordinate
+        const jpLen = window.jpCharCount ? window.jpCharCount(txt) : len; // JP-only: display
         el.dataset.charOffset = String(charAcc);
         el.dataset.charLen = String(len);
+        el.dataset.jpOff = String(jpAcc);
+        el.dataset.jpLen = String(jpLen);
         charAcc += len;
+        jpAcc += jpLen;
         chunkCount++;
       });
-      totalChars = charAcc;
+      totalChars = charAcc;       // raw coordinate space (cue alignment / highlight)
+      totalJpChars = jpAcc;       // displayed total — matches ttu / desktop reader
 
       const isFreshBookLoad = currentName !== name;
       currentName = name;
@@ -2617,9 +2638,16 @@
       if (window._activeTitleId && window.titleStore?.list) {
         const titles = await window.titleStore.list();
         activeTitle = titles.find(x => x.id === window._activeTitleId) || null;
+        // Materialize lazy {uri} attachments to cachePath, then read the
+        // CORRECT schema fields (audiobook.cachePath / srt.cachePath — the
+        // earlier `attachments.audio.path` never matched the stored shape,
+        // so the title branch silently fell through to legacy prefs).
+        if (activeTitle && typeof window.rehydrateTitleCachePaths === 'function') {
+          activeTitle = await window.rehydrateTitleCachePaths(activeTitle) || activeTitle;
+        }
         const t = activeTitle;
-        if (t?.attachments?.audio?.path) audio = { path: t.attachments.audio.path, name: t.attachments.audio.name };
-        if (t?.attachments?.srt?.path)   srt   = { path: t.attachments.srt.path,   name: t.attachments.srt.name };
+        if (t?.attachments?.audiobook?.cachePath) audio = { path: t.attachments.audiobook.cachePath, name: t.attachments.audiobook.name };
+        if (t?.attachments?.srt?.cachePath)       srt   = { path: t.attachments.srt.cachePath,       name: t.attachments.srt.name };
       }
     } catch (e) {}
     if ((!audio || !srt) && window.getAudiobookPairingForDeck && window.getSrtPairingForDeck) {
@@ -3557,7 +3585,9 @@
             let total = 0;
             for (let i = prev + 1; i <= idx; i++) {
               const c = (i === idx) ? (cue || cuesS[i]) : cuesS[i];
-              if (c?.text) total += c.text.length;
+              // JP-only count so audio matches the read / card char counters.
+              if (c?.text) total += window.jpCharCount ? window.jpCharCount(c.text)
+                                                       : c.text.length;
             }
             if (total > 0) window.stats.incrementAudioChars(total);
           }

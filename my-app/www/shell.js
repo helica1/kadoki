@@ -17,6 +17,29 @@
 
   function el(id) { return document.getElementById(id); }
 
+  // Continuous mode (Preferences → Playback). When on, Card / Read / Audio
+  // all track ONE playhead: audio never pauses on a mode switch and the
+  // audio→card/read reentry dialog is suppressed — each mode just follows
+  // the live audio position. Read synchronously (mode switches can run
+  // before preferences.js has set the cached global) with a localStorage
+  // fallback so the default is exactly today's behavior when unset.
+  function isContinuousMode() {
+    if (typeof window._continuousMode === 'boolean') return window._continuousMode;
+    try { return localStorage.getItem('CONTINUOUS_MODE_V1') === 'true'; } catch (_) { return false; }
+  }
+  // Single writer for the flag — keeps localStorage, the cached global, and
+  // the Preferences checkbox (if mounted) all in agreement, so the hamburger
+  // quick-toggle and the Preferences checkbox never disagree.
+  function setContinuousMode(on) {
+    on = !!on;
+    try { localStorage.setItem('CONTINUOUS_MODE_V1', on ? 'true' : 'false'); } catch (_) {}
+    window._continuousMode = on;
+    const cb = document.getElementById('continuousModeToggle');
+    if (cb) cb.checked = on;
+  }
+  window.setContinuousMode = setContinuousMode;
+  window.isContinuousMode = isContinuousMode;
+
   function fmtSec(total) {
     total = Math.floor(total);
     const h = Math.floor(total / 3600);
@@ -408,7 +431,15 @@
         // card M" dialog must never appear there — it was comparing the
         // previous title's stale position. The dialog is only for in-session
         // audio→card/read transitions.
-        const triggerDialog = !(opts && opts.titleOpen) &&
+        // Continuous mode: all three views track ONE playhead and audio
+        // never pauses on a switch — so the reentry dialog is suppressed and
+        // each target mode simply follows the live audio position. Mirror the
+        // playing state into audioAutoAdvance so CARD mode advances with the
+        // playhead (read mode already follows via the position listener).
+        const continuous = isContinuousMode();
+        if (continuous && window._bgPlaying) window.audioAutoAdvance = true;
+        const triggerDialog = !continuous &&
+                              !(opts && opts.titleOpen) &&
                               (mode === 'card' || mode === 'read') &&
                               (prevMode === 'audio' || window._audioPositionUnresolved);
         if (triggerDialog) {
@@ -422,7 +453,7 @@
           if (myGen !== _switchGen) return;
         }
         if (prevMode === 'audio' && typeof window.closeAudiobookMode === 'function') {
-          await window.closeAudiobookMode();
+          await window.closeAudiobookMode({ keepPlaying: continuous });
           if (myGen !== _switchGen) return;
         } else if (prevMode === 'read' && typeof window.closeReadingMode === 'function') {
           await window.closeReadingMode();
@@ -435,21 +466,32 @@
           // OR (b) the CALLER asked for it explicitly via opts.resumeOnly — the
           // lock-screen "play" path needs this so it attaches to the audio the
           // native side ALREADY resumed instead of restarting it (double-play).
-          const resumeOnly = !!window._reentryDismissedByTab || !!(opts && opts.resumeOnly);
+          // Continuous mode with audio already playing also resumes in place
+          // so entering audio never rewinds the playhead to the cue's start.
+          const resumeOnly = !!window._reentryDismissedByTab || !!(opts && opts.resumeOnly) ||
+                             (continuous && !!window._bgPlaying);
           await window.openAudiobookMode({
             seekToCurrentPosition: (prevMode === 'card' || prevMode === 'read') && !resumeOnly,
             resumeOnly
           });
           window._reentryDismissedByTab = false;
         } else if (mode === 'read' && typeof window.openReadingMode === 'function') {
+          // Continuous mode: center the reader on the live audio cue so it
+          // opens already aligned with the playhead (the position listener
+          // keeps it synced from there).
+          if (continuous && prevMode === 'audio' &&
+              Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) {
+            window._reentryAudioJumpCueIdx = window._lastAudioCueIdx;
+          }
           await window.openReadingMode();
-        } else if (mode === 'card' && prevMode === 'read') {
+        } else if (mode === 'card' && (prevMode === 'read' ||
+                   (continuous && prevMode === 'audio'))) {
           // read → card: re-sync the card index to the reader cursor
           // (read and card share the same logical position). For
-          // audio → card, we deliberately DON'T sync — the dialog
-          // already handles "follow audio" vs "stay" and we don't
-          // want syncCardToCurrentCue silently snapping the card
-          // index to the audio cue.
+          // audio → card we normally DON'T sync — the reentry dialog
+          // handles "follow audio" vs "stay". In CONTINUOUS mode there
+          // is no dialog, so audio → card snaps the card to the live
+          // playhead instead (syncCardToCurrentCue reads abCurrentCueIdx).
           if (typeof window.syncCardToCurrentCue === 'function') window.syncCardToCurrentCue();
         }
       } finally {
@@ -480,7 +522,21 @@
     timerPollHandle = setInterval(refreshTimerLabel, 1000);
   }
 
-  // --------- Timer menu ----------
+  // Tap the timer pill = pause / unpause the current mode's timer. Debounced
+  // because the pill has BOTH an inline onclick and a JS-attached click
+  // listener (Android WebView reliability) — without the guard a single tap
+  // would toggle twice and cancel out.
+  let _shellTimerFiring = false;
+  window.shellToggleTimer = function (ev) {
+    try { ev?.stopPropagation?.(); } catch (_) {}
+    if (_shellTimerFiring) return;
+    _shellTimerFiring = true;
+    setTimeout(() => { _shellTimerFiring = false; }, 300);
+    if (typeof window.toggleReadingTimer === 'function') window.toggleReadingTimer();
+    refreshTimerLabel();
+  };
+
+  // --------- Timer menu (legacy; tap now toggles, Stats moved to ⋯) ----------
 
   function dismissShellMenu() {
     const m = document.getElementById('shellFloatingMenu');
@@ -738,7 +794,17 @@
 
     menu.appendChild(mkItem('Library…',        () => { if (typeof openLibrary === 'function') openLibrary(); }));
     menu.appendChild(mkDivider());
+    menu.appendChild(mkItem('Stats…',          () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); }));
+    menu.appendChild(mkDivider());
     menu.appendChild(mkItem('Playback Speed…', () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
+    menu.appendChild(mkDivider());
+    // Quick toggle mirroring the Preferences → Playback checkbox. Label shows
+    // the current state; tapping flips it and toasts the new state.
+    menu.appendChild(mkItem('Continuous mode: ' + (isContinuousMode() ? 'On' : 'Off'), () => {
+      const next = !isContinuousMode();
+      setContinuousMode(next);
+      try { window.showToast?.('Continuous mode ' + (next ? 'on' : 'off'), 1500); } catch (_) {}
+    }));
     menu.appendChild(mkDivider());
     menu.appendChild(mkItem('Print…', () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); }));
     // "Log printed reading…" only appears once a print is pending (set by the
@@ -799,7 +865,7 @@
         } catch (err) { console.warn('[shell] handler error:', err); }
       });
     };
-    wire('shellTimerLabel', 'openShellTimerMenu');
+    wire('shellTimerLabel', 'shellToggleTimer');
     wire('shellPlayBtn',    'shellTogglePlay');
     wire('shellMoreBtn',    'openShellMoreMenu');
   }

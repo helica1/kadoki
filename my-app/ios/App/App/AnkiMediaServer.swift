@@ -3,8 +3,8 @@ import GCDWebServer
 
 /**
  * AnkiMediaServer — tiny embedded HTTP server on 127.0.0.1 that exposes
- * media files we want AnkiMobile to fetch. This is the trick Manatan uses
- * to deliver audio/images to AnkiMobile via `anki://x-callback-url/addnote`
+ * media files we want AnkiMobile to fetch. This is how we deliver
+ * audio/images to AnkiMobile via `anki://x-callback-url/addnote`
  * field URLs without requiring the user to manually link a folder.
  *
  * Flow:
@@ -21,9 +21,9 @@ import GCDWebServer
  * app lifetime — the cost is a small thread + a listening socket on a
  * non-privileged port, which is negligible.
  *
- * Port choice: 4569. Manatan uses 4568, so we pick the next number to be
- * polite to users running both apps. The actual port is reported via
- * `url(for:)` so callers don't have to hardcode it.
+ * Port choice: 4569 — an arbitrary high, non-privileged port chosen to
+ * avoid colliding with other loopback servers. The actual port is reported
+ * via `url(for:)` so callers don't have to hardcode it.
  */
 final class AnkiMediaServer {
 

@@ -29,6 +29,7 @@
   let cumulativeSec = 0;
   let cumulativeChars = 0;
   let currentEpubName = null;
+  let currentEpubUri = null;   // uri of the loaded book — identifies it even when two books share a filename
   let chunks = [];
   let lastMatchedIdx = -1;
   let firstSyncForBook = true;
@@ -444,7 +445,8 @@
   let longPressFired = false;
   let floatingControlsTimer = null;
   let pendingChunk = null;
-  let totalBookChars = 0;
+  let totalBookChars = 0;     // RAW char total — flat-text coordinate (cue align / highlight)
+  let totalBookJpChars = 0;   // Japanese-only total (ttu standard) — what we DISPLAY
   let progressMode = 0; // 0=percent, 1=current/total, 2=remaining
   let progressBarShown = false;
 
@@ -1270,13 +1272,15 @@
   };
   // Jump reading mode to a target character offset (resolves to nearest chunk).
   window.jumpReadingToChars = function (targetChars) {
-    if (!chunks || !chunks.length || !totalBookChars) return;
-    const target = Math.max(0, Math.min(totalBookChars, Math.floor(targetChars)));
+    // targetChars is in JP-only units (the value the progress bar / jump
+    // prompt show), so resolve it through the parallel jpOff/jpLen table.
+    if (!chunks || !chunks.length || !totalBookJpChars) return;
+    const target = Math.max(0, Math.min(totalBookJpChars, Math.floor(targetChars)));
     // Pick the chunk whose [off, off+len) contains the target.
     let best = 0;
     for (let i = 0; i < chunks.length; i++) {
-      const off = parseInt(chunks[i].dataset.charOffset) || 0;
-      const len = parseInt(chunks[i].dataset.charLen) || 0;
+      const off = parseInt(chunks[i].dataset.jpOff) || 0;
+      const len = parseInt(chunks[i].dataset.jpLen) || 0;
       if (target < off + len) { best = i; break; }
       best = i;
     }
@@ -1537,36 +1541,46 @@
   }
 
   function computeChunkCharOffsets() {
-    let acc = 0;
+    let acc = 0, jpAcc = 0;
     chunks.forEach(c => {
-      const len = textWithoutRuby(c).length;
+      const base = textWithoutRuby(c);
+      const len = base.length;                                    // RAW: flat-text coordinate
+      const jpLen = window.jpCharCount ? window.jpCharCount(base) : len; // JP-only: display/stats
       c.dataset.charOffset = String(acc);
       c.dataset.charLen = String(len);
+      c.dataset.jpOff = String(jpAcc);
+      c.dataset.jpLen = String(jpLen);
       acc += len;
+      jpAcc += jpLen;
     });
-    totalBookChars = acc;
+    totalBookChars = acc;       // raw coordinate space (cue alignment / highlight)
+    totalBookJpChars = jpAcc;   // displayed total — matches ttu / desktop reader
     // Persist for the library's progress display. Namespaced by deck +
     // epub name so each (book,deck) pair tracks separately. Use plain
     // localStorage so the sync library render can read it without a
-    // Capacitor Preferences round-trip.
+    // Capacitor Preferences round-trip. Store the JP-only total so the
+    // library % uses the same unit as the position written below.
     try {
       const deck = currentDeckName();
       if (deck && currentEpubName) {
-        localStorage.setItem('READING_TOTAL_CHARS_' + deck + '_' + currentEpubName, String(acc));
+        localStorage.setItem('READING_TOTAL_CHARS_' + deck + '_' + currentEpubName, String(jpAcc));
       }
     } catch (e) {}
   }
 
   function progressForIdx(idx) {
-    if (idx < 0 || !chunks[idx] || !totalBookChars) {
-      return { current: 0, total: totalBookChars, pct: 0 };
+    // Reported in JP-only chars (ttu unit) so the bottom bar / library match
+    // the desktop reader. Uses the parallel jpOff/jpLen table, NOT the raw
+    // charOffset coordinate space.
+    if (idx < 0 || !chunks[idx] || !totalBookJpChars) {
+      return { current: 0, total: totalBookJpChars, pct: 0 };
     }
     const c = chunks[idx];
-    const off = parseInt(c.dataset.charOffset) || 0;
-    const len = parseInt(c.dataset.charLen) || 0;
+    const off = parseInt(c.dataset.jpOff) || 0;
+    const len = parseInt(c.dataset.jpLen) || 0;
     const current = off + len;
-    const pct = totalBookChars ? (current / totalBookChars) * 100 : 0;
-    return { current, total: totalBookChars, pct };
+    const pct = totalBookJpChars ? (current / totalBookJpChars) * 100 : 0;
+    return { current, total: totalBookJpChars, pct };
   }
 
   function formatProgressLabel(p) {
@@ -1734,7 +1748,10 @@
     if (opts && opts.instantScroll) el.dataset._instantScroll = '1';
     if (opts && opts.center) el.dataset._scrollCenter = '1';
     if (!el.dataset.counted) {
-      const len = textWithoutRuby(el).length;
+      // Credit the "characters read" stat in JP-only chars so it's the same
+      // unit as the card / audio counters (cross-mode consistency).
+      const len = window.jpCharCount ? window.jpCharCount(textWithoutRuby(el))
+                                      : textWithoutRuby(el).length;
       if (len > 0) {
         // Only credit cumulativeChars when the user is actually in
         // reader mode. setActive is called by the audio cue listener
@@ -1767,8 +1784,9 @@
     try {
       const deck = currentDeckName();
       if (deck && currentEpubName) {
-        const off = parseInt(el.dataset.charOffset) || 0;
-        const len = parseInt(el.dataset.charLen) || 0;
+        // JP-only position so the library % matches the JP total stored above.
+        const off = parseInt(el.dataset.jpOff) || 0;
+        const len = parseInt(el.dataset.jpLen) || 0;
         localStorage.setItem('READING_POS_' + deck + '_' + currentEpubName,
                              String(off + len));
       }
@@ -2718,13 +2736,16 @@
     }
   };
 
-  window.closeAudiobookMode = async function () {
+  window.closeAudiobookMode = async function (opts) {
+    opts = opts || {};
     const view = document.getElementById('audiobookModeView');
     if (view) view.style.display = 'none';
     await setPref(KEYS.AUDIOBOOK_OPEN, 'false');
     // Pause + save position so re-entry into reading mode can show the dialog.
+    // Continuous mode (opts.keepPlaying) leaves playback running so audio
+    // flows uninterrupted as the user switches into card/read.
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
-    if (bg) {
+    if (bg && !opts.keepPlaying) {
       try { await bg.pause(); } catch (e) {}
     }
     const deck = currentDeckName();
@@ -2916,8 +2937,9 @@
         } else if (targetMode === 'read') {
           const charAt = (idx) => {
             if (!chunks[idx]) return null;
-            const off = parseInt(chunks[idx].dataset.charOffset) || 0;
-            const len = parseInt(chunks[idx].dataset.charLen) || 0;
+            // JP-only units so this matches the bottom-bar character position.
+            const off = parseInt(chunks[idx].dataset.jpOff) || 0;
+            const len = parseInt(chunks[idx].dataset.jpLen) || 0;
             return off + len;
           };
           const curChar = charAt(cursor);
@@ -3044,13 +3066,14 @@
     content.scrollTop = 0;
     title.textContent = name;
     currentEpubName = name;
+    currentEpubUri = uri;
     rlog(`EPUB rendered: ${sections.length} sections`);
 
     chunks = chunkRenderedContent(content);
     computeChunkCharOffsets();
     lastMatchedIdx = -1;
     firstSyncForBook = true;
-    rlog(`Indexed ${chunks.length} reading chunks (${totalBookChars.toLocaleString()} chars)`);
+    rlog(`Indexed ${chunks.length} reading chunks (${totalBookJpChars.toLocaleString()} JP chars, ${totalBookChars.toLocaleString()} raw)`);
     refreshProgressBar();
     // Load SRT cues + build cue↔chunk maps so read-mode highlight follows
     // audio even when the user never opened the audio-mode view. Quiet:
@@ -3102,7 +3125,9 @@
     chunks = [];
     lastMatchedIdx = -1;
     currentEpubName = null;
+    currentEpubUri = null;
     totalBookChars = 0;
+    totalBookJpChars = 0;
   }
 
   // Background-prewarm hook called from app.js right after a title loads.
@@ -3112,7 +3137,22 @@
   let _prewarmInFlight = null;
   window.prewarmReader = async function () {
     if (_prewarmInFlight) return _prewarmInFlight;
-    if (chunks.length) return Promise.resolve(true); // already loaded
+    // Already loaded — but ONLY skip when it's the SAME book as the active
+    // title. Opening a different title must reload; otherwise the previous
+    // book lingers at its old scroll position and the new title appears to
+    // "open in the middle" (the chunks-loaded guard was book-agnostic).
+    if (chunks.length) {
+      let targetUri = null;
+      try {
+        if (window.titleStore && window._activeTitleId) {
+          const titles = await window.titleStore.list();
+          const t = titles.find(x => x.id === window._activeTitleId);
+          targetUri = t?.attachments?.epub?.uri || null;
+        }
+      } catch (e) {}
+      // Compare by URI so two books that share a filename still reload.
+      if (!targetUri || targetUri === currentEpubUri) return Promise.resolve(true);
+    }
     _prewarmInFlight = (async () => {
       try {
         await restoreLastEpub();
@@ -3211,7 +3251,9 @@
         if (past) {
           furthestPastIdx = i;
           if (!ch.dataset.counted) {
-            const len = textWithoutRuby(ch).length;
+            // JP-only credit (cross-mode consistency — see setActive).
+            const len = window.jpCharCount ? window.jpCharCount(textWithoutRuby(ch))
+                                           : textWithoutRuby(ch).length;
             if (len > 0) {
               // Same gating as setActive — credit only when actually
               // in reader mode. Mark counted regardless so audio-mode
@@ -3247,8 +3289,8 @@
           const deck = currentDeckName();
           if (deck && currentEpubName && chunks[furthestPastIdx]) {
             const el = chunks[furthestPastIdx];
-            const off = parseInt(el.dataset.charOffset) || 0;
-            const len = parseInt(el.dataset.charLen) || 0;
+            const off = parseInt(el.dataset.jpOff) || 0;
+            const len = parseInt(el.dataset.jpLen) || 0;
             localStorage.setItem('READING_POS_' + deck + '_' + currentEpubName,
                                  String(off + len));
           }
@@ -3531,8 +3573,8 @@
         const el = chunks[chunkIdx];
         const deck = currentDeckName();
         if (el && deck && currentEpubName) {
-          const off = parseInt(el.dataset.charOffset) || 0;
-          const len = parseInt(el.dataset.charLen) || 0;
+          const off = parseInt(el.dataset.jpOff) || 0;
+          const len = parseInt(el.dataset.jpLen) || 0;
           localStorage.setItem('READING_POS_' + deck + '_' + currentEpubName,
                                String(off + len));
         }
