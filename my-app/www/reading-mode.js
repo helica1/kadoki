@@ -2317,25 +2317,41 @@
     if (!view || view.dataset.swipeWired === '1') return;
     view.dataset.swipeWired = '1';
     let startX = 0, startY = 0, startT = 0, started = false, fired = false;
-    // Advance/rewind one subtitle by SEEKING the LIVE audiobook playhead
-    // (window._lastAudioCueIdx, written every position tick) and letting the
-    // position listener repaint the cue — NOT via window.currentCardIndex,
-    // which is FROZEN in audio mode and made this seek the audiobook to ~0
-    // (jumping to the very start of the book). swipe-RIGHT (dx>0) → previous
-    // cue, swipe-LEFT (dx<0) → next. Mirrors window.lockScreenCueJump.
+    // Advance/rewind ONE subtitle. Steps from the SAME (array,index) pair that
+    // drives the on-screen subtitle — abCues + abCurrentCueIdx, kept live every
+    // position tick by abUpdateCueDisplay — then SEEKS the playhead and repaints
+    // immediately. Earlier this stepped from window._lastAudioCueIdx indexed
+    // into pagedCues, a different pair the audio view doesn't maintain, so a
+    // swipe landed on the wrong cue ("moves an unclear second or two"). In a gap
+    // between cues, derive prev/next from the live position. swipe-RIGHT (dx>0)
+    // → previous, swipe-LEFT (dx<0) → next.
     const navByDx = (dx) => {
-      const cues = (window.pagedCues?.length ? window.pagedCues : window.__abCues) || [];
+      const cues = abCues;
       const bg = window.Capacitor?.Plugins?.BackgroundAudio;
       if (!cues.length || !bg) return;                    // can't resolve → stay put
-      const cur = window._lastAudioCueIdx;                // live playhead cue
-      if (!Number.isFinite(cur) || cur < 0) return;       // playhead unknown → STAY PUT, never seek 0
-      const target = cur + (dx > 0 ? -1 : 1);             // RIGHT = prev, LEFT = next
-      if (target < 0 || target > cues.length - 1) return; // at an edge → no wrap, no clamp-to-0
+      const posMs = (abPositionRef && Number.isFinite(abPositionRef.ms)) ? abPositionRef.ms : 0;
+      let cur = (Number.isFinite(abCurrentCueIdx) && abCurrentCueIdx >= 0)
+        ? abCurrentCueIdx                                  // the cue the view is showing
+        : (window.srtParser?.findCueAtTime ? window.srtParser.findCueAtTime(cues, posMs) : -1);
+      let target;
+      if (Number.isFinite(cur) && cur >= 0) {
+        target = cur + (dx > 0 ? -1 : 1);                 // RIGHT = prev, LEFT = next
+      } else if (dx < 0) {                                // in a gap, going forward → next cue after pos
+        target = cues.findIndex(c => c.startMs > posMs);
+      } else {                                            // in a gap, going back → last cue before pos
+        target = -1;
+        for (let i = cues.length - 1; i >= 0; i--) { if (cues[i].startMs < posMs) { target = i; break; } }
+      }
+      if (!Number.isFinite(target) || target < 0 || target > cues.length - 1) return; // edge → no wrap, no clamp-to-0
       const cue = cues[target];
       if (!cue || !Number.isFinite(cue.startMs)) return;
       window._lastAudioCueIdx = target;
       const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
-      try { bg.seek({ ms }); } catch (_) {}
+      try { bg.seek({ ms, fadeMs: 40 }); } catch (_) {}   // brief fade so the jump doesn't click
+      // Repaint the cue display + advance abCurrentCueIdx now, so the jump is
+      // visible immediately (incl. when paused) and a quick second swipe steps
+      // from the new line. The next live position event no-ops on the gate.
+      try { abUpdateCueDisplay(Math.round(cue.startMs)); } catch (_) {}
     };
     view.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;

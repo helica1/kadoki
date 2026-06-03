@@ -3491,7 +3491,7 @@ window.lockScreenCueJump = function (dir) {
   if (!cue || !Number.isFinite(cue.startMs)) return;
   window._lastAudioCueIdx = target;
   const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
-  try { bg.seek({ ms }); } catch (_) {}
+  try { bg.seek({ ms, fadeMs: 40 }); } catch (_) {}   // brief fade so the jump doesn't click
 };
 
 // Drop any loaded cards + card audio WITHOUT tearing down the dictionary,

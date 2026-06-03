@@ -311,8 +311,32 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func seek(_ call: CAPPluginCall) {
         guard let p = player else { call.resolve(); return }
         let ms = call.getDouble("ms") ?? 0
-        p.currentTime = max(0, min(p.duration, ms / 1000.0))
-        updateNowPlaying()
+        let target = max(0, min(p.duration, ms / 1000.0))
+        // Opt-in CLICK-FREE seek: callers that pass `fadeMs` > 0 (subtitle
+        // swipes, lock-screen prev/next) get a brief volume dip — fade out, jump
+        // the playhead while silent, fade back in — to mask the amplitude-
+        // discontinuity click an abrupt currentTime change makes mid-playback.
+        // No `fadeMs` (or while paused → nothing audible) seeks immediately, so
+        // continuous scrub-bar dragging stays instant. Mirrors the play/pause
+        // ramp; the same fadeGeneration token defers the fade-in to a pause/play
+        // that races in, but the seek itself always lands.
+        let fadeMs = call.getDouble("fadeMs") ?? 0
+        if p.isPlaying && fadeMs > 0 {
+            fadeGeneration += 1
+            let gen = fadeGeneration
+            let secs = fadeMs / 1000.0
+            p.setVolume(0.0, fadeDuration: secs)
+            DispatchQueue.main.asyncAfter(deadline: .now() + secs) { [weak self] in
+                guard let self = self, let p = self.player else { return }
+                p.currentTime = target               // always land the seek
+                self.updateNowPlaying()
+                guard self.fadeGeneration == gen else { return } // a pause/play raced in — it owns the volume
+                p.setVolume(1.0, fadeDuration: secs)
+            }
+        } else {
+            p.currentTime = target
+            updateNowPlaying()
+        }
         call.resolve()
     }
 
