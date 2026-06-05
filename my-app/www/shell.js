@@ -1053,16 +1053,27 @@
     // Restore the last mode the user was in. Wait briefly so the active
     // title finishes loading (otherwise we'd try to enter read/audio
     // before chunks / cues are ready and bounce back to card).
-    setTimeout(async () => {
-      // Reopen the restored title in the mode it was last viewed in. Prefer
-      // the PER-TITLE lastMode (clamped to the modes this title actually
-      // enables); fall back to the global LAST_MODE_V1 only when the title
-      // has none yet. Force the switch — without {force}, the tab gate
-      // (data-empty still reflecting the just-loaded title) would refuse and
-      // we'd stay stuck in card, which is why restore "always" landed on card.
+    // Restore the last mode the user was in — DETERMINISTICALLY, but only once
+    // the boot content has SETTLED. app.js init sets _bootContentReady AFTER
+    // auto-restore + the deck/card render. Firing earlier (on _activeTitleId
+    // alone) switched into read before the card painted, and the deck-default
+    // render + the 800ms DOM-resync then flipped us back to card. Settle first,
+    // then switch once, so it sticks — on slow LMK boots too (no fixed timer).
+    let _modeRestoreTries = 0;
+    async function restoreActiveTitleMode() {
+      if (!window._bootContentReady) {
+        if (_modeRestoreTries++ < 120) setTimeout(restoreActiveTitleMode, 150);
+        return;
+      }
+      if (!window._activeTitleId) return;  // settled, no title → Library; leave mode as-is
+      // Reopen the restored title in the mode it was last viewed in. Prefer the
+      // PER-TITLE lastMode (clamped to the modes this title enables); fall back
+      // to the global LAST_MODE_V1, then the title's natural first-enabled mode.
+      // Force the switch — without {force} the tab gate (data-empty still
+      // reflecting the just-loaded title) would refuse and we'd stay in card.
       let targetMode = null, enabled = null;
       try {
-        if (window._activeTitleId && window.titleStore?.list) {
+        if (window.titleStore?.list) {
           const titles = await window.titleStore.list();
           const t = titles.find(x => x.id === window._activeTitleId);
           enabled = (t && window.titleStore.enabledModes)
@@ -1071,26 +1082,18 @@
         }
       } catch (e) {}
       if (!targetMode) {
-        // Global fallback (first launch after this update, before the title
-        // has a stored mode). Clamp to modes the title actually enables so we
-        // never switch into an empty read/audio view.
         let g = null; try { g = localStorage.getItem('LAST_MODE_V1'); } catch (e) {}
-        // Require enabled to be KNOWN and to include g — if we couldn't
-        // determine the title's modes (list() failed / title missing), stay on
-        // card rather than risk switching into an empty read/audio view.
         if (g && enabled && enabled[g]) targetMode = g;
       }
       if (!targetMode && enabled) {
-        // Still nothing → open the title in its NATURAL mode (first enabled),
-        // so an EPUB-only (or audio-only) title is NOT dumped into the disabled
-        // card mode on launch. EPUB-only → read; audio-only → audio; deck → card.
         targetMode = enabled.card ? 'card' : enabled.read ? 'read' : enabled.audio ? 'audio' : null;
       }
       if (targetMode && targetMode !== currentMode &&
           typeof window.setShellMode === 'function') {
         window.setShellMode(targetMode, { force: true, titleOpen: true });
       }
-    }, 1500);
+    }
+    restoreActiveTitleMode();
   }
 
   // Expose so title-load paths can force an immediate refresh.

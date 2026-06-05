@@ -2647,7 +2647,13 @@
       viewEl.style.display = 'flex';
       try {
         const loaded = await tryLoadFromActiveTitle();
-        if (innerEl.querySelector('.reading-chunk')) {
+        if (document.body.classList.contains('mode-read')) {
+          // The user switched INTO read while we were loading — openView now
+          // owns the live view (its own load + entry scroll). Don't run our
+          // center/recompute too: two concurrent entry scrolls fight and land
+          // the reader off-position. Yield; the finally leaves it revealed.
+          log('prewarm: entered read mid-load — yielding to openView');
+        } else if (innerEl.querySelector('.reading-chunk')) {
           // Wait for vertical-rl layout to materialize. Without this,
           // recompute reads scrollWidth=0 and centerOnActiveCard does
           // nothing useful.
@@ -2672,9 +2678,17 @@
           log('prewarm: no chunks after tryLoadFromActiveTitle (no EPUB attached?)');
         }
       } finally {
-        viewEl.style.display = prevDisplay || 'flex';
-        viewEl.style.visibility = prevVisibility || 'hidden';
-        viewEl.style.pointerEvents = prevPointer || '';
+        // If the user switched INTO read mode while this prewarm was loading,
+        // openView already revealed the live reader (visibility:visible). Do
+        // NOT restore the stale "hidden" we captured before — that would yank
+        // the now-live reader back, and the 800ms DOM-resync would read the
+        // hidden view as 'card' and dump the user out of read at the last
+        // second. Only restore the hidden state if we're still in another mode.
+        if (!document.body.classList.contains('mode-read')) {
+          viewEl.style.display = prevDisplay || 'flex';
+          viewEl.style.visibility = prevVisibility || 'hidden';
+          viewEl.style.pointerEvents = prevPointer || '';
+        }
       }
       window._pagedPrewarmDone = true;
     } catch (e) {

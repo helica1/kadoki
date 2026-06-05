@@ -3412,6 +3412,13 @@ async function init() {
     }
   }
 
+  // Boot content has SETTLED (auto-restore + any deck/card render are done).
+  // Signal the shell's mode-restore to switch into the last-used mode NOW —
+  // strictly AFTER the card render, so the deck-default render and the 800ms
+  // DOM-resync can't flip it back to card. (Firing earlier, on _activeTitleId
+  // alone, switched into read before the card painted and got reset to card.)
+  window._bootContentReady = true;
+
   // Set up enhanced file input with URI capture and validation
   debugLog("Setting up file input with validation...");
   await setupFileInputWithUriCapture();
