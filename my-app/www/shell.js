@@ -1065,7 +1065,11 @@
         if (_modeRestoreTries++ < 120) setTimeout(restoreActiveTitleMode, 150);
         return;
       }
-      if (!window._activeTitleId) return;  // settled, no title → Library; leave mode as-is
+      if (!window._activeTitleId) {
+        // Settled, no title → Library; leave mode as-is and lift the boot cover.
+        try { window.revealApp && window.revealApp(); } catch (_) {}
+        return;
+      }
       // Reopen the restored title in the mode it was last viewed in. Prefer the
       // PER-TITLE lastMode (clamped to the modes this title enables); fall back
       // to the global LAST_MODE_V1, then the title's natural first-enabled mode.
@@ -1091,6 +1095,16 @@
       if (targetMode && targetMode !== currentMode &&
           typeof window.setShellMode === 'function') {
         window.setShellMode(targetMode, { force: true, titleOpen: true });
+      }
+      // Lift the boot cover once the restored mode has settled. READ lifts
+      // itself when the reader entry finishes (revealApp is wired into
+      // hideReaderCover). For card/audio — or when targetMode couldn't be
+      // resolved — the content is already painted, so reveal after the next
+      // paint so the user never stays stuck behind the spinner.
+      if (targetMode !== 'read') {
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          try { window.revealApp && window.revealApp(); } catch (_) {}
+        }));
       }
     }
     restoreActiveTitleMode();

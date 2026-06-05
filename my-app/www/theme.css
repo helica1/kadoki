@@ -146,14 +146,17 @@ body.has-cue-highlight #readingModeContent .reading-chunk.active {
   100%    { background-color: transparent; }
 }
 
-/* Reader-entry cover spinner: pulsing dots in the read accent colour. */
-#readerEnterCover .rc-dot {
+/* Reader-entry cover + boot cover spinner: pulsing dots in the read accent. */
+#readerEnterCover .rc-dot,
+#appBootCover .rc-dot {
   width: 9px; height: 9px; border-radius: 50%;
   background: var(--accent-read, #4caf50);
   animation: rcDotPulse 1s ease-in-out infinite;
 }
-#readerEnterCover .rc-dot:nth-child(2) { animation-delay: .16s; }
-#readerEnterCover .rc-dot:nth-child(3) { animation-delay: .32s; }
+#readerEnterCover .rc-dot:nth-child(2),
+#appBootCover .rc-dot:nth-child(2) { animation-delay: .16s; }
+#readerEnterCover .rc-dot:nth-child(3),
+#appBootCover .rc-dot:nth-child(3) { animation-delay: .32s; }
 @keyframes rcDotPulse {
   0%, 80%, 100% { opacity: .3; transform: scale(.7); }
   40%           { opacity: 1;  transform: scale(1); }

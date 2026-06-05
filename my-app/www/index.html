@@ -694,6 +694,51 @@ body.dimmed .card-image {
 </head>
 <body>
 
+  <!-- Boot cover: opaque overlay shown from the very first paint until the app
+       has restored its mode AND scrolled to the saved position (revealApp()).
+       The native splash is handed off to it (below) so the launch goes
+       splash → spinner → settled view, with no flash of un-settled content
+       (the card-then-read redraw). Critical styles are inline so it's opaque
+       even before theme.css resolves; dots/animation come from theme.css. -->
+  <div id="appBootCover" aria-hidden="true"
+       style="position:fixed;inset:0;z-index:2147483646;background:#000;display:flex;align-items:center;justify-content:center;transition:opacity .34s ease;">
+    <div class="rc-dots" style="display:flex;gap:10px;">
+      <span class="rc-dot"></span><span class="rc-dot"></span><span class="rc-dot"></span>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var cover = document.getElementById('appBootCover');
+      function hideNativeSplash() {
+        try { if (window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.SplashScreen) Capacitor.Plugins.SplashScreen.hide(); } catch (e) {}
+      }
+      // Pre-paint THEME stamp (cosmetic insurance behind the opaque cover): set
+      // body.mode-* from the last mode so a rare cover failure still themes
+      // right. Does NOT touch the shell's currentMode (the switch is gated on
+      // it), so the real mode-restore still fires.
+      try {
+        var lm = localStorage.getItem('LAST_MODE_V1');
+        if (lm === 'read' || lm === 'audio' || lm === 'card') document.body.classList.add('mode-' + lm);
+      } catch (e) {}
+      // Hand the native splash off to this cover once it has actually painted
+      // (2 rAF), so there's never a gap where the un-settled WebView shows.
+      requestAnimationFrame(function () { requestAnimationFrame(hideNativeSplash); });
+      // revealApp(): lift the cover once mode + position are settled. Called by
+      // the reader entry-settle (read), the mode-restore (card/audio/library),
+      // and a hard safety timeout so a slow/failed restore never traps the user.
+      var revealed = false;
+      window.revealApp = function () {
+        if (revealed || !cover) return;
+        revealed = true;
+        hideNativeSplash();
+        cover.style.opacity = '0';
+        cover.style.pointerEvents = 'none';
+        setTimeout(function () { if (cover) cover.style.display = 'none'; }, 360);
+      };
+      setTimeout(window.revealApp, 7000);   // safety backstop
+    })();
+  </script>
+
   <!-- Unified app top bar. Direct child of body (no wrapper) so its z-index
        and pointer-events compete cleanly with sibling mode views. Tap empty
        content area to hide (chrome-hidden on body). No bottom row. -->

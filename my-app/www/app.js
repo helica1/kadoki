@@ -3471,9 +3471,10 @@ window.addEventListener('beforeunload', () => {
 
 window.onload = init;
 
-if (window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.SplashScreen) {
-  Capacitor.Plugins.SplashScreen.hide();
-}
+// NOTE: the native splash is no longer hidden here at parse-time — that
+// revealed the un-settled WebView too early (card-then-read flash). The boot
+// cover in index.html now hands the splash off to itself after first paint and
+// stays up until revealApp() (mode + position restored). See index.html.
 
 // Make functions accessible to other scripts
 window.displayCard = displayCard;

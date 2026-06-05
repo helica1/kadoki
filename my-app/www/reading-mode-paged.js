@@ -3510,6 +3510,11 @@
     _readerCoverHideT = setTimeout(() => { try { window.hideReaderCover(); } catch (_) {} }, 4000);
   };
   window.hideReaderCover = function () {
+    // The reader entry has settled (entry scroll painted, or the 4s safety) —
+    // lift the boot cover too. No-op after the first reveal. Tying it here
+    // means ANY path that ends the reader entry also reveals the app, so a
+    // read-mode cold boot goes spinner → settled reader with no flash.
+    try { window.revealApp && window.revealApp(); } catch (_) {}
     if (!_readerCover) return;
     if (_readerCoverHideT) { clearTimeout(_readerCoverHideT); _readerCoverHideT = null; }
     if (_readerDotsT) { clearTimeout(_readerDotsT); _readerDotsT = null; }
