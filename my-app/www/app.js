@@ -3700,15 +3700,36 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   }
   resetCrossTitlePositionState();
 
-  // Read + parse SRT.
+  // Read + parse SRT. iOS can EVICT the materialized cache file (iCloud
+  // offload) while leaving a stale cachePath / 0-byte placeholder, so the
+  // fetch fails with "Load failed" on first open and only a manual reload
+  // (which re-materializes) works. Self-heal: on a read failure, force a fresh
+  // materialize from the original uri and retry ONCE so the first open works.
+  const _toFileUrl = (p) => (window.Capacitor && typeof window.Capacitor.convertFileSrc === 'function')
+    ? window.Capacitor.convertFileSrc(p)
+    : ('file://' + p);
+  async function _readSrtText(att) {
+    try {
+      const res = await fetch(_toFileUrl(att.cachePath));
+      if (!res.ok) throw new Error('SRT fetch status ' + res.status);
+      const t = await res.text();
+      if (!t) throw new Error('SRT empty (evicted placeholder?)');
+      return t;
+    } catch (e) {
+      if (att.uri && _fa?.materializeToCache) {
+        const m = await _fa.materializeToCache({ uri: att.uri });   // re-streams / downloads from iCloud
+        if (m?.path) {
+          att.cachePath = m.path;
+          const res2 = await fetch(_toFileUrl(att.cachePath));
+          if (res2.ok) return await res2.text();
+        }
+      }
+      throw e;
+    }
+  }
   let cues = [];
   try {
-    const url = (window.Capacitor && typeof window.Capacitor.convertFileSrc === 'function')
-      ? window.Capacitor.convertFileSrc(srtAtt.cachePath)
-      : ('file://' + srtAtt.cachePath);
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('SRT fetch status ' + res.status);
-    const text = await res.text();
+    const text = await _readSrtText(srtAtt);
     cues = window.srtParser.parseSrt(text);
   } catch (e) {
     alert('Failed to read SRT for this title: ' + (e?.message || e));

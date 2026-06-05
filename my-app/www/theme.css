@@ -135,6 +135,17 @@ body.has-cue-highlight #readingModeContent .reading-chunk.active {
   box-shadow: none;
 }
 
+/* Bookmark jump: briefly tint the chunk you return to, in a shade of the read
+   highlight colour (--accent-read — user-selectable, default green). */
+.reading-chunk.bm-flash {
+  animation: bmFlash 3.5s ease forwards;
+  border-radius: 3px;
+}
+@keyframes bmFlash {
+  0%, 70% { background-color: color-mix(in srgb, var(--accent-read, #4caf50) 32%, transparent); }
+  100%    { background-color: transparent; }
+}
+
 /* ---- Apply per-mode appearance vars ---- */
 body.mode-card #cardContainer .subtitle-text,
 body.mode-card #cardContainer .card-text {

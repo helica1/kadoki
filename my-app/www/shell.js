@@ -23,10 +23,10 @@
   // the live audio position. Read synchronously (mode switches can run
   // before preferences.js has set the cached global) with a localStorage
   // fallback so the default is exactly today's behavior when unset.
-  function isContinuousMode() {
-    if (typeof window._continuousMode === 'boolean') return window._continuousMode;
-    try { return localStorage.getItem('CONTINUOUS_MODE_V1') === 'true'; } catch (_) { return false; }
-  }
+  // Continuous mode is now the ONLY mode — always on. (Kept as a function so the
+  // many existing call sites don't need to change; the non-continuous branches
+  // they gate are now dead.)
+  function isContinuousMode() { return true; }
   // Single writer for the flag — keeps localStorage, the cached global, and
   // the Preferences checkbox (if mounted) all in agreement, so the hamburger
   // quick-toggle and the Preferences checkbox never disagree.
@@ -323,6 +323,15 @@
     _switchInFlight = true;
     _switchGen++;
     const myGen = _switchGen;
+
+    // Bookmarks: a switch INTO audio from card/read auto-saves where the user
+    // was reading, so they can jump back after the playhead runs ahead. Capture
+    // NOW (before the view teardown below, while the reader is still laid out);
+    // skip title-opens/restores (no prior in-session reading spot).
+    if (mode === 'audio' && (currentMode === 'card' || currentMode === 'read') &&
+        !(opts && opts.titleOpen) && window.bookmarks && window.bookmarks.capture) {
+      try { window.bookmarks.capture(currentMode); } catch (_) {}
+    }
 
     // === SYNCHRONOUS visibility flip ===
     // Flip views + tab UI THIS frame, before any await. That makes tab
@@ -811,17 +820,11 @@
 
     menu.appendChild(mkItem('Library…',        () => { if (typeof openLibrary === 'function') openLibrary(); }));
     menu.appendChild(mkDivider());
+    menu.appendChild(mkItem('Bookmarks…',      () => { if (window.bookmarks?.openMenu) window.bookmarks.openMenu(); }));
+    menu.appendChild(mkDivider());
     menu.appendChild(mkItem('Stats…',          () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); }));
     menu.appendChild(mkDivider());
     menu.appendChild(mkItem('Playback Speed…', () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
-    menu.appendChild(mkDivider());
-    // Quick toggle mirroring the Preferences → Playback checkbox. Label shows
-    // the current state; tapping flips it and toasts the new state.
-    menu.appendChild(mkItem('Continuous mode: ' + (isContinuousMode() ? 'On' : 'Off'), () => {
-      const next = !isContinuousMode();
-      setContinuousMode(next);
-      try { window.showToast?.('Continuous mode ' + (next ? 'on' : 'off'), 1500); } catch (_) {}
-    }));
     menu.appendChild(mkDivider());
     menu.appendChild(mkItem('Print…', () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); }));
     // "Log printed reading…" only appears once a print is pending (set by the

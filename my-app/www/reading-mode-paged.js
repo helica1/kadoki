@@ -1833,6 +1833,66 @@
     return { edgeIdx: chunks.indexOf(edgeChunk), frontierOff: maxFrontier };
   }
 
+  // ---- Bookmarks (Workstream A): read-location capture + restore ----
+  // First chunk whose END jp-offset passes `target` — used to re-resolve a
+  // bookmark after a font-size re-pagination shifted chunk indices.
+  function _findChunkForJpOff(target) {
+    if (!chunks?.length || !Number.isFinite(target)) return -1;
+    for (let i = 0; i < chunks.length; i++) {
+      const off = parseInt(chunks[i].dataset.jpOff) || 0;
+      const len = parseInt(chunks[i].dataset.jpLen) || 0;
+      if (target < off + len) return i;
+    }
+    return chunks.length - 1;
+  }
+  // The bookmark anchor for an ENRICHED (audio/SRT/EPUB) title: the chunk the
+  // audio cue was LAST playing (the green-highlighted chunk), NOT the EPUB
+  // scroll position. Returns null when no cue has been painted — i.e. there's
+  // no audio context, so the title isn't bookmark-worthy. Stored as chunkIdx
+  // (fast same-layout restore) + jpOff (human-readable char-offset + cross-
+  // layout fallback after a re-pagination).
+  window.pagedGetReadLocation = function () {
+    if (!(lastHighlightedChunkIdx >= 0 && lastHighlightedChunkIdx < (chunks?.length || 0))) return null;
+    const ch = chunks[lastHighlightedChunkIdx];
+    const jpOff = ch ? (parseInt(ch.dataset.jpOff) || 0) : 0;
+    return { chunkIdx: lastHighlightedChunkIdx, jpOff, bookName: currentName };
+  };
+  // Seed the per-book bookmark pref so a (re)open of that book lands here
+  // (used before opening a DIFFERENT title from the Bookmarks list).
+  window.pagedSeedBookmark = async function (loc) {
+    if (!loc || !loc.bookName || !Number.isFinite(loc.chunkIdx)) return;
+    try { await setPref(KEY_BOOKMARK_PREFIX + loc.bookName, String(loc.chunkIdx)); } catch (_) {}
+  };
+  // Jump the live reader to a bookmark — only if its book is the active one.
+  window.pagedJumpToBookmark = async function (loc) {
+    if (!loc) return;
+    try {
+      await window.pagedSeedBookmark(loc);
+      if (loc.bookName !== currentName || !chunks?.length) return;
+      let idx = loc.chunkIdx;
+      if (!(idx >= 0 && idx < chunks.length)) idx = _findChunkForJpOff(loc.jpOff);
+      if (!(idx >= 0 && idx < chunks.length)) return;
+      _bookmarkChunkIdx = idx;
+      try { await _waitForPagedLayout(1500); } catch (_) {}
+      scrollChunkNearRightWithContext(chunks[idx], 3, { allowFarJump: true });
+      _flashBookmarkChunk(chunks[idx]);
+    } catch (e) {}
+  };
+
+  // Briefly tint the chunk a bookmark was made at, so jumping back shows the
+  // user exactly which line they're returning to. Uses the read highlight
+  // colour (.bm-flash → var(--accent-read)); the CSS animation fades it out.
+  function _flashBookmarkChunk(ch) {
+    if (!ch) return;
+    try {
+      ch.classList.remove('bm-flash');
+      // reflow so re-adding the class restarts the animation on a repeat jump
+      void ch.offsetWidth;
+      ch.classList.add('bm-flash');
+      setTimeout(() => { try { ch.classList.remove('bm-flash'); } catch (_) {} }, 3800);
+    } catch (_) {}
+  }
+
   // Restart the 5 s settle timer on every USER page movement (read mode only).
   // Capture the book name AT ARM TIME so a timer armed for book A can never fire
   // after a switch to book B and save B's not-yet-restored (0) viewport.

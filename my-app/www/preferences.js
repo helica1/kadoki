@@ -531,8 +531,6 @@
       const v = localStorage.getItem('DICT_PAUSE_ON_LOOKUP');
       pauseToggle.checked = v === null || v === 'true';
     }
-    const contToggle = document.getElementById('continuousModeToggle');
-    if (contToggle) contToggle.checked = localStorage.getItem('CONTINUOUS_MODE_V1') === 'true';
     if (typeof window.syncModeColorPickers === 'function') window.syncModeColorPickers();
   };
 
@@ -590,11 +588,6 @@
     const pauseToggle = document.getElementById('pauseOnLookupToggle');
     if (pauseToggle) {
       localStorage.setItem('DICT_PAUSE_ON_LOOKUP', pauseToggle.checked ? 'true' : 'false');
-    }
-    const contToggle = document.getElementById('continuousModeToggle');
-    if (contToggle) {
-      localStorage.setItem('CONTINUOUS_MODE_V1', contToggle.checked ? 'true' : 'false');
-      window._continuousMode = contToggle.checked;
     }
     window.closePreferences();
     if (typeof showToast === 'function') showToast('Preferences saved', 2000);

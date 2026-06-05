@@ -825,22 +825,7 @@ body.dimmed .card-image {
           </div>
         </details>
 
-        <!-- ===== PLAYBACK ===== -->
-        <details open class="prefs-section">
-          <summary class="prefs-heading">Playback</summary>
-          <label style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;color:#ccc;cursor:pointer;font-size:.9rem;">
-            <input id="continuousModeToggle" type="checkbox" style="width:18px;height:18px;flex:none;margin-top:2px;">
-            <span>
-              Continuous mode
-              <span style="display:block;font-size:.74rem;color:#777;margin-top:3px;line-height:1.45;">
-                Keep Card, Read &amp; Audio synced to one playhead. Audio keeps
-                playing as you switch modes — no “where to resume?” prompt.
-                When off, switching out of Audio still asks. (Audiobook / SRT
-                titles only.)
-              </span>
-            </span>
-          </label>
-        </details>
+        <!-- Playback section removed — continuous mode is now always on. -->
 
         <!-- Paged-reader toggle removed — vertical paged is now the only
              reader. Tap = dict lookup, swipe-UP = select cue (menu shows
@@ -1258,6 +1243,7 @@ body.dimmed .card-image {
   <script src="folder-import.js"></script>
   <script src="cover-extract.js"></script>
   <script src="stats.js"></script>
+  <script src="bookmarks.js"></script>
   <!-- Yomitan deinflector port lives on disk but is NOT loaded — its
        IIFE built a 834-rule descriptor at script-load (~2 s on iOS
        JavaScriptCore) and per-tap iteration through Yomitan's rule set
@@ -1998,6 +1984,7 @@ body.dimmed .card-image {
     }
     window.rehydrateTitleCachePaths = rehydrateTitleCachePaths;
 
+    window.loadTitleFromLibrary = loadTitleFromLibrary; // bookmarks: cross-title jump
     async function loadTitleFromLibrary(title) {
       debugLog('📚 Loading title: ' + title.name);
       // Deliberate open → clear any safe-boot suppression and lift this
