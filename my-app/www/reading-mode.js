@@ -2543,6 +2543,13 @@
         cueEl.textContent = '…';
       }
     }
+    // Upcoming cue (grayed, plain text → not dict-tappable). Always kept in
+    // sync here; CSS (body.pref-audio-nextsub-on) decides whether it shows.
+    const nextEl = document.getElementById('audiobookNextCueText');
+    if (nextEl) {
+      const nx = (idx >= 0 && idx + 1 < abCues.length) ? abCues[idx + 1] : null;
+      nextEl.textContent = (nx && nx.text) ? nx.text : '';
+    }
     console.log('[abUpdate] cue=' + idx + ' pos=' + positionMs +
       ' mapsReady=' + !!abCueToChunk + ' chunks=' + chunks.length);
 

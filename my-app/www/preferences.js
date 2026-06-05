@@ -192,6 +192,17 @@
       return wrap;
     };
 
+    // Boolean on/off control. getOn() reads the current state; onChange(bool)
+    // persists. Works for real booleans and for the imageDisplay block/none var.
+    const toggle = (getOn, onChange) => {
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!getOn();
+      cb.style.cssText = 'width:22px;height:22px;accent-color:var(--accent-read,#4caf50);cursor:pointer;';
+      cb.addEventListener('change', () => onChange(cb.checked));
+      return cb;
+    };
+
     const row = (labelText, control) => {
       const r = document.createElement('div');
       r.className = 'prefs-row';
@@ -272,6 +283,32 @@
       }
 
       block.appendChild(row('Font size', fontSizeRange(mode, () => get().fontSize)));
+
+      // Display toggles.
+      if (mode === 'card') {
+        block.appendChild(row('Show background image', toggle(
+          () => get().showBgImage !== false,
+          (on) => apply('card', { showBgImage: on })
+        )));
+        block.appendChild(row('Show waveform', toggle(
+          () => get().showWaveform !== false,
+          (on) => apply('card', { showWaveform: on })
+        )));
+        block.appendChild(row('Show upcoming subtitle', toggle(
+          () => get().showNextSub === true,
+          (on) => apply('card', { showNextSub: on })
+        )));
+      }
+      if (mode === 'audio') {
+        block.appendChild(row('Show waveform', toggle(
+          () => get().showWaveform !== false,
+          (on) => apply('audio', { showWaveform: on })
+        )));
+        block.appendChild(row('Show upcoming subtitle', toggle(
+          () => get().showNextSub === true,
+          (on) => apply('audio', { showNextSub: on })
+        )));
+      }
 
       // Card-only extras (moved from the deleted Card mode prefs section).
       if (mode === 'card') {

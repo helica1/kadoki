@@ -2763,6 +2763,22 @@ async function loadFieldMappings(deckName) {
 }
 
 // Fixed displayCard with proper caching logic
+// Place the (absolutely-positioned) upcoming subtitle just below the live one.
+// The live .subtitle-text is position:absolute (the subtitle-offset rule), so
+// flow can't stack them — measure and set the next one's top per card.
+function _positionCardNextSub() {
+  try {
+    const container = document.getElementById('cardContainer');
+    if (!container) return;
+    const st = container.querySelector('.subtitle-text');
+    const sn = container.querySelector('.subtitle-next');
+    if (!st || !sn) return;
+    const cr = container.getBoundingClientRect();
+    const sr = st.getBoundingClientRect();
+    sn.style.top = Math.round(sr.bottom - cr.top + 10) + 'px';
+  } catch (_) {}
+}
+
 async function displayCard() {
   if (!allNotes || allNotes.length === 0) return;
 
@@ -2819,14 +2835,22 @@ async function displayCard() {
     debugLog(`displayCard: index changed mid-await ${capturedIndex} → ${currentCardIndex}, re-rendering`);
     return displayCard();
   }
+  // Upcoming-subtitle (next card's text), rendered grayed BELOW the current
+  // one. Always emitted when a next card exists; CSS (body.pref-card-nextsub-on)
+  // decides whether it's visible, so toggling the pref needs no re-render.
+  const _nextNote = allNotes[capturedIndex + 1];
+  const nextHtml = (_nextNote && _nextNote.expression)
+    ? `<div class="subtitle-next">${_nextNote.expression}</div>` : '';
   // SRT-card path: this card's audio is a segment of an audiobook. Play via
   // BackgroundAudio plugin (no per-card mp3 file). Skip the new-Audio path.
   if (card.isSrtCard) {
     container.innerHTML = `
       <div class="subtitle-text">${card.expression}</div>
+      ${nextHtml}
       <div id="srtCardWaveform" style="width:90%;max-width:520px;margin:auto auto calc(96px + env(safe-area-inset-bottom, 0px)) auto;order:2;align-self:center;flex:0 0 auto;"></div>
     `;
     if (window.wrapSubtitleTokens) window.wrapSubtitleTokens();
+    requestAnimationFrame(_positionCardNextSub);
     if (window.syncReadingToCard) {
       try { window.syncReadingToCard(card.expression); } catch (e) {}
     }
@@ -2837,7 +2861,13 @@ async function displayCard() {
       // audiobook flow through the inter-cue silence like audio mode, so don't
       // arm the per-cue end-stop. Single-card playback (navigating to a card
       // while paused) still stops at the cue's endMs.
-      _srtCardEndMs = window.audioAutoAdvance ? 0 : (card.audiobookEndMs || 0);
+      // Continuous mode is the ONLY mode now → audio always plays THROUGH cue
+      // boundaries; never arm the per-cue end-stop. (It used to gate on
+      // audioAutoAdvance, which wasn't reliably set the instant you switched to
+      // card with audio playing, so the bg listener stopped audio at the cue
+      // end — the "audio stops when switching to card mode" bug.)
+      _srtCardEndMs = (window.isContinuousMode && window.isContinuousMode())
+        ? 0 : (window.audioAutoAdvance ? 0 : (card.audiobookEndMs || 0));
       _ensureBgListenersForSrtCards();
       // When a cross-mode sync (e.g., switching to card mode while audio
       // was already playing) brought us here, audio is already at the
@@ -2868,7 +2898,8 @@ async function displayCard() {
     // will use the adjusted bounds. Continuous play re-shows this for each new
     // cue; waveform.show() carries the playhead across a same-source re-show so
     // the cursor glides through cue boundaries instead of cold-starting.
-    if (window.waveform && card.audiobookPath) {
+    if (window.waveform && card.audiobookPath &&
+        !document.body.classList.contains('pref-card-waveform-off')) {
       window.waveform.show({
         container: document.getElementById('srtCardWaveform'),
         srcPath: card.audiobookPath,
@@ -2891,9 +2922,11 @@ async function displayCard() {
   container.innerHTML = `
     ${imageHtml}
     <div class="subtitle-text">${card.expression}</div>
+    ${nextHtml}
   `;
 
   if (window.wrapSubtitleTokens) window.wrapSubtitleTokens();
+  requestAnimationFrame(_positionCardNextSub);
 
   if (window.syncReadingToCard) {
     try { window.syncReadingToCard(card.expression); }

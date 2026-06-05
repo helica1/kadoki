@@ -103,9 +103,16 @@
     window.addEventListener('resize', resizeCanvas);
     return canvas;
   }
+  // Honour the audio "Show waveform" preference (appearance.js sets the body
+  // class). When off we both hide the canvas AND idle the rAF loop, so it isn't
+  // burning 60 fps drawing a hidden strip.
+  function waveformPrefOn() {
+    return !document.body.classList.contains('pref-audio-waveform-off');
+  }
   function setVisible(v) {
-    if (canvas) canvas.style.display = v ? 'block' : 'none';
-    if (v) startLoop(); else stopLoop();
+    const show = v && waveformPrefOn();
+    if (canvas) canvas.style.display = show ? 'block' : 'none';
+    if (show) startLoop(); else stopLoop();
   }
 
   // ---------- cues ----------
@@ -337,7 +344,7 @@
   // ---------- continuous rAF loop (visible only) ----------
   function frame() {
     if (!running) { rafHandle = null; return; }
-    const inAudio = document.body.classList.contains('mode-audio');
+    const inAudio = document.body.classList.contains('mode-audio') && waveformPrefOn();
     if (inAudio) { try { draw(); } catch (e) {} }
     // Keep the loop alive only while playing, or briefly after a wake so the
     // ease settles; otherwise idle to save battery. Leaving audio mode also
@@ -392,7 +399,14 @@
           const dv = d.positionMs - lastPositionMs, dt = t - lastPositionAt;
           if (dt > 20 && dv >= 0 && dv < 8000) {
             const inst = dv / dt;                       // ms audio per ms real
-            measuredRate = measuredRate * 0.6 + inst * 0.4;
+            // Heavier low-pass (was .4) so a single late/early native event
+            // (events arrive ~150ms apart and jitter, esp. just after
+            // play/resume) can't jolt the extrapolation speed — the true rate
+            // is ~constant. Then clamp to a band around the REQUESTED rate so a
+            // noisy delta can't fling the playhead. This was the playhead jitter.
+            measuredRate = measuredRate * 0.85 + inst * 0.15;
+            const want = window.audioPlaybackRate || 1;
+            measuredRate = Math.max(want * 0.6, Math.min(want * 1.5, measuredRate));
           }
         }
         lastPositionMs = d.positionMs;
@@ -420,6 +434,11 @@
     if (window._liveWaveformInited) return;
     if (!ensureCanvas()) { setTimeout(init, 200); return; }
     window._liveWaveformInited = true;
+    // Let appearance.js re-apply the waveform pref live (toggling the audio
+    // "Show waveform" preference while in audio mode shows/hides + wakes/idles).
+    window._liveWaveformApplyVisibility = function () {
+      setVisible(document.body.classList.contains('mode-audio'));
+    };
     setVisible(false);
     attachBg();
     watchSrc();

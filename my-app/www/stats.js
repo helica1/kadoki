@@ -293,6 +293,12 @@
     const inAudio = newMode === 'audio';
     if (window._bgPlaying && inAudio && !timers.audio.runningSince) startMode('audio');
     if ((!window._bgPlaying || !inAudio) && timers.audio.runningSince) stopMode('audio');
+    // Card mirrors audio: while the playhead is running (continuous-mode SRT /
+    // audio playback), entering card should start its timer too. Read already
+    // starts via bumpRead on the bg 'state' listener; card had no equivalent,
+    // so switching into card with audio playing never started the timer.
+    const inCard = newMode === 'card';
+    if (window._bgPlaying && inCard && !timers.card.runningSince) startMode('card');
   }
 
   // Periodic check: inactivity timeouts + a mode/audio reconciliation backstop.

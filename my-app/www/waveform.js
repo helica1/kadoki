@@ -486,16 +486,25 @@
       console.warn('[waveform] AudioSlicer plugin not available');
       return [];
     }
-    try {
-      const r = await slicer.getWaveform({ srcPath, startMs, endMs, samples: 200 });
-      const arr = Array.isArray(r.samples) ? r.samples : [];
-      console.log('[waveform] decoded ' + arr.length + ' buckets, peak=' +
-        (arr.length ? Math.max(...arr).toFixed(3) : 'n/a'));
-      return arr;
-    } catch (e) {
-      console.warn('[waveform] decode failed:', e?.message || e);
-      return [];
+    const attempt = async () => {
+      try {
+        const r = await slicer.getWaveform({ srcPath, startMs, endMs, samples: 200 });
+        return Array.isArray(r.samples) ? r.samples : [];
+      } catch (e) {
+        console.warn('[waveform] decode failed:', e?.message || e);
+        return [];
+      }
+    };
+    let arr = await attempt();
+    if (!arr.length) {
+      // The slicer is sometimes busy right after a rapid re-show (continuous
+      // play re-slices per cue). One delayed retry before giving up so a
+      // transient miss doesn't surface as "waveform unavailable".
+      await new Promise(r => setTimeout(r, 160));
+      arr = await attempt();
     }
+    console.log('[waveform] decoded ' + arr.length + ' buckets');
+    return arr;
   }
 
   // Cancel any in-flight preview listener.
@@ -519,6 +528,13 @@
       // events at every cue boundary, which was the continuous-play jitter.
       const carry = (state && state.srcPath === srcPath && state.playheadPlaying)
         ? { ms: state.playheadMs, disp: state.playheadDispMs }
+        : null;
+      // Carry the prior slice's BUCKETS on a same-source re-show so the strip
+      // never blanks to "waveform unavailable" between cues while the new slice
+      // decodes (continuous play re-slices per cue, and a slice occasionally
+      // returns empty mid-rush). Refined async by loadWaveform below.
+      const carryBuckets = (state && state.srcPath === srcPath && state.buckets && state.buckets.length)
+        ? { buckets: state.buckets, s: state.bucketsStartMs, e: state.bucketsEndMs }
         : null;
       this.hide();
       const wfStartMs = Math.max(0, startMs - VIEWPORT_PAD_MS);
@@ -544,7 +560,9 @@
         endLabel:   container.querySelector('[data-role="end"]'),
         lenLabel:   container.querySelector('[data-role="len"]'),
         srcPath,
-        buckets: [],
+        buckets: carryBuckets ? carryBuckets.buckets : [],
+        bucketsStartMs: carryBuckets ? carryBuckets.s : undefined,
+        bucketsEndMs: carryBuckets ? carryBuckets.e : undefined,
         wfStartMs,
         wfEndMs,
         startMs,
@@ -574,6 +592,7 @@
       // Kick off the actual waveform decode in the background.
       loadWaveform(srcPath, wfStartMs, wfEndMs).then(buckets => {
         if (!state || state.srcPath !== srcPath) return;
+        if (!buckets || !buckets.length) return;  // keep carried buckets — don't blank to "unavailable"
         state.buckets = buckets;
         state.bucketsStartMs = wfStartMs;
         state.bucketsEndMs = wfEndMs;
@@ -596,7 +615,12 @@
             const dv = d.positionMs - prevPos, dt = nowTs - state.playheadLastTs;
             if (dt > 20 && dv >= 0 && dv < 8000) {
               const inst = dv / dt;
-              state.playheadRate = (state.playheadRate || (window.audioPlaybackRate || 1)) * 0.6 + inst * 0.4;
+              // Heavier low-pass (was .4) so a single late/early native event
+              // can't jolt the speed, then clamp to a band around the requested
+              // rate so a noisy delta can't fling the playhead (the jitter).
+              state.playheadRate = (state.playheadRate || (window.audioPlaybackRate || 1)) * 0.85 + inst * 0.15;
+              const want = window.audioPlaybackRate || 1;
+              state.playheadRate = Math.max(want * 0.6, Math.min(want * 1.5, state.playheadRate));
             }
           }
           // Reject minor backward steps (the native poll occasionally

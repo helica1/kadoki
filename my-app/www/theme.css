@@ -217,6 +217,39 @@ body.mode-audio #audiobookCardImage {
   align-self: var(--image-audio-align);
 }
 
+/* ---- Appearance toggles (preferences) ---- */
+/* The waveforms set their display inline from JS, so override with !important.
+   #cardBackgroundImage is the blurred ambient cover backdrop (shell.js); its
+   opacity is set inline (0.10) so we override that too. */
+body.pref-card-waveform-off  #srtCardWaveform     { display: none !important; }
+body.pref-audio-waveform-off #liveWaveform        { display: none !important; }
+body.pref-card-bgimage-off   #cardBackgroundImage { opacity: 0 !important; }
+/* Upcoming (next) subtitle — rendered always, hidden unless its pref is on,
+   then shown grayed. Plain text in a separate class so it's not dict-tappable
+   and doesn't get token-wrapped like the live subtitle. */
+.subtitle-next, #audiobookNextCueText {
+  display: none;
+  opacity: 0.42;
+  color: #fff;
+  text-align: center;
+  pointer-events: none;
+}
+/* Audio: in-flow flex item, sits naturally below the live cue. */
+#audiobookNextCueText { margin-top: 6px; font-size: 1.05rem; line-height: 1.5; flex-shrink: 0; }
+body.mode-audio #audiobookNextCueText { font-family: var(--font-family-audio); }
+body.pref-audio-nextsub-on #audiobookNextCueText { display: block; }
+/* Card: the live .subtitle-text is position:absolute (offset rule), so flow
+   stacking superimposes. Position this one absolutely just BELOW it — top is
+   set per-card by JS (_positionCardNextSub); the calc is a 1-line fallback. */
+.subtitle-next {
+  position: absolute; left: 10%; right: 10%; width: 80%; box-sizing: border-box;
+  top: calc(env(safe-area-inset-top, 0px) + var(--subtitle-offset, 65px) + 3.2em);
+  padding: 2px 20px;
+  text-shadow: 1px 1px 6px rgba(0,0,0,.9), -1px -1px 6px rgba(0,0,0,.9);
+}
+body.mode-card .subtitle-next { font-family: var(--font-family-card); font-size: calc(var(--font-size-card, 1.875rem) * 0.62); }
+body.pref-card-nextsub-on .subtitle-next { display: block; }
+
 /* =====================================================================
  * Utility classes
  * ===================================================================== */

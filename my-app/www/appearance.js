@@ -30,14 +30,19 @@
     // Defaults updated 2026-05-30 per user request:
     // card/audio = 30 px (1.875 rem), read = 28 px (1.75 rem).
     card:  { fontSize: '1.875rem', align: 'center', fontFamily: 'serif',
-             imageDisplay: 'block', imageOpacity: 1, imageAlign: 'flex-start' },
+             imageDisplay: 'block', imageOpacity: 1, imageAlign: 'flex-start',
+             // Toggles (default = preserve current behavior): show the SRT-card
+             // waveform + the blurred ambient cover backdrop; show the upcoming
+             // subtitle (grayed) is opt-in OFF.
+             showWaveform: true, showNextSub: false, showBgImage: true },
     read:  { fontSize: '1.75rem', align: 'left',   fontFamily: 'serif',
              imageDisplay: 'none',  imageOpacity: 1, imageAlign: 'flex-start',
              // 'bg' = current behavior (translucent fill + underline);
              // 'text' = recolor the cue text only (less artifact-prone).
              highlightStyle: 'text' },
     audio: { fontSize: '1.875rem', align: 'center', fontFamily: 'serif',
-             imageDisplay: 'block', imageOpacity: 0.6, imageAlign: 'center' }
+             imageDisplay: 'block', imageOpacity: 0.6, imageAlign: 'center',
+             showWaveform: true, showNextSub: false }
   };
 
   function deepMerge(into, from) {
@@ -100,6 +105,20 @@
     const hs = (state.read && state.read.highlightStyle) || DEFAULTS.read.highlightStyle;
     document.body.classList.toggle('highlight-text', hs === 'text');
     document.body.classList.toggle('highlight-bg',   hs !== 'text');
+
+    // Appearance toggles → body classes. Only the NON-default state adds a
+    // class (clean profile = no class). CSS keys off these to show/hide the
+    // waveforms (overriding JS-set inline display via !important) and the
+    // grayed upcoming-subtitle elements. The livewaveform hook re-evaluates
+    // its canvas + idles the rAF loop when hidden (so it's not just CSS-hidden
+    // while still drawing). Hooks may not exist yet at boot — guarded.
+    const cardS = state.card || {}, audioS = state.audio || {};
+    document.body.classList.toggle('pref-card-waveform-off',  cardS.showWaveform === false);
+    document.body.classList.toggle('pref-card-bgimage-off',   cardS.showBgImage === false);
+    document.body.classList.toggle('pref-card-nextsub-on',    cardS.showNextSub === true);
+    document.body.classList.toggle('pref-audio-waveform-off', audioS.showWaveform === false);
+    document.body.classList.toggle('pref-audio-nextsub-on',   audioS.showNextSub === true);
+    try { window._liveWaveformApplyVisibility && window._liveWaveformApplyVisibility(); } catch (_) {}
   }
 
   const current = load();
