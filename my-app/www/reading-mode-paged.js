@@ -206,8 +206,12 @@
          glyph variants from Hiragino (built into iOS). */
       #readingPagedInner,
       #readingPagedInner * {
-        font-family: "Hiragino Mincho ProN", "Hiragino Mincho Pro",
-                     "YuMincho", "Yu Mincho", serif !important;
+        /* Honour the appearance font picker (--font-family-read, incl. imported
+           custom fonts); fall back to the vertical-capable Hiragino mincho
+           stack when unset. This rule's !important also overrides the EPUB's
+           own fonts so the reader font wins. */
+        font-family: var(--font-family-read, "Hiragino Mincho ProN", "Hiragino Mincho Pro",
+                     "YuMincho", "Yu Mincho", serif) !important;
         font-feature-settings: "vert" 1, "vrt2" 1, "vkrn" 1 !important;
         -webkit-font-feature-settings: "vert" 1, "vrt2" 1, "vkrn" 1 !important;
         text-orientation: mixed !important;

@@ -89,6 +89,58 @@
 
     const apply = (mode, patch) => window.appearance?.set?.(mode, patch);
 
+    // ---- Custom fonts (import a TTF/OTF, then pick it per mode) ----
+    function triggerFontImport(onDone) {
+      let input = document.getElementById('fontImportInput');
+      if (!input) {
+        input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.ttf,.otf,.ttc,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2';
+        input.id = 'fontImportInput';
+        input.style.display = 'none';
+        document.body.appendChild(input);
+      }
+      input.value = '';
+      input.onchange = async () => {
+        const f = input.files && input.files[0];
+        if (!f || !window.fonts) return;
+        try { const info = await window.fonts.importFile(f); if (onDone) onDone(info); }
+        catch (e) { alert('Font import failed: ' + (e && e.message || e)); }
+      };
+      input.click();
+    }
+    // Rebuild the whole appearance section so every mode's picker + the font
+    // manager reflect an import/delete.
+    function refreshAppearance() {
+      if (host) { host.dataset.built = ''; buildAppearanceSection(); }
+    }
+    // Per-mode font picker: built-in serif/sans + imported customs + Import.
+    function fontControl(mode, getCurrent) {
+      const sel = document.createElement('select');
+      const cur = getCurrent();
+      [['Serif', 'serif'], ['Sans-serif', 'sans']].forEach(([label, val]) => {
+        const o = document.createElement('option'); o.value = val; o.textContent = label;
+        if (cur === val) o.selected = true; sel.appendChild(o);
+      });
+      ((window.fonts && window.fonts.list && window.fonts.list()) || []).forEach(f => {
+        const o = document.createElement('option');
+        o.value = 'custom:' + f.id; o.textContent = f.name;
+        if (cur === 'custom:' + f.id) o.selected = true; sel.appendChild(o);
+      });
+      const imp = document.createElement('option');
+      imp.value = '__import__'; imp.textContent = '➕ Import TTF…';
+      sel.appendChild(imp);
+      sel.addEventListener('change', () => {
+        if (sel.value === '__import__') {
+          sel.value = cur;   // don't leave "Import…" selected if cancelled
+          triggerFontImport((info) => { apply(mode, { fontFamily: 'custom:' + info.id }); refreshAppearance(); });
+          return;
+        }
+        apply(mode, { fontFamily: sel.value });
+      });
+      return sel;
+    }
+
     const SEG = (modeId, suffix, options, getCurrent) => {
       const div = document.createElement('div');
       div.className = 'seg';
@@ -264,23 +316,10 @@
 
       const get = () => window.appearance?.get?.(mode) || window.appearance?.defaults?.()[mode];
 
-      // Font family — only Serif / Sans-serif, and only for Card + Audio.
-      // Read mode is locked to Serif per user request.
-      if (mode === 'card' || mode === 'audio') {
-        const FONT_OPTIONS = [
-          ['Serif',      'serif'],
-          ['Sans-serif', 'sans']
-        ];
-        const fontSelect = document.createElement('select');
-        FONT_OPTIONS.forEach(([label, key]) => {
-          const opt = document.createElement('option');
-          opt.value = key; opt.textContent = label;
-          if (get().fontFamily === key) opt.selected = true;
-          fontSelect.appendChild(opt);
-        });
-        fontSelect.addEventListener('change', () => apply(mode, { fontFamily: fontSelect.value }));
-        block.appendChild(row('Font family', fontSelect));
-      }
+      // Font family — Serif / Sans-serif, any imported custom (TTF) fonts, and
+      // an "Import TTF…" action. Shown for ALL modes so fonts can be set per
+      // mode (read included).
+      block.appendChild(row('Font family', fontControl(mode, () => get().fontFamily)));
 
       block.appendChild(row('Font size', fontSizeRange(mode, () => get().fontSize)));
 
@@ -322,6 +361,35 @@
     host.appendChild(modeBlock('card'));
     host.appendChild(modeBlock('read'));
     host.appendChild(modeBlock('audio'));
+
+    // Imported-fonts manager — list + delete (preview each name in its font).
+    const imported = (window.fonts && window.fonts.list && window.fonts.list()) || [];
+    if (imported.length) {
+      const mgr = document.createElement('div');
+      mgr.className = 'appearance-mode';
+      const lbl = document.createElement('div');
+      lbl.className = 'mode-label';
+      lbl.textContent = 'Imported fonts';
+      mgr.appendChild(lbl);
+      imported.forEach(f => {
+        const r = document.createElement('div');
+        r.className = 'prefs-row';
+        const nm = document.createElement('label');
+        nm.textContent = f.name;
+        nm.style.fontFamily = '"' + f.family + '", serif';
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.textContent = 'Delete';
+        del.style.cssText = 'background:#2a1414;color:#e88;border:1px solid #5a2a2a;border-radius:6px;padding:5px 12px;font-size:.8rem;cursor:pointer;';
+        del.addEventListener('click', async () => {
+          try { await window.fonts.remove(f.id); } catch (_) {}
+          refreshAppearance();
+        });
+        r.appendChild(nm); r.appendChild(del);
+        mgr.appendChild(r);
+      });
+      host.appendChild(mgr);
+    }
   }
 
   function populateDeckSelect(select, decks, value) {

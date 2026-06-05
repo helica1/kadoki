@@ -78,13 +78,22 @@
       const fontKey = s.fontFamily || DEFAULTS[mode].fontFamily;
       root.style.setProperty(`--font-size-${mode}`,      s.fontSize     || DEFAULTS[mode].fontSize);
       root.style.setProperty(`--align-${mode}`,          s.align        || DEFAULTS[mode].align);
-      // Read mode is always serif per user request — appearance UI
-      // doesn't expose font family for read anymore. For card + audio
-      // the picker is limited to serif/sans; any other legacy stored
-      // value (system, mono, jpSans, jpSerif) falls back to serif.
-      let resolved = FONT_STACKS[fontKey];
-      if (mode === 'read') resolved = FONT_STACKS.serif;
-      else if (fontKey !== 'serif' && fontKey !== 'sans') resolved = FONT_STACKS.serif;
+      // Resolve the font family. A user-imported font is stored as
+      // 'custom:<id>' → use its registered FontFace family name (kfont-<id>)
+      // with JP-aware fallbacks (used while the face is still loading, and for
+      // any glyphs the imported font lacks). Otherwise the built-in picker
+      // exposes serif/sans; any other legacy stored value falls back to serif.
+      // (Custom fonts are honoured for ALL modes — read included — so fonts can
+      // be set per mode.)
+      let resolved;
+      if (typeof fontKey === 'string' && fontKey.indexOf('custom:') === 0) {
+        const fam = (window.fonts && window.fonts.familyFor) ? window.fonts.familyFor(fontKey.slice(7)) : null;
+        resolved = fam ? `"${fam}", "Noto Sans CJK JP", "Hiragino Kaku Gothic Pro", sans-serif`
+                       : FONT_STACKS.serif;
+      } else {
+        resolved = FONT_STACKS[fontKey];
+        if (fontKey !== 'serif' && fontKey !== 'sans') resolved = FONT_STACKS.serif;
+      }
       root.style.setProperty(`--font-family-${mode}`, resolved || FONT_STACKS.serif);
       root.style.setProperty(`--image-${mode}-display`,  s.imageDisplay || DEFAULTS[mode].imageDisplay);
       root.style.setProperty(`--image-${mode}-opacity`,  s.imageOpacity ?? DEFAULTS[mode].imageOpacity);
@@ -136,6 +145,9 @@
     },
     all() { return JSON.parse(JSON.stringify(current)); },
     defaults() { return JSON.parse(JSON.stringify(DEFAULTS)); },
-    fontStacks() { return { ...FONT_STACKS }; }
+    fontStacks() { return { ...FONT_STACKS }; },
+    // Re-apply current state to the CSS vars (e.g. after a custom font finishes
+    // registering, or fonts are imported/removed).
+    refresh() { applyAll(current); }
   };
 })();
