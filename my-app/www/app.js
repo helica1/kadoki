@@ -2847,7 +2847,7 @@ async function displayCard() {
     container.innerHTML = `
       <div class="subtitle-text">${card.expression}</div>
       ${nextHtml}
-      <div id="srtCardWaveform" style="width:90%;max-width:520px;margin:auto auto calc(96px + env(safe-area-inset-bottom, 0px)) auto;order:2;align-self:center;flex:0 0 auto;"></div>
+      <div id="srtCardWaveform" style="width:100%;max-width:none;margin:auto 0 calc(96px + env(safe-area-inset-bottom, 0px)) 0;order:2;align-self:stretch;flex:0 0 auto;"></div>
     `;
     if (window.wrapSubtitleTokens) window.wrapSubtitleTokens();
     requestAnimationFrame(_positionCardNextSub);
@@ -2900,11 +2900,31 @@ async function displayCard() {
     // the cursor glides through cue boundaries instead of cold-starting.
     if (window.waveform && card.audiobookPath &&
         !document.body.classList.contains('pref-card-waveform-off')) {
+      // Window each card from its cue start through the trailing silence up to
+      // the NEXT cue (full width), so the playhead is seen advancing through the
+      // gap between cards — and pre-render the next card's window so its swap is
+      // instant (no decode flash).
+      const _i = capturedIndex;
+      const _nxt = allNotes[_i + 1], _nxt2 = allNotes[_i + 2];
+      const _WF_LEAD = 400, _WF_TRAIL = 1500, _WF_MAX = 12000;
+      const _wfWin = (c, after) => {
+        let s = Math.max(0, (c.audiobookStartMs || 0) - _WF_LEAD);
+        let e = (after && Number.isFinite(after.audiobookStartMs))
+          ? after.audiobookStartMs : ((c.audiobookEndMs || 0) + _WF_TRAIL);
+        if (e - s > _WF_MAX) e = s + _WF_MAX;
+        if (e <= s) e = s + 1000;
+        return { s, e };
+      };
+      const _win = _wfWin(card, _nxt);
+      const _pre = _nxt ? _wfWin(_nxt, _nxt2) : null;
       window.waveform.show({
         container: document.getElementById('srtCardWaveform'),
         srcPath: card.audiobookPath,
         startMs: card.audiobookStartMs,
         endMs: card.audiobookEndMs,
+        viewStartMs: _win.s, viewEndMs: _win.e,
+        cacheKey: 'c' + _i,
+        preload: _pre ? { viewStartMs: _pre.s, viewEndMs: _pre.e, key: 'c' + (_i + 1) } : null,
         onChange: ({ startMs, endMs }) => {
           card.audiobookStartMs = startMs;
           card.audiobookEndMs = endMs;
@@ -3645,6 +3665,14 @@ function _ensureBgListenersForSrtCards() {
   _srtEndListenerAttached = true;
   bg.addListener('state', (d) => {
     window._bgPlaying = !!d.playing;
+    // Card waveform: the draggable bounds show only when STOPPED. Re-render the
+    // editor on every play/pause from THIS persistent listener (set _bgPlaying
+    // first, above, so render() reads the correct state). The editor's own
+    // state listener is attached async per re-show and can miss a pause that
+    // lands right after a card advance — which is why the bounds didn't appear.
+    if (document.body.classList.contains('mode-card')) {
+      try { window.waveform?.renderNow?.(); } catch (_) {}
+    }
     // Strip refresh on play/pause only matters in AUDIO mode (where
     // the strip shows mm:ss / mm:ss). In read mode, the user wants
     // the scroll-derived character position; in card mode, card N/M.

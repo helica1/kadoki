@@ -222,6 +222,11 @@ body.mode-audio #audiobookCardImage {
    #cardBackgroundImage is the blurred ambient cover backdrop (shell.js); its
    opacity is set inline (0.10) so we override that too. */
 body.pref-card-waveform-off  #srtCardWaveform     { display: none !important; }
+/* NOTE: a per-card fade/rise CSS animation here promoted #srtCardWaveform to a
+   compositing layer, and Android WebView won't re-composite the LIVE canvas
+   inside an animating layer for the animation's duration — so the playhead
+   appeared to hang for the first ~moments of every card on Android (iOS was
+   fine). Removed; the pre-render makes the swap clean without it. */
 body.pref-audio-waveform-off #liveWaveform        { display: none !important; }
 body.pref-card-bgimage-off   #cardBackgroundImage { opacity: 0 !important; }
 /* Upcoming (next) subtitle — rendered always, hidden unless its pref is on,

@@ -29,25 +29,35 @@
       playheadRAF = null;
       return;
     }
-    // Use the MEASURED velocity (falls back to the configured rate) so the line
-    // tracks true playback speed without drift.
-    const rate = state.playheadRate || window.audioPlaybackRate || 1;
-    const dt = performance.now() - (state.playheadLastTs || 0);
-    // Stale-event guard: when dt is huge (paused tab, slow first event),
-    // don't extrapolate ahead — wait for a fresh position event.
-    const raw = dt > 300 ? state.playheadMs : state.playheadMs + dt * rate;
-    // Low-pass the displayed position so the per-event correction eases in
-    // instead of snapping (snapping is what looked jittery at high speed).
-    if (!Number.isFinite(state.playheadDispMs)) state.playheadDispMs = raw;
-    const diff = raw - state.playheadDispMs;
-    if (Math.abs(diff) > 1200) state.playheadDispMs = raw; // seek → snap
-    else state.playheadDispMs += diff * 0.3;
+    // SMOOTH playhead: a free-running clock advanced at the CONSTANT requested
+    // playback rate (constant velocity ⇒ no frame-to-frame speed wobble), only
+    // GENTLY phase-locked to the real position. Measuring the rate from the
+    // noisy ~150ms native position events made the velocity jitter every frame —
+    // which is invisible in AUDIO mode (the film scrolls, so the cursor is
+    // ~stationary) but obvious HERE, where the cursor sweeps across a fixed
+    // waveform, so any velocity wobble shows directly as jitter.
+    const now = performance.now();
+    const frameDt = Math.min(100, now - (state._tickTs || now));
+    state._tickTs = now;
+    const rate = window.audioPlaybackRate || 1;
+    const sinceEvent = Math.max(0, now - (state.playheadLastTs || now));
+    if (!Number.isFinite(state.playheadDispMs)) state.playheadDispMs = state.playheadMs;
+    // 1) free-run at constant velocity while position events are flowing (stop
+    //    advancing during a stall so the cursor doesn't run ahead of the audio)
+    if (sinceEvent < 400) state.playheadDispMs += frameDt * rate;
+    // 2) gently correct toward the authoritative position (extrapolated to now,
+    //    capped so a stall can't fling it). The error each event is only a few
+    //    ms, so this is smooth; a real seek (>1.2s) snaps.
+    const target = state.playheadMs + Math.min(400, sinceEvent) * rate;
+    const err = target - state.playheadDispMs;
+    if (Math.abs(err) > 1200) state.playheadDispMs = target;
+    else state.playheadDispMs += err * 0.08;
     state.playheadInterpMs = state.playheadDispMs;
     paintFromSnapshot();
-    // Stop the loop once playback has passed the selection end. The line
-    // is already invisible (render() clips to [startMs, endMs]); no need
-    // to keep burning rAF frames.
-    if (state.playheadInterpMs >= state.endMs) {
+    // Keep sweeping until the cursor passes the WINDOW end (the next cue / the
+    // card-advance point), not just the cue end — so it travels visibly through
+    // the trailing silence. (When the card advances, a fresh show() takes over.)
+    if (state.playheadInterpMs >= state.wfEndMs) {
       playheadRAF = null;
       return;
     }
@@ -211,45 +221,49 @@
       ctx.fillText('waveform unavailable', cssW / 2, midY - 14);
     }
 
-    // ---- selection frame ----
-    ctx.strokeStyle = rgba(accent, 0.6);
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(x0 + 0.5, wfTop + 0.5, (x1 - x0), wfHeight - 1);
+    // Selection frame + draggable handles — ONLY when STOPPED. During
+    // continuous play we show just the waveform + the moving cursor; the bounds
+    // "appear" the moment you pause (so you can adjust them), then vanish on
+    // play. Gate on the GLOBAL _bgPlaying (set by app.js's persistent listener)
+    // — the editor's own state listener attaches async per re-show and can miss
+    // a pause that lands right after a card advance, so the bounds wouldn't show.
+    if (!window._bgPlaying) {
+      // ---- selection frame ----
+      ctx.strokeStyle = rgba(accent, 0.6);
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x0 + 0.5, wfTop + 0.5, (x1 - x0), wfHeight - 1);
 
-    // Soft selection glow background.
-    ctx.fillStyle = rgba(accent, 0.06);
-    ctx.fillRect(x0, wfTop, x1 - x0, wfHeight);
+      // Soft selection glow background.
+      ctx.fillStyle = rgba(accent, 0.06);
+      ctx.fillRect(x0, wfTop, x1 - x0, wfHeight);
 
-    // ---- playhead is drawn AFTER the static snapshot (see end of render) so
-    // the rAF loop can blit the cached static layer instead of rebuilding the
-    // whole waveform every frame — that per-frame rebuild was the choppiness. ----
-
-    // ---- handles (vertical line + circular cap) ----
-    const drawHandle = (x) => {
-      // Vertical line through the waveform.
-      ctx.strokeStyle = accent;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x, wfTop);
-      ctx.lineTo(x, wfBottom);
-      ctx.stroke();
-      // Cap at top, just below tick strip.
-      const capY = wfTop + 6;
-      ctx.beginPath();
-      ctx.arc(x, capY, 9, 0, Math.PI * 2);
-      ctx.fillStyle = accent;
-      ctx.fill();
-      ctx.strokeStyle = '#0c0c0c';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      // Inner dot for grip emphasis.
-      ctx.beginPath();
-      ctx.arc(x, capY, 2.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#0c0c0c';
-      ctx.fill();
-    };
-    drawHandle(x0);
-    drawHandle(x1);
+      // ---- handles (vertical line + circular cap) ----
+      const drawHandle = (x) => {
+        // Vertical line through the waveform.
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x, wfTop);
+        ctx.lineTo(x, wfBottom);
+        ctx.stroke();
+        // Cap at top, just below tick strip.
+        const capY = wfTop + 6;
+        ctx.beginPath();
+        ctx.arc(x, capY, 9, 0, Math.PI * 2);
+        ctx.fillStyle = accent;
+        ctx.fill();
+        ctx.strokeStyle = '#0c0c0c';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // Inner dot for grip emphasis.
+        ctx.beginPath();
+        ctx.arc(x, capY, 2.5, 0, Math.PI * 2);
+        ctx.fillStyle = '#0c0c0c';
+        ctx.fill();
+      };
+      drawHandle(x0);
+      drawHandle(x1);
+    }
 
     // Cache everything above (sans playhead) so the rAF playhead loop only has
     // to blit + draw the cursor — no per-frame waveform rebuild.
@@ -278,9 +292,10 @@
     const cssW = c.clientWidth, cssH = c.clientHeight;
     const wfRange = state.wfEndMs - state.wfStartMs;
     const phMs = Number.isFinite(state.playheadInterpMs) ? state.playheadInterpMs : state.playheadMs;
-    // Only within the SELECTED region — the line represents progress through
-    // the cue, not the whole file.
-    if (!Number.isFinite(phMs) || phMs < state.startMs || phMs > state.endMs || wfRange <= 0) return;
+    // Draw across the whole VISIBLE WINDOW (cue + the trailing silence to the
+    // next cue), not just the cue — so the cursor is seen advancing through the
+    // gap between cards (confirmation that playback is moving).
+    if (!Number.isFinite(phMs) || phMs < state.wfStartMs || phMs > state.wfEndMs || wfRange <= 0) return;
     const ctx2 = c.getContext('2d');
     const px = ((phMs - state.wfStartMs) / wfRange) * cssW; // sub-pixel, never rounded
     const accent = getModeColor();
@@ -519,26 +534,35 @@
     }
   }
 
+  // Off-screen pre-render: the previous show() decodes the NEXT card's window
+  // into here so this show() can paint it instantly (no decode delay / flash).
+  let _preCache = null;
+
   window.waveform = {
-    async show({ container, srcPath, startMs, endMs, onChange }) {
+    async show({ container, srcPath, startMs, endMs, onChange, viewStartMs, viewEndMs, cacheKey, preload }) {
       if (!container) return;
       // Carry the playhead across a same-source re-show (continuous card play
-      // re-shows the waveform for each new cue). Without this, hide() cleared
-      // the warmup gate so the cursor cold-started — stepping for ~1-2 position
-      // events at every cue boundary, which was the continuous-play jitter.
+      // re-shows the waveform for each new cue) so the cursor doesn't cold-start.
       const carry = (state && state.srcPath === srcPath && state.playheadPlaying)
         ? { ms: state.playheadMs, disp: state.playheadDispMs }
         : null;
-      // Carry the prior slice's BUCKETS on a same-source re-show so the strip
-      // never blanks to "waveform unavailable" between cues while the new slice
-      // decodes (continuous play re-slices per cue, and a slice occasionally
-      // returns empty mid-rush). Refined async by loadWaveform below.
+      // Buckets to seed the FIRST paint, best → worst: (a) the off-screen
+      // pre-render of THIS card (instant + exact); (b) the prior card's buckets
+      // (approximate, refined async); else empty. Never blanks to "unavailable".
+      const pre = (cacheKey && _preCache && _preCache.key === cacheKey &&
+                   _preCache.buckets && _preCache.buckets.length) ? _preCache : null;
       const carryBuckets = (state && state.srcPath === srcPath && state.buckets && state.buckets.length)
         ? { buckets: state.buckets, s: state.bucketsStartMs, e: state.bucketsEndMs }
         : null;
+      const seed = pre || carryBuckets;
       this.hide();
-      const wfStartMs = Math.max(0, startMs - VIEWPORT_PAD_MS);
-      const wfEndMs = endMs + VIEWPORT_PAD_MS;
+      // Viewport. Continuous card play passes an explicit window spanning the
+      // cue PLUS the trailing silence up to the next cue (full width), so the
+      // playhead is visibly seen advancing through the gap. Else cue ± pad.
+      const wfStartMs = Number.isFinite(viewStartMs) ? Math.max(0, viewStartMs)
+                                                     : Math.max(0, startMs - VIEWPORT_PAD_MS);
+      const wfEndMs = (Number.isFinite(viewEndMs) && viewEndMs > wfStartMs) ? viewEndMs
+                                                                            : (endMs + VIEWPORT_PAD_MS);
 
       container.innerHTML = `
         <div style="display:flex;align-items:center;gap:8px;font-size:.78rem;color:#888;margin-bottom:6px;font-variant-numeric:tabular-nums;letter-spacing:.04em;">
@@ -554,15 +578,25 @@
           <button data-role="reset" style="background:transparent;color:#666;border:1px solid #2a2a2a;padding:6px 14px;border-radius:999px;font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;">Reset</button>
         </div>
       `;
+      // Robust playhead seed: start from the CURRENT audio position and free-run
+      // IMMEDIATELY when playing — don't depend on `carry` (often null on Android
+      // at a card advance, which left the cursor frozen for the first moments
+      // until the warmup gate cleared, while iOS's faster events hid it).
+      // _bgPlaying is the reliable global play state.
+      const _playing = !!window._bgPlaying || !!carry;
+      let _curPos = carry ? carry.ms : startMs;
+      if (!carry && _playing) {
+        try { const _a = window.getAudioProgress?.(); if (_a && Number.isFinite(_a.ms)) _curPos = _a.ms; } catch (_) {}
+      }
       state = {
         canvas: container.querySelector('[data-role="canvas"]'),
         startLabel: container.querySelector('[data-role="start"]'),
         endLabel:   container.querySelector('[data-role="end"]'),
         lenLabel:   container.querySelector('[data-role="len"]'),
         srcPath,
-        buckets: carryBuckets ? carryBuckets.buckets : [],
-        bucketsStartMs: carryBuckets ? carryBuckets.s : undefined,
-        bucketsEndMs: carryBuckets ? carryBuckets.e : undefined,
+        buckets: seed ? seed.buckets : [],
+        bucketsStartMs: seed ? seed.s : undefined,
+        bucketsEndMs: seed ? seed.e : undefined,
         wfStartMs,
         wfEndMs,
         startMs,
@@ -570,14 +604,16 @@
         origStartMs: startMs,
         origEndMs: endMs,
         onChange,
-        // Seed the playhead from the prior cue's waveform on a same-src re-show
-        // so the cursor keeps gliding (no warmup cold-start) across boundaries.
-        playheadWarmed:  !!carry,
-        playheadPlaying: !!carry,
-        playheadMs:       carry ? carry.ms   : undefined,
-        playheadDispMs:   carry ? carry.disp : undefined,
-        playheadInterpMs: carry ? carry.ms   : undefined,
-        playheadLastTs:   carry ? performance.now() : 0
+        // Start warmed + playing whenever audio is playing, seeded at the LIVE
+        // position, so the cursor free-runs from frame 1 of every card (no
+        // Android cold-start freeze). playheadLastTs = now ⇒ sinceEvent starts
+        // at 0, so tickPlayhead's free-run isn't gated off before the 1st event.
+        playheadWarmed:  _playing,
+        playheadPlaying: _playing,
+        playheadMs:       _curPos,
+        playheadDispMs:   carry ? carry.disp : _curPos,
+        playheadInterpMs: _curPos,
+        playheadLastTs:   performance.now()
       };
       container.querySelector('[data-role="preview"]').addEventListener('click', () => this.preview());
       container.querySelector('[data-role="reset"]').addEventListener('click', () => {
@@ -587,17 +623,35 @@
         if (state.onChange) state.onChange({ startMs: state.startMs, endMs: state.endMs });
       });
       attachInteractions();
-      if (carry) startPlayheadAnim();   // resume the glide immediately (skip warmup wait)
-      requestAnimationFrame(render);
-      // Kick off the actual waveform decode in the background.
-      loadWaveform(srcPath, wfStartMs, wfEndMs).then(buckets => {
-        if (!state || state.srcPath !== srcPath) return;
-        if (!buckets || !buckets.length) return;  // keep carried buckets — don't blank to "unavailable"
-        state.buckets = buckets;
-        state.bucketsStartMs = wfStartMs;
-        state.bucketsEndMs = wfEndMs;
-        render();
-      });
+      // Render SYNCHRONOUSLY now (not via rAF): forces layout so the freshly
+      // created canvas is sized (clientWidth is 0 until laid out) and paints the
+      // seeded waveform + playhead from frame 0 — so on Android the cursor is
+      // visible/advancing immediately instead of waiting on a delayed rAF.
+      render();
+      if (_playing) startPlayheadAnim();   // then free-run (skip warmup wait)
+      // Decode this card's window — unless the pre-render already gave us EXACT
+      // buckets for it (then it's already painted; skip the redundant slice).
+      const haveExact = seed && Number.isFinite(seed.s) &&
+                        Math.abs(seed.s - wfStartMs) < 1 && Math.abs(seed.e - wfEndMs) < 1;
+      if (!haveExact) {
+        loadWaveform(srcPath, wfStartMs, wfEndMs).then(buckets => {
+          if (!state || state.srcPath !== srcPath) return;
+          if (!buckets || !buckets.length) return;  // keep seeded buckets — don't blank
+          state.buckets = buckets;
+          state.bucketsStartMs = wfStartMs;
+          state.bucketsEndMs = wfEndMs;
+          render();
+        });
+      }
+      // Off-screen pre-render the NEXT card's window so its show() is instant.
+      if (preload && preload.key && Number.isFinite(preload.viewStartMs) &&
+          Number.isFinite(preload.viewEndMs) && (!_preCache || _preCache.key !== preload.key)) {
+        loadWaveform(srcPath, preload.viewStartMs, preload.viewEndMs).then(buckets => {
+          if (buckets && buckets.length) {
+            _preCache = { key: preload.key, buckets, s: preload.viewStartMs, e: preload.viewEndMs };
+          }
+        });
+      }
       // Playhead: subscribe to bg position so the white tick line tracks
       // playback in real time. The rAF loop interpolates between position
       // events so the line glides at 60 Hz instead of stepping at 150 ms.
@@ -677,10 +731,15 @@
           else {
             state.playheadWarmed = false;
             state.playheadLastTs = performance.now();
+            render();  // redraw without the bounds — they only show when stopped
           }
         }).then(h => { if (state) state.stateHandle = h; }).catch(() => {});
       }
     },
+
+    // Re-paint on demand (app.js calls this from its persistent bg 'state'
+    // listener so the bounds reliably appear/vanish on pause/play in card mode).
+    renderNow() { if (state) { try { render(); } catch (_) {} } },
 
     hide() {
       cancelPreview();
