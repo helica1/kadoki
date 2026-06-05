@@ -348,6 +348,9 @@
     const legacyReaderView = document.getElementById('readingModeView');
     if (legacyReaderView) legacyReaderView.style.display = 'none';
     if (mode === 'read') {
+      // Cover the reader BEFORE revealing it so the entry load + scroll-to-
+      // position happen behind an opaque panel — no visible scroll on entry.
+      try { window.showReaderCover && window.showReaderCover(); } catch (_) {}
       const pv = document.getElementById('readingPagedView');
       // Reveal via visibility (display stays flex) so the vertical-rl layout is
       // NOT re-run on every read-entry — the Android mode-switch "settling" lag.

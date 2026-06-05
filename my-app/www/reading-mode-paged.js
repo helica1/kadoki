@@ -1811,26 +1811,44 @@
     if (!scrollEl || !chunks?.length) return null;
     const sr = scrollEl.getBoundingClientRect();
     if (!(sr.width > 1)) return null;
+    // The line the user is actually reading sits where the RESTORE re-positions
+    // the bookmark: "near the right edge with ~3 context lines", i.e. its right
+    // edge at (viewport-right − pad − 3 lines). Saving THAT chunk (not the
+    // right-edge / oldest-visible chunk, which is those ~3 already-read context
+    // lines behind) is what makes a reopen land where the user left off instead
+    // of ~3 lines back. Mirrors scrollChunkNearRightWithContext's geometry.
+    let lineHeightPx = 40;
+    try {
+      const cs = getComputedStyle(innerEl);
+      lineHeightPx = parseFloat(cs.lineHeight);
+      if (!Number.isFinite(lineHeightPx) || lineHeightPx <= 0) lineHeightPx = (parseFloat(cs.fontSize) || 18) * 1.8;
+    } catch (_) {}
+    const pad = Math.min(16, sr.width * 0.04);
+    const targetRightX = sr.right - pad - lineHeightPx * 3;   // 3 = the restore's contextLines
+
     let edgeChunk = null, edgeDist = Infinity;
+    let readingChunk = null, readingDist = Infinity;
     let maxFrontier = 0;   // deepest END char-offset among on-screen chunks
     for (const ch of chunks) {
       const r = ch.getBoundingClientRect();
       if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
       if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
       // Frontier = the DEEPEST visible text, from char METADATA (engine-agnostic).
-      // The old min-getBoundingClientRect().left pick saturated on WKWebView — a
-      // multi-column vertical-rl paragraph's block rect doesn't climb as you page
-      // WITHIN it — so the first settle anchored stats' monotonic high-water deep
-      // and every later settle early-returned: the iOS counter froze at 0.
       // dataset.jpOff/jpLen are identical on both engines and the max END offset
       // on screen climbs monotonically as you read forward.
       const end = (parseInt(ch.dataset.jpOff) || 0) + (parseInt(ch.dataset.jpLen) || 0);
       if (end > maxFrontier) maxFrontier = end;
       const d = Math.abs(r.right - sr.right);
       if (d < edgeDist) { edgeChunk = ch; edgeDist = d; }
+      const rd = Math.abs(r.right - targetRightX);
+      if (rd < readingDist) { readingChunk = ch; readingDist = rd; }
     }
     if (!edgeChunk) return null;
-    return { edgeIdx: chunks.indexOf(edgeChunk), frontierOff: maxFrontier };
+    return {
+      edgeIdx: chunks.indexOf(edgeChunk),
+      readingIdx: chunks.indexOf(readingChunk || edgeChunk),
+      frontierOff: maxFrontier
+    };
   }
 
   // ---- Bookmarks (Workstream A): read-location capture + restore ----
@@ -1952,11 +1970,11 @@
       if (_readerHidden()) return;
       const a = _visibleReadAnchors();
       if (!a || a.edgeIdx < 0) return;               // nothing valid → never bookmark garbage
-      _bookmarkChunkIdx = a.edgeIdx;
+      _bookmarkChunkIdx = a.readingIdx;
       _persistBookmark();
       try { window.stats?.noteReadPosition?.(a.frontierOff); } catch (_) {}
-      if (a.edgeIdx !== _lastToastedBookmarkIdx) {     // one toast per new line
-        _lastToastedBookmarkIdx = a.edgeIdx;
+      if (a.readingIdx !== _lastToastedBookmarkIdx) {     // one toast per new line
+        _lastToastedBookmarkIdx = a.readingIdx;
         try { window.showToast?.('Location bookmarked', 1200); } catch (_) {}
       }
     } catch (_) {}
@@ -1985,7 +2003,7 @@
       if (_readerHidden()) return;
       const a = _visibleReadAnchors();
       if (!a || a.edgeIdx < 0) return;
-      _bookmarkChunkIdx = a.edgeIdx;
+      _bookmarkChunkIdx = a.readingIdx;
       _persistBookmark();
       try { window.stats?.noteReadPosition?.(a.frontierOff); } catch (_) {}
     } catch (_) {}
@@ -3432,8 +3450,69 @@
     return _epubLoadPromise;
   }
 
+  // ---- Reader-entry cover (Workstream C, step 1) ----
+  // An opaque panel (matching the reader's own #000 bg) held over the reader
+  // while it loads + scrolls to position on ENTRY, then faded out once the
+  // position is settled — so the user never sees the entry scroll. It's a CHILD
+  // of the reader, so it's automatically hidden whenever the reader is (leaving
+  // read mode needs no extra handling). Live audio-follow happens AFTER the
+  // cover lifts, so the green-line tracking stays visible, as intended.
+  let _readerCover = null;
+  let _readerCoverHideT = null;
+  let _readerDotsT = null;
+  function _ensureReaderCover() {
+    if (_readerCover && _readerCover.isConnected) return _readerCover;
+    if (!viewEl) ensureView();
+    _readerCover = document.createElement('div');
+    _readerCover.id = 'readerEnterCover';
+    Object.assign(_readerCover.style, {
+      position: 'absolute', inset: '0',
+      background: '#000', zIndex: '50',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      opacity: '0', pointerEvents: 'none',
+      transition: 'opacity .18s ease'
+    });
+    // Pulsing dots — shown only if the cover lingers (slow load), so a fast
+    // mode switch doesn't flash them. Styled in theme.css (#readerEnterCover).
+    _readerCover.innerHTML =
+      '<div class="rc-dots" style="display:flex;gap:9px;opacity:0;transition:opacity .3s ease;">' +
+      '<span class="rc-dot"></span><span class="rc-dot"></span><span class="rc-dot"></span></div>';
+    viewEl.appendChild(_readerCover);
+    return _readerCover;
+  }
+  window.showReaderCover = function () {
+    const c = _ensureReaderCover();
+    if (_readerCoverHideT) { clearTimeout(_readerCoverHideT); _readerCoverHideT = null; }
+    if (_readerDotsT) { clearTimeout(_readerDotsT); _readerDotsT = null; }
+    c.style.transition = 'none';
+    c.style.opacity = '1';
+    void c.offsetWidth;                 // commit the opaque state before any fade
+    c.style.transition = 'opacity .18s ease';
+    const dots = c.querySelector('.rc-dots');
+    if (dots) dots.style.opacity = '0';
+    _readerDotsT = setTimeout(() => { if (dots) dots.style.opacity = '1'; }, 180);
+    // Safety: never leave the cover up — reveal after a bounded wait even if the
+    // settle signal never fires (position is best-effort by then).
+    _readerCoverHideT = setTimeout(() => { try { window.hideReaderCover(); } catch (_) {} }, 4000);
+  };
+  window.hideReaderCover = function () {
+    if (!_readerCover) return;
+    if (_readerCoverHideT) { clearTimeout(_readerCoverHideT); _readerCoverHideT = null; }
+    if (_readerDotsT) { clearTimeout(_readerDotsT); _readerDotsT = null; }
+    _readerCover.style.opacity = '0';
+    const dots = _readerCover.querySelector('.rc-dots');
+    if (dots) dots.style.opacity = '0';
+  };
+  // Fade the cover out AFTER the entry scroll has actually painted (2 rAF).
+  function _revealReaderSettled() {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      try { window.hideReaderCover(); } catch (_) {}
+    }));
+  }
+
   async function openView() {
     ensureView();
+    window.showReaderCover();               // cover BEFORE reveal — entry scroll happens behind it
     viewEl.style.display = 'flex';
     viewEl.style.visibility = 'visible';   // reveal (layout already computed → no re-layout)
     viewEl.style.pointerEvents = 'auto';
@@ -3496,6 +3575,7 @@
       // alignment maps + layout are fully ready, then stop.
       if (_cameFromCardEntry) {
         centerOnActiveCard();
+        _revealReaderSettled();
         return;
       }
       // Plain reopen → land on the BOOKMARK line (the single anchor). A reentry
@@ -3507,7 +3587,7 @@
         : (Number.isFinite(jumpCue) && jumpCue >= 0) ? jumpCue
         : bmCue;
       const cueN = (pagedCues?.length ? pagedCues : (window.__abCues || [])).length;
-      if (cueN <= 0) { centerOnActiveCard(); return; }
+      if (cueN <= 0) { centerOnActiveCard(); _revealReaderSettled(); return; }
       // GUARANTEED green-on-enter, WITH RETRY. chunks, cues, and the alignment
       // map don't all become ready at the same instant on a cold open, so keep
       // re-attempting the paint until it actually lands — this is what "playing
@@ -3527,6 +3607,7 @@
         if (!ok && _tries < 20 && !window._bgPlaying) setTimeout(tryPaint, 120);
       };
       tryPaint();
+      _revealReaderSettled();
     };
     setTimeout(runReaderEnterSetup, 80);
   }
