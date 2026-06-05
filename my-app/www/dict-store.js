@@ -89,6 +89,42 @@
     return meta.length > 0;
   }
 
+  // Distinct dictName values that actually have ENTRIES records, with counts.
+  // Used to surface ORPHANS: entries whose DICTS meta row was lost (e.g. an
+  // interrupted delete) — lookups still serve them but the manager (which lists
+  // only DICTS meta) otherwise can't show or delete them. Walks the by_dict
+  // index one distinct key at a time (nextunique), then counts each.
+  async function listEntryDicts() {
+    let db;
+    try { db = await openDb(); } catch (e) { return []; }
+    const names = await new Promise((resolve) => {
+      const out = [];
+      try {
+        const tx = db.transaction(ENTRIES, 'readonly');
+        const req = tx.objectStore(ENTRIES).index('by_dict').openKeyCursor(null, 'nextunique');
+        req.onsuccess = (e) => {
+          const c = e.target.result;
+          if (c) { out.push(c.key); c.continue(); }
+          else { resolve(out); }
+        };
+        req.onerror = () => resolve(out);
+      } catch (e) { resolve(out); }
+    });
+    const result = [];
+    for (const name of names) {
+      const count = await new Promise((resolve) => {
+        try {
+          const tx = db.transaction(ENTRIES, 'readonly');
+          const req = tx.objectStore(ENTRIES).index('by_dict').count(IDBKeyRange.only(name));
+          req.onsuccess = () => resolve(req.result || 0);
+          req.onerror = () => resolve(0);
+        } catch (e) { resolve(0); }
+      });
+      result.push({ dictName: name, entryCount: count });
+    }
+    return result;
+  }
+
   // --------- lookup ---------
 
   async function lookup(term, opts = {}) {
@@ -173,28 +209,69 @@
     return { ok: true, dictName, entryCount: totalRecords };
   }
 
-  async function removeInner(db, dictName) {
-    return new Promise((resolve) => {
+  async function removeInner(db, dictName, onProgress) {
+    const report = (deleted, total, done) => {
+      if (typeof onProgress !== 'function') return;
+      try { onProgress({ deleted, total, pct: total ? Math.min(1, deleted / total) : 1, done: !!done }); } catch (e) {}
+    };
+    // Count first so the caller can render a real progress bar (a large dict is
+    // 100k+ records and the delete is genuinely O(n) IDB ops).
+    let total = 0;
+    try {
+      total = await new Promise((resolve) => {
+        try {
+          const tx = db.transaction(ENTRIES, 'readonly');
+          const req = tx.objectStore(ENTRIES).index('by_dict').count(IDBKeyRange.only(dictName));
+          req.onsuccess = () => resolve(req.result || 0);
+          req.onerror   = () => resolve(0);
+        } catch (e) { resolve(0); }
+      });
+    } catch (e) {}
+    report(0, total, false);
+    // Delete in bounded batches so a large dict never holds ONE giant transaction
+    // — that locks the store for minutes and, if the OS kills the app mid-delete,
+    // leaves a half-deleted dict. Each batch is its own tx; the DICTS meta row is
+    // deleted LAST so an interrupted delete is resumable.
+    let deleted = 0;
+    for (;;) {
+      const n = await new Promise((resolve) => {
+        let count = 0;
+        try {
+          const tx = db.transaction(ENTRIES, 'readwrite');
+          const store = tx.objectStore(ENTRIES);
+          const req = store.index('by_dict').openKeyCursor(IDBKeyRange.only(dictName));
+          req.onsuccess = (e) => {
+            const c = e.target.result;
+            if (c && count < 5000) { store.delete(c.primaryKey); count++; c.continue(); }
+            // else: stop advancing — this batch's tx commits
+          };
+          tx.oncomplete = () => resolve(count);
+          tx.onerror    = () => resolve(-1);
+          tx.onabort    = () => resolve(-1);
+        } catch (e) { resolve(-1); }
+      });
+      if (n <= 0) break;                        // 0 = nothing left, -1 = error/abort
+      deleted += n;
+      report(deleted, total, false);
+      await new Promise(r => setTimeout(r, 0));  // yield so deletes never block lookups
+    }
+    // Remove the meta row LAST (list/isPopulated report 'gone' only when done).
+    const ok = await new Promise((resolve) => {
       try {
-        const tx = db.transaction([ENTRIES, DICTS], 'readwrite');
-        const entries = tx.objectStore(ENTRIES);
-        const dicts   = tx.objectStore(DICTS);
-        const idx = entries.index('by_dict');
-        const req = idx.openKeyCursor(IDBKeyRange.only(dictName));
-        req.onsuccess = (e) => {
-          const c = e.target.result;
-          if (c) { entries.delete(c.primaryKey); c.continue(); }
-          else { dicts.delete(dictName); }
-        };
+        const tx = db.transaction(DICTS, 'readwrite');
+        tx.objectStore(DICTS).delete(dictName);
         tx.oncomplete = () => resolve(true);
         tx.onerror    = () => resolve(false);
+        tx.onabort    = () => resolve(false);
       } catch (e) { resolve(false); }
     });
+    report(total, total, true);
+    return ok;
   }
 
-  async function remove(dictName) {
+  async function remove(dictName, onProgress) {
     const db = await openDb();
-    return removeInner(db, dictName);
+    return removeInner(db, dictName, onProgress);
   }
 
   // --------- migration from old dict-cache ---------
@@ -237,101 +314,68 @@
     return true;
   }
 
-  // --------- term set (deinflector fast path) ---------
+  // --------- bulk existence oracle (deinflector) ---------
   //
-  // The deinflector needs SYNCHRONOUS "does term X exist in any dict?"
-  // checks during greedy match (up to ~20 candidate forms per tap).
-  // Going to IDB per candidate would mean 20× 5-10 ms = 200 ms of async
-  // chatter per tap. Instead, build a Set<string> of every headword
-  // once and check it sync. ~200k entries × ~10 bytes = 2 MB of heap —
-  // a fair price for instant deinflection.
-  let _termSet = null;
-  let _readingToTerm = null;  // Map<reading, canonicalTerm> for deinflection lookup
-  let _termSetPromise = null;
-  function termSetReady() { return _termSet !== null; }
-  function hasTerm(term) {
-    if (!_termSet) return false;
-    if (_termSet.has(term)) return true;
-    // ALSO consult the reading map — dict entries store the headword
-    // as `term` (often kanji like 頷く) and the kana reading inside the
-    // entry array. The deinflector produces base forms in kana
-    // (うなずいた → うなずく), so without this map hasTerm("うなずく")
-    // would always return false and the parser fell back to 2-char うな.
-    return _readingToTerm ? _readingToTerm.has(term) : false;
+  // The deinflector generates many candidate base forms per tap and needs to
+  // know which ones actually exist in a dictionary. Instead of a whole-store
+  // term Set built by a multi-second boot cursor scan (the old buildTermSet),
+  // we answer existence on demand: ONE readonly transaction, one indexed
+  // `count` per candidate term. No boot cost, no resident Set, and per-tap
+  // cost scales with the candidate count, NOT the corpus size — so startup is
+  // instant at any dictionary size. This is the Yomitan model (existence == an
+  // index query). Kana readings resolve directly because the importer stores
+  // each entry under both its expression AND its reading as `term` records.
+  async function existsBulk(terms) {
+    const out = new Set();
+    const uniq = Array.from(new Set(terms || [])).filter(t => t != null && t !== '');
+    if (!uniq.length) return out;
+    let db;
+    try { db = await openDb(); } catch (e) { return out; }
+    return new Promise((resolve) => {
+      // This is awaited on the lookup hot path with no timeout, so it MUST
+      // always resolve — a non-resolve would reintroduce the "Initializing
+      // Dictionaries… forever" hang. finish() is idempotent; we resolve on the
+      // last request, on tx abort/error, OR via a watchdog as a last resort.
+      let done = false;
+      const finish = () => { if (done) return; done = true; clearTimeout(wd); resolve(out); };
+      const wd = setTimeout(finish, 4000);
+      try {
+        const tx = db.transaction(ENTRIES, 'readonly');
+        const idx = tx.objectStore(ENTRIES).index('by_term');
+        let pending = uniq.length;
+        const tick = () => { if (--pending === 0) finish(); };
+        for (const t of uniq) {
+          const req = idx.count(IDBKeyRange.only(t));
+          req.onsuccess = () => { if (req.result > 0) out.add(t); tick(); };
+          req.onerror = () => { tick(); };
+        }
+        tx.onabort = finish;
+        tx.onerror = finish;
+      } catch (e) { finish(); }
+    });
   }
-  // Given a reading (e.g., うなずく), return the canonical term that the
-  // dict actually stores (e.g., 頷く). Used by greedyDeinflect's caller
-  // to translate a deinflected kana base into a key dictStore.lookup
-  // can actually find. Returns null if not known.
-  function termForReading(reading) {
-    return _readingToTerm ? (_readingToTerm.get(reading) || null) : null;
-  }
-  async function buildTermSet() {
-    if (_termSet) return _termSet;
-    if (_termSetPromise) return _termSetPromise;
-    _termSetPromise = (async () => {
-      const t0 = performance.now();
-      const db = await openDb();
-      // Fast path: openKeyCursor on the by_term INDEX. Each onsuccess
-      // gives us the index key (the term string). Read-only and
-      // returns nothing but keys, so iOS WKWebView serializes other
-      // IDB operations against this transaction for a much shorter
-      // window (~5 s for 405 k entries) than the old openCursor build
-      // (full records, ~45 s). That long lock was blocking every
-      // subsequent dictStore.lookup behind it — the user saw a 43 s
-      // delay on the second tap that ended up sitting in the queue.
-      //
-      // We lose the inline reading→canonical-term map here. Yomitan's
-      // deinflector still covers most inflection patterns directly
-      // against dict terms; the reading map is a separate concern and
-      // can be rebuilt later in a background-only fashion if needed.
-      const set = new Set();
-      await new Promise((resolve) => {
-        try {
-          const tx = db.transaction(ENTRIES, 'readonly');
-          const req = tx.objectStore(ENTRIES).index('by_term').openKeyCursor();
-          req.onsuccess = (e) => {
-            const c = e.target.result;
-            if (c) { set.add(c.key); c.continue(); }
-            else { resolve(); }
-          };
-          req.onerror = () => resolve();
-        } catch (e) { resolve(); }
-      });
-      _termSet = set;
-      const ms = Math.round(performance.now() - t0);
-      console.log(`[dict-store] termSet built: ${set.size} headwords in ${ms}ms`);
-      return set;
-    })();
-    return _termSetPromise;
-  }
-  // Invalidate after import/remove so it gets rebuilt next time.
-  function invalidateTermSet() { _termSet = null; _termSetPromise = null; }
 
   // Wrap import/remove to invalidate the set automatically.
   const _origImportFromMap = importFromMap;
   async function importFromMapWrapped(...args) {
     const r = await _origImportFromMap(...args);
-    invalidateTermSet();
     return r;
   }
   const _origRemove = remove;
-  async function removeWrapped(name) {
-    const r = await _origRemove(name);
-    invalidateTermSet();
+  async function removeWrapped(name, onProgress) {
+    const r = await _origRemove(name, onProgress);
     return r;
   }
 
   window.dictStore = {
     isPopulated,
     list,
+    listEntryDicts,
     lookup,
     importFromMap: importFromMapWrapped,
     importFromCache,
     remove: removeWrapped,
-    // Deinflector fast path.
-    buildTermSet,
-    termSetReady,
-    hasTerm
+    // Deinflector existence oracle (bulk, on-demand — replaces the term Set).
+    existsBulk
   };
 })();

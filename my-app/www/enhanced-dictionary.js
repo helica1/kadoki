@@ -24,18 +24,6 @@
         console.log('📚 Dynamically scanning for .zip dictionary files...');
         
         try {
-            // Since JMdict loads successfully from 'assets/dictionaries/', let's test that exact path
-            console.log('📚 Testing the same path that works for JMdict...');
-            
-            // First, let's verify the path works by testing a known file
-            try {
-                console.log('📚 Testing known working path with JMdict...');
-                const testResponse = await fetch('assets/dictionaries/JMdict_english.json', { method: 'HEAD' });
-                console.log(`📚 JMdict test: status=${testResponse.status}, ok=${testResponse.ok}`);
-            } catch (error) {
-                console.log('📚 JMdict test failed:', error);
-            }
-            
             const yourDictionaries = [
                 'MonolingualA.zip'
                 //'sankoku8.zip'
@@ -430,22 +418,37 @@
         }
         if (totalEntries === 0) throw new Error('Dictionary has no term_bank entries');
         const metadata = { ...indexData, filename: opts.fallbackName || dictName + '.zip' };
-        dictionaries.set(dictName, termEntries);
         dictionaryMetadata.set(dictName, metadata);
-        if (window.dictCache?.save) {
-            onProgress({ phase: 'cache', pct: 0 });
-            await window.dictCache.save(
-                IMPORTED_CACHE_PREFIX + dictName,
-                IMPORTED_CACHE_VERSION,
-                { termEntries, metadata }
-            );
-        }
+
+        // Write to the indexed store — the authoritative, on-disk, query-on-demand
+        // source. In the common case this is the ONLY copy we keep.
+        let storeOk = false;
         if (window.dictStore?.importFromMap) {
             try {
                 await window.dictStore.importFromMap(dictName, metadata, termEntries, (p) => {
                     onProgress({ phase: 'index', pct: p.pct, written: p.written, total: p.total });
                 });
+                storeOk = true;
             } catch (e) { console.warn('[dictStore] import write failed:', e); }
+        }
+        if (storeOk) {
+            // dictStore has it -> DON'T keep a redundant in-memory Map copy (resident
+            // heap that hurts the LMK/restart problem) or a full-Map dictCache copy
+            // (a slow structured-clone write — the old "Saving…" step). Lookups query
+            // dictStore directly via existsBulk/lookup.
+            dictionaries.delete(dictName);
+            dictStoreReadyCache = true; // store is now non-empty → lookups use it at once
+        } else {
+            // Fallback: the indexed write failed. Keep the in-memory copy AND cache it
+            // so the dict still works (legacy path) and survives a reboot.
+            dictionaries.set(dictName, termEntries);
+            if (window.dictCache?.save) {
+                onProgress({ phase: 'cache', pct: 0 });
+                try {
+                    await window.dictCache.save(IMPORTED_CACHE_PREFIX + dictName,
+                        IMPORTED_CACHE_VERSION, { termEntries, metadata });
+                } catch (e) {}
+            }
         }
         onProgress({ phase: 'done', pct: 1 });
         // Track imported names.
@@ -460,14 +463,31 @@
 
     async function loadImportedDictionariesFromCache() {
         const list = listImportedDicts();
+        if (!list.length) return;
+        // Dicts that live in the indexed store need NO in-memory copy — lookups
+        // query dictStore directly (existsBulk/lookup). Only restore (into the
+        // legacy Map) dicts NOT in the store, e.g. an import whose store write
+        // failed, so they still work via the in-memory fallback path.
+        let storeNames = new Set();
+        try {
+            if (window.dictStore?.list) {
+                storeNames = new Set((await window.dictStore.list()).map(m => m.dictName));
+            }
+        } catch (e) {}
         for (const name of list) {
+            if (storeNames.has(name)) {
+                // Served from dictStore → drop the now-redundant full-Map dictCache
+                // copy left by older builds (reclaims disk; keeps zero heap copy).
+                try { await window.dictCache?.clear?.(IMPORTED_CACHE_PREFIX + name); } catch (e) {}
+                continue;
+            }
             if (dictionaries.has(name)) continue;
             try {
                 const cached = await window.dictCache?.load?.(IMPORTED_CACHE_PREFIX + name, IMPORTED_CACHE_VERSION);
                 if (cached?.termEntries) {
                     dictionaries.set(name, cached.termEntries);
                     if (cached.metadata) dictionaryMetadata.set(name, cached.metadata);
-                    console.log(`✅ Restored imported dict "${name}" from cache: ${cached.termEntries.size} terms`);
+                    console.log(`✅ Restored imported dict "${name}" from cache (fallback): ${cached.termEntries.size} terms`);
                 }
             } catch (e) {
                 console.warn(`Failed to restore imported dict "${name}":`, e);
@@ -475,12 +495,17 @@
         }
     }
 
-    async function removeImportedDictionary(name) {
+    async function removeImportedDictionary(name, onProgress) {
         dictionaries.delete(name);
         dictionaryMetadata.delete(name);
         const list = listImportedDicts().filter(n => n !== name);
         persistImportedList(list);
         try { await window.dictCache?.clear?.(IMPORTED_CACHE_PREFIX + name); } catch (e) {}
+        // Remove from the indexed store too — otherwise the dict lingers there,
+        // keeps being served in lookups, and re-importing duplicates it (the
+        // 'deleted dict shows up twice' relic). Batched remove, so it can't hang.
+        try { await window.dictStore?.remove?.(name, onProgress); } catch (e) {}
+        dictStoreReadyCache = null; // re-probe: store may now be empty
         console.log(`🗑 Removed imported dict "${name}"`);
     }
 
@@ -491,116 +516,51 @@
     window.removeImportedDictionary = removeImportedDictionary;
     window.loadImportedDictionariesFromCache = loadImportedDictionariesFromCache;
 
-    // ==================== JMDICT LOADING (EXISTING FUNCTIONALITY) ====================
-    
-    // Bump JMDICT_CACHE_VERSION whenever the bundled JMdict_english.json changes
-    // so cached IDB copies are invalidated and re-parsed.
-    const JMDICT_CACHE_VERSION = '2025-05-19';
-
-    async function loadJMDict() {
-        console.log('📚 Loading JMDict...');
-
-        // 1) Try IndexedDB cache first. After first install, this returns the
-        //    parsed Map in milliseconds — no fetch, no JSON.parse, no index
-        //    rebuild.
-        if (window.dictCache && typeof window.dictCache.load === 'function') {
-            try {
-                const cached = await window.dictCache.load('JMDict', JMDICT_CACHE_VERSION);
-                if (cached && typeof cached.size === 'number' && cached.size > 0) {
-                    dictionaries.set('JMDict', cached);
-                    dictionaryMetadata.set('JMDict', {
-                        title: 'JMDict',
-                        revision: JMDICT_CACHE_VERSION,
-                        filename: 'JMdict_english.json'
-                    });
-                    console.log(`✅ JMDict from cache: ${cached.size} indexed terms`);
-                    return;
-                }
-            } catch (e) {
-                console.warn('JMDict cache load failed; falling back to parse:', e);
-            }
-        }
-
+    // ==================== JMDICT REMOVED ====================
+    //
+    // The bundled JMdict_english.json (108 MB) and its in-memory load were
+    // removed: holding the parsed ~125k-entry Map resident made the WebView
+    // process a prime target for Android's Low-Memory Killer (the "app
+    // restarts on unlock" bug). English coverage now comes from the user's
+    // imported JP->EN dictionary (Preferences -> Dictionaries), served via
+    // dictStore. This one-time helper reclaims the orphaned 108 MB IDB copy
+    // left by older builds.
+    async function purgeStaleJMDictCache() {
         try {
-            const res = await fetch('assets/dictionaries/JMdict_english.json');
-            console.log('📚 JMdict fetch status:', res.status, res.statusText);
-
-            if (!res.ok) {
-                throw new Error(`JMdict fetch failed: ${res.status} ${res.statusText}`);
+            if (localStorage.getItem('JMDICT_CACHE_PURGED_V1') === '1') return;
+            if (window.dictCache && typeof window.dictCache.clear === 'function') {
+                await window.dictCache.clear('JMDict');
             }
+            localStorage.setItem('JMDICT_CACHE_PURGED_V1', '1');
+            console.log('[dict] purged stale JMDict IDB cache');
+        } catch (e) { /* best-effort */ }
+    }
 
-            console.log('📚 JMdict fetch successful, parsing JSON...');
-            const raw = await res.json();
-            console.log('📚 JMdict JSON parsed, building index...');
-
-            if (!raw.words || !Array.isArray(raw.words)) {
-                throw new Error('Invalid JMdict format - no words array found');
+    // One-time cleanup of a JMDict copy that an OLDER build migrated into the
+    // indexed dictStore. The 108 MB bundle + in-memory load are gone, but a
+    // migrated copy would otherwise (a) keep ~405k entries that buildTermSet must
+    // scan every boot (the multi-second 'Initializing Dictionaries…' the user
+    // saw) and (b) keep serving JMDict glosses in lookups — defeating the whole
+    // removal. GATED: only drop it when ANOTHER dict exists, so a user whose only
+    // dictionary is the migrated JMDict is never left with zero coverage.
+    async function purgeStaleJMDictFromStore() {
+        try {
+            if (localStorage.getItem('JMDICT_STORE_PURGED_V1') === '1') return;
+            if (!window.dictStore || !window.dictStore.list || !window.dictStore.remove) return;
+            const names = (await window.dictStore.list()).map(m => m.dictName);
+            const jmNames = names.filter(n => n === 'JMDict' || n === 'JMdict');
+            const others  = names.filter(n => n !== 'JMDict' && n !== 'JMdict');
+            if (jmNames.length && others.length) {
+                for (const n of jmNames) {
+                    await window.dictStore.remove(n);
+                    console.log('[dict] removed stale dictStore JMDict copy:', n);
+                }
+                localStorage.setItem('JMDICT_STORE_PURGED_V1', '1');
+            } else if (!jmNames.length) {
+                localStorage.setItem('JMDICT_STORE_PURGED_V1', '1'); // nothing to purge
             }
-
-            console.log(`📚 Found ${raw.words.length} dictionary words, building index...`);
-
-            const jmEntries = new Map();
-            let count = 0;
-
-            for (const e of raw.words) {
-                // Index kanji forms
-                (e.kanji || []).forEach(k => {
-                    if (k.text) {
-                        if (!jmEntries.has(k.text)) {
-                            jmEntries.set(k.text, []);
-                        }
-                        jmEntries.get(k.text).push(e);
-                        count++;
-                    }
-                });
-
-                // Index kana forms
-                (e.kana || []).forEach(k => {
-                    if (k.text) {
-                        if (!jmEntries.has(k.text)) {
-                            jmEntries.set(k.text, []);
-                        }
-                        jmEntries.get(k.text).push(e);
-                        count++;
-                    }
-                });
-            }
-
-            dictionaries.set('JMDict', jmEntries);
-            dictionaryMetadata.set('JMDict', {
-                title: 'JMDict',
-                revision: JMDICT_CACHE_VERSION,
-                filename: 'JMdict_english.json'
-            });
-
-            // 2) Persist the parsed Map so next launch hits the cache.
-            if (window.dictCache && typeof window.dictCache.save === 'function') {
-                window.dictCache.save('JMDict', JMDICT_CACHE_VERSION, jmEntries)
-                    .catch(err => console.warn('JMDict cache save failed:', err));
-            }
-
-            console.log(`✅ Successfully loaded JMdict with ${count} total entries`);
-            
-        } catch (error) {
-            console.error('❌ JMdict loading failed:', error);
-            console.log('⚠️ Falling back to test dictionary');
-            
-            // Create test dictionary
-            const testEntries = new Map();
-            testEntries.set('食べる', [{
-                kanji: [{ text: '食べる' }],
-                kana: [{ text: 'たべる' }],
-                sense: [{ gloss: [{ text: 'to eat' }] }]
-            }]);
-            testEntries.set('たべる', testEntries.get('食べる'));
-            
-            dictionaries.set('JMDict', testEntries);
-            dictionaryMetadata.set('JMDict', {
-                title: 'JMDict (Test)',
-                revision: 'test',
-                filename: 'test'
-            });
-        }
+            // jmNames present but NO other dict → leave it (don't strand the user).
+        } catch (e) { /* best-effort */ }
     }
 
     // ==================== MULTI-DICTIONARY LOOKUP ====================
@@ -620,18 +580,12 @@
     let dictStoreReadyCache = null;     // null = unknown, bool once probed
     let dictStoreMigrationStarted = false;
     async function isDictStoreReady() {
-        if (dictStoreReadyCache !== null) return dictStoreReadyCache;
+        if (dictStoreReadyCache === true) return true; // re-probe while false: an import may have populated it
         if (!window.dictStore) { dictStoreReadyCache = false; return false; }
         try {
             dictStoreReadyCache = await window.dictStore.isPopulated();
         } catch (e) {
             dictStoreReadyCache = false;
-        }
-        // Pre-warm the term set so deinflection works on the very first tap.
-        // Fires in the background; greedyDeinflect-callers await it explicitly
-        // if it's still pending.
-        if (dictStoreReadyCache && window.dictStore.buildTermSet) {
-            window.dictStore.buildTermSet();
         }
         return dictStoreReadyCache;
     }
@@ -788,8 +742,24 @@
         }
         console.log(`⏱   [lookup] in-memory scan: +${Math.round(performance.now() - _memT)}ms (${dictionaries.size} dicts)`);
 
-        console.log(`🔍 Found ${results.length} results for "${term}" (store+mem) total +${ms()}ms`);
-        return results;
+        // Collapse byte-identical duplicate entries. Relic/duplicate store rows
+        // (a dict imported under name variants like 'JMDict' vs 'JMdict', or
+        // orphaned entries from an interrupted delete) produce repeated cards with
+        // identical content; distinct senses/dicts have distinct content and are
+        // preserved, so this only removes true duplicates.
+        const _seenEntries = new Set();
+        const deduped = [];
+        for (const r of results) {
+            let key = null;
+            try { key = JSON.stringify(r.entry); } catch (e) {}
+            if (key !== null) {
+                if (_seenEntries.has(key)) continue;
+                _seenEntries.add(key);
+            }
+            deduped.push(r);
+        }
+        console.log(`🔍 Found ${results.length} results for "${term}" → ${deduped.length} after dedup (store+mem) total +${ms()}ms`);
+        return deduped;
     }
 
     // Expose currently-loaded dictionary names so the Preferences UI can
@@ -804,13 +774,13 @@
         console.log('📚 Loading dictionaries...');
         
         try {
-            updateStartupProgress('Loading Yomitan dictionaries...', 0);
+            updateStartupProgress('Loading dictionaries...', 0);
             await loadYomitanDictionaries();
             // User-imported Yomitan dictionaries (persisted in IDB).
             await loadImportedDictionariesFromCache();
+            // Reclaim the orphaned 108 MB JMdict IDB cache from older builds.
+            purgeStaleJMDictCache();
 
-            updateStartupProgress('Loading JMDict...', 90, 'Loading fallback dictionary...');
-            await loadJMDict();
             
             updateStartupProgress('Dictionaries ready!', 100, 'All dictionaries loaded successfully');
             
@@ -821,8 +791,6 @@
             
         } catch (error) {
             console.error('❌ Dictionary loading failed:', error);
-            updateStartupProgress('Loading JMDict only...', 95, 'Falling back to JMDict');
-            await loadJMDict(); // Fallback to JMDict only
             
             setTimeout(() => {
                 hideStartupProgress();
@@ -830,6 +798,23 @@
         }
         
         dictLoaded = true;
+
+        // No bundled fallback dictionary any more: if the user imported none
+        // (and dictStore is empty) every lookup would silently return nothing.
+        // Point them at the importer instead of failing in silence.
+        try {
+            let _storeCount = 0;
+            if (window.dictStore && typeof window.dictStore.list === 'function') {
+                try { _storeCount = (await window.dictStore.list()).length; } catch (_) {}
+            }
+            if (dictionaries.size === 0 && _storeCount === 0) {
+                if (typeof window.showToast === 'function') {
+                    window.showToast('No dictionary loaded — import one in Preferences → Dictionaries', 4000);
+                } else {
+                    console.warn('[dict] No dictionaries loaded — import one in Preferences → Dictionaries');
+                }
+            }
+        } catch (_) {}
     }
 
     // ==================== DEINFLECTION FUNCTIONS (FROM EXISTING CODE) ====================
@@ -1321,7 +1306,8 @@
         // the avoid-content placement only worked on epub-ONLY titles and why
         // combined titles dropped the popup in a fixed spot over the text.
         const pagedView = document.getElementById('readingPagedView');
-        const pagedActive = pagedView && pagedView.style.display !== 'none';
+        // display:flex always now; visibility is the toggle — check both.
+        const pagedActive = pagedView && pagedView.style.display !== 'none' && pagedView.style.visibility !== 'hidden';
 
         // Card mode: anchor below the subtitle text. Works for BOTH classic
         // image+subtitle cards AND SRT-cards (subtitle + waveform, no image).
@@ -1710,78 +1696,61 @@
         console.log(`🎨 Highlighted ${lastHovered.length} spans`);
     }
 
-    // `hasTermAnywhere` — checks both the dictStore term set AND the
-    // in-memory legacy dictionaries Map. termSet check is FIRST because
-    // it's a single O(1) Set.has, vs. iterating the legacy Map (which on
-    // iOS WKWebView has noticeable per-call overhead × many forms ×
-    // many surface lengths). termSet is populated from the same dicts
-    // post-migration, so the in-memory loop only matters for the brief
-    // window before migration completes.
-    function hasTermAnywhere(word) {
-        if (window.dictStore?.termSetReady?.() && window.dictStore.hasTerm(word)) {
-            return true;
-        }
-        for (const [, entries] of dictionaries) {
-            if (entries.has(word)) return true;
-        }
-        return false;
-    }
-
-    // Iterate longest surface first. As soon as ANY surface length has at
-    // least one valid deinflection in the dict, return — longer surface
-    // is almost always the right pick. The previous short→long sweep with
-    // "longer-base wins" let 説明した get clobbered by the noun 説き明かし
-    // (longer base entry happens to exist at the shorter "説明し" surface),
-    // and 積もらない get clobbered by single-char 積. Longest-surface-first
-    // matches what Yomitan does.
-    // Translate a candidate deinflected base into the term the dict
-    // ACTUALLY indexes by. dictStore stores headwords as `term` (often
-    // kanji, e.g., 頷く), and the kana reading (うなずく) lives inside
-    // the entry. The reading→term map built at termSet-build time lets
-    // us map deinflected kana bases back to the canonical kanji term so
-    // the subsequent multiDictionaryLookup actually finds the entry.
-    function canonicalLookupTerm(word) {
-        // Legacy in-memory dicts use the literal key, so any word found
-        // in the in-memory Map is canonical there.
-        for (const [, entries] of dictionaries) {
-            if (entries.has(word)) return word;
-        }
-        // dictStore: term-set hit means either it IS the term or it's
-        // only a reading. termForReading returns the kanji form if so;
-        // null if the word is a direct term.
-        if (window.dictStore?.termSetReady?.()) {
-            if (window.dictStore.hasTerm?.(word)) {
-                const fromReading = window.dictStore.termForReading?.(word);
-                return fromReading || word;
-            }
-        }
-        return word;
-    }
-
-    // CLEAN RESET — this is the same simple algorithm the Android build
-    // ran fine. For each length from longest to shortest, get all
-    // deinflection forms (BFS depth 2 over the deinflect.json rules,
-    // ~569 rules) and pick the first length where ANY form is in any
-    // dict. The "fast path" experiment that pre-checked raw surfaces
-    // was wrong: it returned shorter literal matches (e.g., 渡し as a
-    // noun) before letting the deinflector find the verb base (渡す).
-    // No fast path here — trust the deinflector + termSet.
-    function greedyDeinflect(text, start, maxLength = 12) {
+    // Longest-match deinflection, Yomitan-style: generate ALL candidate base
+    // forms for every surface length IN-MEMORY (getDeinflections — no existence
+    // check), gather them, then do ONE bulk async existence query against the
+    // indexed dictStore (existsBulk) PLUS a sync check of the legacy in-memory
+    // `dictionaries` Map, and pick the longest surface (longest base within it)
+    // that has a hit. Replaces the old per-candidate synchronous _termSet.has,
+    // so there is NO boot-time term-index scan — startup is instant regardless
+    // of dictionary count/size, and per-tap cost scales with candidates only.
+    //
+    // Selection invariants preserved from the previous matcher: longest SURFACE
+    // first, and within a surface the longest BASE form. Changing this brought
+    // back known regressions (説明した clobbered by 説き明かし; 積もらない by 積).
+    async function greedyDeinflect(text, start, maxLength = 12) {
         const fallback = { match: text[start], base: text[start], length: 1 };
         const searchLimit = Math.min(maxLength, text.length - start);
+        if (searchLimit < 1) return fallback;
+
+        // 1) Generate candidates for every length (longest-first) and gather
+        //    all unique candidate words for ONE bulk existence query.
+        const perLen = [];
+        const allWords = new Set();
         for (let len = searchLimit; len >= 1; len--) {
             const surface = text.slice(start, start + len);
             const forms = getDeinflections(surface, 2);
-            let bestAtLen = null;
-            for (const f of forms) {
-                if (!hasTermAnywhere(f.word)) continue;
-                if (!bestAtLen || f.word.length > bestAtLen.word.length) {
-                    bestAtLen = f;
+            perLen.push({ len, surface, forms });
+            for (const f of forms) allWords.add(f.word);
+        }
+        if (!allWords.size) return fallback;
+
+        // 2) ONE bulk async existence check against the indexed store…
+        let exists = new Set();
+        try {
+            if (window.dictStore?.existsBulk) {
+                exists = await window.dictStore.existsBulk(Array.from(allWords));
+            }
+        } catch (e) { exists = new Set(); }
+        // …plus the legacy in-memory Map (covers the brief pre-migration /
+        // store-empty window, exactly as the old hasTermAnywhere did).
+        if (dictionaries.size) {
+            for (const w of allWords) {
+                if (exists.has(w)) continue;
+                for (const [, entries] of dictionaries) {
+                    if (entries.has(w)) { exists.add(w); break; }
                 }
             }
-            if (bestAtLen) {
-                return { match: surface, base: bestAtLen.word, length: len };
+        }
+
+        // 3) Pick the longest surface with a hit; longest base within it.
+        for (const { len, surface, forms } of perLen) {
+            let bestAtLen = null;
+            for (const f of forms) {
+                if (!exists.has(f.word)) continue;
+                if (!bestAtLen || f.word.length > bestAtLen.word.length) bestAtLen = f;
             }
+            if (bestAtLen) return { match: surface, base: bestAtLen.word, length: len };
         }
         return fallback;
     }
@@ -1820,8 +1789,7 @@
             // finishes + the termSet builds. Plain "Looking up…" reads as
             // "the tap did nothing" — show a more honest "Initializing
             // Dictionaries…" with a progress bar instead.
-            const dictsReady = dictLoaded &&
-                (!window.dictStore || window.dictStore.termSetReady?.());
+            const dictsReady = dictLoaded;
             const earlyPopup = getOrCreatePopup();
             if (dictsReady) {
                 earlyPopup.innerHTML = `
@@ -1865,10 +1833,6 @@
             // dict-store termSet — whichever is the canonical data source.
             try { if (window._dictLoadPromise) await window._dictLoadPromise; } catch (e) {}
             lap('after _dictLoadPromise');
-            if (window.dictStore && !window.dictStore.termSetReady?.()) {
-                try { await window.dictStore.buildTermSet(); } catch (e) {}
-            }
-            lap('after buildTermSet');
             // Finish the bar so the transition to the next popup state
             // doesn't look like it bailed at 90%.
             const finishBar = document.getElementById('earlyLookupBar');
@@ -1877,7 +1841,7 @@
             const text = spans.map(s => s.textContent).join('');
             const charIndex = spans.slice(0, index)
                 .reduce((sum, s) => sum + s.textContent.length, 0);
-            const best = greedyDeinflect(text, charIndex);
+            const best = await greedyDeinflect(text, charIndex);
             lap(`greedyDeinflect → "${best.base}" (${best.length}ch)`);
 
             highlightSpans(spans, index, best.length);
@@ -2880,7 +2844,7 @@
         document.addEventListener('click', (e) => {
             const pagedView = document.getElementById('readingPagedView');
             if (pagedView && pagedView.style.display !== 'none' &&
-                pagedView.contains(e.target)) return;
+                pagedView.style.visibility !== 'hidden' && pagedView.contains(e.target)) return;
             const popup = document.getElementById('dictPopup');
             if (popup && !popup.contains(e.target) && !e.target.classList.contains('dict-frag')) {
                 hidePopup();
@@ -2903,7 +2867,7 @@
         document.addEventListener('touchstart', (e) => {
             const pagedView = document.getElementById('readingPagedView');
             if (pagedView && pagedView.style.display !== 'none' &&
-                pagedView.contains(e.target)) return;
+                pagedView.style.visibility !== 'hidden' && pagedView.contains(e.target)) return;
             const popup = document.getElementById('dictPopup');
             if (!popup || popup.style.display === 'none') return;
             const t = e.target;
@@ -2967,7 +2931,7 @@
                 const dy = Math.abs(t.clientY - tsY);
                 if (dx > 8 || dy > 8) moved = true;
             }, { passive: true });
-            span.addEventListener('touchend', (e) => {
+            span.addEventListener('touchend', async (e) => {
                 if (moved) return; // scrolled, not a tap
                 e.preventDefault();
                 e.stopPropagation();
@@ -2975,7 +2939,7 @@
                 const text = spans.map(s => s.textContent).join('');
                 const charIndex = spans.slice(0, index)
                     .reduce((sum, s) => sum + s.textContent.length, 0);
-                const best = greedyDeinflect(text, charIndex);
+                const best = await greedyDeinflect(text, charIndex);
                 highlightSpans(spans, index, best.length);
                 performLookup(spans, index);
             });
@@ -3025,13 +2989,19 @@
                     await ensureJM();
                 }
 
-                // Build termSet AT BOOT (not lazily on first tap). The
-                // 405k-entry cursor scan takes ~5 s on iOS WKWebView;
-                // doing it inside performLookup's await chain made the
-                // first tap look like a 14-second deinflection bug.
-                if (window.dictStore?.buildTermSet) {
-                    try { await window.dictStore.buildTermSet(); } catch (_) {}
-                }
+                // Drop any JMDict an older build migrated into dictStore so
+                // lookups reflect the removal. (No term-index pre-build any more —
+                // existence is answered per-tap via dictStore.existsBulk, so
+                // startup is instant regardless of dictionary size.)
+                await purgeStaleJMDictFromStore();
+                // Mark dictionaries READY regardless of which source served them.
+                // dictLoaded is otherwise set ONLY inside ensureJM(), but the
+                // dictStore-populated branch above SKIPS ensureJM — so without
+                // this the readiness gate (dictsReady, ~line 1735) and the
+                // first-lookup loader (isFirstLookup, ~line 1799) would stay
+                // stuck 'not ready' forever and show "Initializing Dictionaries…"
+                // on every tap once the term index is actually built and fast.
+                dictLoaded = true;
                 console.log(`✅ Global dictionary loading complete in ${Math.round(performance.now() - t0)}ms`);
                 return true;
             } catch (error) {
@@ -3101,15 +3071,12 @@
             // matches because hasTermAnywhere always returns false against
             // empty stores (the symptom: "tapped 高かった, got just 高").
             try { await loadPromise; } catch (e) {}
-            if (window.dictStore && !window.dictStore.termSetReady?.()) {
-                try { await window.dictStore.buildTermSet(); } catch (e) {}
-            }
 
             // Cancellation: if another tap fired while we were awaiting
             // dict load, abandon this stale lookup.
             if (token !== currentLookupToken) return;
 
-            const best = greedyDeinflect(flatText, charIndex);
+            const best = await greedyDeinflect(flatText, charIndex);
             // Paint via CSS Custom Highlight API — no DOM mutation.
             if (typeof paintFn === 'function') {
                 try { paintFn(chunk, textNodes, charIndex, best.length); } catch (e) {}

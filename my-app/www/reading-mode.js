@@ -2558,7 +2558,10 @@
     // still runs above so cross-mode sync (chunk→card lookups) stays
     // consistent.
     const pagedView = document.getElementById('readingPagedView');
-    const pagedActive = !!(pagedView && pagedView.style.display !== 'none');
+    // The paged view is display:flex ALWAYS now; visibility is the show/hide
+    // toggle. Must check BOTH or this reads "paged active" even in audio/card mode
+    // (which left the audio subtitle's cue-active highlight painting green on iOS).
+    const pagedActive = !!(pagedView && pagedView.style.display !== 'none' && pagedView.style.visibility !== 'hidden');
     if (abCueToChunk && idx >= 0) {
       let chunkIdx = abCueToChunk[idx];
       if (chunkIdx < 0) {
@@ -2773,24 +2776,29 @@
     //   (a) SRT-card mode → current card's audiobookStartMs (most direct)
     //   (b) Read-mode chunk → chunkToCue[lastMatchedIdx] → cue.startMs
     const deck = currentDeckName();
-    let startMs = 0;
+    let startMs = null;   // null = no current position resolved yet (NOT 0 — 0 is a valid book-start)
     const card = Array.isArray(window.allNotes) ? window.allNotes[window.currentCardIndex] : null;
     if (opts.seekToCurrentPosition) {
       if (card?.isSrtCard && Number.isFinite(card.audiobookStartMs)) {
         startMs = card.audiobookStartMs;
-      } else if (abChunkToCue && lastMatchedIdx >= 0) {
-        const cueIdx = abChunkToCue[lastMatchedIdx];
-        if (cueIdx >= 0 && abCues[cueIdx]) startMs = abCues[cueIdx].startMs;
+      } else {
+        // Deck/EPUB: seek to the PAGED read cursor (the line the user actually
+        // read), NOT the legacy lastMatchedIdx — which the active paged reader
+        // never advances, so it was stale and audio resumed at the OLD spot
+        // (the read→audio desync bug). null → fall through to the saved position
+        // below; NEVER coerce to 0.
+        const readMs = (typeof window._pagedReadCueStartMs === 'function') ? window._pagedReadCueStartMs() : null;
+        if (Number.isFinite(readMs)) startMs = readMs;
       }
     }
-    if (!startMs) {
+    if (startMs == null) {
       const last = await getAudiobookLastPosition(deck);
       startMs = last.ms || 0;
     }
     console.log('[ab] openAudiobookMode seek=' + !!opts.seekToCurrentPosition +
       ' isSrt=' + !!card?.isSrtCard +
       ' cardStart=' + (card?.audiobookStartMs ?? 'n/a') +
-      ' chunkIdx=' + lastMatchedIdx +
+      ' readCue=' + (window._pagedReadCueIdx ? window._pagedReadCueIdx() : 'n/a') +
       ' → startMs=' + startMs);
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (bg) {
@@ -2946,20 +2954,21 @@
           : -1;
         if (cursor >= 0 && abCues[cursor]) cursorMs = abCues[cursor].startMs;
       } else if (abCueToChunk && abCurrentCueIdx >= 0) {
-        // Deck-card titles with paired EPUB: cards come from the
-        // deck, but the reader/audio cursor maps via cue→chunk.
+        // Deck-card titles with paired EPUB: cards come from the deck, but the
+        // reader/audio cursor maps via cue↔chunk. Compare audio vs read as legacy
+        // CHUNK indices (so reentryPendingAudioChunk downstream is unchanged), but
+        // source the read cursor from the LIVE PAGED read cue (shell snapshot as
+        // fallback) mapped through abCueToChunk — NOT the legacy lastMatchedIdx,
+        // which the active paged reader never advances, so the old compare used a
+        // stale read position and mis-fired (or skipped) the deck+EPUB prompt.
         audioChunk = abCueToChunk[abCurrentCueIdx];
-        // Snapshot from shell on audio entry (where the reader was
-        // before audio).
-        const priorCursor = window._priorReaderCursorIdx;
-        const hasPrior = Number.isFinite(priorCursor) && priorCursor >= 0;
-        cursor = hasPrior ? priorCursor : lastMatchedIdx;
-        if (cursor >= 0 && abChunkToCue) {
-          const cueIdxForCursor = abChunkToCue[cursor];
-          if (cueIdxForCursor >= 0 && abCues[cueIdxForCursor]) {
-            cursorMs = abCues[cueIdxForCursor].startMs;
-          }
+        let readCue = (typeof window._pagedReadCueIdx === 'function') ? window._pagedReadCueIdx() : -1;
+        if (!(Number.isFinite(readCue) && readCue >= 0) &&
+            Number.isFinite(window._priorReaderCursorIdx) && window._priorReaderCursorIdx >= 0) {
+          readCue = window._priorReaderCursorIdx;   // CUE index snapshot (set in shell.js on audio entry)
         }
+        cursor = (readCue >= 0 && Number.isFinite(abCueToChunk[readCue])) ? abCueToChunk[readCue] : -1;
+        if (readCue >= 0 && abCues[readCue]) cursorMs = abCues[readCue].startMs;
       }
       // No audio context at all (audio mode never opened, audiobook
       // not paired) → no prompt needed.

@@ -83,6 +83,10 @@
   // Auto-scroll grace period: don't yank the view back if the user
   // manually scrolled within the last 5 seconds.
   let lastUserScrollTime = 0;
+  // Monotonic scroll id: each scrollChunkNearRightWithContext bumps it; a pending
+  // 600ms verifier re-forces scrollLeft ONLY if it's still the newest scroll, so
+  // two scrolls within 600ms can't ping-pong (the card<->read oscillation).
+  let _scrollSeq = 0;
   let lastProgrammaticScrollTime = 0;
 
   async function setPref(k, v) {
@@ -363,13 +367,26 @@
     document.head.appendChild(s);
   }
 
+  // The reader view stays display:flex once created; show/hide toggles VISIBILITY
+  // + pointerEvents, NOT display — so the heavy vertical-rl layout (thousands of
+  // chunks over a huge canvas) is computed ONCE and never re-run on a mode switch.
+  // display:none was discarding the layout and re-running it on every read-entry —
+  // the Android "settling" lag (iOS renders horizontal, so it was cheap there).
+  // "Hidden" = no view yet, or visibility:hidden (display:none kept for back-compat).
+  function _readerHidden() {
+    return !viewEl || viewEl.style.visibility === 'hidden' || viewEl.style.display === 'none';
+  }
+
   function ensureView() {
     if (viewEl) return viewEl;
     ensureStylesheet();
     viewEl = document.createElement('div');
     viewEl.id = 'readingPagedView';
     Object.assign(viewEl.style, {
-      display: 'none',
+      // Created hidden + non-interactive, but display:flex so layout computes once.
+      display: 'flex',
+      visibility: 'hidden',
+      pointerEvents: 'none',
       position: 'fixed',
       // Top inset = safe-area + 48px clears the shell header (which is
       // fixed at top: safe-area, height: 48px, z-index 9000). With this,
@@ -1254,7 +1271,7 @@
       // switch could otherwise let a leftover pass run against the hidden view
       // and clobber the shared _lastAudioCueIdx (corrupting lock-screen
       // cue-jump's relative base). Mirrors pagedCenterOnCue's guard.
-      if (!viewEl || viewEl.style.display === 'none') return false;
+      if (_readerHidden()) return false;
       const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
       if (!cues.length || !chunks.length) return false;
       // 1. choose the intended current cue
@@ -1319,7 +1336,7 @@
       lastHighlightedCue = -1;             // let the next live audio-follow paint fire
       window._lastAudioCueIdx = want;      // keep the shared cursor at the intended cue
       lastProgrammaticScrollTime = Date.now();
-      try { scrollChunkNearRightWithContext(chunk); } catch (_) {}
+      try { scrollChunkNearRightWithContext(chunk, 3, { allowFarJump: true }); } catch (_) {}
       log('[scroll-trace] ensureGreenOnEnter want=' + want + ' matchCue=' + matchCue + ' painted=' + !!r);
       return !!r;
     } catch (e) { log('ensureGreenOnEnter err: ' + e.message); return false; }
@@ -1328,6 +1345,23 @@
   // Expose the paged reader's live read cursor so the reentry dialog can
   // capture a "stay at read position" anchor BEFORE loadAudiobookCues wipes it.
   window._pagedReadCueIdx = function () { return lastReadCueIdx; };
+  // Resolve the read cursor's audio START TIME (ms) from the PAGED cue array, so
+  // audio-mode entry and read-mode PLAY seek to the line the user actually read
+  // — WITHOUT indexing the paged cursor into the legacy abCues array (which can
+  // be a different indexing). Returns null when there is no valid read cue, so
+  // callers fall back to the saved position and NEVER coerce to book start.
+  window._pagedReadCueStartMs = function () {
+    try {
+      // lastReadCueIdx is ALWAYS a pagedCues index — never index it into a
+      // different array. When pagedCues is transiently empty (mid-reload), return
+      // null so callers fall back to the saved audio position (invariant-safe).
+      const rc = lastReadCueIdx;
+      if (pagedCues?.length && rc >= 0 && rc < pagedCues.length && Number.isFinite(pagedCues[rc]?.startMs)) {
+        return pagedCues[rc].startMs;
+      }
+    } catch (_) {}
+    return null;
+  };
 
   // Scroll the chunk into view. In vertical-rl, that means aligning the
   // chunk's right edge with the viewport's right edge (where new content
@@ -1360,6 +1394,20 @@
     if (!scrollEl) return;
     if (Array.isArray(window.allNotes) && window.allNotes.length > 0) return; // has cards → centerOnActiveCard handles it
     if (Date.now() - lastUserScrollTime < 5000) return; // actively reading — don't yank
+    // EPUB-only reopen: prefer the bookmark LINE (engine-agnostic, line-exact);
+    // fall back to the saved raw scrollLeft only when there's no bookmark.
+    if (_bookmarkChunkIdx >= 0 && _bookmarkChunkIdx < chunks.length &&
+        (chunks[_bookmarkChunkIdx].getBoundingClientRect().width || 0) > 0) {
+      // Only take the line-exact path when the chunk is actually laid out;
+      // otherwise the relative scroll silently no-ops — fall THROUGH to the raw
+      // savedReadScrollLeft fallback below instead of returning to a dead no-op.
+      suppressScrollSave = true;
+      lastProgrammaticScrollTime = Date.now();
+      try { scrollChunkNearRightWithContext(chunks[_bookmarkChunkIdx], 3, { allowFarJump: true }); } catch (_) {}
+      setTimeout(() => { suppressScrollSave = false; }, 200);
+      log('restoreReadScrollIfNoCard → bookmark chunk ' + _bookmarkChunkIdx);
+      return;
+    }
     const sl = savedReadScrollLeft;
     if (Number.isFinite(sl) && Math.abs(sl) > 1 && Math.abs(scrollEl.scrollLeft - sl) > 2) {
       suppressScrollSave = true;
@@ -1428,7 +1476,7 @@
       // fallback" pair — those produced the "highlight slightly
       // off-screen" cases the user reported.
       log('[scroll-trace] centerOnActiveCard → scrollChunkNearRightWithContext');
-      scrollChunkNearRightWithContext(chunk);
+      scrollChunkNearRightWithContext(chunk, 3, { allowFarJump: true });
     } catch (e) { log('centerOnActiveCard error:', e.message); }
   }
 
@@ -1566,7 +1614,7 @@
     if (!scrollEl) return;
     _ensureEdgeMasks();
     const on = _physEnabled() && document.body.classList.contains('mode-read') &&
-               viewEl && viewEl.style.display !== 'none';
+               !_readerHidden();
     if (!on) { _edgeMaskL.style.width = '0'; _edgeMaskR.style.width = '0'; _maskLW = 0; _maskRW = 0; return; }
     const sr = scrollEl.getBoundingClientRect();
     if (sr.width < 40) { _edgeMaskL.style.width = '0'; _edgeMaskR.style.width = '0'; _maskLW = 0; _maskRW = 0; return; }
@@ -1676,10 +1724,10 @@
         // instant scrollBy was the "rough, unnatural stop" on iPhone — and
         // since each turn advances by WHOLE columns, an already-aligned page
         // stays aligned without it; the next autoscroll re-aligns regardless.)
-        _physAnimateTo(anchor - PHYS.DIR * sign * cols * W, PHYS.TURN_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); });
+        _physAnimateTo(anchor - PHYS.DIR * sign * cols * W, PHYS.TURN_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); _creditReadFrontier(); _armBookmarkTimer(); });
       } else {
         // Slow drag → spring back to where you started.
-        _physAnimateTo(anchor, PHYS.SNAP_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); });
+        _physAnimateTo(anchor, PHYS.SNAP_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); _creditReadFrontier(); _armBookmarkTimer(); });
       }
       // Keep physDragging true through the settle so the tap handler doesn't
       // fire a dict lookup; clear shortly after.
@@ -1722,13 +1770,10 @@
         const d = Math.abs(r.right - sr.right); // closest to the right reading edge
         if (d < edgeDist) { edgeChunk = ch; edgeDist = d; }
       }
-      // Char progress: credit through the END of the furthest-read (left) chunk.
-      // JP-only unit so the read counter matches the card / audio counters.
-      if (leftChunk) {
-        const off = parseInt(leftChunk.dataset.jpOff) || 0;
-        const len = parseInt(leftChunk.dataset.jpLen) || 0;
-        window.stats.noteReadPosition(off + len);
-      }
+      // (Char crediting removed from this scroll path — it counted auto-scroll.
+      // Chars are credited only at the 5 s bookmark; `leftChunk` is unused here
+      // now but kept so the scan stays a single source for both anchors.)
+      void leftChunk;
       // Read cursor: the current reading line is the chunk at the RIGHT edge, so
       // "stay at read position" + restore-on-open land where the user actually is.
       if (edgeChunk && pagedChunkToCue) {
@@ -1738,6 +1783,151 @@
           window._lastAudioCueIdx = lastReadCueIdx;
         }
       }
+      // NOTE: char crediting deliberately does NOT happen here anymore — it would
+      // count auto-scroll / smooth programmatic scrolls. Chars are credited only
+      // at the 5s bookmark (_settleBookmark). This call now only moves the cursor.
+    } catch (_) {}
+  }
+
+  // ===================== READ BOOKMARK — single position anchor =============
+  // ONE source of truth for the read/card place: the line you're on (a chunk
+  // index). It is where the book reopens, the highlighted line, AND the char
+  // baseline. Auto-set after 5 s of no page movement (with a toast) and silently
+  // on close, so reopen is always exact. Char credit happens ONLY here, so
+  // auto-scroll / jumps can never inflate the count. Hard guards: never bookmark
+  // or restore unless read mode + laid out + a real line is on screen — so a
+  // dump-to-0 / garbage save is structurally impossible.
+  const KEY_BOOKMARK_PREFIX = 'PAGED_BOOKMARK_';
+  const BOOKMARK_SETTLE_MS = 5000;
+  let _bookmarkChunkIdx = -1;
+  let _bookmarkTimer = null;
+  let _lastToastedBookmarkIdx = -2;
+
+  // The current reading line (right edge) + frontier char offset (leftmost
+  // visible), read from the live viewport. Returns null if nothing valid is on
+  // screen (view hidden / not laid out / no chunk intersects) — callers MUST
+  // treat null as "do nothing", never as position 0.
+  function _visibleReadAnchors() {
+    if (!scrollEl || !chunks?.length) return null;
+    const sr = scrollEl.getBoundingClientRect();
+    if (!(sr.width > 1)) return null;
+    let edgeChunk = null, edgeDist = Infinity;
+    let maxFrontier = 0;   // deepest END char-offset among on-screen chunks
+    for (const ch of chunks) {
+      const r = ch.getBoundingClientRect();
+      if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
+      if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
+      // Frontier = the DEEPEST visible text, from char METADATA (engine-agnostic).
+      // The old min-getBoundingClientRect().left pick saturated on WKWebView — a
+      // multi-column vertical-rl paragraph's block rect doesn't climb as you page
+      // WITHIN it — so the first settle anchored stats' monotonic high-water deep
+      // and every later settle early-returned: the iOS counter froze at 0.
+      // dataset.jpOff/jpLen are identical on both engines and the max END offset
+      // on screen climbs monotonically as you read forward.
+      const end = (parseInt(ch.dataset.jpOff) || 0) + (parseInt(ch.dataset.jpLen) || 0);
+      if (end > maxFrontier) maxFrontier = end;
+      const d = Math.abs(r.right - sr.right);
+      if (d < edgeDist) { edgeChunk = ch; edgeDist = d; }
+    }
+    if (!edgeChunk) return null;
+    return { edgeIdx: chunks.indexOf(edgeChunk), frontierOff: maxFrontier };
+  }
+
+  // Restart the 5 s settle timer on every USER page movement (read mode only).
+  // Capture the book name AT ARM TIME so a timer armed for book A can never fire
+  // after a switch to book B and save B's not-yet-restored (0) viewport.
+  let _bookmarkArmedForName = null;
+  function _armBookmarkTimer() {
+    if (!document.body.classList.contains('mode-read')) return;
+    if (_bookmarkTimer) clearTimeout(_bookmarkTimer);
+    _bookmarkArmedForName = currentName;
+    _bookmarkTimer = setTimeout(_settleBookmark, BOOKMARK_SETTLE_MS);
+  }
+
+  // Cancel any pending settle (on book load / close / mode change) so it can't
+  // fire against the wrong book.
+  function _clearBookmarkTimer() {
+    if (_bookmarkTimer) { clearTimeout(_bookmarkTimer); _bookmarkTimer = null; }
+    _bookmarkArmedForName = null;
+  }
+
+  function _persistBookmark() {
+    if (!currentName || _bookmarkChunkIdx < 0) return;       // never persist garbage
+    try { setPref(KEY_BOOKMARK_PREFIX + currentName, String(_bookmarkChunkIdx)); } catch (_) {}
+  }
+
+  // Guard for the RAW-scrollLeft save: refuse to write unless the view is live,
+  // laid out, and the value is real — so a transient mid-flip 0 (book B has reset
+  // scrollLeft to 0 but currentName is still book A) can NEVER overwrite book A's
+  // good saved position — the title-alternation place-loss this guards against.
+  // A real deep position, a card-bearing title, or a recent user scroll passes.
+  function _canSaveReadScroll() {
+    try {
+      if (!currentName || !scrollEl || !viewEl) return false;
+      if (_readerHidden()) return false;
+      if (!(scrollEl.scrollWidth > scrollEl.clientWidth + 1)) return false;  // not laid out
+      const hasCards = Array.isArray(window.allNotes) && window.allNotes.length > 0;
+      return hasCards || Math.abs(scrollEl.scrollLeft) > 1 || (Date.now() - lastUserScrollTime < 4000);
+    } catch (_) { return false; }
+  }
+
+  // Credit genuine reading via the frontier (leftmost-visible) char offset.
+  // noteReadPosition is monotonic + page-capped, so calling this often (page
+  // turns, settle, close) can never OVER-credit, and a jump's big delta is
+  // dropped — yet it can't UNDER-count a steady read that ends in a close.
+  function _creditReadFrontier() {
+    try {
+      if (!document.body.classList.contains('mode-read')) return;
+      const a = _visibleReadAnchors();
+      if (a) window.stats?.noteReadPosition?.(a.frontierOff);
+    } catch (_) {}
+  }
+
+  // 5 s of stillness → bookmark the current line, credit reading, toast.
+  function _settleBookmark() {
+    try {
+      _bookmarkTimer = null;
+      if (_bookmarkArmedForName !== currentName) return;   // book changed since arm → bail
+      if (!document.body.classList.contains('mode-read')) return;
+      if (_readerHidden()) return;
+      const a = _visibleReadAnchors();
+      if (!a || a.edgeIdx < 0) return;               // nothing valid → never bookmark garbage
+      _bookmarkChunkIdx = a.edgeIdx;
+      _persistBookmark();
+      try { window.stats?.noteReadPosition?.(a.frontierOff); } catch (_) {}
+      if (a.edgeIdx !== _lastToastedBookmarkIdx) {     // one toast per new line
+        _lastToastedBookmarkIdx = a.edgeIdx;
+        try { window.showToast?.('Location bookmarked', 1200); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+
+  // Capture the current line silently (on close / background) so reopen is exact
+  // even if the user left before 5 s, and credit the final reading so a session
+  // that ends in a close isn't lost. Never overwrites a good bookmark with junk.
+  function _saveBookmarkNow(force) {
+    try {
+      // Restore in flight: currentName is already the NEW book and the view is
+      // laid out + mode-read, but scrollLeft is still 0 because the bookmark
+      // scroll hasn't been applied yet (across `await _waitForPagedLayout`). A
+      // visibilitychange/hidden or a leave-read flush in that window would read
+      // edgeIdx≈0 and persist 0 over the just-loaded deep bookmark → dump-to-0.
+      // suppressScrollSave is true for the whole restore window (same signal the
+      // raw-scroll save already trusts), so bail.
+      if (suppressScrollSave) return;
+      // `force` (from the leave-read flush) bypasses ONLY the mode-read class
+      // gate: shell.js clears mode-read BEFORE firing shell:mode-change, so the
+      // exit flush would otherwise skip freshening the line and reopen a few
+      // lines behind. The view-visible guard + the _visibleReadAnchors null-check
+      // below still block any write when the paged view isn't the live layout,
+      // so a real card/audio mode (paged view hidden) is still correctly skipped.
+      if (!force && !document.body.classList.contains('mode-read')) return;
+      if (_readerHidden()) return;
+      const a = _visibleReadAnchors();
+      if (!a || a.edgeIdx < 0) return;
+      _bookmarkChunkIdx = a.edgeIdx;
+      _persistBookmark();
+      try { window.stats?.noteReadPosition?.(a.frontierOff); } catch (_) {}
     } catch (_) {}
   }
 
@@ -1760,12 +1950,13 @@
         // the physics page-turn settle can call it too — under that engine this
         // gated scroll path never fires.)
         _creditReadCharsFromVisible();
+        _armBookmarkTimer();   // user moved → (re)start the 5 s bookmark countdown
       }
       updateProgress();
       if (suppressScrollSave) return;
       if (pendingSave) clearTimeout(pendingSave);
       pendingSave = setTimeout(() => {
-        if (currentName) {
+        if (_canSaveReadScroll()) {
           setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft);
         }
         // Persist the read location as the title's card index for SRT-cards
@@ -1785,8 +1976,9 @@
       window._pagedVisFlushWired = true;
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState !== 'hidden') return;
-        if (!currentName || !scrollEl || !viewEl || viewEl.style.display === 'none') return;
-        try { setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft); } catch (_) {}
+        if (!currentName || !scrollEl || _readerHidden()) return;
+        try { _saveBookmarkNow(); } catch (_) {}
+        try { if (_canSaveReadScroll()) setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft); } catch (_) {}
         if (lastReadCueIdx >= 0 && typeof window.persistReadCue === 'function') {
           try { window.persistReadCue(lastReadCueIdx); } catch (_) {}
         }
@@ -1818,7 +2010,7 @@
     window.addEventListener('resize', () => {
       if (t) clearTimeout(t);
       t = setTimeout(() => {
-        if (!viewEl || viewEl.style.display === 'none') return;
+        if (_readerHidden()) return;
         // CRITICAL: only react to WIDTH changes. iOS Safari fires resize
         // events constantly as the URL bar hides/shows on scroll — if we
         // re-scroll on every event, the view fights the user's swipe.
@@ -2402,8 +2594,8 @@
           log('prewarm: no chunks after tryLoadFromActiveTitle (no EPUB attached?)');
         }
       } finally {
-        viewEl.style.display = prevDisplay || 'none';
-        viewEl.style.visibility = prevVisibility || '';
+        viewEl.style.display = prevDisplay || 'flex';
+        viewEl.style.visibility = prevVisibility || 'hidden';
         viewEl.style.pointerEvents = prevPointer || '';
       }
       window._pagedPrewarmDone = true;
@@ -2546,6 +2738,20 @@
   async function loadEpubFromUri(uri, name) {
     try {
       ensureView();
+      // Snapshot the OUTGOING book's freshest line FIRST — before any reset or
+      // DOM swap — so a same-mode A→B title-open (which does NOT fire a
+      // mode-change flush) still persists A's exact line under A's key.
+      // currentName + chunks + the DOM all still reflect the outgoing book here.
+      // Internally guarded (read-mode + view-visible + not-mid-restore), and a
+      // no-op on the very first open when there is no outgoing book.
+      try { _saveBookmarkNow(); } catch (_) {}
+      // Reset per-book position state IMMEDIATELY — before any DOM swap — so
+      // nothing reads a CROSS-BOOK stale bookmark index, or fires the prior
+      // book's settle timer against this one (the title-flip place-loss). The
+      // real value for THIS book is loaded from its pref further down.
+      _bookmarkChunkIdx = -1;
+      _lastToastedBookmarkIdx = -2;
+      _clearBookmarkTimer();
       innerEl.innerHTML = `<p style="color:#888;text-align:center;margin-top:30vh;">Loading ${name}…</p>`;
 
       const { path } = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri });
@@ -2620,6 +2826,15 @@
       const isFreshBookLoad = currentName !== name;
       currentName = name;
       if (isFreshBookLoad) pagedInitialScrollDone = false;
+      // Re-anchor the read char baseline to THIS book. maxCharOffsetSeen is a
+      // single GLOBAL high-water mark but is semantically a per-book char offset
+      // — without re-anchoring, a high-water left by a DEEPER book (or a prior
+      // session, since it's persisted to localStorage) sits above every offset
+      // in this book, so noteReadPosition credits NOTHING and the read counter
+      // sticks at 0. rebaselineRead only clears baselineSet (the accumulated
+      // chars total is preserved); the next settle silently re-anchors to the
+      // reopen line, after which forward reading accrues normally.
+      if (isFreshBookLoad) { try { window.stats?.rebaselineRead?.(); } catch (_) {} }
       log(`Loaded ${name}: ${sections.length} sections, ${chunkCount} chunks`);
 
       // Layout settles over 2 RAFs on iOS.
@@ -2645,10 +2860,33 @@
       let resumeLeft = 0;
       const sl = parseFloat(await getPref(KEY_LAST_SCROLL_PREFIX + name) || '0');
       if (Number.isFinite(sl)) resumeLeft = sl;
-      savedReadScrollLeft = resumeLeft; // cache for the post-layout sync re-apply (restoreReadScrollIfNoCard)
+      savedReadScrollLeft = resumeLeft; // raw-scroll fallback for restoreReadScrollIfNoCard
+      // Bookmark = the LINE you were on → engine-agnostic, line-exact reopen.
+      const _bmRaw = await getPref(KEY_BOOKMARK_PREFIX + name);
+      const _bmIdx = (_bmRaw != null && _bmRaw !== '') ? parseInt(_bmRaw) : -1;
+      _bookmarkChunkIdx = (Number.isFinite(_bmIdx) && _bmIdx >= 0) ? _bmIdx : -1;
+      _lastToastedBookmarkIdx = -2; // a fresh open may toast again on first settle
       await setPref(KEY_LAST_NAME, name);
       suppressScrollSave = true;
-      scrollEl.scrollTo({ left: resumeLeft, behavior: 'instant' });
+      lastProgrammaticScrollTime = Date.now(); // this restore is not "reading"
+      // Wait for vertical-rl layout to settle so the bookmark chunk has a real
+      // rect — 2 RAFs is NOT enough on a cold WKWebView open, and the relative
+      // scroll silently no-ops on a zero-width rect (without this the book could
+      // sit at 0 with no retry).
+      try { await _waitForPagedLayout(2500); } catch (_) {}
+      let _restored = false;
+      if (_bookmarkChunkIdx >= 0 && _bookmarkChunkIdx < chunks.length) {
+        const _ch = chunks[_bookmarkChunkIdx];
+        if ((_ch.getBoundingClientRect().width || 0) > 0) {
+          // Relative scrollBy off the chunk's rect — no scrollWidth/raw-scrollLeft
+          // dependency, so it lands the same LINE on WKWebView and Chromium.
+          // allowFarJump: a deep bookmark in a long book is a legit huge delta.
+          try { scrollChunkNearRightWithContext(_ch, 3, { allowFarJump: true }); _restored = true; } catch (_) {}
+        }
+      }
+      if (!_restored) {
+        scrollEl.scrollTo({ left: resumeLeft, behavior: 'instant' }); // no/late bookmark → raw fallback
+      }
       setTimeout(() => { suppressScrollSave = false; }, 200);
     } catch (e) {
       log('loadEpub error:', e);
@@ -2666,6 +2904,18 @@
   // chunk is off-screen.
 
   async function loadAudiobookCues() {
+    // Already loaded + mapped for THIS title against the CURRENT chunk layout?
+    // Skip the SRT re-fetch + re-parse (~10k cues) + alignment rebuild. This runs
+    // on EVERY read-entry / mode switch, and re-parsing+re-mapping each time was a
+    // major chunk of the mode-switch lag. The map-length check vs the current
+    // chunks invalidates the cache after a relayout (e.g. font-size change), so a
+    // stale map can never mis-highlight; otherwise the maps stay valid (same title
+    // → same chunks → same indices) and the read cursor is preserved.
+    if (window._activeTitleId && window._activeTitleId === window._pagedCuesTitleId &&
+        pagedCues.length > 0 && pagedChunkToCue && Array.isArray(chunks) &&
+        pagedChunkToCue.length === chunks.length) {
+      return true;
+    }
     pagedCues = []; pagedCueToChunk = null; pagedChunkToCue = null; pagedAudioPath = null;
     window._pagedAudioPath = null; // expose for read-mode PLAY (toggleReadingPlayback)
     pagedCueMapFromAlignment = false;
@@ -3125,6 +3375,8 @@
   async function openView() {
     ensureView();
     viewEl.style.display = 'flex';
+    viewEl.style.visibility = 'visible';   // reveal (layout already computed → no re-layout)
+    viewEl.style.pointerEvents = 'auto';
     document.body.classList.add('has-paged-progress');
     positionPlayheadBtn();
     setTimeout(positionPlayheadBtn, 200);
@@ -3152,17 +3404,21 @@
     // chunks first, then retry the paint until it lands.
     let _openWaited = 0;
     const runReaderEnterSetup = async () => {
-      if (!viewEl || viewEl.style.display === 'none') return;       // left read mode
+      if (_readerHidden()) return;       // left read mode
       if (!innerEl.querySelector('.reading-chunk')) {
         if (_openWaited < 4000) { _openWaited += 80; setTimeout(runReaderEnterSetup, 80); }
         return;
       }
+      // Snapshot + CONSUME the card→read signal now, so it can never leak into a
+      // later title-open (which must still land on the M1 bookmark).
+      const _cameFromCardEntry = Number.isFinite(window._reentryCardCueIdx) && window._reentryCardCueIdx >= 0;
+      window._reentryCardCueIdx = null;
       recompute();
       centerOnActiveCard();
       _scheduleEdgeMask(); // paint the leftover-column mask now that content is laid out
       await loadAudiobookCues();
       attachBgListener();
-      if (!viewEl || viewEl.style.display === 'none') return;       // bailed during await
+      if (_readerHidden()) return;       // bailed during await
       lastUserScrollTime = 0; // deliberate enter → always allow centering
       const jumpCue = window._reentryAudioJumpCueIdx;
       window._reentryAudioJumpCueIdx = null;
@@ -3171,9 +3427,25 @@
       // TOP priority so STAY lands on the read position, not the audio-ahead cue.
       const stayCue = window._reentryStayCueIdx;
       window._reentryStayCueIdx = null;
-      const preferred = (Number.isFinite(stayCue) && stayCue >= 0)
-        ? stayCue
-        : (Number.isFinite(jumpCue) ? jumpCue : -1);
+      // CARD → READ: centerOnActiveCard (run above + re-run inside loadAudiobookCues)
+      // is the SOLE positioner — it resolves the card's chunk for SRT-cards AND
+      // deck-cards and has already painted + scrolled the card's EXACT line. Skip
+      // ensureGreenOnEnter(bmCue): bmCue is the sparse-collapsed BOOKMARK cue
+      // (1-2 lines off the card) and would fight + overwrite the correct card line
+      // — the reported card↔read drift + oscillation. Re-assert once now that the
+      // alignment maps + layout are fully ready, then stop.
+      if (_cameFromCardEntry) {
+        centerOnActiveCard();
+        return;
+      }
+      // Plain reopen → land on the BOOKMARK line (the single anchor). A reentry
+      // stay/jump choice still wins when one is present.
+      const bmCue = (_bookmarkChunkIdx >= 0 && pagedChunkToCue &&
+                     _bookmarkChunkIdx < pagedChunkToCue.length && pagedChunkToCue[_bookmarkChunkIdx] >= 0)
+        ? pagedChunkToCue[_bookmarkChunkIdx] : -1;
+      const preferred = (Number.isFinite(stayCue) && stayCue >= 0) ? stayCue
+        : (Number.isFinite(jumpCue) && jumpCue >= 0) ? jumpCue
+        : bmCue;
       const cueN = (pagedCues?.length ? pagedCues : (window.__abCues || [])).length;
       if (cueN <= 0) { centerOnActiveCard(); return; }
       // GUARANTEED green-on-enter, WITH RETRY. chunks, cues, and the alignment
@@ -3185,7 +3457,7 @@
       // stops the retry.
       let _tries = 0;
       const tryPaint = () => {
-        if (!viewEl || viewEl.style.display === 'none') return;
+        if (_readerHidden()) return;
         const ok = ensureGreenOnEnter(preferred);
         _tries++;
         // The FIRST attempt always runs (no blank gap on enter, even while
@@ -3207,7 +3479,9 @@
   function flushReadPosition() {
     try {
       if (!currentName || !scrollEl) return;
-      setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft);
+      _clearBookmarkTimer();     // a pending settle must not fire against the next book
+      _saveBookmarkNow(true);    // force: capture the exact line even though shell may have already cleared mode-read
+      if (_canSaveReadScroll()) setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft);
       if (lastReadCueIdx >= 0 && typeof window.persistReadCue === 'function') {
         window.persistReadCue(lastReadCueIdx);
       }
@@ -3215,7 +3489,8 @@
   }
   function closeView() {
     flushReadPosition();
-    if (viewEl) viewEl.style.display = 'none';
+    if (viewEl) { viewEl.style.visibility = 'hidden'; viewEl.style.pointerEvents = 'none'; }  // hide but KEEP layout
+    try { clearCueHighlight(); } catch (_) {}   // drop the green so it can't bleed on the hidden-but-laid-out reader (iOS WebKit)
     document.body.classList.remove('has-paged-progress');
   }
 
@@ -3238,7 +3513,7 @@
           window._lastAudioCueIdx = idx;
         }
       } catch (e) {}
-      if (viewEl && viewEl.style.display !== 'none') {
+      if (!_readerHidden()) {
         try { centerOnActiveCard(); } catch (e) {}
       }
     };
@@ -3258,14 +3533,14 @@
       // classes; shell sets those before firing this event.
       try { updateProgress({ cueIdx: window._lastAudioCueIdx ?? -1 }); } catch (_) {}
       if (!viewEl) return;
-      const pagedShown = viewEl.style.display !== 'none';
+      const pagedShown = !_readerHidden();
       if (mode === 'read') {
         // Show progress strip only when paged reader is the active view.
         if (pagedShown) document.body.classList.add('has-paged-progress');
       } else {
         // Leaving read mode → flush position BEFORE hiding, so a quick
         // read→audio/card switch can't drop the last page-turn.
-        if (pagedShown) { flushReadPosition(); viewEl.style.display = 'none'; }
+        if (pagedShown) { flushReadPosition(); viewEl.style.visibility = 'hidden'; viewEl.style.pointerEvents = 'none'; }
         document.body.classList.remove('has-paged-progress');
       }
     });
@@ -3313,7 +3588,7 @@
   window.pagedSetPlayheadFromView = async function () {
     const note = (m) => { log(m); try { console.log('[reader-paged] ' + m); } catch (_) {} };
     note('pagedSetPlayheadFromView invoked');
-    if (!viewEl || viewEl.style.display === 'none') {
+    if (_readerHidden()) {
       try { window.showToast?.('Reader not open', 1800); } catch (_) {}
       return;
     }
@@ -3412,7 +3687,7 @@
   // chunk so the user can immediately see WHERE the playhead is.
   window.pagedCenterOnCue = function (cueIdx) {
     if (!Number.isFinite(cueIdx)) return false;
-    if (!viewEl || viewEl.style.display === 'none') return false;
+    if (_readerHidden()) return false;
     const cuesSrc = (pagedCues?.length ? pagedCues : (window.__abCues || []));
     const cue = cuesSrc[cueIdx];
     if (!cue) return false;
@@ -3455,8 +3730,9 @@
   //   3. After the smooth scroll, schedule a verification pass at
   //      ~600 ms: if the chunk STILL isn't visible (the scroll
   //      animation got eaten by some race), re-issue the scroll.
-  function scrollChunkNearRightWithContext(chunk, contextLines) {
+  function scrollChunkNearRightWithContext(chunk, contextLines, opts) {
     if (!chunk || !scrollEl) return;
+    const mySeq = ++_scrollSeq;   // newest scroll wins; stale verifiers below bail
     if (typeof contextLines !== 'number') contextLines = 3;
     const cr = chunk.getBoundingClientRect();
     const sr = scrollEl.getBoundingClientRect();
@@ -3491,6 +3767,31 @@
     // Bail on absurd deltas — symptom of stale chunk refs or a
     // findChunkForText false match. Don't scroll into the void.
     if (Math.abs(delta) > 200000) {
+      if (opts && opts.allowFarJump) {
+        // Deliberate reopen to a known chunk in a LONG book — a huge delta is
+        // legitimate, not a stale-ref bug. Move by it and let the browser clamp
+        // to the valid range (NEVER abort to 0). Works on either scrollLeft sign.
+        lastProgrammaticScrollTime = Date.now();
+        scrollEl.scrollLeft += delta;
+        // Self-heal: this is the deep-bookmark cold-open path (the most
+        // layout-fragile moment) and the single set above can be eaten by a
+        // post-restore reflow on a slow WKWebView. Re-verify at ~600 ms and
+        // re-apply against the fresh rect, exactly like the smooth path below.
+        setTimeout(() => {
+          if (mySeq !== _scrollSeq) return;   // superseded by a newer scroll
+          try {
+            const cr2 = chunk.getBoundingClientRect();
+            const sr2 = scrollEl.getBoundingClientRect();
+            if (!cr2.width || !sr2.width) return;
+            const visible = cr2.right > sr2.left && cr2.left < sr2.right;
+            if (!visible) {
+              lastProgrammaticScrollTime = Date.now();
+              scrollEl.scrollLeft += (cr2.right - (sr2.right - pad - contextPx));
+            }
+          } catch (_) {}
+        }, 600);
+        return;
+      }
       log('scrollChunkNearRightWithContext: absurd delta=' + Math.round(delta) + ' — aborting');
       return;
     }
@@ -3504,6 +3805,7 @@
     // recovers from the "black viewport" case where the smooth
     // animation got swallowed.
     setTimeout(() => {
+      if (mySeq !== _scrollSeq) return;   // superseded by a newer scroll
       try {
         const cr2 = chunk.getBoundingClientRect();
         const sr2 = scrollEl.getBoundingClientRect();
@@ -3681,7 +3983,7 @@
       window._lastAudioCueIdx = idx;
       try { updateProgress({ cueIdx: idx }); } catch (_) {}
     }
-    if (!viewEl || viewEl.style.display === 'none') return;
+    if (_readerHidden()) { clearCueHighlight(); return; }   // drop stale green: it would paint on the hidden-but-laid-out reader on iOS
     if (idx === lastHighlightedCue) return;
     lastHighlightedCue = idx;
     if (idx < 0 || !cue?.text) { clearCueHighlight(); return; }
@@ -3703,6 +4005,21 @@
     // the book-wide far-jump that the old "SKIP unmatched" guarded against.
     const chunk = resolveCueChunk(idx, cue.text, !pagedCueMapFromAlignment);
     if (!chunk) return; // genuinely unplaceable — keep the current highlight
+    // READ-ALONG char credit: the reader is VISIBLE (read mode — guaranteed by the
+    // _readerHidden early-return above) and the playhead is advancing, so the user
+    // is reading along with the audio. Credit the read frontier from the line now
+    // being spoken — the auto-scroll path otherwise never credited (it's
+    // programmatic, so the user-scroll gate skips it). noteReadPosition is
+    // MONOTONIC + page-capped (READ_DELTA_CAP), so a seek/jump never credits the
+    // skipped span and re-firing the same line is a no-op — this cannot
+    // reintroduce the old auto-scroll over-count.
+    if (document.body.classList.contains('mode-read')) {
+      try {
+        const _jpEnd = (parseInt(chunk.dataset.jpOff) || 0) + (parseInt(chunk.dataset.jpLen) || 0);
+        if (_jpEnd > 0) window.stats?.noteReadPosition?.(_jpEnd);
+        window.stats?.bumpRead?.();
+      } catch (_) {}
+    }
     const range = setCueRangeHighlight(chunk, cue.text);
     if (!range || !scrollEl) return;
     // No user-scroll grace gate here — this hook only fires when the

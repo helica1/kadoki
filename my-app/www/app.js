@@ -2,6 +2,21 @@
 
 // No import needed - Capacitor automatically registers plugins
 
+// PERFORMANCE (Android-only jank fix): gate verbose console.log behind a runtime
+// flag. On Android the WebView intercepts EVERY console.log on the UI thread and
+// writes logcat synchronously; this app logs heavily (per-scroll [scroll-trace],
+// per-switch deck-state saves, dict lookups), which janked scrolling + lookups
+// ("unresponsive then perks up"). iOS's console path is cheap, so iOS stayed
+// snappy. Default OFF for speed; `localStorage.setItem('KADOKI_DEBUG','1')` then
+// reload re-enables it for diagnosis. console.error / console.warn are left
+// intact so crashes/warnings still reach logcat.
+(function () {
+  try { window.__KDBG = (localStorage.getItem('KADOKI_DEBUG') === '1'); }
+  catch (_) { window.__KDBG = false; }
+  const _origLog = console.log.bind(console);
+  console.log = function () { if (window.__KDBG) _origLog.apply(console, arguments); };
+})();
+
 // Cleared the first time displayCard is asked to start audio. Keeps the
 // app silent on launch so the user can choose when to start playback.
 window.startupAutoPlayBlocked = true;
@@ -59,9 +74,15 @@ function debugLog(message) {
   const timestamp = new Date().toLocaleTimeString();
   const logMessage = `[APP] ${timestamp}: ${message}`;
   console.log(logMessage);
-  
-  // Also send to HTML debug console if available
-  if (window.debugLog) {
+
+  // Forward to a SEPARATE on-screen HTML debug console if one exists — but NEVER
+  // when window.debugLog is THIS function. index.html does `window.debugLog =
+  // debugLog` to expose it globally, so an unguarded forward calls itself
+  // forever: a stack overflow on every debugLog call (and isCapacitorEnvironment
+  // calls it repeatedly). That burned ~60k recursions, aborted the reading-mode
+  // restore (→ opens a few lines back) and the card render (→ blank card), and
+  // caused multi-second mode-switch lag.
+  if (window.debugLog && window.debugLog !== debugLog) {
     window.debugLog(message);
   }
 }
@@ -180,14 +201,19 @@ function isCapacitorEnvironment() {
   }
   
   const result = !!(window.Capacitor && hasFilesystem && hasPreferences);
-  
-  debugLog(`Capacitor environment check: ${result} (Capacitor: ${!!window.Capacitor}, Plugins: ${!!window.Capacitor?.Plugins}, FS: ${hasFilesystem}, Prefs: ${hasPreferences})`);
-  
-  // Additional debugging
-  if (window.Capacitor) {
-    debugLog(`Available Capacitor properties: ${Object.keys(window.Capacitor).join(', ')}`);
-    if (window.Capacitor.Plugins) {
-      debugLog(`Available Plugin names: ${Object.keys(window.Capacitor.Plugins).join(', ')}`);
+
+  // Log the environment probe at most ONCE. This is a HOT path — called on every
+  // preference read/write, many times per mode switch — and emitting 3 verbose
+  // lines (the full Capacitor property + plugin list) each time was hundreds of
+  // console.log → logcat JNI hops, contributing real mode-switch lag + log spam.
+  if (!window._capEnvLogged) {
+    window._capEnvLogged = true;
+    debugLog(`Capacitor environment check: ${result} (Capacitor: ${!!window.Capacitor}, Plugins: ${!!window.Capacitor?.Plugins}, FS: ${hasFilesystem}, Prefs: ${hasPreferences})`);
+    if (window.Capacitor) {
+      debugLog(`Available Capacitor properties: ${Object.keys(window.Capacitor).join(', ')}`);
+      if (window.Capacitor.Plugins) {
+        debugLog(`Available Plugin names: ${Object.keys(window.Capacitor.Plugins).join(', ')}`);
+      }
     }
   }
   
@@ -2936,7 +2962,7 @@ function setupSwipe() {
         const inReadingView = (target) => {
           if (!target) return false;
           const paged = document.getElementById('readingPagedView');
-          if (paged && paged.style.display !== 'none' && paged.contains(target)) return true;
+          if (paged && paged.style.display !== 'none' && paged.style.visibility !== 'hidden' && paged.contains(target)) return true;
           const view = document.getElementById('readingModeView');
           return !!(view && view.style.display !== 'none' && view.contains(target));
         };
@@ -3830,13 +3856,24 @@ window.toggleReadingPlayback = function () {
                           (window.allNotes?.[window.currentCardIndex]?.audiobookPath);
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (audiobookPath && bg) {
-      // Start point fallback:
-      //   1. Current chunk's cue startMs
-      //   2. SRT-card's audiobookStartMs
-      //   3. 0 (the position listener will then drive the highlight)
-      const startCueMs = Number.isFinite(window._currentReadingCueStartMs)
-        ? window._currentReadingCueStartMs
-        : (window.allNotes?.[window.currentCardIndex]?.audiobookStartMs ?? 0);
+      // Start point fallback (prefer the LIVE paged read cursor — the line the
+      // user actually read — over the legacy _currentReadingCueStartMs, which
+      // the paged reader never updates so it's stale/unset in the active flow):
+      //   1. Paged read cursor's cue startMs (window._pagedReadCueStartMs)
+      //   2. Legacy _currentReadingCueStartMs (if a legacy session set it)
+      //   3. SRT-card's audiobookStartMs
+      //   4. 0 (the position listener will then drive the highlight)
+      // For SRT-card titles the card index is the truer read position (card
+      // navigation doesn't advance the paged read cursor, so it can be stale),
+      // so prefer audiobookStartMs there; for deck/EPUB use the live read cursor.
+      const isSrtCardTitle = Array.isArray(window.allNotes) && window.allNotes[0]?.isSrtCard;
+      const readCueMs = (!isSrtCardTitle && typeof window._pagedReadCueStartMs === 'function')
+        ? window._pagedReadCueStartMs() : null;
+      const startCueMs = Number.isFinite(readCueMs)
+        ? readCueMs
+        : (Number.isFinite(window._currentReadingCueStartMs)
+            ? window._currentReadingCueStartMs
+            : (window.allNotes?.[window.currentCardIndex]?.audiobookStartMs ?? 0));
       const startMs = Math.max(0, Math.round(startCueMs) - (window.AUDIO_START_OFFSET_MS || 0));
       const url = audiobookPath.startsWith('file://') ? audiobookPath : 'file://' + audiobookPath;
       console.log('[reader-play] audiobookPath=' + audiobookPath + ' startMs=' + startMs);
@@ -3941,20 +3978,8 @@ async function loadCounters() {
 
 window.addEventListener('DOMContentLoaded', () => {
   loadCounters();
-  // Pre-warm the dict-store term set IMMEDIATELY at boot so the first
-  // dictionary lookup doesn't block on the ~5 s IDB cursor scan. Fire-
-  // and-forget — by the time the user finishes navigating into a deck
-  // and tapping their first word, the Set is ready and greedyDeinflect
-  // resolves synchronously. Skipping the previous 500 ms setTimeout
-  // because that just stacked atop the build duration; nothing else on
-  // the main thread needs that prelude window.
-  try {
-    if (window.dictStore?.isPopulated && window.dictStore?.buildTermSet) {
-      window.dictStore.isPopulated().then(ok => {
-        if (ok) window.dictStore.buildTermSet();
-      });
-    }
-  } catch (e) {}
+  // (No dict-store term-set pre-warm any more — deinflection answers term
+  // existence per-tap via dictStore.existsBulk, so there is no boot scan.)
 });
 
 /* Periodic persistence */

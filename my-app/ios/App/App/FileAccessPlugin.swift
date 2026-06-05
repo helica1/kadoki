@@ -162,6 +162,33 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - materializeToCache
 
+    /// iCloud: ensure the item at `url` is fully downloaded locally before we read
+    /// it. On iPad especially, a file added on another device (or offloaded to free
+    /// space) is a DATALESS placeholder — copying it yields a TRUNCATED file, and
+    /// the JS .apkg ZIP reader then fails with "End of central directory not found".
+    /// Triggers the download and blocks (on the plugin's background queue, NOT the
+    /// main thread) until it's `.current` or the timeout elapses. Returns false on
+    /// timeout. A non-iCloud (local) file returns true immediately.
+    private func ensureDownloaded(_ url: URL, timeout: TimeInterval = 45) -> Bool {
+        let keys: Set<URLResourceKey> = [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey]
+        guard let vals = try? url.resourceValues(forKeys: keys),
+              vals.isUbiquitousItem == true else {
+            return true   // not an iCloud-managed item → already local
+        }
+        if vals.ubiquitousItemDownloadingStatus == .current { return true }
+        do { try FileManager.default.startDownloadingUbiquitousItem(at: url) }
+        catch { NSLog("[FileAccess] startDownloadingUbiquitousItem failed: \(error.localizedDescription)") }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let v = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]),
+               v.ubiquitousItemDownloadingStatus == .current {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        return false
+    }
+
     @objc func materializeToCache(_ call: CAPPluginCall) {
         guard let uri = call.getString("uri") else {
             call.reject("uri required")
@@ -212,6 +239,15 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         let didStart = scopeURL.startAccessingSecurityScopedResource()
         defer { if didStart { scopeURL.stopAccessingSecurityScopedResource() } }
 
+        // iCloud: the source may be a DATALESS placeholder (offloaded, or added on
+        // another device — common on iPad). Download it BEFORE copying, or the
+        // cache ends up truncated and the .apkg ZIP read fails with "End of central
+        // directory not found". No-op for a normal local file.
+        if !ensureDownloaded(sourceURL) {
+            call.reject("iCloud download didn't finish — open the file once in the Files app to download it, then try again")
+            return
+        }
+
         let ext = sourceURL.pathExtension.isEmpty ? "bin" : sourceURL.pathExtension
         let hash = stableHash(uri)
         let cacheDir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -224,8 +260,11 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
            let cacheAttrs = try? FileManager.default.attributesOfItem(atPath: cacheURL.path),
            let srcMod   = srcAttrs[.modificationDate]   as? Date,
            let cacheMod = cacheAttrs[.modificationDate] as? Date,
-           cacheMod >= srcMod {
-            let size = (cacheAttrs[.size] as? Int) ?? 0
+           let srcSize  = srcAttrs[.size] as? Int,
+           let cacheSize = cacheAttrs[.size] as? Int,
+           cacheMod >= srcMod,
+           cacheSize == srcSize {     // size match rejects a TRUNCATED cache from a prior dataless (placeholder) copy
+            let size = cacheSize
             // Bump lastUsed so getPersistedUriPermissions sorting is fresh.
             touchLastUsed(uri: touchUri)
             call.resolve([

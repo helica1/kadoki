@@ -225,7 +225,8 @@
     const ab = document.getElementById('audiobookModeView');
     if (ab && ab.style.display !== 'none') return 'audio';
     const rdPaged = document.getElementById('readingPagedView');
-    if (rdPaged && rdPaged.style.display !== 'none') return 'read';
+    // The paged view is display:flex always now; visibility is the show/hide toggle.
+    if (rdPaged && rdPaged.style.display !== 'none' && rdPaged.style.visibility !== 'hidden') return 'read';
     const rd = document.getElementById('readingModeView');
     if (rd && rd.style.display !== 'none') return 'read';
     return 'card';
@@ -339,7 +340,9 @@
     if (legacyReaderView) legacyReaderView.style.display = 'none';
     if (mode === 'read') {
       const pv = document.getElementById('readingPagedView');
-      if (pv) pv.style.display = 'flex';
+      // Reveal via visibility (display stays flex) so the vertical-rl layout is
+      // NOT re-run on every read-entry — the Android mode-switch "settling" lag.
+      if (pv) { pv.style.display = 'flex'; pv.style.visibility = 'visible'; pv.style.pointerEvents = 'auto'; }
     } else if (mode === 'audio') {
       const av = document.getElementById('audiobookModeView');
       if (av) av.style.display = 'flex';
@@ -349,7 +352,9 @@
       if (av && mode !== 'audio') av.style.display = 'none';
     } else if (currentMode === 'read') {
       const pv = document.getElementById('readingPagedView');
-      if (pv && mode !== 'read') pv.style.display = 'none';
+      // Hide via visibility (KEEP layout) so returning to read is a reveal, not a
+      // full vertical-rl re-layout.
+      if (pv && mode !== 'read') { pv.style.visibility = 'hidden'; pv.style.pointerEvents = 'none'; }
     }
     const prevMode = currentMode;
     currentMode = mode;
@@ -372,15 +377,17 @@
     // without this capture, both ended up identical because
     // lastMatchedIdx had advanced with audio-driven setActive calls.
     //
-    // Capture on ANY transition INTO audio so the next return-from-audio
-    // has a meaningful prior. Use lastMatchedIdx as the chunk index
-    // and let the modal compute the character position from
-    // chunks[idx].dataset.charOffset.
+    // Capture on ANY transition INTO audio so the next return-from-audio has a
+    // meaningful prior read position. Snapshot the PAGED read CUE cursor (the
+    // line the user actually read) — NOT the legacy lastMatchedIdx, which the
+    // active paged reader never advances (it was stale, so "return to prior
+    // reading position" landed at an old spot). The reentry dialog reads the
+    // live paged cursor first and uses this as the fallback; both are CUE indices.
     if (mode === 'audio' && prevMode !== 'audio') {
       try {
-        const lmi = window._readingLastMatchedIdx;
-        if (Number.isFinite(lmi) && lmi >= 0) {
-          window._priorReaderCursorIdx = lmi;
+        const rc = (typeof window._pagedReadCueIdx === 'function') ? window._pagedReadCueIdx() : -1;
+        if (Number.isFinite(rc) && rc >= 0) {
+          window._priorReaderCursorIdx = rc;
           window._priorReaderCursorAtMs = Date.now();
         }
         // Card-mode snapshot for SRT-cards titles where the modal
@@ -482,6 +489,16 @@
           if (continuous && prevMode === 'audio' &&
               Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) {
             window._reentryAudioJumpCueIdx = window._lastAudioCueIdx;
+          }
+          // CARD → READ: signal the reader to land the green EXACTLY on the card's
+          // line. centerOnActiveCard resolves the card's chunk for BOTH SRT-cards
+          // (cue-map) AND deck-cards (text search); without this signal,
+          // ensureGreenOnEnter(bmCue = the sparse-collapsed BOOKMARK cue, 1-2 lines
+          // off the card) runs after it and overwrites + fights it (the card↔read
+          // drift + oscillation). NOT set on titleOpen (handled above, untouched),
+          // so a plain title-open still lands on the M1 bookmark.
+          if (prevMode === 'card' && Number.isFinite(window.currentCardIndex) && window.currentCardIndex >= 0) {
+            window._reentryCardCueIdx = window.currentCardIndex;
           }
           await window.openReadingMode();
         } else if (mode === 'card' && (prevMode === 'read' ||

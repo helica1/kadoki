@@ -300,10 +300,18 @@
     reconcileMode(currentMode());
 
     const now = Date.now();
-    // Card inactivity.
+    // Card inactivity — skipped during CONTINUOUS PLAY (the user pressed play, so
+    // cards auto-advance and audio plays continuously; they're actively listening,
+    // not idle). Manual one-by-one viewing still times out at 20s of no swipe.
+    const cardContinuousPlay = !!window._bgPlaying && !!window.audioAutoAdvance;
     if (timers.card.runningSince) {
       const idleSec = (now - timers.card.lastInteraction) / 1000;
-      if (idleSec > TIMEOUT_CARD_SEC) stopMode('card', { byInactivity: true });
+      if (!cardContinuousPlay && idleSec > TIMEOUT_CARD_SEC) stopMode('card', { byInactivity: true });
+    }
+    // Keep the card timer alive while continuous play runs so a long, touch-free
+    // listening stretch doesn't trip the 20s timeout (mirrors the read timer).
+    if (cardContinuousPlay && timers.card.runningSince) {
+      timers.card.lastInteraction = now;
     }
     // Read inactivity — skipped while audio is playing (passive listening).
     if (timers.read.runningSince) {

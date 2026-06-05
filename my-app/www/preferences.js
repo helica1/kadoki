@@ -610,24 +610,32 @@
     const memNames = (typeof window.getLoadedDictionaryNames === 'function')
       ? window.getLoadedDictionaryNames() : [];
     let storeNames = [];
+    const countByName = new Map();   // dictName -> entryCount (for display)
     try {
       if (window.dictStore?.list) {
         const meta = await window.dictStore.list();
         storeNames = meta.map(m => m.dictName);
+        for (const m of meta) if (typeof m.entryCount === 'number') countByName.set(m.dictName, m.entryCount);
       }
     } catch (e) {}
+    // Names that actually have ENTRIES records. Anything here WITHOUT a meta row
+    // is an orphaned relic (e.g. an interrupted delete, or an old build's leftover)
+    // that lookups still serve — surface it so it's visible AND deletable.
+    let entryDicts = [];
+    try { if (window.dictStore?.listEntryDicts) entryDicts = await window.dictStore.listEntryDicts(); } catch (e) {}
+    const entryNameSet = new Set(entryDicts.map(d => d.dictName));
+    for (const d of entryDicts) if (!countByName.has(d.dictName)) countByName.set(d.dictName, d.entryCount);
+    const storeNameSet = new Set(storeNames);
+    const orphanNames = entryDicts.map(d => d.dictName).filter(n => !storeNameSet.has(n));
+
     const seen = new Set();
     const names = [];
-    const storeNameSet = new Set(storeNames);
-    for (const n of [...memNames, ...storeNames]) {
-      // Hide ONLY the legacy bundled JMDict — the one that's loaded
-      // into the in-memory `dictionaries` Map at boot from the
-      // assets/dictionaries/JMdict_english.json file. A user-imported
-      // JMDict (via the Yomitan zip import) shows up in dictStore as
-      // well, and we want THAT one visible/toggleable. The legacy
-      // path appears in memNames but not in storeNames.
+    for (const n of [...memNames, ...storeNames, ...orphanNames]) {
+      // Hide a name ONLY if it's the legacy in-memory bundled JMDict with NO
+      // backing store data (no meta row AND no entries). Anything with real
+      // store data stays visible + deletable.
       const isLegacyOnly = (n === 'JMDict' || n === 'JMdict') &&
-                           !storeNameSet.has(n);
+                           !storeNameSet.has(n) && !entryNameSet.has(n);
       if (isLegacyOnly) continue;
       if (!seen.has(n)) { seen.add(n); names.push(n); }
     }
@@ -636,27 +644,39 @@
       ? window.listImportedDictionaries() : []);
 
     let html = `
-      <div style="display:flex;gap:8px;margin-bottom:10px;">
+      <div style="display:flex;gap:8px;margin-bottom:6px;align-items:center;">
         <button id="dictImportBtn" class="btn" style="font-size:.78rem;">＋ Import Yomitan zip…</button>
         <span id="dictImportStatus" style="font-size:.75rem;color:#888;align-self:center;"></span>
+      </div>
+      <div id="dictImportBarWrap" style="display:none;height:6px;background:#222;border-radius:3px;overflow:hidden;margin:0 0 10px;">
+        <div id="dictImportBar" style="width:0%;height:100%;background:#4caf50;transition:width .2s ease;"></div>
       </div>
     `;
     if (!ordered.length) {
       html += '<div style="color:#666;font-size:.8rem;padding:8px 0;">No dictionaries loaded yet. Open Preferences again once startup loading completes.</div>';
     } else {
-      html += ordered.map(name => `
+      html += ordered.map(name => {
+        const cnt = countByName.get(name);
+        const isOrphan = !storeNameSet.has(name) && entryNameSet.has(name);
+        const tag = isOrphan
+          ? ' <span style="color:#f80;font-size:.7rem;">(orphaned relic)</span>'
+          : importedSet.has(name) ? ' <span style="color:#888;font-size:.7rem;">(imported)</span>' : '';
+        const cntTxt = (typeof cnt === 'number')
+          ? ` <span style="color:#666;font-size:.7rem;">· ${cnt.toLocaleString()} entries</span>` : '';
+        const removable = storeNameSet.has(name) || entryNameSet.has(name) || importedSet.has(name);
+        return `
         <div data-dict="${encodeURIComponent(name)}" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #1f1f1f;">
           <label style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;cursor:pointer;">
             <input type="checkbox" data-role="enabled" ${window.dictPrefs?.isEnabled(name) ? 'checked' : ''}>
             <span style="font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-              ${name}${importedSet.has(name) ? ' <span style="color:#888;font-size:.7rem;">(imported)</span>' : ''}
+              ${name}${tag}${cntTxt}
             </span>
           </label>
           <button data-role="up"   class="btn" style="padding:4px 8px;font-size:.85rem;min-width:32px;">▲</button>
           <button data-role="down" class="btn" style="padding:4px 8px;font-size:.85rem;min-width:32px;">▼</button>
-          ${importedSet.has(name) ? '<button data-role="remove" class="btn" style="padding:4px 8px;font-size:.85rem;color:#f44;" title="Remove imported dictionary">✕</button>' : ''}
-        </div>
-      `).join('');
+          ${removable ? '<button data-role="remove" class="btn" style="padding:4px 8px;font-size:.85rem;color:#f44;" title="Remove dictionary">✕</button>' : ''}
+        </div>`;
+      }).join('');
     }
     host.innerHTML = html;
 
@@ -668,21 +688,38 @@
         window.dictPrefs?.setEnabled(name, e.target.checked);
       });
       row.querySelector('[data-role="up"]')?.addEventListener('click', () => {
-        const all = window.getLoadedDictionaryNames();
+        const all = names; // merged store+mem list (in-memory Map is empty post-migration)
         window.dictPrefs?.moveUp(name, all);
         buildDictionarySection();
       });
       row.querySelector('[data-role="down"]')?.addEventListener('click', () => {
-        const all = window.getLoadedDictionaryNames();
+        const all = names; // merged store+mem list (in-memory Map is empty post-migration)
         window.dictPrefs?.moveDown(name, all);
         buildDictionarySection();
       });
       row.querySelector('[data-role="remove"]')?.addEventListener('click', async () => {
-        if (!confirm(`Remove imported dictionary "${name}"? Its data will be cleared from device storage.`)) return;
+        if (!confirm(`Remove dictionary "${name}"? Its data will be cleared from device storage.`)) return;
+        // Re-query each tick so the bar/text survive any re-render during the
+        // (potentially many-second) batched delete of a large dictionary.
+        const setStatus = (m) => { const s = document.getElementById('dictImportStatus'); if (s) s.textContent = m; };
+        const setBar = (pct) => {
+          const w = document.getElementById('dictImportBarWrap');
+          const b = document.getElementById('dictImportBar');
+          if (w) w.style.display = 'block';
+          if (b) b.style.width = Math.max(0, Math.min(100, pct)) + '%';
+        };
+        setStatus(`Removing "${name}"…`);
+        setBar(3);
         if (typeof window.removeImportedDictionary === 'function') {
-          await window.removeImportedDictionary(name);
+          await window.removeImportedDictionary(name, (p) => {
+            const pct = Math.floor((p.pct || 0) * 100);
+            setStatus(`Removing "${name}"… ${pct}%`);
+            setBar((p.pct || 0) * 100);
+          });
         }
-        buildDictionarySection();
+        const w = document.getElementById('dictImportBarWrap');
+        if (w) w.style.display = 'none';
+        buildDictionarySection(); // row disappears once fully removed from the store
       });
     });
   }
@@ -702,31 +739,55 @@
     input.onchange = async () => {
       const f = input.files?.[0];
       if (!f) return;
-      const status = document.getElementById('dictImportStatus');
+      const status  = document.getElementById('dictImportStatus');
+      const barWrap = document.getElementById('dictImportBarWrap');
+      const bar     = document.getElementById('dictImportBar');
       const setStatus = (msg) => { if (status) status.textContent = msg; };
+      const setBar = (pct) => {
+        if (barWrap) barWrap.style.display = 'block';
+        if (bar) bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+      };
+      const hideBar = () => { if (barWrap) barWrap.style.display = 'none'; if (bar) bar.style.width = '0%'; };
+      const phaseLabel = {
+        unzip: 'Unzipping…', parse: 'Parsing entries…', cache: 'Saving…',
+        index: 'Indexing…', done: 'Imported'
+      };
+      // Collapse each phase's local pct onto ONE monotonic 0–100 bar, so a big
+      // dictionary's long parse + index phases visibly advance instead of the
+      // status sitting at "Indexing 0%" for minutes.
+      const overall = (p) => {
+        const x = Math.max(0, Math.min(1, p.pct || 0));
+        switch (p.phase) {
+          case 'unzip': return 2;
+          case 'parse': return 5 + x * 45;
+          case 'cache': return 52;
+          case 'index': return 55 + x * 45;
+          case 'done':  return 100;
+          default:      return x * 100;
+        }
+      };
       setStatus('Reading ' + f.name + '…');
+      setBar(1);
       try {
         const buf = await f.arrayBuffer();
-        const phaseLabel = {
-          unzip: 'Unzipping…',
-          parse: 'Parsing entries',
-          cache: 'Saving cache…',
-          index: 'Indexing',
-          done:  'Imported'
-        };
         const name = await window.importYomitanDictionaryFromBuffer(buf, {
           fallbackName: f.name,
           onProgress: (p) => {
-            const pct = Math.floor((p.pct || 0) * 100);
+            const within = Math.floor((p.pct || 0) * 100);
             const label = phaseLabel[p.phase] || p.phase;
-            setStatus(`${label} ${pct}%`);
+            // Show the within-phase % on the long phases so motion is visible.
+            setStatus((p.phase === 'parse' || p.phase === 'index') ? `${label} ${within}%` : label);
+            setBar(overall(p));
           }
         });
-        setStatus(`Imported "${name}".`);
+        setStatus(`Imported "${name}". Lookups ready.`);
+        setBar(100);
         buildDictionarySection();
+        setTimeout(hideBar, 1500);
       } catch (e) {
         console.error('Dict import failed:', e);
         setStatus('Failed: ' + (e?.message || e));
+        hideBar();
       }
     };
     input.click();
