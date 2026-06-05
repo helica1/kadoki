@@ -4,6 +4,26 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.3.0 — 2026-06-05
+
+### Added
+- **Bookmarks** (hamburger menu): each time you switch from Card or Read into Audio, Kadoki silently saves the spot you were on. The menu keeps your last few spots (spaced about a minute apart) — tap one to jump straight back to that mode and exact position; a Read-mode bookmark briefly flashes the line you'd reached.
+- **Custom fonts, per mode**: Preferences → Appearance → **Font family** now lets you **import your own TTF/OTF** font and pick a different one for Card, Read, and Audio. Imported fonts are listed (with delete) in the same section, and Japanese fallbacks are kept so a Latin-only font still renders kana/kanji.
+- **Per-mode appearance toggles**: show/hide the **card background image**, show/hide the **waveform** (Card and Audio), and an optional **upcoming-subtitle** preview — the next line shown greyed below the current one (Card and Audio).
+
+### Changed
+- **Continuous mode is now the only mode.** Audio never stops when you switch between Card, Read, and Audio, and every view stays locked to the same playhead. The old "continue from the audiobook / resume from your reading position?" prompt and the continuous-mode toggle are gone — use **Bookmarks** to jump back to where you were reading.
+- **Card-mode waveform redesigned**: each card now shows a full-width waveform spanning the line plus the silence up to the next one, with a smooth playhead that visibly advances through the gap; the draggable trim handles appear only when paused.
+- **Faster, cleaner launch**: the app reopens straight into the mode and position you left — behind a brief loading cover instead of a flash of the wrong screen or a visible scroll into place.
+- **Smaller app, faster dictionaries**: the bundled fallback dictionary was removed (Kadoki only uses the dictionaries you import), so the app is much smaller and lookups + startup stay near-instant even with several large dictionaries. Deconjugation was reworked to a Yomitan-style approach.
+
+### Fixed
+- **Card-mode timer didn't run during playback** — switching into Card mode while audio is playing now counts the time, like the other modes.
+- **Reopening could land a few lines behind** your saved reading position, or briefly flash Card mode / scroll into place on launch — restore now lands cleanly in the same mode and spot.
+- **iOS — "Failed to read SRT" on first open** of a title (a manual reload used to fix it) now self-heals automatically.
+- **Android — the app would frequently cold-restart** when reopened, losing your place; it now restores reliably to the same mode and position.
+- **Dictionary management**: duplicate/stale dictionary entries are cleaned up and removable, with a progress bar on import and removal.
+
 ## v1.2.1 — 2026-06-03
 
 ### Added

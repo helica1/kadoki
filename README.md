@@ -100,13 +100,17 @@ Listen to the audiobook while staying synchronized with the reading modes.
 - Sync with reading progress
 - Lock-screen subtitles — the current sentence shows large on the lock screen / Always-On Display while you listen (iOS)
 
-When returning to reading, Kadoki lets you choose to **continue from the audiobook position** or **resume from your previous reading position** — making it easy to alternate between intensive reading and passive listening.
-
-**Continuous mode** (Preferences → Playback, or the quick toggle in the hamburger menu) removes that prompt: audio keeps playing as you switch between Card, Read, and Audio, and every view stays locked to the same playhead. When off, the choose-where-to-resume prompt behaves as above. Applies to audiobook / SRT titles.
+Audio keeps playing as you switch between Card, Read, and Audio, and every view stays locked to the same playhead — so you can freely alternate between intensive reading and passive listening without ever stopping playback. To jump back to where you were reading before you started listening, use **Bookmarks** (in the hamburger menu): each time you switch into Audio, Kadoki quietly saves your last reading spot.
 
 <p align="center">
   <img src="docs/screenshots/screenshot5.jpeg" width="300" alt="Audiobook playback fully synchronized with reading modes">
 </p>
+
+---
+
+## Bookmarks
+
+Each time you switch from Card or Read into **Audio**, Kadoki silently saves the spot you were on. The hamburger menu's **Bookmarks** keeps your last few spots (spaced about a minute apart) — tap one to jump straight back to that mode and exact position. A Read-mode bookmark briefly flashes the line you'd reached so it's easy to find.
 
 ---
 
@@ -136,7 +140,7 @@ Tap any empty space to show or hide the toolbar.
 - **Top left** — mode switching: Card / Read / Audio
 - **Location indicator** — changes with the active mode; tap it to jump to a specific location
 - **Timer** — tap to pause/resume timing; includes intelligent auto-timeout logic for accuracy (and a slight scroll in Read mode resumes it automatically)
-- **Top right menu** (hamburger) — Library · Stats · Playback Speed · Continuous mode · Print · Preferences
+- **Top right menu** (hamburger) — Library · Stats · Bookmarks · Playback Speed · Print · Preferences
 
 ---
 
@@ -167,9 +171,8 @@ Playback speed can be configured globally across all modes, or separately for ea
 
 ## Preferences
 
+- **Per-mode appearance** (Card / Read / Audio): font size, **font family — including your own imported TTF/OTF fonts**, and toggles for the card background image, the waveform, and an upcoming-subtitle preview
 - Mode color customization
-- Font size adjustment
-- Continuous mode (Playback) — keep Card / Read / Audio synced to one playhead
 - Dictionary import
 - Audio archive import
 - Anki configuration
