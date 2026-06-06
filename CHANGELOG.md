@@ -4,6 +4,16 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.3.1 — 2026-06-05
+
+### Fixed
+- **Audiobook position lost on restart** — if the app was closed (or reaped by Android) while you were listening, it resumed back at your *reading* spot instead of where you'd listened to. The audio playhead is now saved continuously during playback and the restore resumes from it (loses at most ~30s).
+- **Send-to-Anki audio editor** — the draggable range handles could disappear while audio played, and the preview could play past the selection. The handles now stay put and grabbable, Preview stops at the selection end, and the audiobook pauses while you adjust the bounds (resuming when you close the dialog).
+
+### Changed
+- **The dictionary now pauses narration in Card mode too** (previously Read / Audio only): opening the dictionary pauses the audio and dismissing it resumes, in all three modes.
+- **Gentler audio transitions** — a brief fade when the dictionary pauses/resumes playback, and when a card swipe jumps the playhead, instead of an abrupt click.
+
 ## v1.3.0 — 2026-06-05
 
 ### Added
