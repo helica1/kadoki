@@ -4,6 +4,12 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.3.2 — 2026-06-05
+
+### Added
+- **Plain-text (`.txt`) books** — the reader now opens a `.txt` file as well as an EPUB. Each line becomes a paragraph, and Aozora-Bunko ruby (e.g. 漢字《かんじ》) is rendered as furigana. Add one via **📁 Import folder**, or a title's **"EPUB / TXT"** read-source slot.
+- **Audiobook + SRT Titles** (no book) — a Title can be just an audiobook + SRT, which enables **Card** and **Audio** modes (Read is hidden). Create one via **📁 Import folder** on a folder of audio + `.srt`, or **+ New title** → attach an audiobook + SRT.
+
 ## v1.3.1 — 2026-06-05
 
 ### Fixed

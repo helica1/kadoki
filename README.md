@@ -148,8 +148,9 @@ Tap any empty space to show or hide the toolbar.
 
 Each Library entry is called a **Title**. A Title may contain:
 
-- An Anki deck, or
-- A narrated audiobook set (epub + audio + SRT)
+- An Anki deck (Card mode), or
+- A book — **EPUB** or plain-text **`.txt`** — for Read mode, optionally paired with an audiobook + SRT for synchronized narration, or
+- Just an **audiobook + SRT** (no book) — enables Card and Audio modes (Read is hidden)
 
 Features: custom cover image support · one-tap activation · swipe-to-edit · swipe-to-delete.
 
@@ -157,7 +158,7 @@ Features: custom cover image support · one-tap activation · swipe-to-edit · s
 
 **Library → 📁 Import folder** bulk-imports a whole folder of books in one step. The folder can either hold a single book's `epub` / audio / `srt`, or contain many such sub-folders — each book becomes its own Title, with the epub automatically paired to its matching audio and subtitles by filename. Files are **linked, not copied**, so even a large library imports instantly; each book's media is pulled into the cache the first time you open it, and re-importing skips books already in your library. Embedded cover art (the epub cover image or the audio file's tag) is filled in shortly after import.
 
-A Title that contains an epub opens directly in **Read** mode.
+A Title that contains a book (**EPUB** or **`.txt`**) opens directly in **Read** mode.
 
 To use Kadoki as a standard epub reader, simply load an epub into a Title. However, it is not optimized for epub only reading, and Hoshi reader has much more mature support.
 
