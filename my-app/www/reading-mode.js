@@ -2663,6 +2663,10 @@
     imgEl.style.display = src ? '' : 'none';
   }
 
+  // Last time we persisted the audio playhead (throttle for the per-position
+  // durability save below). Module-scoped so it throttles globally.
+  let _abLastSaveAt = 0;
+
   function abAttachListenersOnce() {
     if (abListenersAttached) return;
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
@@ -2671,6 +2675,21 @@
     bg.addListener('position', (d) => {
       abPositionRef.ms = d.positionMs || 0;
       abPositionRef.durMs = d.durationMs || 0;
+      // Durability: persist the audio playhead every ~30s while it advances, so
+      // a cold restore (Android LMK reaping the app mid-listen) loses at most
+      // ~30s of position. Previously it was saved ONLY when leaving audio mode,
+      // so being killed while listening resumed back at the entry/read spot.
+      // The throttle starts at 0 so the FIRST position event after >30s saves
+      // immediately (no 30s blind window at the start of playback).
+      const _now = Date.now();
+      if (abPositionRef.ms > 0 && _now - _abLastSaveAt > 30000) {
+        _abLastSaveAt = _now;
+        const _deck = currentDeckName();
+        if (_deck) {
+          const _ci = (abCueToChunk && abCurrentCueIdx >= 0) ? abCueToChunk[abCurrentCueIdx] : -1;
+          try { saveAudiobookLastPosition(_deck, abPositionRef.ms, _ci); } catch (_) {}
+        }
+      }
       const label = document.getElementById('audiobookTimeLabel');
       if (label) label.textContent = `${abFmtMs(abPositionRef.ms)} / ${abFmtMs(abPositionRef.durMs)}`;
       if (!abScrubbing) {
