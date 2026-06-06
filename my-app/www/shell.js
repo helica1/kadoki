@@ -489,8 +489,15 @@
           // so entering audio never rewinds the playhead to the cue's start.
           const resumeOnly = !!window._reentryDismissedByTab || !!(opts && opts.resumeOnly) ||
                              (continuous && !!window._bgPlaying);
+          // On a COLD RESTORE / title-open (opts.titleOpen), the prior mode is
+          // just the boot default ('card'), so seekToCurrentPosition would seek
+          // to the READ cursor and rewind the audiobook back to your reading
+          // spot — losing where you were actually listening. A restore must
+          // instead resume the SAVED audio playhead (startMs falls through to
+          // getAudiobookLastPosition when seekToCurrentPosition is false).
+          const isRestore = !!(opts && opts.titleOpen);
           await window.openAudiobookMode({
-            seekToCurrentPosition: (prevMode === 'card' || prevMode === 'read') && !resumeOnly,
+            seekToCurrentPosition: (prevMode === 'card' || prevMode === 'read') && !resumeOnly && !isRestore,
             resumeOnly
           });
           window._reentryDismissedByTab = false;
