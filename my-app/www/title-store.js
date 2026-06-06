@@ -14,6 +14,14 @@
 
 (function () {
   const PREF_KEY = 'TITLES_V1';
+  // Cover dataURIs (base64 JPEGs, often MBs) are stored SEPARATELY from the main
+  // blob. TITLES_V1 is re-written on every setCardIndex (i.e. every card advance),
+  // and re-serializing every title's base64 cover each time was marshalling
+  // megabytes across the Capacitor bridge per card → GC churn + multi-second
+  // main-thread jank (Android card-mode lag). Covers change rarely (import/edit),
+  // so they're written only when they actually change (see coversSig()).
+  const COVERS_KEY = 'TITLE_COVERS_V1';
+  let _lastCoversSig = '';
 
   function isCap() {
     return typeof window.isCapacitorEnvironment === 'function' && window.isCapacitorEnvironment();
@@ -69,14 +77,76 @@
     }
     if (!Array.isArray(titles)) {
       titles = await migrateFromLegacyDecks();
+      await persist();           // writes lean blob + covers (sig started '')
+      return titles;
+    }
+    // Merge the separately-stored cover dataURIs back into the titles.
+    let hadCoversKey = false;
+    try {
+      const craw = await getPref(COVERS_KEY);
+      if (craw) {
+        hadCoversKey = true;
+        const covers = JSON.parse(craw) || {};
+        for (const t of titles) {
+          if (covers[t.id]) {
+            if (!t.attachments) t.attachments = {};
+            if (!t.attachments.cover) t.attachments.cover = {};
+            t.attachments.cover.dataUri = covers[t.id];
+          }
+        }
+      }
+    } catch (e) { console.warn('[titles] covers load failed:', e); }
+    _lastCoversSig = coversSig();
+    // One-time migration: older installs stored covers INLINE in TITLES_V1 (no
+    // COVERS_KEY). They're in memory now (parsed from the old blob); split them
+    // out so the lean writes from here on don't drop them.
+    if (!hadCoversKey && titles.some(t => t.attachments && t.attachments.cover && t.attachments.cover.dataUri)) {
+      _lastCoversSig = '__migrate__'; // force the covers write
       await persist();
     }
     return titles;
   }
 
+  // Signature of just the covers (id + dataUri length) — cheap to compute and
+  // lets persist() detect when covers ACTUALLY changed so it only re-writes the
+  // (heavy) covers blob then, not on every position write.
+  function coversSig() {
+    if (!titles) return '';
+    return titles.map(t => {
+      const du = t.attachments && t.attachments.cover && t.attachments.cover.dataUri;
+      return t.id + ':' + (du ? du.length : 0);
+    }).join('|');
+  }
+
   async function persist() {
     try {
-      await setPref(PREF_KEY, JSON.stringify(titles || []));
+      // Write TITLES_V1 WITHOUT the base64 cover dataURIs (stripped). This is the
+      // blob re-written on every card advance (setCardIndex), so keeping it lean
+      // turns a multi-MB write into a few-KB one. Covers live in COVERS_KEY and
+      // are re-written only when they change.
+      const lean = (titles || []).map(t => {
+        const cover = t.attachments && t.attachments.cover;
+        if (cover && cover.dataUri) {
+          return Object.assign({}, t, {
+            attachments: Object.assign({}, t.attachments, {
+              cover: Object.assign({}, cover, { dataUri: undefined }) // dropped by JSON.stringify
+            })
+          });
+        }
+        return t;
+      });
+      await setPref(PREF_KEY, JSON.stringify(lean));
+      // Covers: only re-serialize when the set/size of covers changed (rare).
+      const sig = coversSig();
+      if (sig !== _lastCoversSig) {
+        const covers = {};
+        for (const t of (titles || [])) {
+          const du = t.attachments && t.attachments.cover && t.attachments.cover.dataUri;
+          if (du) covers[t.id] = du;
+        }
+        await setPref(COVERS_KEY, JSON.stringify(covers));
+        _lastCoversSig = sig;
+      }
     } catch (e) {
       console.warn('[titles] persist failed:', e);
     }

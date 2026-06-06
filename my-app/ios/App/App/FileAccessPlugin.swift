@@ -214,11 +214,18 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
             scopeURL  = folderURL
             sourceURL = folderURL.appendingPathComponent(parsed.relPath)
             touchUri  = parsed.folderUri
-            // Path-traversal guard: the resolved child must stay inside the
-            // granted folder (reject a crafted relPath like "../../etc/...").
-            let folderStd = folderURL.standardizedFileURL.path
-            let childStd  = sourceURL.standardizedFileURL.path
-            if !(childStd == folderStd || childStd.hasPrefix(folderStd + "/")) {
+            // Path-traversal guard: reject a crafted relPath that would climb
+            // out of the granted folder (e.g. "../../etc/..."). Check the
+            // relPath LEXICALLY — comparing standardizedFileURL paths here was
+            // unreliable: this runs BEFORE startAccessingSecurityScopedResource,
+            // and standardizedFileURL resolves symlinks (e.g. /var -> /private/var)
+            // only for paths it can stat, so after a cold relaunch the folder
+            // and child standardized asymmetrically and this guard spuriously
+            // tripped for folder-imported titles ("Resolved path escapes the
+            // imported folder"). relPath is always folder-relative by
+            // construction, so a lexical ".."/absolute check is the real intent.
+            let relComps = (parsed.relPath as NSString).pathComponents
+            if parsed.relPath.hasPrefix("/") || relComps.contains("..") {
                 call.reject("Resolved path escapes the imported folder")
                 return
             }

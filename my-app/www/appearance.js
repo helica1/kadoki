@@ -30,7 +30,11 @@
     // Defaults updated 2026-05-30 per user request:
     // card/audio = 30 px (1.875 rem), read = 28 px (1.75 rem).
     card:  { fontSize: '1.875rem', align: 'center', fontFamily: 'serif',
-             imageDisplay: 'block', imageOpacity: 1, imageAlign: 'flex-start',
+             // imageAlign 'center' (was 'flex-start'): the Anki-deck card image is
+             // vertically centered in its area instead of pinned to the top under
+             // the subtitle (the dedicated "Image position" pref was removed, so
+             // this default is what users get). Matches audio mode.
+             imageDisplay: 'block', imageOpacity: 1, imageAlign: 'center',
              // Toggles (default = preserve current behavior): show the SRT-card
              // waveform + the blurred ambient cover backdrop; show the upcoming
              // subtitle (grayed) is opt-in OFF.

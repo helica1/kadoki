@@ -7,8 +7,8 @@ android {
         applicationId "com.helica1.yama"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 7
-        versionName "1.3.2"
+        versionCode 8
+        versionName "1.3.3"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -42,6 +42,11 @@ dependencies {
     implementation project(':capacitor-cordova-android-plugins')
     // Background audio MediaSession + MediaStyle notification
     implementation "androidx.media:media:1.7.0"
+    // Media3 ExoPlayer — replaces android.media.MediaPlayer for audiobook
+    // playback. ExoPlayer's own MP4 extractor parses Audible-style .m4b files
+    // (embedded cover art + chapter track) that Android's native Stagefright
+    // parser rejects with error 1/-2147483648. media3-common comes transitively.
+    implementation "androidx.media3:media3-exoplayer:1.4.1"
     // Pure-Java XZ/LZMA2 decoder so ArchiveExtractor can import .tar.xz directly
     // (Java has GZIP built in but no XZ). ~120 KB, streaming decode.
     implementation "org.tukaani:xz:1.9"

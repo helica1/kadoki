@@ -8,11 +8,6 @@ import android.app.Service;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.content.ComponentName;
-import android.media.AudioAttributes;
-import android.media.MediaMetadata;
-import android.media.MediaPlayer;
-import android.media.PlaybackParams;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -24,9 +19,16 @@ import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 import androidx.media.app.NotificationCompat.MediaStyle;
+import androidx.media3.common.AudioAttributes;
+import androidx.media3.common.C;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.PlaybackParameters;
+import androidx.media3.common.Player;
+import androidx.media3.exoplayer.ExoPlayer;
 
 /**
- * Foreground service that runs MediaPlayer so audio keeps playing while the
+ * Foreground service that runs Media3 ExoPlayer so audio keeps playing while the
  * WebView/Activity is paused (screen off, app backgrounded).
  *
  * Driven by Intents for play/pause/resume/stop (so JS can fire-and-forget
@@ -35,6 +37,17 @@ import androidx.media.app.NotificationCompat.MediaStyle;
  *
  * Plugin can register an OnStateChangeListener to receive position polling
  * events for forwarding to JS via notifyListeners.
+ *
+ * ExoPlayer (unlike the old MediaPlayer) is single-threaded: it MUST be created
+ * and accessed on ONE Looper thread. We build and touch it only on the MAIN
+ * looper. The Intent handlers (onStartCommand), MediaSession callbacks, and the
+ * fade Handler all run on the main looper already; the few direct calls that can
+ * arrive on a Capacitor plugin worker thread (seek/setRate) are marshalled there
+ * via runOnPlayer(), and the cross-thread getters (position/duration/playing)
+ * are served from volatile caches kept fresh by the main-looper position poll.
+ * Migrated from android.media.MediaPlayer, whose native Stagefright MP4 parser
+ * rejected some valid Audible-style .m4b files (error 1/-2147483648) that
+ * ExoPlayer's own extractor reads fine.
  */
 public class BackgroundAudioService extends Service {
 
@@ -78,16 +91,37 @@ public class BackgroundAudioService extends Service {
     private static BackgroundAudioService instance;
     public static BackgroundAudioService getInstance() { return instance; }
 
-    private MediaPlayer player;
-    private boolean prepared = false;
-    private float pendingRate = 1.0f;
-    private int pendingStartMs = 0;
-    private OnStateChangeListener listener;
+    // Player + state. `exo`, `prepared`, `wantPlaying`, and the position/
+    // duration caches are read from other threads (plugin getState, isReady),
+    // so they are volatile. Methods are only ever INVOKED on `exo` from the
+    // main looper.
+    private volatile ExoPlayer exo;
+    private volatile boolean prepared = false;
+    // Our transport intent (playing vs paused), mirroring what the old
+    // player.isPlaying() conveyed at the points the listener fired. Stays true
+    // through a fade-out until the pause actually lands, false on pause/stop/
+    // end — and never dips on a transient rebuffer (unlike ExoPlayer.isPlaying).
+    private volatile boolean wantPlaying = false;
+    private volatile int cachedPositionMs = -1;
+    private volatile int cachedDurationMs = -1;
+    private volatile float pendingRate = 1.0f;
+    private volatile int pendingStartMs = 0;
+    private volatile OnStateChangeListener listener;
+    // URL currently loaded into `exo` (the media item we prepared). Lets a
+    // repeated ACTION_PLAY with the SAME url skip the expensive
+    // release+rebuild+prepare (parsing the moov of an 877 MB .m4b can take
+    // seconds, and it used to run on EVERY bg.play). Set when we set the media
+    // item, cleared by stopPlayback. Only read/written on the main looper
+    // (onStartCommand / startPlayback / stopPlayback all run there).
+    private String currentUrl = null;
 
     private MediaSessionCompat mediaSession;
-    private String metaTitle = "Anki Deck Reader";
-    private String metaSubtitle = "";
-    private android.graphics.Bitmap metaArt;   // lock-screen cover art (persists across cue updates)
+    // Metadata fields: written via setMetadata (marshalled to the main looper)
+    // and read by buildNotification/onStartCommand on the main looper; volatile
+    // is defense-in-depth against any future non-marshalled access.
+    private volatile String metaTitle = "Anki Deck Reader";
+    private volatile String metaSubtitle = "";
+    private volatile android.graphics.Bitmap metaArt;   // lock-screen cover art (persists across cue updates)
 
     @Override
     public void onCreate() {
@@ -109,13 +143,25 @@ public class BackgroundAudioService extends Service {
         Log.d(TAG, "onStartCommand action=" + action);
         if (ACTION_PLAY.equals(action)) {
             String url = intent.getStringExtra(EXTRA_URL);
-            pendingStartMs = intent.getIntExtra(EXTRA_START_MS, 0);
+            int startMs = intent.getIntExtra(EXTRA_START_MS, 0);
             float rate = intent.getFloatExtra(EXTRA_RATE, 1.0f);
+            int fadeMs = intent.getIntExtra(EXTRA_FADE_MS, DEFAULT_FADE_MS);
+            pendingStartMs = startMs;
             if (rate > 0) pendingRate = rate;
-            startPlayback(url);
+            // SAME-url fast path: the file is already loaded & prepared into
+            // `exo`. A repeated bg.play (card replay / re-entering audio mode /
+            // PLAY toggle) is then just a seek+play, not a multi-second moov
+            // re-parse. Only a genuinely DIFFERENT url (or nothing loaded yet)
+            // falls through to the full startPlayback() rebuild.
+            if (url != null && url.equals(currentUrl) && exo != null && prepared) {
+                Log.d(TAG, "ACTION_PLAY same-url fast path startMs=" + startMs);
+                replayLoaded(startMs, fadeMs);
+            } else {
+                startPlayback(url);
+            }
         } else if (ACTION_PAUSE.equals(action)) {
             tryRun(() -> {
-                if (player != null && player.isPlaying()) {
+                if (exo != null && exo.isPlaying()) {
                     int fadeMs = intent.getIntExtra(EXTRA_FADE_MS, DEFAULT_FADE_MS);
                     fadeOutThenPause(fadeMs);
                 }
@@ -124,7 +170,7 @@ public class BackgroundAudioService extends Service {
             updatePlaybackState();
         } else if (ACTION_RESUME.equals(action)) {
             tryRun(() -> {
-                if (player != null && prepared) {
+                if (exo != null && prepared) {
                     int fadeMs = intent.getIntExtra(EXTRA_FADE_MS, DEFAULT_FADE_MS);
                     fadeInOnResume(fadeMs);
                 }
@@ -139,6 +185,38 @@ public class BackgroundAudioService extends Service {
         return START_NOT_STICKY;
     }
 
+    // Runs r on the player's (main) looper. Direct API calls from the Capacitor
+    // plugin worker thread (seek/setRate/setMetadata) hop here so they never
+    // touch ExoPlayer / MediaSession off-thread (which throws / races).
+    // IMPORTANT: marshals on playerHandler, NOT fadeHandler — cancelFade()
+    // blanket-clears fadeHandler, which would silently drop a queued
+    // seek/setRate command body before it ran.
+    private void runOnPlayer(Runnable r) {
+        if (Looper.myLooper() == Looper.getMainLooper()) r.run();
+        else playerHandler.post(r);
+    }
+
+    private final Player.Listener playerListener = new Player.Listener() {
+        @Override public void onPlaybackStateChanged(int state) {
+            if (state == Player.STATE_READY) {
+                if (!prepared) onFirstReady();
+            } else if (state == Player.STATE_ENDED) {
+                Log.d(TAG, "completion");
+                wantPlaying = false;
+                if (listener != null) listener.onEnded();
+                updatePlaybackState();
+            }
+        }
+        @Override public void onPlayerError(PlaybackException error) {
+            Log.e(TAG, "ExoPlayer error code=" + error.errorCode + " (" + error.getErrorCodeName() + ")", error);
+            wantPlaying = false;
+            if (listener != null) {
+                listener.onError("ExoPlayer error " + error.errorCode + "/" + error.getErrorCodeName());
+            }
+            updatePlaybackState(); // don't leave the lock screen stuck on STATE_PLAYING
+        }
+    };
+
     private void startPlayback(String url) {
         stopPlayback();
         if (url == null || url.isEmpty()) {
@@ -146,61 +224,71 @@ public class BackgroundAudioService extends Service {
             return;
         }
         try {
-            player = new MediaPlayer();
-            player.setAudioAttributes(new AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build());
-            player.setDataSource(getApplicationContext(), Uri.parse(url));
-            player.setOnPreparedListener(mp -> {
-                prepared = true;
-                Log.d(TAG, "prepared; dur=" + mp.getDuration() + " startMs=" + pendingStartMs);
-                if (pendingStartMs > 0) mp.seekTo(pendingStartMs);
-                applyRate(pendingRate);
-                // First play: only fade in if DEFAULT_FADE_MS > 0.
-                // With the current default of 0, just start at full
-                // volume. The audio buffer was empty so there's no
-                // amplitude discontinuity to click on.
-                if (DEFAULT_FADE_MS > 0) {
-                    try { mp.setVolume(0f, 0f); } catch (Exception ignored) {}
-                    mp.start();
-                    rampVolume(mp, 0f, 1f, DEFAULT_FADE_MS);
-                } else {
-                    mp.start();
-                }
-                updateNotification("Playing");
-                updatePlaybackState();
-                if (listener != null) {
-                    listener.onPlayingStateChanged(true);
-                    listener.onPositionUpdate(mp.getCurrentPosition(), mp.getDuration());
-                }
-            });
-            player.setOnErrorListener((mp, what, extra) -> {
-                Log.e(TAG, "MediaPlayer error what=" + what + " extra=" + extra);
-                if (listener != null) listener.onError("MediaPlayer error " + what + "/" + extra);
-                return true;
-            });
-            player.setOnCompletionListener(mp -> {
-                Log.d(TAG, "completion");
-                if (listener != null) listener.onEnded();
-            });
-            player.prepareAsync();
+            ExoPlayer p = new ExoPlayer.Builder(getApplicationContext()).build();
+            exo = p;
+            AudioAttributes attrs = new AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
+                .build();
+            // handleAudioFocus=false matches the old MediaPlayer (which never
+            // requested focus); the app drives its own pause logic.
+            p.setAudioAttributes(attrs, false);
+            // Hold a partial wake lock while playing so screen-off CPU sleep
+            // can't stall background playback (WAKE_LOCK is granted in the
+            // manifest). The old MediaPlayer relied solely on the foreground
+            // service; this is strictly more robust.
+            p.setWakeMode(C.WAKE_MODE_LOCAL);
+            p.addListener(playerListener);
+            p.setPlaybackParameters(new PlaybackParameters(pendingRate > 0 ? pendingRate : 1.0f));
+            // Start muted when we intend to fade in (see onFirstReady); the
+            // audio buffer is empty at first play so there's no click, but the
+            // ramp gives the same gentle onset as iOS.
+            p.setVolume(DEFAULT_FADE_MS > 0 ? 0f : 1f);
+            p.setMediaItem(MediaItem.fromUri(url));
+            currentUrl = url; // remember what we loaded for the same-url fast path
+            if (pendingStartMs > 0) p.seekTo(pendingStartMs);
+            p.setPlayWhenReady(true);
+            p.prepare();
         } catch (Exception e) {
             Log.e(TAG, "startPlayback failed", e);
+            stopPlayback(); // release the partially-built player + its wake lock
             if (listener != null) listener.onError(e.getMessage());
         }
     }
 
+    // First time the player reaches READY for this media item: mirror the old
+    // onPrepared sequence (apply rate, fade in, fire listener + notification).
+    private void onFirstReady() {
+        ExoPlayer p = exo;
+        if (p == null) return;
+        prepared = true;
+        long d = p.getDuration();
+        cachedDurationMs = (d == C.TIME_UNSET || d < 0) ? -1 : (int) d;
+        cachedPositionMs = (int) Math.max(0, p.getCurrentPosition());
+        Log.d(TAG, "prepared; dur=" + cachedDurationMs + " startMs=" + pendingStartMs);
+        applyRate(pendingRate);
+        // playWhenReady was set, so playback has begun (muted if fading).
+        if (DEFAULT_FADE_MS > 0) {
+            rampVolume(0f, 1f, DEFAULT_FADE_MS);
+        } else {
+            try { p.setVolume(1f); } catch (Exception ignored) {}
+        }
+        wantPlaying = true;
+        updateNotification("Playing");
+        updatePlaybackState();
+        if (listener != null) {
+            listener.onPlayingStateChanged(true);
+            listener.onPositionUpdate(cachedPositionMs, cachedDurationMs);
+        }
+    }
+
     private void applyRate(float rate) {
-        if (player == null || !prepared) { pendingRate = rate; return; }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return; // API 23+
+        if (rate <= 0) return;
+        pendingRate = rate;
+        ExoPlayer p = exo;
+        if (p == null) return;
         try {
-            boolean wasPlaying = player.isPlaying();
-            PlaybackParams pp = player.getPlaybackParams();
-            pp.setSpeed(rate);
-            player.setPlaybackParams(pp);
-            // On some devices setPlaybackParams while paused auto-starts; pause again.
-            if (!wasPlaying) player.pause();
+            p.setPlaybackParameters(new PlaybackParameters(rate));
         } catch (Exception e) {
             Log.w(TAG, "applyRate failed", e);
         }
@@ -208,28 +296,86 @@ public class BackgroundAudioService extends Service {
 
     private void stopPlayback() {
         prepared = false;
+        wantPlaying = false;
+        currentUrl = null; // nothing loaded → next ACTION_PLAY must rebuild
         cancelFade();
-        if (player != null) {
-            try { player.stop(); } catch (Exception ignored) {}
-            try { player.release(); } catch (Exception ignored) {}
-            player = null;
+        ExoPlayer p = exo;
+        if (p != null) {
+            exo = null;
+            try { p.removeListener(playerListener); } catch (Exception ignored) {}
+            try { p.stop(); } catch (Exception ignored) {}
+            try { p.release(); } catch (Exception ignored) {}
+            cachedPositionMs = -1;
+            cachedDurationMs = -1;
             if (listener != null) listener.onPlayingStateChanged(false);
         }
     }
 
-    // ---- Volume ramp helpers (P2 roadmap) ----
+    // SAME-url fast path body: the player already has this file loaded &
+    // prepared, so re-prepare nothing — just (re)apply the rate, jump the
+    // playhead, and play with the same gentle fade-in onset as a fresh start.
+    // Runs on the main (player) looper via onStartCommand. Mirrors the
+    // fade/listener/notification side effects of the onFirstReady path so the
+    // lock screen + JS see a consistent "playing from startMs" state.
     //
-    // MediaPlayer.setVolume is instant — no native fade like iOS
+    // CORRECTNESS: this is the click-free seek+play used for card replay,
+    // re-entering audio mode, and the SRT-card PLAY toggle. It honors startMs
+    // exactly (always seekTo(startMs), even far jumps), so a card swipe that
+    // lands on a distant cue still seeks — never reloads. It does NOT decide
+    // whether to seek vs. plain-resume; callers that want a plain resume (no
+    // position jump) already use ACTION_RESUME / bg.resume() instead of
+    // bg.play(), and live scrub drags use seek(). bg.play() always means
+    // "(re)start from this startMs", which is exactly what this delivers.
+    private void replayLoaded(int startMs, int fadeMs) {
+        final ExoPlayer p = exo;
+        if (p == null || !prepared) { startPlayback(currentUrl); return; }
+        cancelFade(); // drop any in-flight pause-after-fade / volume ramp
+        applyRate(pendingRate);
+        try {
+            p.seekTo(Math.max(0, startMs));
+            cachedPositionMs = Math.max(0, startMs);
+            // Fade in from silence so the (re)start onset matches a fresh play
+            // and never clicks on a non-zero waveform left by a prior pause.
+            if (fadeMs > 0) {
+                try { p.setVolume(0f); } catch (Exception ignored) {}
+                p.play();
+                rampVolume(0f, 1f, fadeMs);
+            } else {
+                try { p.setVolume(1f); } catch (Exception ignored) {}
+                p.play();
+            }
+            wantPlaying = true;
+        } catch (Exception e) {
+            Log.w(TAG, "replayLoaded failed; falling back to full rebuild", e);
+            startPlayback(currentUrl);
+            return;
+        }
+        updateNotification("Playing");
+        updatePlaybackState();
+        if (listener != null) {
+            listener.onPlayingStateChanged(true);
+            listener.onPositionUpdate(cachedPositionMs, getDurationMs());
+        }
+    }
+
+    // ---- Volume ramp helpers ----
+    //
+    // ExoPlayer.setVolume is instant — no native fade like iOS
     // AVAudioPlayer.setVolume(_:fadeDuration:). We schedule a sequence
     // of setVolume calls via a main-thread Handler to approximate a
-    // linear ramp over `durationMs`. Step granularity is FADE_STEP_MS
-    // (~10 ms) which is smooth enough for the 50 ms default without
-    // being CPU-heavy.
+    // linear ramp over `durationMs`. All ramp steps run on the main
+    // looper, which is also the player thread, so they touch ExoPlayer
+    // safely.
     //
     // Outstanding ramps are cancelled if a new ramp / pause / stop
     // arrives so we never have two ramps fighting over the same
     // setVolume.
     private final Handler fadeHandler = new Handler(Looper.getMainLooper());
+    // Separate main-looper channel for marshalling off-thread command bodies
+    // (seek/setRate/setMetadata). Kept distinct from fadeHandler so that
+    // cancelFade()'s removeCallbacksAndMessages(null) — which clears volume
+    // ramps and the pending pause — can never purge a queued command.
+    private final Handler playerHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingPauseAfterFade = null;
 
     private void cancelFade() {
@@ -237,11 +383,12 @@ public class BackgroundAudioService extends Service {
         pendingPauseAfterFade = null;
     }
 
-    private void rampVolume(MediaPlayer mp, float from, float to, int durationMs) {
+    private void rampVolume(float from, float to, int durationMs) {
         cancelFade();
-        if (mp == null) return;
+        final ExoPlayer target = exo;
+        if (target == null) return;
         if (durationMs <= 0) {
-            try { mp.setVolume(to, to); } catch (Exception ignored) {}
+            try { target.setVolume(to); } catch (Exception ignored) {}
             return;
         }
         // Step count adapts to fit inside durationMs so a 5 ms fade
@@ -253,30 +400,34 @@ public class BackgroundAudioService extends Service {
         for (int i = 1; i <= steps; i++) {
             final int step = i;
             final int total = steps;
-            final MediaPlayer target = mp;
             fadeHandler.postDelayed(() -> {
                 float v = from + (to - from) * ((float) step / (float) total);
-                try { target.setVolume(v, v); } catch (Exception ignored) {}
+                try { target.setVolume(v); } catch (Exception ignored) {}
             }, (long) step * stepIntervalMs);
         }
     }
 
     private void fadeOutThenPause(int fadeMs) {
-        if (player == null) return;
+        final ExoPlayer mp = exo;
+        if (mp == null) return;
         if (fadeMs <= 0) {
             // No fade — set volume to 0 first so pause doesn't click on
             // a non-zero waveform, then pause, then restore for the
             // next play.
             try {
-                player.setVolume(0f, 0f);
-                player.pause();
-                player.setVolume(1f, 1f);
+                mp.setVolume(0f);
+                mp.pause();
+                mp.setVolume(1f);
+                wantPlaying = false;
                 if (listener != null) listener.onPlayingStateChanged(false);
             } catch (Exception ignored) {}
+            // Publish the paused transport state now that wantPlaying is false
+            // (the synchronous update in onStartCommand ran while still playing).
+            updatePlaybackState();
+            updateNotification("Paused");
             return;
         }
-        final MediaPlayer mp = player;
-        rampVolume(mp, 1f, 0f, fadeMs);
+        rampVolume(1f, 0f, fadeMs);
         // Schedule the actual pause AFTER the ramp completes.
         // Belt-and-suspenders: also set volume to 0 inside the runnable
         // so if the ramp didn't quite finish before this fires (handler
@@ -284,63 +435,86 @@ public class BackgroundAudioService extends Service {
         // still happens at zero amplitude.
         pendingPauseAfterFade = () -> {
             try {
-                try { mp.setVolume(0f, 0f); } catch (Exception ignored) {}
+                try { mp.setVolume(0f); } catch (Exception ignored) {}
                 if (mp.isPlaying()) mp.pause();
-                try { mp.setVolume(1f, 1f); } catch (Exception ignored) {} // reset for next play
+                try { mp.setVolume(1f); } catch (Exception ignored) {} // reset for next play
+                wantPlaying = false;
                 if (listener != null) listener.onPlayingStateChanged(false);
             } catch (Exception ignored) {}
+            // The state published in onStartCommand ran while wantPlaying was
+            // still true (fade in flight); correct the lock screen to PAUSED now.
+            updatePlaybackState();
+            updateNotification("Paused");
             pendingPauseAfterFade = null;
         };
         fadeHandler.postDelayed(pendingPauseAfterFade, fadeMs);
     }
 
     private void fadeInOnResume(int fadeMs) {
-        if (player == null) return;
+        final ExoPlayer mp = exo;
+        if (mp == null) return;
         if (fadeMs <= 0) {
             // No fade — just start at full volume. (Volume was reset
             // to 1 inside the pause runnable, so we don't need to
             // reset here.)
-            try { player.start(); } catch (Exception ignored) {}
+            try { mp.play(); } catch (Exception ignored) {}
+            wantPlaying = true;
             if (listener != null) listener.onPlayingStateChanged(true);
             return;
         }
-        try { player.setVolume(0f, 0f); } catch (Exception ignored) {}
-        try { player.start(); } catch (Exception ignored) {}
+        try { mp.setVolume(0f); } catch (Exception ignored) {}
+        try { mp.play(); } catch (Exception ignored) {}
+        wantPlaying = true;
         if (listener != null) listener.onPlayingStateChanged(true);
-        rampVolume(player, 0f, 1f, fadeMs);
+        rampVolume(0f, 1f, fadeMs);
     }
 
     // ----- Public API for direct calls from BackgroundAudioPlugin -----
 
     public void setListener(OnStateChangeListener l) {
         this.listener = l;
-        // Catch-up: if MediaPlayer is already prepared when a listener attaches
+        // Catch-up: if the player is already prepared when a listener attaches
         // late (race between play() startService and ensureListener), replay
         // the current state so the plugin starts its position poll. Without
         // this, prepared-before-listener loses the state event forever.
-        if (l != null && prepared && player != null) {
+        // setListener is invoked on the main looper (scheduleEnsureListener
+        // posts to the main Handler), so reading the player live is safe.
+        if (l != null && prepared) {
             try {
-                boolean playing = player.isPlaying();
-                l.onPlayingStateChanged(playing);
-                l.onPositionUpdate(player.getCurrentPosition(), player.getDuration());
+                l.onPlayingStateChanged(wantPlaying);
+                l.onPositionUpdate(getPositionMs(), getDurationMs());
             } catch (Exception ignored) {}
         }
     }
 
-    public boolean isReady() { return prepared && player != null; }
+    public boolean isReady() { return prepared && exo != null; }
 
-    public boolean isCurrentlyPlaying() {
-        try { return player != null && player.isPlaying(); } catch (Exception e) { return false; }
-    }
+    public boolean isCurrentlyPlaying() { return wantPlaying; }
 
     public int getPositionMs() {
-        try { return player != null && prepared ? player.getCurrentPosition() : -1; }
-        catch (Exception e) { return -1; }
+        // Refresh the cache when called on the player (main) looper — the
+        // plugin's 150 ms position poll runs there, keeping it fresh. Off-thread
+        // callers (getState) get the most recent cached value.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            ExoPlayer p = exo;
+            if (p != null && prepared) {
+                try { cachedPositionMs = (int) Math.max(0, p.getCurrentPosition()); } catch (Exception ignored) {}
+            }
+        }
+        return prepared ? cachedPositionMs : -1;
     }
 
     public int getDurationMs() {
-        try { return player != null && prepared ? player.getDuration() : -1; }
-        catch (Exception e) { return -1; }
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            ExoPlayer p = exo;
+            if (p != null && prepared) {
+                try {
+                    long d = p.getDuration();
+                    cachedDurationMs = (d == C.TIME_UNSET || d < 0) ? -1 : (int) d;
+                } catch (Exception ignored) {}
+            }
+        }
+        return prepared ? cachedDurationMs : -1;
     }
 
     public void seekToMs(int ms) {
@@ -357,32 +531,41 @@ public class BackgroundAudioService extends Service {
     // may then be dropped, but consecutive swipes recompute the target so the end
     // position is still right, and whatever cancelled it restores the volume.
     public void seekToMs(int ms, int fadeMs) {
-        tryRun(() -> {
-            if (player == null || !prepared) return;
+        runOnPlayer(() -> tryRun(() -> {
+            final ExoPlayer mp = exo;
+            if (mp == null || !prepared) return;
             boolean playing = false;
-            try { playing = player.isPlaying(); } catch (Exception ignored) {}
+            try { playing = mp.isPlaying(); } catch (Exception ignored) {}
             if (playing && fadeMs > 0) {
-                final MediaPlayer mp = player;
                 final int target = ms;
                 final int f = fadeMs;
-                rampVolume(mp, 1f, 0f, f);
+                rampVolume(1f, 0f, f);
                 fadeHandler.postDelayed(() -> {
                     try {
-                        mp.setVolume(0f, 0f);      // ensure silence even if the ramp didn't quite finish
+                        mp.setVolume(0f);          // ensure silence even if the ramp didn't quite finish
                         mp.seekTo(target);         // land the seek while muted
-                        rampVolume(mp, 0f, 1f, f); // fade back in
+                        cachedPositionMs = target;
+                        // Only fade back in if this is still the active player and
+                        // we still intend to play; otherwise a pause that landed
+                        // during the seek would get un-muted. Restore volume to 1
+                        // for the next play either way.
+                        if (exo == mp && wantPlaying) {
+                            rampVolume(0f, 1f, f); // fade back in
+                        } else {
+                            mp.setVolume(1f);
+                        }
                     } catch (Exception ignored) {}
                 }, f);
             } else {
-                player.seekTo(ms);
+                mp.seekTo(ms);
+                cachedPositionMs = ms;
             }
-        });
+        }));
     }
 
     public void setRate(float rate) {
         if (rate <= 0) return;
-        pendingRate = rate;
-        applyRate(rate);
+        runOnPlayer(() -> applyRate(rate));
     }
 
     public void setMetadata(String title, String subtitle) {
@@ -394,24 +577,29 @@ public class BackgroundAudioService extends Service {
     // null); "" = clear it. Cover art is set once on audio-mode entry and
     // persists across the per-cue subtitle updates.
     public void setMetadata(String title, String subtitle, String artwork) {
-        if (title != null && !title.isEmpty()) metaTitle = title;
-        if (subtitle != null) metaSubtitle = subtitle;
-        if (artwork != null) metaArt = artwork.isEmpty() ? null : decodeArtwork(artwork);
-        String display = (metaSubtitle != null && !metaSubtitle.isEmpty()) ? metaSubtitle : metaTitle;
-        if (mediaSession != null) {
-            MediaMetadataCompat.Builder b = new MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, display)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, metaTitle)
-                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, display)
-                .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, metaTitle);
-            if (metaArt != null) {
-                b.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, metaArt);
-                b.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, metaArt);
+        // Called directly from the Capacitor plugin worker thread. Marshal onto
+        // the main looper where mediaSession lives (MediaSessionCompat is not
+        // documented thread-safe, and onDestroy releases it on the main thread).
+        runOnPlayer(() -> {
+            if (title != null && !title.isEmpty()) metaTitle = title;
+            if (subtitle != null) metaSubtitle = subtitle;
+            if (artwork != null) metaArt = artwork.isEmpty() ? null : decodeArtwork(artwork);
+            String display = (metaSubtitle != null && !metaSubtitle.isEmpty()) ? metaSubtitle : metaTitle;
+            if (mediaSession != null) {
+                MediaMetadataCompat.Builder b = new MediaMetadataCompat.Builder()
+                    .putString(MediaMetadataCompat.METADATA_KEY_TITLE, display)
+                    .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, metaTitle)
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, display)
+                    .putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, metaTitle);
+                if (metaArt != null) {
+                    b.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, metaArt);
+                    b.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, metaArt);
+                }
+                mediaSession.setMetadata(b.build());
+                updatePlaybackState();
             }
-            mediaSession.setMetadata(b.build());
-            updatePlaybackState();
-        }
-        updateNotification(display);
+            updateNotification(display);
+        });
     }
 
     private android.graphics.Bitmap decodeArtwork(String s) {
@@ -435,8 +623,9 @@ public class BackgroundAudioService extends Service {
         mediaSession = new MediaSessionCompat(this, "DeckReaderAudio");
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
             @Override public void onPlay() {
-                if (player != null && prepared) {
-                    player.start();
+                if (exo != null && prepared) {
+                    exo.play();
+                    wantPlaying = true;
                     if (listener != null) listener.onPlayingStateChanged(true);
                     updatePlaybackState();
                 }
@@ -447,8 +636,9 @@ public class BackgroundAudioService extends Service {
                 if (listener != null) listener.onRemoteCommand("play");
             }
             @Override public void onPause() {
-                if (player != null && player.isPlaying()) {
-                    player.pause();
+                if (exo != null && exo.isPlaying()) {
+                    exo.pause();
+                    wantPlaying = false;
                     if (listener != null) listener.onPlayingStateChanged(false);
                     updatePlaybackState();
                 }

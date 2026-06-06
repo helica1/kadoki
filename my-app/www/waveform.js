@@ -43,12 +43,17 @@
     const sinceEvent = Math.max(0, now - (state.playheadLastTs || now));
     if (!Number.isFinite(state.playheadDispMs)) state.playheadDispMs = state.playheadMs;
     // 1) free-run at constant velocity while position events are flowing (stop
-    //    advancing during a stall so the cursor doesn't run ahead of the audio)
-    if (sinceEvent < 400) state.playheadDispMs += frameDt * rate;
+    //    advancing during a real stall so the cursor doesn't run ahead of the
+    //    audio). Gate widened 400→1000 ms: Android's native position poll runs
+    //    on the WebView UI looper and slips behind the per-frame canvas paints
+    //    (often 200–500 ms between events), so at 400 ms the cursor froze then
+    //    yanked forward — the Android-only choppiness. iOS polls regularly and
+    //    never tripped it. 1000 ms rides through the slip; a true seek still snaps.
+    if (sinceEvent < 1000) state.playheadDispMs += frameDt * rate;
     // 2) gently correct toward the authoritative position (extrapolated to now,
     //    capped so a stall can't fling it). The error each event is only a few
     //    ms, so this is smooth; a real seek (>1.2s) snaps.
-    const target = state.playheadMs + Math.min(400, sinceEvent) * rate;
+    const target = state.playheadMs + Math.min(1000, sinceEvent) * rate;
     const err = target - state.playheadDispMs;
     if (Math.abs(err) > 1200) state.playheadDispMs = target;
     else state.playheadDispMs += err * 0.08;
@@ -597,9 +602,30 @@
       // selection start until the user taps Preview (which the bg position
       // listener then animates, bounded to endMs).
       const _playing = cardMode ? (!!window._bgPlaying || !!carry) : false;
+      // Seed at the FRESHEST true playhead. The card only advances once a (slow,
+      // 200–500ms on Android) position event crosses the new cue's start, so by
+      // now the real audio is already some ms into the cue. carry.ms is the prior
+      // card's last polled position and carry.disp is its *displayed* value, which
+      // lags it via the 8% phase-lock — both can sit behind the cue start. Take
+      // the max of carry and the live getAudioProgress() so the cursor seeds at
+      // the actual position, never behind it (never goes backward either).
       let _curPos = carry ? carry.ms : startMs;
-      if (cardMode && !carry && _playing) {
-        try { const _a = window.getAudioProgress?.(); if (_a && Number.isFinite(_a.ms)) _curPos = _a.ms; } catch (_) {}
+      if (cardMode && _playing) {
+        try { const _a = window.getAudioProgress?.(); if (_a && Number.isFinite(_a.ms)) _curPos = carry ? Math.max(_curPos, _a.ms) : _a.ms; } catch (_) {}
+        // Floor at the PRIOR card's DISPLAYED cursor (playheadInterpMs): it
+        // free-ran + phase-locked right up to this card advance, so it's the
+        // freshest estimate of where the audio actually is NOW. carry.ms and
+        // getAudioProgress are the last POLLED spot — up to one slow Android
+        // poll-interval (200–500ms) behind — so seeding only from them starts the
+        // cursor behind and it visibly STICKS at the cue start until the first
+        // fresh event snaps it forward (worst on short cues, where it eats most of
+        // the cue). Flooring at the prior displayed position removes the behind-
+        // seed without overshooting; _seedSnap still corrects any residual on the
+        // first authoritative event. Gated on `carry` so it only applies to a
+        // same-source continuous advance (never crosses audio timelines).
+        if (carry && state && Number.isFinite(state.playheadInterpMs)) {
+          _curPos = Math.max(_curPos, state.playheadInterpMs);
+        }
       }
       state = {
         cardMode,
@@ -625,9 +651,19 @@
         playheadWarmed:  _playing,
         playheadPlaying: _playing,
         playheadMs:       _curPos,
-        playheadDispMs:   carry ? carry.disp : _curPos,
+        // Seed the DISPLAYED cursor at the same fresh position (not the prior
+        // card's lagging carry.disp) so it starts exactly under the real audio.
+        playheadDispMs:   _curPos,
         playheadInterpMs: _curPos,
-        playheadLastTs:   performance.now()
+        playheadLastTs:   performance.now(),
+        // Reset the per-frame clock so the first tick's frameDt isn't computed
+        // against the prior card's _tickTs (and isn't 0 from an unset value).
+        _tickTs:          performance.now(),
+        // First position-event correction SNAPS instead of easing at 8%/frame:
+        // the seed is the last *polled* spot, which on Android can be a poll
+        // interval behind the true audio, so the first real event must jump the
+        // cursor to truth rather than slowly phase-lock (the start-stick).
+        _seedSnap:        true
       };
       container.querySelector('[data-role="preview"]').addEventListener('click', () => this.preview());
       container.querySelector('[data-role="reset"]').addEventListener('click', () => {
@@ -712,6 +748,15 @@
             state.playheadWarmed = true;
           }
           if (d.playing && state.playheadWarmed) {
+            // First authoritative event after a new-card seed: SNAP the displayed
+            // cursor to truth. The seed was the last *polled* position (up to a
+            // slow Android poll interval behind the real audio), so easing it in
+            // at 8%/frame is the "stick at the cue start, then jump" artifact.
+            // One-shot — steady playback below keeps eased/smooth thereafter.
+            if (state._seedSnap && !isMinorBackstep) {
+              state._seedSnap = false;
+              state.playheadDispMs = state.playheadInterpMs = state.playheadMs;
+            }
             // Steady playback: the rAF loop (tickPlayhead) owns the displayed
             // position. Do NOT also hard-set playheadInterpMs to d.positionMs
             // here — that jumped the cursor forward on each 150 ms event and

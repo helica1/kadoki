@@ -4,6 +4,19 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.3.3 — 2026-06-06
+
+### Added
+- **Audible-style `.m4b` audiobooks now play on Android.** Long, chaptered `.m4b` files that previously failed with a playback error now work in all modes — including the card-mode waveform and sending a card's audio to Anki.
+
+### Fixed
+- **iOS — a title could fail to load after the app refreshed in the background** ("Resolved path escapes the imported folder"). Titles whose media is linked from a folder now reopen reliably, without needing to re-pick the files.
+- **Severe card-swipe lag** (Anki decks and audiobook card mode) that could freeze for a second or more on each card — swiping is fast again.
+- **Card mode flickered the subtitle** back and forth when you swiped while the audio playhead was running; swipes are clean now.
+
+### Changed
+- **Anki deck card images are centered** vertically instead of pinned to the top under the subtitle.
+
 ## v1.3.2 — 2026-06-05
 
 ### Added

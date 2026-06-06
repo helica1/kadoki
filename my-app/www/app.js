@@ -71,6 +71,11 @@ let currentStoredPath = null; // Store app's private file path
 
 // Enhanced debugging
 function debugLog(message) {
+  // Fast path: when debug logging is off and no on-screen console is wired,
+  // skip building the timestamp/template string entirely. debugLog runs ~7–12×
+  // per card swipe; on Android even this string work + a gated console.log adds
+  // up to UI-thread jank during rapid swiping.
+  if (!window.__KDBG && (!window.debugLog || window.debugLog === debugLog)) return;
   const timestamp = new Date().toLocaleTimeString();
   const logMessage = `[APP] ${timestamp}: ${message}`;
   console.log(logMessage);
@@ -2891,6 +2896,15 @@ async function displayCard() {
           // jump within it; seek with a brief fade so it doesn't click (like the
           // audio-mode swipe), instead of restarting playback from scratch.
           try { bg.seek({ ms: adjStart, fadeMs: 70 }); } catch (_) {}
+          // Post-swipe auto-advance guard: position events keep arriving with the
+          // OLD (pre-seek) playhead for a moment, and the card-mode auto-advance
+          // listener would re-derive the index from that lagging position and yank
+          // the card BACK to the previous cue → the swipe "flicker" (visible on
+          // iOS; a delayed re-adjust on Android). Hold THIS swiped-to card until
+          // the playhead's derived index matches it (seek landed), with a failsafe
+          // deadline. Direction-agnostic (works for prev and next swipes).
+          window._cardAdvanceTargetIdx = currentCardIndex;
+          window._cardAdvanceGuardUntil = Date.now() + 1200;
         } else {
           bg.play({
             url,
@@ -2968,35 +2982,39 @@ async function displayCard() {
     return !!(v && v.style.display !== 'none');
   })();
   if (audioSrc && !audiobookViewOpen) {
-    // Stop previous audio
+    // Stop previous audio synchronously so nothing overlaps.
     if (currentAudio) {
-      currentAudio.pause();
+      try { currentAudio.pause(); } catch (_) {}
     }
-
-    currentAudio = new Audio(audioSrc);
-    currentAudio.playbackRate = window.audioPlaybackRate || 1;
-    currentAudio.addEventListener('ended', () => {
-      // Don't auto-advance if audiobook mode has taken over.
-      const ab = document.getElementById('audiobookModeView');
-      if (ab && ab.style.display !== 'none') return;
-      if (!window.audioAutoAdvance) return;
-      const readingView = document.getElementById('readingModeView');
-      const inReadingMode = readingView && readingView.style.display !== 'none';
-      if (inReadingMode && window.readingAutoAdvance === false) return;
-      if (currentCardIndex < allNotes.length - 1) goToNextCard();
-    });
-    // Suppress auto-play on the very first card after app launch — the
-    // user expects a quiet startup. Subsequent displayCards (after a
-    // swipe, PLAY tap, etc.) play normally.
-    if (window.startupAutoPlayBlocked) {
-      // Suppressed on open/restart. Do NOT consume — it's lifted by a real
-      // card advance (updateCardIndex) or explicit PLAY, so the first card on
-      // open/restart never auto-plays while normal navigation still does.
-    } else {
-      currentAudio.play().catch(err => {
-        debugLog(`Audio play error: ${err.message}`);
+    // DEFER the new audio off the swipe's critical render path. `new Audio(
+    // data:audio/mpeg;base64,...)` makes Android's WebView base64-decode + parse
+    // the whole clip SYNCHRONOUSLY (cheap on iOS WKWebView), which stalled each
+    // deck swipe. Let the card (text + image) paint first, then start audio on
+    // the next macrotask — and skip it entirely if the user has already swiped
+    // past this card, so rapid swiping never decodes audio it won't hear.
+    const _audioForIdx = capturedIndex;
+    const _src = audioSrc;
+    setTimeout(() => {
+      if (currentCardIndex !== _audioForIdx) return; // swiped on → stale, skip
+      const a = new Audio(_src);
+      a.playbackRate = window.audioPlaybackRate || 1;
+      a.addEventListener('ended', () => {
+        // Don't auto-advance if audiobook mode has taken over.
+        const ab = document.getElementById('audiobookModeView');
+        if (ab && ab.style.display !== 'none') return;
+        if (!window.audioAutoAdvance) return;
+        const readingView = document.getElementById('readingModeView');
+        const inReadingMode = readingView && readingView.style.display !== 'none';
+        if (inReadingMode && window.readingAutoAdvance === false) return;
+        if (currentCardIndex < allNotes.length - 1) goToNextCard();
       });
-    }
+      currentAudio = a;
+      // Suppress auto-play on the very first card after app launch (quiet
+      // startup); NOT consumed here — lifted by a real card advance / PLAY.
+      if (!window.startupAutoPlayBlocked) {
+        a.play().catch(err => { debugLog(`Audio play error: ${err.message}`); });
+      }
+    }, 0);
   }
   
   updateProgressBar();
@@ -3732,6 +3750,18 @@ function _ensureBgListenersForSrtCards() {
       let idx = currentCardIndex;
       while (idx + 1 < allNotes.length && (allNotes[idx + 1].audiobookStartMs || 0) <= pos) idx++;
       while (idx > 0 && (allNotes[idx].audiobookStartMs || 0) > pos + 1) idx--;
+      // Post-swipe guard: a swipe just seeked the playhead but position events
+      // still report the OLD spot. Until the playhead-derived index reaches the
+      // swiped-to target (seek landed), don't move the card — otherwise lagging
+      // events flicker it back to the old cue. Failsafe deadline so a dropped
+      // seek can't freeze auto-advance.
+      if (window._cardAdvanceGuardUntil > 0) {
+        if (idx === window._cardAdvanceTargetIdx || Date.now() > window._cardAdvanceGuardUntil) {
+          window._cardAdvanceGuardUntil = 0;
+        } else {
+          return;
+        }
+      }
       if (idx !== currentCardIndex && typeof updateCardIndex === 'function') {
         window._skipNextCardAudioRestart = true; // update the card UI, keep audio flowing
         updateCardIndex(idx);

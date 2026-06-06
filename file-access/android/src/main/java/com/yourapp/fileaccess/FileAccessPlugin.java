@@ -190,10 +190,9 @@ public class FileAccessPlugin extends Plugin {
 
             File cacheDir = new File(getContext().getCacheDir(), "decks");
             if (!cacheDir.exists()) cacheDir.mkdirs();
-            String cacheFileName = "deck_" + Integer.toHexString(uriString.hashCode()) + ".apkg";
-            File cacheFile = new File(cacheDir, cacheFileName);
 
             long sourceSize = -1;
+            String displayName = null;
             Cursor cursor = getContext().getContentResolver().query(uri, null, null, null, null);
             if (cursor != null) {
                 try {
@@ -202,11 +201,30 @@ public class FileAccessPlugin extends Plugin {
                         if (sizeIndex >= 0) {
                             sourceSize = cursor.getLong(sizeIndex);
                         }
+                        int nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                        if (nameIndex >= 0) {
+                            displayName = cursor.getString(nameIndex);
+                        }
                     }
                 } finally {
                     cursor.close();
                 }
             }
+
+            // Preserve the source file's extension on the cache copy. The old
+            // code hard-coded ".apkg" for EVERY materialized file — fine for the
+            // JS ZIP reader, but it gave audiobooks a misleading name. Android's
+            // MediaPlayer can hint off the extension, so a ".apkg" audio file
+            // could fail to prepare (error 1/-2147483648) where the same bytes
+            // play with a correct extension. iOS already keeps the real ext.
+            String ext = displayName != null ? extensionOf(displayName) : null;
+            if (ext == null) {
+                String lastSeg = uri.getLastPathSegment();
+                if (lastSeg != null) ext = extensionOf(lastSeg);
+            }
+            if (ext == null || ext.isEmpty()) ext = "bin";
+            String cacheFileName = "deck_" + Integer.toHexString(uriString.hashCode()) + "." + ext;
+            File cacheFile = new File(cacheDir, cacheFileName);
 
             if (cacheFile.exists() && sourceSize > 0 && cacheFile.length() == sourceSize) {
                 JSObject result = new JSObject();
