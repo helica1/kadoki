@@ -22,7 +22,7 @@
 (function () {
   const AUDIO_EXTS = new Set(['mp3', 'm4a', 'm4b', 'ogg', 'oga', 'opus', 'wav', 'flac', 'aac']);
   const SRT_EXTS   = new Set(['srt', 'vtt', 'ass']);
-  const EPUB_EXTS  = new Set(['epub']);
+  const EPUB_EXTS  = new Set(['epub', 'txt']);   // txt = a plain-text book (read mode)
 
   let importing = false;
 

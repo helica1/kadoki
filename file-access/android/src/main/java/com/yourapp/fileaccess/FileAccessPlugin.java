@@ -162,7 +162,8 @@ public class FileAccessPlugin extends Plugin {
                 "application/octet-stream",
                 "application/x-anki-deck",
                 "application/vnd.anki",
-                "application/epub+zip"
+                "application/epub+zip",
+                "text/plain"   // .txt plain-text books
             };
         }
         if (mimeTypes != null) {
@@ -246,7 +247,7 @@ public class FileAccessPlugin extends Plugin {
 
     // Media extensions we surface from a folder scan. Lowercase, no dot.
     private static final String[] MEDIA_EXTS = {
-        "epub",
+        "epub", "txt",
         "mp3", "m4a", "m4b", "ogg", "oga", "opus", "wav", "flac", "aac",
         "srt", "vtt", "ass"
     };

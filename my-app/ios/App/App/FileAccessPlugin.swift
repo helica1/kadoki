@@ -45,7 +45,7 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
 
     // Media extensions surfaced from a folder scan (lowercase, no dot).
     private static let mediaExts: Set<String> = [
-        "epub", "mp3", "m4a", "m4b", "ogg", "oga", "opus", "wav", "flac", "aac", "srt", "vtt", "ass"
+        "epub", "txt", "mp3", "m4a", "m4b", "ogg", "oga", "opus", "wav", "flac", "aac", "srt", "vtt", "ass"
     ]
 
     public override func load() {
@@ -392,7 +392,9 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
                     UTType(filenameExtension: "m4a") ?? .audio]
         case "epub":
             return [UTType("org.idpf.epub-container") ?? .data,
-                    UTType(filenameExtension: "epub") ?? .data]
+                    UTType(filenameExtension: "epub") ?? .data,
+                    UTType(filenameExtension: "txt") ?? .plainText,
+                    .plainText]   // .txt plain-text books
         case "srt":
             return [UTType(filenameExtension: "srt") ?? .plainText, .text]
         case "image":

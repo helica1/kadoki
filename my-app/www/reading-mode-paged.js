@@ -2831,6 +2831,28 @@
     } catch (e) { log('pickEpub error:', e.message); }
   }
 
+  // Plain-text book → reader HTML. Each non-blank line becomes a paragraph
+  // (chunk). Aozora-Bunko ruby (漢字《かんじ》 or ｜base《reading》) is converted
+  // to <ruby>, and ［＃…］ editor annotations are stripped. A plain .txt with no
+  // Aozora markup just gets one <p> per line.
+  function _txtToReaderHtml(text) {
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const lines = String(text || '').replace(/﻿/g, '').replace(/\r\n?/g, '\n').split('\n');
+    const ps = [];
+    for (let line of lines) {
+      line = line.replace(/［＃[^］]*］/g, '');     // strip Aozora annotations
+      const t = line.trim();
+      if (!t) continue;
+      let h = esc(t);
+      // Aozora furigana: explicit ｜base《reading》 first, then bare 漢字《reading》.
+      h = h.replace(/｜([^《》｜\n]+)《([^《》\n]+)》/g, '<ruby>$1<rt>$2</rt></ruby>');
+      h = h.replace(/([一-鿿々〆ヶ々]+)《([^《》\n]+)》/g, '<ruby>$1<rt>$2</rt></ruby>');
+      ps.push('<p>' + h + '</p>');
+    }
+    if (!ps.length) ps.push('<p style="color:#888;text-align:center;margin-top:30vh;">(empty text file)</p>');
+    return ps.join('\n');
+  }
+
   async function loadEpubFromUri(uri, name) {
     try {
       ensureView();
@@ -2853,41 +2875,48 @@
       const { path } = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri });
       const response = await fetch(window.Capacitor.convertFileSrc(path));
       if (!response.ok) throw new Error(`fetch ${response.status}`);
-      const blob = await response.blob();
-      const zip = await JSZip.loadAsync(blob);
+      // A plain-text book (.txt) is read directly into paragraphs; EPUBs are
+      // unzipped + spine-walked. Detect by the attachment name / uri extension.
+      const _isTxt = /\.txt$/i.test(name || '') || /\.txt$/i.test(String(uri || ''));
+      if (_isTxt) {
+        innerEl.innerHTML = _txtToReaderHtml(await response.text());
+      } else {
+        const blob = await response.blob();
+        const zip = await JSZip.loadAsync(blob);
 
-      const containerXml = await zip.file('META-INF/container.xml')?.async('string');
-      if (!containerXml) throw new Error('Not a valid EPUB');
-      const opfPath = new DOMParser()
-        .parseFromString(containerXml, 'application/xml')
-        .querySelector('rootfile')?.getAttribute('full-path');
-      if (!opfPath) throw new Error('No OPF rootfile');
+        const containerXml = await zip.file('META-INF/container.xml')?.async('string');
+        if (!containerXml) throw new Error('Not a valid EPUB');
+        const opfPath = new DOMParser()
+          .parseFromString(containerXml, 'application/xml')
+          .querySelector('rootfile')?.getAttribute('full-path');
+        if (!opfPath) throw new Error('No OPF rootfile');
 
-      const opfXml = await zip.file(opfPath).async('string');
-      const opfDoc = new DOMParser().parseFromString(opfXml, 'application/xml');
-      const opfDir = opfPath.includes('/') ? opfPath.replace(/[^/]+$/, '') : '';
+        const opfXml = await zip.file(opfPath).async('string');
+        const opfDoc = new DOMParser().parseFromString(opfXml, 'application/xml');
+        const opfDir = opfPath.includes('/') ? opfPath.replace(/[^/]+$/, '') : '';
 
-      const manifest = {};
-      opfDoc.querySelectorAll('manifest > item').forEach(item => {
-        manifest[item.getAttribute('id')] = item.getAttribute('href');
-      });
-      const spineOrder = [...opfDoc.querySelectorAll('spine > itemref')]
-        .map(ref => manifest[ref.getAttribute('idref')])
-        .filter(Boolean);
+        const manifest = {};
+        opfDoc.querySelectorAll('manifest > item').forEach(item => {
+          manifest[item.getAttribute('id')] = item.getAttribute('href');
+        });
+        const spineOrder = [...opfDoc.querySelectorAll('spine > itemref')]
+          .map(ref => manifest[ref.getAttribute('idref')])
+          .filter(Boolean);
 
-      const sections = [];
-      for (const href of spineOrder) {
-        const fullPath = (opfDir + href).replace(/^\//, '');
-        const file = zip.file(fullPath);
-        if (!file) continue;
-        const html = await file.async('string');
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        doc.querySelectorAll('script, style, link').forEach(el => el.remove());
-        doc.querySelectorAll('img, image').forEach(el => el.remove());
-        if (doc.body) sections.push(doc.body.innerHTML);
+        const sections = [];
+        for (const href of spineOrder) {
+          const fullPath = (opfDir + href).replace(/^\//, '');
+          const file = zip.file(fullPath);
+          if (!file) continue;
+          const html = await file.async('string');
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          doc.querySelectorAll('script, style, link').forEach(el => el.remove());
+          doc.querySelectorAll('img, image').forEach(el => el.remove());
+          if (doc.body) sections.push(doc.body.innerHTML);
+        }
+
+        innerEl.innerHTML = sections.join('\n');
       }
-
-      innerEl.innerHTML = sections.join('\n');
 
       // Tag block-level descendants as .reading-chunk for dict / scroll-snap.
       // Also accumulate per-chunk char offsets for the bottom progress
