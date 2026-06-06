@@ -2878,8 +2878,10 @@
       // A plain-text book (.txt) is read directly into paragraphs; EPUBs are
       // unzipped + spine-walked. Detect by the attachment name / uri extension.
       const _isTxt = /\.txt$/i.test(name || '') || /\.txt$/i.test(String(uri || ''));
+      let sectionCount = 0;
       if (_isTxt) {
         innerEl.innerHTML = _txtToReaderHtml(await response.text());
+        sectionCount = 1;
       } else {
         const blob = await response.blob();
         const zip = await JSZip.loadAsync(blob);
@@ -2916,6 +2918,7 @@
         }
 
         innerEl.innerHTML = sections.join('\n');
+        sectionCount = sections.length;
       }
 
       // Tag block-level descendants as .reading-chunk for dict / scroll-snap.
@@ -2960,7 +2963,7 @@
       // chars total is preserved); the next settle silently re-anchors to the
       // reopen line, after which forward reading accrues normally.
       if (isFreshBookLoad) { try { window.stats?.rebaselineRead?.(); } catch (_) {} }
-      log(`Loaded ${name}: ${sections.length} sections, ${chunkCount} chunks`);
+      log(`Loaded ${name}: ${sectionCount} sections, ${chunkCount} chunks`);
 
       // Layout settles over 2 RAFs on iOS.
       await new Promise(r => requestAnimationFrame(r));
