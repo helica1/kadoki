@@ -1616,9 +1616,13 @@
 
     function isLookupModeAutoPause() {
         const body = document.body;
-        const inReadOrAudio = body.classList.contains('mode-read') ||
-                              body.classList.contains('mode-audio');
-        if (!inReadOrAudio) return false;
+        // Pause narration on lookup in read, audio, AND card mode (card was
+        // excluded before — user wants the transport to stop when the dictionary
+        // is brought up, same as read mode, and resume on dismiss).
+        const inPausableMode = body.classList.contains('mode-read') ||
+                               body.classList.contains('mode-audio') ||
+                               body.classList.contains('mode-card');
+        if (!inPausableMode) return false;
         // Preference defaults to true; user can disable via Preferences.
         const v = localStorage.getItem('DICT_PAUSE_ON_LOOKUP');
         return v === null || v === 'true';
@@ -1633,7 +1637,7 @@
             console.log('[dict-pause] state.playing=' + !!s?.playing);
             if (s?.playing) {
                 _lookupPausedPlayback = true;
-                bg.pause();
+                bg.pause({ fadeMs: 140 });   // brief fade-out so it doesn't click
                 console.log('[dict-pause] paused, flag set');
             }
         } catch (e) { console.log('[dict-pause] error: ' + e.message); }
@@ -1644,7 +1648,7 @@
         _lookupPausedPlayback = false;
         const bg = window.Capacitor?.Plugins?.BackgroundAudio;
         try {
-            const r = bg?.resume?.();
+            const r = bg?.resume?.({ fadeMs: 140 });   // brief fade-in on resume
             console.log('[dict-resume] bg.resume() invoked');
             if (r?.catch) r.catch((err) => console.log('[dict-resume] resume err: ' + err?.message));
         } catch (e) { console.log('[dict-resume] error: ' + e.message); }

@@ -54,10 +54,11 @@
     else state.playheadDispMs += err * 0.08;
     state.playheadInterpMs = state.playheadDispMs;
     paintFromSnapshot();
-    // Keep sweeping until the cursor passes the WINDOW end (the next cue / the
-    // card-advance point), not just the cue end — so it travels visibly through
-    // the trailing silence. (When the card advances, a fresh show() takes over.)
-    if (state.playheadInterpMs >= state.wfEndMs) {
+    // Card mode: sweep through the window (incl. the silence to the next cue).
+    // Editor (not cardMode): stop at the SELECTION end so a Preview never plays
+    // past the chosen range.
+    const _stopAt = state.cardMode ? state.wfEndMs : state.endMs;
+    if (state.playheadInterpMs >= _stopAt) {
       playheadRAF = null;
       return;
     }
@@ -227,7 +228,9 @@
     // play. Gate on the GLOBAL _bgPlaying (set by app.js's persistent listener)
     // — the editor's own state listener attaches async per re-show and can miss
     // a pause that lands right after a card advance, so the bounds wouldn't show.
-    if (!window._bgPlaying) {
+    // Editor (not cardMode): handles ALWAYS shown so they stay grabbable.
+    // Card mode: hidden during playback, shown when stopped.
+    if (!state.cardMode || !window._bgPlaying) {
       // ---- selection frame ----
       ctx.strokeStyle = rgba(accent, 0.6);
       ctx.lineWidth = 1.5;
@@ -541,9 +544,16 @@
   window.waveform = {
     async show({ container, srcPath, startMs, endMs, onChange, viewStartMs, viewEndMs, cacheKey, preload }) {
       if (!container) return;
+      // cardMode = the live card-mode waveform (passes an explicit viewport).
+      // The send-to-Anki EDITOR (waveform.edit → show with no viewStartMs) is
+      // NOT cardMode: it must always show the draggable handles, never free-run
+      // the cursor off the live audio, and stop the playhead at the selection
+      // end. The card-mode behaviors are gated on cardMode below.
+      const cardMode = Number.isFinite(viewStartMs);
       // Carry the playhead across a same-source re-show (continuous card play
       // re-shows the waveform for each new cue) so the cursor doesn't cold-start.
-      const carry = (state && state.srcPath === srcPath && state.playheadPlaying)
+      // Only in cardMode — the editor must not inherit the live playhead.
+      const carry = (cardMode && state && state.srcPath === srcPath && state.playheadPlaying)
         ? { ms: state.playheadMs, disp: state.playheadDispMs }
         : null;
       // Buckets to seed the FIRST paint, best → worst: (a) the off-screen
@@ -583,12 +593,16 @@
       // at a card advance, which left the cursor frozen for the first moments
       // until the warmup gate cleared, while iOS's faster events hid it).
       // _bgPlaying is the reliable global play state.
-      const _playing = !!window._bgPlaying || !!carry;
+      // The editor (not cardMode) never free-runs: it stays static at the
+      // selection start until the user taps Preview (which the bg position
+      // listener then animates, bounded to endMs).
+      const _playing = cardMode ? (!!window._bgPlaying || !!carry) : false;
       let _curPos = carry ? carry.ms : startMs;
-      if (!carry && _playing) {
+      if (cardMode && !carry && _playing) {
         try { const _a = window.getAudioProgress?.(); if (_a && Number.isFinite(_a.ms)) _curPos = _a.ms; } catch (_) {}
       }
       state = {
+        cardMode,
         canvas: container.querySelector('[data-role="canvas"]'),
         startLabel: container.querySelector('[data-role="start"]'),
         endLabel:   container.querySelector('[data-role="end"]'),
@@ -940,6 +954,11 @@
         document.body.classList.add('prefs-open');
 
         const host = panel.querySelector('[data-role="wf-host"]');
+        // Pause the audiobook while editing so the live playhead doesn't sweep
+        // past the selection and the handles stay grabbable (restored on close).
+        const _bgEdit = window.Capacitor?.Plugins?.BackgroundAudio;
+        const _editWasPlaying = !!window._bgPlaying;
+        if (_editWasPlaying) { try { _bgEdit?.pause?.({ fadeMs: 120 }); } catch (_) {} }
         this.show({ container: host, srcPath, startMs, endMs });
 
         const textRangeState = useTextHandles ? {
@@ -1076,6 +1095,8 @@
           try { this.hide(); } catch (e) {}
           overlay.remove();
           document.body.classList.remove('prefs-open');
+          // Resume the audiobook if we paused it on open.
+          if (_editWasPlaying) { try { _bgEdit?.resume?.({ fadeMs: 120 }); } catch (_) {} }
           resolve(result);
         };
 

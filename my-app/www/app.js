@@ -2886,11 +2886,18 @@ async function displayCard() {
         const adjStart = Math.max(0, Math.round(card.audiobookStartMs) - (window.AUDIO_START_OFFSET_MS || 0));
         console.log('[srt-card] play idx=' + currentCardIndex +
           ' startMs=' + adjStart + ' endMs=' + card.audiobookEndMs);
-        bg.play({
-          url,
-          startMs: adjStart,
-          rate: window.audioPlaybackRate || 1
-        }).catch(err => debugLog('SRT card play: ' + err.message));
+        if (window._bgPlaying) {
+          // Already playing this audiobook — a card swipe is just a position
+          // jump within it; seek with a brief fade so it doesn't click (like the
+          // audio-mode swipe), instead of restarting playback from scratch.
+          try { bg.seek({ ms: adjStart, fadeMs: 70 }); } catch (_) {}
+        } else {
+          bg.play({
+            url,
+            startMs: adjStart,
+            rate: window.audioPlaybackRate || 1
+          }).catch(err => debugLog('SRT card play: ' + err.message));
+        }
       }
     }
     // Render the per-card waveform with draggable endpoints. Adjusting the
