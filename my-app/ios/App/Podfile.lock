@@ -1,8 +1,6 @@
 PODS:
   - Capacitor (7.6.5):
     - CapacitorCordova
-  - CapacitorCamera (7.0.1):
-    - Capacitor
   - CapacitorCordova (7.6.5)
   - CapacitorFilesystem (7.1.1):
     - Capacitor
@@ -20,7 +18,6 @@ PODS:
 
 DEPENDENCIES:
   - "Capacitor (from `../../node_modules/@capacitor/ios`)"
-  - "CapacitorCamera (from `../../node_modules/@capacitor/camera`)"
   - "CapacitorCordova (from `../../node_modules/@capacitor/ios`)"
   - "CapacitorFilesystem (from `../../node_modules/@capacitor/filesystem`)"
   - "CapacitorPreferences (from `../../node_modules/@capacitor/preferences`)"
@@ -36,8 +33,6 @@ SPEC REPOS:
 EXTERNAL SOURCES:
   Capacitor:
     :path: "../../node_modules/@capacitor/ios"
-  CapacitorCamera:
-    :path: "../../node_modules/@capacitor/camera"
   CapacitorCordova:
     :path: "../../node_modules/@capacitor/ios"
   CapacitorFilesystem:
@@ -51,7 +46,6 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   Capacitor: e9708b186e71dc45f9b2ee72e826b7389fb79ff2
-  CapacitorCamera: 6e73f1fc6c629a672658705a02409b60854bc0f1
   CapacitorCordova: 2b36392a7292c3c451dcae154185ee8804d7b6b3
   CapacitorFilesystem: 39173fe5a0e77851119998d0d8c61c70551a412a
   CapacitorPreferences: 6c98117d4d7508034a4af9db64d6b26fc75d7b94
@@ -60,6 +54,6 @@ SPEC CHECKSUMS:
   GCDWebServer: 2c156a56c8226e2d5c0c3f208a3621ccffbe3ce4
   IONFilesystemLib: 21a63377696b2d8fab5632ecfb7d2ac67bddb68a
 
-PODFILE CHECKSUM: 7d08d8083c9faa60a6cad54cc7056fb7782485c8
+PODFILE CHECKSUM: 6dc06471626daff909fbe0d18310f925e681c173
 
 COCOAPODS: 1.16.2

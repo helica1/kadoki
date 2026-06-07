@@ -2675,6 +2675,14 @@
     bg.addListener('position', (d) => {
       abPositionRef.ms = d.positionMs || 0;
       abPositionRef.durMs = d.durationMs || 0;
+      // Furthest-listened high-water mark (per active title) → feeds the
+      // Bookmarks "Furthest listened" recovery entry. Advances only; the
+      // bookmarks module throttles its own durable persistence.
+      try {
+        if (abPositionRef.ms > 0 && window._activeTitleId && window.bookmarks?.updateFurthest) {
+          window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
+        }
+      } catch (_) {}
       // Durability: persist the audio playhead every ~30s while it advances, so
       // a cold restore (Android LMK reaping the app mid-listen) loses at most
       // ~30s of position. Previously it was saved ONLY when leaving audio mode,
@@ -2803,8 +2811,20 @@
     //   (b) Read-mode chunk → chunkToCue[lastMatchedIdx] → cue.startMs
     const deck = currentDeckName();
     let startMs = null;   // null = no current position resolved yet (NOT 0 — 0 is a valid book-start)
+    // One-shot explicit target (Bookmarks "Furthest listened" recovery). Highest
+    // priority — overrides seek/resume logic so we land exactly here. Honored only
+    // if freshly stamped (<15s), so a refused switch can't seek to a stale spot
+    // on some later, unrelated audio entry. Always read+clear.
+    const _pendFresh = Number.isFinite(window._pendingAudioStartMs) &&
+                       Number.isFinite(window._pendingAudioStartAt) &&
+                       (Date.now() - window._pendingAudioStartAt) < 15000;
+    const pendingStartMs = _pendFresh ? window._pendingAudioStartMs : null;
+    window._pendingAudioStartMs = null;
+    window._pendingAudioStartAt = null;
     const card = Array.isArray(window.allNotes) ? window.allNotes[window.currentCardIndex] : null;
-    if (opts.seekToCurrentPosition) {
+    if (pendingStartMs != null) {
+      startMs = pendingStartMs;
+    } else if (opts.seekToCurrentPosition) {
       if (card?.isSrtCard && Number.isFinite(card.audiobookStartMs)) {
         startMs = card.audiobookStartMs;
       } else {
@@ -2843,7 +2863,7 @@
       // BG has no current position (cold start), fall through to a
       // regular bg.play() so playback still happens.
       let didResume = false;
-      if (opts.resumeOnly) {
+      if (opts.resumeOnly && pendingStartMs == null) {
         try {
           const s = await bg.getState();
           if (s && (s.ready || s.positionMs > 0)) {

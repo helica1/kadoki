@@ -6,8 +6,16 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     var window: UIWindow?
 
+    // If a URL COLD-LAUNCHES us (e.g. AnkiMobile's infoForAdding x-success after
+    // iOS evicted us), the AnkiBridge plugin's AnkiBridgeAppUrlOpen observer
+    // isn't attached yet, so the open-url notification would be lost. Stash the
+    // launch URL here; AnkiBridgePlugin.load() drains it once the observer exists.
+    static var pendingLaunchUrl: String?
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        if let url = launchOptions?[.url] as? URL {
+            AppDelegate.pendingLaunchUrl = url.absoluteString
+        }
         return true
     }
 

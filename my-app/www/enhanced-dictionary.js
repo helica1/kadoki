@@ -25,9 +25,11 @@
         
         try {
             const yourDictionaries = [
-                'MonolingualA.zip'
-                //'sankoku8.zip'
-                // Removed duplicate Kotowaza.zip
+                // No dictionaries are bundled in the app any more — the
+                // monolingual dictionaries were copyrighted commercial products
+                // and can't be redistributed. Users import their own via
+                // Preferences → Dictionaries (stored in dictStore). Empty list =
+                // nothing scanned or loaded from app assets.
             ];
             
             console.log(`📚 Checking ${yourDictionaries.length} specified dictionaries...`);
@@ -63,10 +65,7 @@
                 console.log('📚 No files found with specific names, trying common patterns...');
                 
                 const commonPatterns = [
-                    'sankoku8.zip',
-                    'dict.zip', 
-                    'dictionary.zip',
-                    'test.zip'
+                    // (none — no bundled dictionaries to discover)
                 ];
                 
                 for (const filename of commonPatterns) {
@@ -2559,14 +2558,26 @@
     // ==================== ANKI INTEGRATION (FROM EXISTING CODE) ====================
     
     async function sendWordToAnki({ expression, reading, sentence, meaning, imageData, audioData, audioSrcPath, wordAudio, dictionary, glossary, termFurigana }) {
-        // Pull live settings; fall back to the prior hardcoded mapping.
+        // Pull live settings; fall back to generic field names with NO deck/model
+        // (the user picks those in Preferences — no personal values ship).
         const cfg = (typeof window.getAnkiSettings === 'function')
           ? await window.getAnkiSettings('dict')
-          : { deck: 'Mining', model: 'jidoujisho Kinomoto',
+          : { deck: '', model: '',
               fields: { term:'Term', reading:'Reading', sentence:'Sentence',
                         meaning:'Meaning', image:'Image',
                         sentenceAudio:'Sentence Audio', termAudio:'Term Audio',
                         glossary:'', termFurigana:'' } };
+
+        // No deck/note type chosen yet → guide the user instead of failing.
+        if (!cfg.deck || !cfg.model) {
+            alert('Choose a deck and note type in Preferences → Anki (dictionary) first.');
+            return;
+        }
+        // No field mapping → don't write into an empty field name (silent blank card).
+        if (!cfg.fields || !cfg.fields.term) {
+            alert('Map your note type’s fields in Preferences → Anki (dictionary) first.');
+            return;
+        }
 
         const imageFilename = `mining_${Date.now()}.jpg`;
         const sentenceAudioFilename = `sentence_${Date.now()}.mp3`;

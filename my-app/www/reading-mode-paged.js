@@ -75,8 +75,6 @@
   let activeCueHighlight = null;
   let selectionHighlight = null;  // shared Highlight for 'reader-selection'
   let selectedCue = null;          // { cue, idx, chunk } when a swipe-up selected a sentence
-  let undoMs = null;               // previous playhead ms to revert to
-  let undoTimer = null;            // setTimeout handle to auto-hide undo chip
   let progressEl = null;
   let totalChars = 0;     // RAW char total — flat-text coordinate (cue align / highlight)
   let totalJpChars = 0;   // Japanese-only total (ttu standard) — what we DISPLAY
@@ -301,30 +299,6 @@
         white-space: nowrap;
       }
       #pagedSelectionMenu button:active { background: rgba(255,255,255,.07); }
-      /* Undo chip — top-right safe-area, mirrors the progress strip. */
-      #pagedUndoChip {
-        position: fixed;
-        top: calc(env(safe-area-inset-top, 0px) / 2);
-        transform: translateY(-50%);
-        right: calc(env(safe-area-inset-right, 0px) + 12px);
-        padding: 8px 12px;
-        font: 600 10px var(--font-sans, system-ui);
-        color: var(--accent-read, #4caf50);
-        background: transparent;
-        border: 1px solid var(--accent-read, #4caf50);
-        border-radius: 999px;
-        z-index: 9001;
-        cursor: pointer;
-        user-select: none;
-        -webkit-user-select: none;
-        white-space: nowrap;
-        transition: opacity .18s ease;
-      }
-      #pagedUndoChip:active { opacity: .55; }
-      body.chrome-hidden #pagedUndoChip {
-        opacity: 0;
-        pointer-events: none;
-      }
       /* Play-from-here button — positioned ABOVE the shell's play/pause
          icon, in the safe-area band right of the Dynamic Island. Top
          offset is computed directly (no transform) because translateY
@@ -825,7 +799,7 @@
     await window.sendToAnki({ expression: cue.text || '', imageData });
   }
 
-  // ---------- Play from selection + undo ----------
+  // ---------- Play from selection ----------
 
   async function getCurrentPlayMs() {
     try {
@@ -841,9 +815,6 @@
     if (!bg) return;
     const cue = selectedCue.cue;
     if (!Number.isFinite(cue?.startMs)) return;
-    // Record the previous position for undo BEFORE we seek.
-    const oldMs = await getCurrentPlayMs();
-    if (Number.isFinite(oldMs)) recordUndo(oldMs);
     try { await bg.seek({ ms: Math.round(cue.startMs) }); } catch (_) {}
     try { await bg.play?.(); } catch (_) {}
     // Selection is consumed.
@@ -863,35 +834,6 @@
       if (s?.playing) await bg.pause?.();
       else await bg.play?.();
     } catch (_) {}
-  }
-
-  function recordUndo(ms) {
-    undoMs = ms;
-    let chip = document.getElementById('pagedUndoChip');
-    if (!chip) {
-      chip = document.createElement('div');
-      chip.id = 'pagedUndoChip';
-      chip.textContent = 'UNDO';
-      chip.addEventListener('click', revertUndo);
-      document.body.appendChild(chip);
-    }
-    chip.style.display = 'block';
-    if (undoTimer) clearTimeout(undoTimer);
-    undoTimer = setTimeout(hideUndo, 8000);
-  }
-
-  function hideUndo() {
-    const chip = document.getElementById('pagedUndoChip');
-    if (chip) chip.style.display = 'none';
-    undoMs = null;
-    if (undoTimer) { clearTimeout(undoTimer); undoTimer = null; }
-  }
-
-  async function revertUndo() {
-    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
-    if (!bg || undoMs == null) { hideUndo(); return; }
-    try { await bg.seek({ ms: Math.round(undoMs) }); } catch (_) {}
-    hideUndo();
   }
 
   async function sendChunkToAnki(chunk) {
@@ -3847,8 +3789,6 @@
       try { window.showToast?.('Audio plugin missing', 1800); } catch (_) {}
       return;
     }
-    const oldMs = await getCurrentPlayMs();
-    if (Number.isFinite(oldMs)) recordUndo(oldMs);
     try {
       await bg.play({
         url,
@@ -4071,12 +4011,6 @@
       try { window.showToast?.('Audio plugin missing', 1600); } catch (_) {}
       return false;
     }
-    // Record undo (if the helper exists, it captures current position
-    // before the jump).
-    try {
-      const s = await bg.getState?.();
-      if (s && Number.isFinite(s.positionMs)) recordUndo(s.positionMs);
-    } catch (_) {}
     try {
       await bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
       log('pagedPlayFromCue: bg.play resolved startMs=' + startMs);

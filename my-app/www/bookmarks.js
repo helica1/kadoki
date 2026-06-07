@@ -48,6 +48,81 @@
   }
   function list() { return loadSync(); }
 
+  // ---- "Furthest position listened" — a per-title audio high-water mark ----
+  // Separate from the dwell bookmarks above: it's audio-domain, one per title,
+  // and only ever ADVANCES. The audio position listener feeds it continuously;
+  // it's surfaced (pinned, for the active title) in the Bookmarks menu so the
+  // user can recover their place if it's ever lost. Map: { [titleId]: {ms, ts} }.
+  const FURTHEST_KEY = 'AUDIO_FURTHEST_V1';
+  const FURTHEST_SAVE_GAP_MS = 20000;   // throttle the durable (Capacitor) write
+  let _furthestMap = null;              // in-memory cache (authoritative this session)
+  let _furthestLastSaveAt = 0;
+
+  function loadFurthestSync() {
+    if (_furthestMap) return _furthestMap;
+    try {
+      const raw = localStorage.getItem(FURTHEST_KEY);
+      const m = raw ? JSON.parse(raw) : {};
+      _furthestMap = (m && typeof m === 'object' && !Array.isArray(m)) ? m : {};
+    } catch (_) { _furthestMap = {}; }
+    return _furthestMap;
+  }
+
+  // High-water update. Called every audio position tick; cheap when not
+  // advancing. Persist is throttled (in-memory stays current for the menu).
+  function updateFurthest(titleId, ms) {
+    if (!titleId || !Number.isFinite(ms) || ms <= 0) return;
+    const map = loadFurthestSync();
+    const cur = map[titleId];
+    if (cur && Number.isFinite(cur.ms) && ms <= cur.ms) return;   // never regress
+    map[titleId] = { ms: Math.floor(ms), ts: Date.now() };
+    const now = Date.now();
+    if (now - _furthestLastSaveAt > FURTHEST_SAVE_GAP_MS) {
+      _furthestLastSaveAt = now;
+      const s = JSON.stringify(map);
+      try { localStorage.setItem(FURTHEST_KEY, s); } catch (_) {}
+      try { PREF?.set?.({ key: FURTHEST_KEY, value: s }); } catch (_) {}
+    }
+  }
+
+  function getFurthest(titleId) {
+    if (!titleId) return null;
+    const m = loadFurthestSync()[titleId];
+    return (m && Number.isFinite(m.ms) && m.ms > 0) ? m : null;
+  }
+
+  function fmtMs(ms) {
+    const t = Math.max(0, Math.floor((ms || 0) / 1000));
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    const pad = (n) => String(n).padStart(2, '0');
+    return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+  }
+
+  // Jump audio to the furthest-listened position for the active title. Routes
+  // through openAudiobookMode via a one-shot start target (NOT the bottom-bar
+  // seek, which is intentionally disabled to avoid losing your spot).
+  async function jumpToFurthest(ms) {
+    if (!Number.isFinite(ms)) return;
+    try {
+      // One-shot, freshness-stamped: openAudiobookMode honors it only if recent,
+      // so a refused/early-returned switch can't seek to a stale spot later.
+      window._pendingAudioStartMs = ms;
+      window._pendingAudioStartAt = Date.now();
+      const inAudio = document.body.classList.contains('mode-audio');
+      if (inAudio && typeof window.openAudiobookMode === 'function') {
+        // Already in audio mode → setShellMode('audio') is a no-op, so re-open
+        // directly; openAudiobookMode honors the pending start target.
+        await window.openAudiobookMode({});
+      } else if (typeof window.setShellMode === 'function') {
+        await window.setShellMode('audio', { force: true });
+      }
+    } catch (e) {
+      window._pendingAudioStartMs = null;
+      window._pendingAudioStartAt = null;
+      console.warn('[bookmarks] jumpToFurthest failed', e);
+    }
+  }
+
   // Called on a switch INTO audio from card/read — saves the spot the user was
   // reading just before they started listening, silently.
   function capture(mode) {
@@ -118,6 +193,8 @@
     const prev = document.getElementById('bookmarksOverlay');
     if (prev) prev.remove();
     const items = list();
+    const activeTitleId = window._activeTitleId || null;
+    const furthest = activeTitleId ? getFurthest(activeTitleId) : null;
     // Resolve title names for nicer rows (best-effort; menu still works without).
     let nameById = new Map();
     try {
@@ -139,7 +216,21 @@
     head.textContent = 'Bookmarks';
     card.appendChild(head);
 
-    if (!items.length) {
+    // Pinned at top: the furthest audio position for the title you're in — a
+    // recovery anchor if you ever lose your spot.
+    if (furthest) {
+      const fName = (nameById && nameById.get(activeTitleId)) || '';
+      const fb = document.createElement('button');
+      fb.className = 'menu-item';
+      fb.style.cssText = 'display:block;width:100%;text-align:left;background:#15201b;border:1px solid #2e5a3f;border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer;';
+      fb.innerHTML =
+        `<div style="font-size:.9rem;color:#bff0cf;">↻ Furthest listened · ${fmtMs(furthest.ms)}</div>` +
+        `<div style="color:#7fae8e;font-size:.72rem;margin-top:2px;">${fName ? (fName + ' · ') : ''}tap to resume here</div>`;
+      fb.addEventListener('click', () => { overlay.remove(); jumpToFurthest(furthest.ms); });
+      card.appendChild(fb);
+    }
+
+    if (!items.length && !furthest) {
       const empty = document.createElement('div');
       empty.style.cssText = 'color:#888;font-size:.85rem;padding:6px 2px;';
       empty.textContent = 'No bookmarks yet. Read for a minute in Card or Read mode and the spot is saved here automatically.';
@@ -158,5 +249,5 @@
     document.body.appendChild(overlay);
   }
 
-  window.bookmarks = { record, list, capture, jumpTo, openMenu };
+  window.bookmarks = { record, list, capture, jumpTo, openMenu, updateFurthest, getFurthest, jumpToFurthest };
 })();

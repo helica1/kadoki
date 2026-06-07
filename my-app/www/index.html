@@ -977,6 +977,24 @@ body.dimmed .card-image {
           </div>
         </details>
 
+        <details class="prefs-section">
+          <summary class="prefs-heading">Licenses &amp; acknowledgements</summary>
+          <div style="font-size:.78rem;color:#aaa;line-height:1.6;padding:4px 2px;">
+            <p style="margin:6px 0;">Furigana readings are derived from
+              <b>JmdictFurigana</b> (github.com/Doublevil/JmdictFurigana),
+              licensed <b>CC BY-SA 4.0</b>, itself derived from the
+              <b>JMdict / JMnedict</b> dictionary files © the Electronic
+              Dictionary Research and Development Group (<b>EDRDG</b>), used
+              under CC BY-SA 4.0.</p>
+            <p style="margin:6px 0;">Deinflection adapts the <b>Yomitan</b>
+              deinflector (github.com/yomidevs/yomitan), licensed
+              <b>GPL-3.0-or-later</b>.</p>
+            <p style="margin:6px 0;"><b>JSZip</b> is used under its MIT license.</p>
+            <p style="margin:6px 0;color:#777;">Dictionaries and media you import
+              stay on your device and are not redistributed by this app.</p>
+          </div>
+        </details>
+
         <!-- Card mode + Playback prefs sections removed 2026-05-30.
              Subtitle vertical offset + Stopwatch timeout moved into the
              Card appearance block. Audio playback speed lives in the
@@ -1022,16 +1040,21 @@ body.dimmed .card-image {
     <div>
       <button onclick="openLibrary()">Library</button>
       <button onclick="openReadingMode()">📖 Reading</button>
-      <button onclick="window.testBgAudio && window.testBgAudio()">🎧 BG Pick&Play</button>
-      <button onclick="window.bgPauseToggle && window.bgPauseToggle()">⏯ BG</button>
-      <button onclick="window.bgSeek && window.bgSeek(-10000)">−10s</button>
-      <button onclick="window.bgSeek && window.bgSeek(10000)">+10s</button>
-      <button onclick="window.bgSetRate && window.bgSetRate(0.75)">0.75×</button>
-      <button onclick="window.bgSetRate && window.bgSetRate(1.0)">1×</button>
-      <button onclick="window.bgSetRate && window.bgSetRate(1.5)">1.5×</button>
-      <button onclick="window.stopBgAudio && window.stopBgAudio()">⏹ Stop BG</button>
-      <button onclick="window.bgCycleTestMetadata && window.bgCycleTestMetadata()">📝 Test Lockscreen</button>
-      <span id="bgAudioPosLabel" style="color:#00ffcc;font-variant-numeric:tabular-nums;font-size:14px;min-width:90px;">–:–– / –:––</span>
+      <!-- Developer audio-engine test controls. Hidden in release; revealed only
+           when localStorage KADOKI_DEBUG is set (reveal script just below). -->
+      <span id="debugAudioControls" style="display:none">
+        <button onclick="window.testBgAudio && window.testBgAudio()">🎧 BG Pick&Play</button>
+        <button onclick="window.bgPauseToggle && window.bgPauseToggle()">⏯ BG</button>
+        <button onclick="window.bgSeek && window.bgSeek(-10000)">−10s</button>
+        <button onclick="window.bgSeek && window.bgSeek(10000)">+10s</button>
+        <button onclick="window.bgSetRate && window.bgSetRate(0.75)">0.75×</button>
+        <button onclick="window.bgSetRate && window.bgSetRate(1.0)">1×</button>
+        <button onclick="window.bgSetRate && window.bgSetRate(1.5)">1.5×</button>
+        <button onclick="window.stopBgAudio && window.stopBgAudio()">⏹ Stop BG</button>
+        <button onclick="window.bgCycleTestMetadata && window.bgCycleTestMetadata()">📝 Test Lockscreen</button>
+        <span id="bgAudioPosLabel" style="color:#00ffcc;font-variant-numeric:tabular-nums;font-size:14px;min-width:90px;">–:–– / –:––</span>
+      </span>
+      <script>try{if(localStorage.getItem('KADOKI_DEBUG')){var _dac=document.getElementById('debugAudioControls');if(_dac)_dac.style.display='';}}catch(e){}</script>
     </div>
     <div>
       <button onclick="openPreferences()">⚙️</button>

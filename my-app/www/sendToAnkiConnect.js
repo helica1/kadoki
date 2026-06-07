@@ -258,9 +258,53 @@ async function viaBridge(opts) {
 window.viaAnkiBridge = viaBridge;
 
 // ----------------------------------------------------------------------------
+// iOS deck/note-type/field source
+// ----------------------------------------------------------------------------
+// AnkiMobile has no per-call listing API, but anki://x-callback-url/infoForAdding
+// returns decks + note types (each with its fields) via the clipboard after an
+// app-switch round-trip. We cache the last fetch and serve the Preferences
+// dropdowns from it; fetchAnkiInfoIOS() triggers the round-trip (wired to the
+// "Fetch from Anki" button). On Android the live ContentProvider path is used.
+function isIOSPlatform() { return (window.Capacitor?.getPlatform?.() === 'ios'); }
+window._iosAnkiInfo = window._iosAnkiInfo || null; // { decks:[String], notetypes:[{name, fields:[String]}] }
+
+window.fetchAnkiInfoIOS = function () {
+  const ab = window.Capacitor?.Plugins?.AnkiBridge;
+  if (!ab || typeof ab.fetchInfo !== 'function') return Promise.reject(new Error('AnkiBridge unavailable'));
+  return new Promise((resolve, reject) => {
+    let handle = null, done = false;
+    const finish = (ok, val) => {
+      if (done) return; done = true; clearTimeout(timer);
+      try { handle && handle.remove && handle.remove(); } catch (_) {}
+      ok ? resolve(val) : reject(val);
+    };
+    // AnkiMobile is an app-switch + a user tap; give it a generous window.
+    const timer = setTimeout(() => finish(false, new Error('Timed out waiting for AnkiMobile')), 90000);
+    const onInfo = (d) => {
+      if (d && d.error) { finish(false, new Error(d.error)); return; }
+      window._iosAnkiInfo = { decks: (d && d.decks) || [], notetypes: (d && d.notetypes) || [] };
+      finish(true, window._iosAnkiInfo);
+    };
+    let added;
+    try { added = ab.addListener('ankiInfo', onInfo); }
+    catch (e) { finish(false, e); return; }
+    // Capacitor's addListener returns a PluginListenerHandle DIRECTLY in some
+    // versions and a Promise<handle> in others — normalize both. (The prior
+    // unconditional .then() threw "then is not a function" on iOS.) The ankiInfo
+    // event arrives seconds later (after the AnkiMobile round-trip), so the
+    // listener is registered well before it fires either way.
+    if (added && typeof added.then === 'function') added.then((h) => { handle = h; }).catch(() => {});
+    else handle = added;
+    try { Promise.resolve(ab.fetchInfo()).catch((err) => finish(false, err)); }
+    catch (e) { finish(false, e); }
+  });
+};
+
+// ----------------------------------------------------------------------------
 // fetchDeckNames
 // ----------------------------------------------------------------------------
 async function fetchDeckNames() {
+  if (isIOSPlatform()) return (window._iosAnkiInfo && window._iosAnkiInfo.decks) || [];
   const ab = await viaBridge();
   if (ab) {
     try {
@@ -295,6 +339,7 @@ window.fetchDeckNames = fetchDeckNames;
 // fetchModelNames
 // ----------------------------------------------------------------------------
 async function fetchModelNames() {
+  if (isIOSPlatform()) return ((window._iosAnkiInfo && window._iosAnkiInfo.notetypes) || []).map(n => n.name);
   const ab = await viaBridge();
   if (ab) {
     try {
@@ -329,6 +374,10 @@ window.fetchModelNames = fetchModelNames;
 // ----------------------------------------------------------------------------
 async function fetchModelFieldNames(modelName) {
   if (!modelName) return [];
+  if (isIOSPlatform()) {
+    const nt = ((window._iosAnkiInfo && window._iosAnkiInfo.notetypes) || []).find(n => n.name === modelName);
+    return (nt && nt.fields) || [];
+  }
   const ab = await viaBridge();
   if (ab) {
     try {
@@ -367,9 +416,22 @@ window.fetchModelFieldNames = fetchModelFieldNames;
 async function sendToAnki({ expression, imageData, audioData }) {
   const cfg = (typeof window.getAnkiSettings === 'function')
     ? await window.getAnkiSettings('swipe')
-    : { deck: (await getPref('SELECTED_DECK')) || 'Shadowing9',
-        model: 'jidoujisho Kinomoto BLUE',
+    : { deck: (await getPref('SELECTED_DECK')) || '',
+        model: '',
         fields: { expression: 'Term', image: 'Image', audio: 'Sentence Audio' } };
+
+  // No deck/note type chosen yet (defaults ship blank — no personal values).
+  // Guide the user instead of failing with a confusing "deck not found".
+  if (!cfg.deck || !cfg.model) {
+    alert('Choose a deck and note type in Preferences → Anki (swipe-up) first.');
+    return;
+  }
+  // No field mapping → don't write content into an empty field name (that would
+  // silently create a blank card). Block + guide instead.
+  if (!cfg.fields || !cfg.fields.expression) {
+    alert('Map your note type’s fields in Preferences → Anki (swipe-up) first.');
+    return;
+  }
 
   // Pre-flight: verify the deck exists, BUT only when we actually got a
   // non-empty list back. iOS AnkiMobile has no listing API in the URL

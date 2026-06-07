@@ -41,6 +41,8 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "deckNames",            returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "modelNames",           returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "modelFieldNames",      returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "fetchInfo",            returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getLastInfo",          returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "addNote",              returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "linkMediaFolder",      returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "unlinkMediaFolder",    returnType: CAPPluginReturnPromise),
@@ -49,6 +51,11 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
 
     private static let bookmarkKey = "AnkiBridge.mediaFolderBookmark.v1"
     private static let lastNameKey = "AnkiBridge.mediaFolderName.v1"
+
+    // Last decks/note-types parsed from AnkiMobile's infoForAdding. Cached so a
+    // COLD-LAUNCH return (where the JS fetch promise died with the old process)
+    // isn't lost — the JS layer reads it back via getLastInfo() on Preferences open.
+    private static var lastAnkiInfo: [String: Any]?
 
     private var pendingLinkCall: CAPPluginCall?
 
@@ -63,12 +70,83 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
             object: nil
         )
         NSLog("[AnkiBridge] plugin loaded; AnkiBridgeAppUrlOpen observer attached")
+        // Drain a URL that COLD-LAUNCHED us before this observer existed (e.g.
+        // AnkiMobile's infoForAdding x-success after we were evicted).
+        if let pending = AppDelegate.pendingLaunchUrl {
+            AppDelegate.pendingLaunchUrl = nil
+            NSLog("[AnkiBridge] draining cold-launch url: \(pending)")
+            handleUrl(pending)
+        }
     }
 
     @objc private func handleAppUrlOpen(_ notification: Notification) {
-        let url = (notification.userInfo?["url"] as? String) ?? ""
-        NSLog("[AnkiBridge] AnkiBridgeAppUrlOpen → \(url)")
+        handleUrl((notification.userInfo?["url"] as? String) ?? "")
+    }
+
+    private func handleUrl(_ url: String) {
+        NSLog("[AnkiBridge] handleUrl → \(url)")
+        // Return from infoForAdding: AnkiMobile wrote the decks/note-types JSON
+        // to the clipboard and bounced back via x-success. Read + forward it.
+        if url.hasPrefix("ankideckreader://anki-info") {
+            emitAnkiInfoFromPasteboard()
+            return
+        }
         notifyListeners("ankiCallbackUrl", data: ["url": url])
+    }
+
+    // AnkiMobile's infoForAdding writes a JSON blob to the iOS clipboard under
+    // "net.ankimobile.json", then re-opens us via x-success. The docs guarantee
+    // deck + note-type NAMES; some builds also include each note type's fields
+    // (parsed when present — the JS side keeps field mapping as free-text if not).
+    // Read + clear the clipboard, cache for cold-launch recovery, and forward as
+    // an "ankiInfo" event. Reference: https://docs.ankimobile.net/url-schemes.html
+    private func emitAnkiInfoFromPasteboard() {
+        let pbType = "net.ankimobile.json"
+        guard let data = UIPasteboard.general.data(forPasteboardType: pbType), !data.isEmpty else {
+            notifyListeners("ankiInfo", data: ["error": "No data from AnkiMobile (update AnkiMobile to a recent version, then try again)."])
+            return
+        }
+        // Diagnostic: dump the raw blob so the exact shape (and whether a fields
+        // key exists per note type) can be confirmed against a live AnkiMobile.
+        NSLog("[AnkiBridge] infoForAdding raw: \(String(data: data, encoding: .utf8) ?? "<non-utf8>")")
+        // Don't leave AnkiMobile's blob on the user's clipboard.
+        UIPasteboard.general.setData(Data(), forPasteboardType: pbType)
+        do {
+            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                notifyListeners("ankiInfo", data: ["error": "Unexpected AnkiMobile response"])
+                return
+            }
+            let decks = parseNameList(obj["decks"])
+            var notetypes: [[String: Any]] = []
+            if let arr = obj["notetypes"] as? [[String: Any]] {
+                for nt in arr {
+                    let name = (nt["name"] as? String) ?? ""
+                    if name.isEmpty { continue }
+                    notetypes.append(["name": name, "fields": parseNameList(nt["fields"])])
+                }
+            } else if let names = obj["notetypes"] as? [String] {
+                notetypes = names.map { ["name": $0, "fields": [String]()] }
+            }
+            let payload: [String: Any] = ["decks": decks, "notetypes": notetypes]
+            AnkiBridgePlugin.lastAnkiInfo = payload   // cache for cold-launch / getLastInfo()
+            notifyListeners("ankiInfo", data: payload)
+        } catch {
+            notifyListeners("ankiInfo", data: ["error": "Failed to parse AnkiMobile response: \(error.localizedDescription)"])
+        }
+    }
+
+    // JS reads this on Preferences open to recover a result delivered while the
+    // app was cold-launched (when the live fetchInfo round-trip's JS promise had
+    // died with the previous process).
+    @objc func getLastInfo(_ call: CAPPluginCall) {
+        call.resolve(AnkiBridgePlugin.lastAnkiInfo ?? ["decks": [String](), "notetypes": [[String: Any]]()])
+    }
+
+    // Accept either ["A","B"] or [{"name":"A"},{"name":"B"}].
+    private func parseNameList(_ raw: Any?) -> [String] {
+        if let strs = raw as? [String] { return strs }
+        if let objs = raw as? [[String: Any]] { return objs.compactMap { $0["name"] as? String } }
+        return []
     }
 
     // MARK: - availability + permission
@@ -86,9 +164,40 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - introspection stubs
 
+    // These three return empty on iOS (no per-call listing API); the JS layer
+    // uses fetchInfo() instead, which deep-links to AnkiMobile and gets the full
+    // deck/note-type/field lists back via the clipboard.
     @objc func deckNames(_ call: CAPPluginCall)        { call.resolve(["decks":  [String]()]) }
     @objc func modelNames(_ call: CAPPluginCall)       { call.resolve(["models": [String]()]) }
     @objc func modelFieldNames(_ call: CAPPluginCall)  { call.resolve(["fields": [String]()]) }
+
+    // Ask AnkiMobile for the decks + note types (+ fields) the user can add to.
+    // This is an APP-SWITCH round-trip: it opens AnkiMobile, which (after the
+    // user authorizes) writes the lists to the clipboard and re-opens us via
+    // x-success → handleAppUrlOpen → emitAnkiInfoFromPasteboard → "ankiInfo"
+    // event. So JS triggers this from a "Fetch from Anki" button and listens for
+    // the event, rather than awaiting this call's result.
+    @objc func fetchInfo(_ call: CAPPluginCall) {
+        guard canOpenAnki() else {
+            call.reject("AnkiMobile not installed.")
+            return
+        }
+        var components = URLComponents()
+        components.scheme = "anki"
+        components.host = "x-callback-url"
+        components.path = "/infoForAdding"
+        components.queryItems = [URLQueryItem(name: "x-success", value: "ankideckreader://anki-info")]
+        guard let url = components.url else {
+            call.reject("Failed to construct anki:// URL")
+            return
+        }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url, options: [:]) { ok in
+                if ok { call.resolve(["opened": true]) }
+                else { call.reject("Could not open AnkiMobile") }
+            }
+        }
+    }
 
     // MARK: - media folder linking
 

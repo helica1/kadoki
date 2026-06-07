@@ -25,17 +25,19 @@
     ANKI_DICT_F_TERM_FURIGANA:  'ANKI_DICT_F_TERM_FURIGANA',
   };
 
-  // Defaults preserve the user's current hardcoded behavior so legacy decks
-  // keep working before they open Preferences once.
+  // Defaults: NO personal deck/note-type (the user picks those in Preferences —
+  // on Android/iOS via the live "Fetch from Anki" dropdowns). Field names are
+  // left as the standard Anki/jidoujisho names so a typical note type maps with
+  // zero setup; they're overridden once the user picks a note type.
   const ANKI_DEFAULTS = {
     swipe: {
-      deck: 'Shadowing9',
-      model: 'jidoujisho Kinomoto BLUE',
+      deck: '',
+      model: '',
       fields: { expression: 'Term', image: 'Image', audio: 'Sentence Audio' }
     },
     dict: {
-      deck: 'Mining',
-      model: 'jidoujisho Kinomoto',
+      deck: '',
+      model: '',
       fields: {
         term: 'Term', reading: 'Reading', sentence: 'Sentence', meaning: 'Meaning',
         image: 'Image', sentenceAudio: 'Sentence Audio', termAudio: 'Term Audio',
@@ -91,6 +93,41 @@
 
     // ---- Custom fonts (import a TTF/OTF, then pick it per mode) ----
     function triggerFontImport(onDone) {
+      // iOS: WKWebView's <input type=file> silently drops .ttf/.otf selections
+      // (it has no MIME/UTType mapping for fonts, so onchange never fires and
+      // nothing imports). Route iOS through the native document picker the same
+      // way every other file type is picked.
+      const platform = window.Capacitor?.getPlatform?.() || '';
+      const fa = window.Capacitor?.Plugins?.FileAccess;
+      if (platform === 'ios' && fa?.pickFileWithUri && fa?.materializeToCache) {
+        (async () => {
+          try {
+            const picked = await fa.pickFileWithUri({ type: 'font' });
+            if (!picked?.uri) return;                 // user cancelled
+            const mat = await fa.materializeToCache({ uri: picked.uri });
+            if (!mat?.path || !window.fonts) return;
+            // iOS WKWebView can't fetch file:// directly — read via the local
+            // server URL (convertFileSrc), same as the apkg/audio paths.
+            const url = window.Capacitor?.convertFileSrc
+              ? window.Capacitor.convertFileSrc(mat.path)
+              : ('file://' + mat.path);
+            // iOS's WebViewAssetHandler serves a cached file with a bare response
+            // (no HTTP status) unless a Range request routes it through the 206
+            // branch — without this header the body comes back empty and the font
+            // silently fails to register. Same pattern as local-audio.js / apkg-reader.js.
+            const resp = await fetch(url, { headers: { Range: 'bytes=0-' } });
+            const blob = await resp.blob();
+            if (!blob || blob.size === 0) throw new Error('Font file came back empty');
+            const name = picked.name || 'font.ttf';
+            const file = new File([blob], name, { type: blob.type || '' });
+            const info = await window.fonts.importFile(file);
+            if (onDone) onDone(info);
+          } catch (e) {
+            alert('Font import failed: ' + (e && e.message || e));
+          }
+        })();
+        return;
+      }
       let input = document.getElementById('fontImportInput');
       if (!input) {
         input = document.createElement('input');
@@ -392,11 +429,20 @@
     }
   }
 
+  // Empty-list placeholder text — platform-aware. iOS has no AnkiConnect; its
+  // lists come from the "Fetch from Anki" round-trip, so point the user there
+  // instead of showing a confusing AnkiConnect message.
+  function ankiEmptyListLabel() {
+    return (window.Capacitor?.getPlatform?.() === 'ios')
+      ? '(tap "Fetch from Anki")'
+      : '(AnkiConnect unreachable)';
+  }
+
   function populateDeckSelect(select, decks, value) {
     select.innerHTML = '';
     if (!decks.length) {
       const opt = document.createElement('option');
-      opt.textContent = '(AnkiConnect unreachable)';
+      opt.textContent = ankiEmptyListLabel();
       opt.value = '';
       select.appendChild(opt);
     } else {
@@ -415,42 +461,71 @@
     select.value = value || '';
   }
 
-  // iOS uses AnkiMobile via URL scheme, which can't enumerate decks /
-  // models / fields. Swap the Anki <select> dropdowns for free-text
-  // <input> fields on iOS so the user can type the exact names that
-  // exist in their AnkiMobile setup. The savePreferences flow reads
-  // .value on the same id — works the same for both element types.
-  function swapAnkiSelectsToInputsIfIOS() {
+  // iOS: AnkiMobile has no live per-call listing, but anki://x-callback-url/
+  // infoForAdding returns the decks / note types (each with its fields) after an
+  // app-switch round-trip. Keep the SAME dropdowns as Android — they're populated
+  // from the cached fetch via fetchDeckNames/fetchModelNames/fetchModelFieldNames
+  // — and add a "Fetch from Anki" button per Anki section to run the round-trip
+  // and repopulate. (Android auto-populates live, so it gets no button.)
+  function setupIOSAnkiPickers() {
     const platform = window.Capacitor?.getPlatform?.() || '';
     if (platform !== 'ios') return;
-    const ids = [
-      'ankiSwipeDeck', 'ankiSwipeModel',
-      'ankiSwipeFieldExpression', 'ankiSwipeFieldImage', 'ankiSwipeFieldAudio',
-      'ankiDictDeck', 'ankiDictModel',
-      'ankiDictFieldTerm', 'ankiDictFieldReading', 'ankiDictFieldSentence',
-      'ankiDictFieldMeaning', 'ankiDictFieldImage',
-      'ankiDictFieldSentenceAudio', 'ankiDictFieldTermAudio',
-    ];
-    for (const id of ids) {
-      const sel = document.getElementById(id);
-      if (!sel || sel.tagName !== 'SELECT') continue;
-      const value = sel.value || '';
-      const input = document.createElement('input');
-      input.id = id;
-      input.type = 'text';
-      input.value = value;
-      input.placeholder = id.includes('Deck')  ? 'Deck name (in AnkiMobile)'
-                         : id.includes('Model') ? 'Note type (in AnkiMobile)'
-                         : 'Field name (in AnkiMobile)';
-      input.style.cssText = sel.style.cssText;
-      input.className = sel.className;
-      sel.parentNode.replaceChild(input, sel);
-    }
-    // Add the iOS-only "Link AnkiMobile media folder" affordance below
-    // the dictionary Anki section. Lets the user grant our app a
-    // security-scoped bookmark to AnkiMobile's collection.media folder
-    // so audio/image bytes deliver silently via direct file write.
+    injectIOSAnkiFetchButton();
+    // Recover a cold-launch result: if a prior "Fetch from Anki" returned while
+    // the app had been evicted, the native side cached it (getLastInfo) — load it
+    // so the dropdowns populate without another AnkiMobile round-trip.
+    (async () => {
+      try {
+        if (window._iosAnkiInfo && (window._iosAnkiInfo.decks || []).length) return;
+        const ab = window.Capacitor?.Plugins?.AnkiBridge;
+        if (!ab || typeof ab.getLastInfo !== 'function') return;
+        const info = await ab.getLastInfo();
+        if (info && (info.decks || []).length) {
+          window._iosAnkiInfo = { decks: info.decks || [], notetypes: info.notetypes || [] };
+          if (typeof wireAnkiSection === 'function') await wireAnkiSection();
+        }
+      } catch (_) {}
+    })();
+    // iOS-only "Link AnkiMobile media folder" affordance (security-scoped
+    // bookmark to AnkiMobile's collection.media for silent media delivery).
     injectIOSMediaFolderLinker();
+  }
+
+  function injectIOSAnkiFetchButton() {
+    document.querySelectorAll('.prefs-section').forEach((s) => {
+      const isAnki = s.textContent.includes('Anki: swipe-up') ||
+                     s.textContent.includes('Anki: dictionary add-word');
+      if (!isAnki || s.querySelector('[data-role="anki-fetch"]')) return; // dedupe
+      const row = document.createElement('div');
+      row.style.cssText = 'margin:10px 0;';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.dataset.role = 'anki-fetch';
+      btn.textContent = '⤓ Fetch decks, note types & fields from Anki';
+      btn.style.cssText = 'background:#1a1a1a;color:var(--text,#e8e8e8);border:1px solid #333;' +
+        'border-radius:8px;padding:8px 14px;font-size:.85rem;cursor:pointer;-webkit-tap-highlight-color:transparent;';
+      const note = document.createElement('div');
+      note.style.cssText = 'font-size:.72rem;color:#888;margin-top:4px;';
+      note.textContent = 'Opens AnkiMobile and returns here. Run once — and again after you add decks/note types in Anki.';
+      btn.addEventListener('click', async () => {
+        if (typeof window.fetchAnkiInfoIOS !== 'function') { alert('AnkiMobile bridge unavailable.'); return; }
+        const label = btn.textContent; btn.disabled = true; btn.textContent = 'Opening AnkiMobile…';
+        try {
+          const info = await window.fetchAnkiInfoIOS();
+          if (typeof wireAnkiSection === 'function') await wireAnkiSection(); // repopulate all dropdowns from the cache
+          const nd = (info.decks || []).length, nt = (info.notetypes || []).length;
+          btn.textContent = `✓ ${nd} decks, ${nt} note types`;
+          setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 2500);
+        } catch (e) {
+          alert('Could not fetch from AnkiMobile: ' + ((e && e.message) || e) +
+                '\n\nMake sure AnkiMobile is installed and up to date, then try again.');
+          btn.textContent = label; btn.disabled = false;
+        }
+      });
+      row.appendChild(btn); row.appendChild(note);
+      const summary = s.querySelector('summary');
+      if (summary) s.insertBefore(row, summary.nextSibling); else s.prepend(row);
+    });
   }
 
   function injectIOSMediaFolderLinker() {
@@ -604,7 +679,7 @@
     buildAppearanceSection();
     buildDictionarySection();
     await wireAnkiSection();
-    swapAnkiSelectsToInputsIfIOS();
+    setupIOSAnkiPickers();
 
     // Playback
     const timeoutInput = document.getElementById('timeoutInput');
@@ -908,7 +983,7 @@
     if (values && values.length === 0 && savedValue) {
       const opt = document.createElement('option');
       opt.value = '';
-      opt.textContent = '(AnkiConnect unreachable)';
+      opt.textContent = ankiEmptyListLabel();
       opt.disabled = true;
       sel.appendChild(opt);
     }

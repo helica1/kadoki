@@ -406,6 +406,16 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
             return [UTType(filenameExtension: "srt") ?? .plainText, .text]
         case "image":
             return [.image]
+        case "font":
+            return [UTType("public.font") ?? .data,
+                    UTType("public.truetype-ttf-font") ?? .data,
+                    UTType("public.opentype-font") ?? .data,
+                    UTType("com.apple.truetype-datafork-suitcase-font") ?? .data, // .ttc
+                    UTType(filenameExtension: "ttf") ?? .data,
+                    UTType(filenameExtension: "otf") ?? .data,
+                    UTType(filenameExtension: "ttc") ?? .data,
+                    UTType(filenameExtension: "woff") ?? .data,
+                    UTType(filenameExtension: "woff2") ?? .data]
         case "anki", "deck", "apkg":
             return [UTType(filenameExtension: "apkg") ?? .data, .data, .item]
         default:
