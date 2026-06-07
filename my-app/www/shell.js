@@ -316,6 +316,10 @@
           try { window.openReadingMode(); } catch (e) {}
         } else if (mode === 'audio' && typeof window.openAudiobookMode === 'function') {
           try { window.openAudiobookMode(); } catch (e) {}
+        } else if (mode === 'card' && typeof window.ensureCardRenderedForActiveTitle === 'function') {
+          // Card content is normally rendered by the loader, but force a flush in
+          // case the prior title's card is still showing (stale-card-on-switch fix).
+          try { window.ensureCardRenderedForActiveTitle(); } catch (e) {}
         }
       }
       return;
@@ -530,6 +534,13 @@
           // playhead instead (syncCardToCurrentCue reads abCurrentCueIdx).
           if (typeof window.syncCardToCurrentCue === 'function') window.syncCardToCurrentCue();
         }
+        // Entering card mode: guarantee the card view reflects the ACTIVE title.
+        // syncCardToCurrentCue / the reentry dialog only re-render when the card
+        // INDEX changes, so a title switch where the new index coincides with the
+        // old one would otherwise leave the previous book's card on screen.
+        if (mode === 'card' && typeof window.ensureCardRenderedForActiveTitle === 'function') {
+          try { window.ensureCardRenderedForActiveTitle(); } catch (e) {}
+        }
       } finally {
         if (myGen === _switchGen) _switchInFlight = false;
       }
@@ -726,6 +737,9 @@
       window._lastBgPlaying = willPlay;
       _shellPlayOptimistic = { playing: willPlay, until: Date.now() + SHELL_PLAY_OPTIMISTIC_MS };
       if (btn) setPlayBtnState(btn, willPlay);
+      // Freeze/resume the waveform cursor SYNCHRONOUSLY (like swipe-down) so it
+      // doesn't lag waiting on the native 'state' round-trip.
+      try { window.waveform?.setPlaying?.(willPlay); } catch (_) {}
       if (typeof window.audiobookTogglePlay === 'function') window.audiobookTogglePlay();
       return;
     }
@@ -735,6 +749,10 @@
     const willPlay = !wasPlaying;
     _shellPlayOptimistic = { playing: willPlay, until: Date.now() + SHELL_PLAY_OPTIMISTIC_MS };
     if (btn) setPlayBtnState(btn, willPlay);
+    // Freeze/resume the waveform cursor SYNCHRONOUSLY (matches swipe-down) so the
+    // card-mode playhead reacts instantly instead of lagging on the native
+    // 'state' round-trip.
+    try { window.waveform?.setPlaying?.(willPlay); } catch (_) {}
     window.audioAutoAdvance = willPlay;
     if (typeof window.toggleReadingPlayback === 'function') window.toggleReadingPlayback();
   };

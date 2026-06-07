@@ -1309,8 +1309,10 @@
 
     let target = -1;
     if (isSrt) {
-      // SRT-cards mode: cue index == card index.
-      target = cueIdx;
+      // SRT-cards mode: map the live cue → its card. With combined cards one
+      // card holds several cues (window._srtCueToCard); otherwise cue == card.
+      const map = window._srtCueToCard;
+      target = (map && cueIdx >= 0 && cueIdx < map.length) ? map[cueIdx] : cueIdx;
     } else if (abCueToChunk && cueIdx >= 0) {
       // Deck-card mode: cue → chunk → card via tagged dataset.
       const chunkIdx = abCueToChunk[cueIdx];
@@ -1641,11 +1643,52 @@
     }
   }
 
+  // iOS ruby-base fix: WebKit's ::highlight() color reaches the furigana (rt)
+  // but NOT the kanji BASE inside <ruby>, so the active cue's kanji stayed white
+  // on iOS. We instead color the EXISTING <ruby> elements within the active cue's
+  // range via a class (no DOM mutation → safe in the vertical-rl WKWebView path
+  // that crashes on structural reflow). Shared by both readers; both call these.
+  if (!window._applyCueRubyColor) {
+    window._cueRubyEls = [];
+    window._clearCueRubyColor = function () {
+      const arr = window._cueRubyEls || [];
+      for (let i = 0; i < arr.length; i++) { try { arr[i].classList.remove('cue-ruby-active'); } catch (_) {} }
+      window._cueRubyEls = [];
+    };
+    window._applyCueRubyColor = function (range /*, anchorChunk (unused) */) {
+      window._clearCueRubyColor();
+      if (!range) return;
+      const out = [];
+      try {
+        const chunkOf = (node) => {
+          let n = (node && node.nodeType === 3) ? node.parentNode : node;
+          while (n && !(n.classList && n.classList.contains('reading-chunk'))) n = n.parentNode;
+          return n;
+        };
+        // Scope the <ruby> query to the smallest correct subtree: the single chunk
+        // when the cue stays in one (the overwhelmingly common case → cheap), else
+        // the range's common ancestor. querySelectorAll('ruby') is nesting-safe
+        // (no DOM-sibling assumption); intersectsNode filters to the cue range.
+        const sc = chunkOf(range.startContainer);
+        const ec = chunkOf(range.endContainer);
+        let root = (sc && sc === ec) ? sc : range.commonAncestorContainer;
+        if (root && root.nodeType === 3) root = root.parentNode;
+        if (!root || !root.querySelectorAll) return;
+        const rubies = root.querySelectorAll('ruby');
+        for (let i = 0; i < rubies.length; i++) {
+          try { if (range.intersectsNode(rubies[i])) { rubies[i].classList.add('cue-ruby-active'); out.push(rubies[i]); } } catch (_) {}
+        }
+      } catch (_) {}
+      window._cueRubyEls = out;
+    };
+  }
+
   // Cue-precise highlight. Uses CSS Custom Highlight API to mark just the
   // characters of the currently-playing SRT cue inside a chunk (without
   // mutating the DOM). Falls back silently if the API is unavailable.
   function clearCueHighlight() {
     try { if (window.CSS?.highlights) CSS.highlights.delete('cue-active'); } catch (e) {}
+    try { window._clearCueRubyColor && window._clearCueRubyColor(); } catch (e) {}
     document.body.classList.remove('has-cue-highlight');
   }
   function setCueHighlight(chunkIdx, cueText) {
@@ -1711,6 +1754,8 @@
       range.setStart(sNode, sOff);
       range.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
       CSS.highlights.set(name, new Highlight(range));
+      // iOS: color the kanji base of any <ruby> in the active cue (see helper).
+      if (name === 'cue-active') { try { window._applyCueRubyColor && window._applyCueRubyColor(range, chunk); } catch (_) {} }
     } catch (e) {
       try { CSS.highlights.delete(name); } catch (er) {}
     }
@@ -2667,7 +2712,78 @@
   // durability save below). Module-scoped so it throttles globally.
   let _abLastSaveAt = 0;
 
+  // ── Native-truth reconcile — fix for the BACKWARDS place-jump on resume ──
+  // While the WebView is suspended (iOS background) or recreated (Android LMK),
+  // native audio keeps advancing but our JS 'position' events stop arriving, so
+  // abPositionRef AND the throttled save FREEZE at the value they had when we
+  // went to the background. On return, a save / seek / mode-switch could then
+  // snap back to that frozen value. These helpers make the live native playhead
+  // the source of truth again. FORWARD-ONLY by construction, so they can never
+  // themselves cause a regression.
+  async function reconcileAudioFromNative() {
+    try {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg || typeof bg.getState !== 'function') return;
+      const s = await bg.getState();
+      if (!s || !s.ready || !(Number(s.positionMs) > 0)) return;
+      // The native playhead IS the source of truth (we already gated on
+      // ready && positionMs>0). Adopt it EXACTLY — in both directions — so the
+      // value we persist below always matches where audio actually is. This
+      // covers a deliberate BACKWARD lock-screen scrub made while the JS was
+      // suspended (which our frozen abPositionRef never saw) as well as the
+      // forward advance during a background listen. (Adopting forward-only here
+      // would leave abPositionRef stale-high and then save that wrong value.)
+      abPositionRef.ms = s.positionMs;
+      if (Number(s.durationMs) > 0) abPositionRef.durMs = s.durationMs;
+      const deck = currentDeckName();
+      if (deck) {
+        const ci = (abCueToChunk && abCurrentCueIdx >= 0) ? abCueToChunk[abCurrentCueIdx] : -1;
+        _abLastSaveAt = Date.now();
+        try { saveAudiobookLastPosition(deck, abPositionRef.ms, ci); } catch (_) {}
+      }
+      try {
+        if (window._activeTitleId && window.bookmarks?.updateFurthest) {
+          window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
+        }
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  // Flush the LIVE playhead immediately (on background), bypassing the 30s
+  // throttle, so a cold restore (process actually killed) loses as little as
+  // possible. Saving the current live position is never a regression.
+  function flushAudioPositionNow() {
+    try {
+      if (!(abPositionRef.ms > 0)) return;
+      const deck = currentDeckName();
+      if (!deck) return;
+      const ci = (abCueToChunk && abCurrentCueIdx >= 0) ? abCueToChunk[abCurrentCueIdx] : -1;
+      _abLastSaveAt = Date.now();
+      saveAudiobookLastPosition(deck, abPositionRef.ms, ci);
+    } catch (_) {}
+  }
+
+  // Foreground/background hooks — attached once. visibilitychange is the
+  // cross-platform signal (fires on iOS WKWebView AND Android WebView app
+  // background/foreground). @capacitor/app is not installed, so we deliberately
+  // don't rely on appStateChange. Reconcile is idempotent + forward-only, so
+  // firing it from several events is harmless.
+  let _abFgHooked = false;
+  function abAttachForegroundHooksOnce() {
+    if (_abFgHooked) return;
+    _abFgHooked = true;
+    try {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') reconcileAudioFromNative();
+        else flushAudioPositionNow();
+      });
+      window.addEventListener('pageshow', () => reconcileAudioFromNative());
+      window.addEventListener('focus', () => reconcileAudioFromNative());
+    } catch (_) {}
+  }
+
   function abAttachListenersOnce() {
+    abAttachForegroundHooksOnce();
     if (abListenersAttached) return;
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (!bg) return;
@@ -2840,6 +2956,22 @@
     if (startMs == null) {
       const last = await getAudiobookLastPosition(deck);
       startMs = last.ms || 0;
+      // Never resume BEHIND where this SAME audio is already playing natively.
+      // On a warm resume (iOS suspended the WebView / Android recreated it while
+      // the audio service survived) the saved value is stale but native kept
+      // advancing — the live playhead is the truth. url-gated (so we never adopt
+      // a DIFFERENT title's position) and forward-only (only raises startMs).
+      // This is the core backwards-jump fix; it touches ONLY the stale-saved
+      // fallback path — never the Bookmarks one-shot or a deliberate
+      // seekToCurrentPosition (which may legitimately go backward to re-listen).
+      try {
+        const _bg = window.Capacitor?.Plugins?.BackgroundAudio;
+        const _url = abAudioPath.startsWith('file://') ? abAudioPath : 'file://' + abAudioPath;
+        const _s = _bg && typeof _bg.getState === 'function' ? await _bg.getState() : null;
+        if (_s && _s.ready && _s.url && _s.url === _url && Number(_s.positionMs) > startMs) {
+          startMs = _s.positionMs;
+        }
+      } catch (_) {}
     }
     console.log('[ab] openAudiobookMode seek=' + !!opts.seekToCurrentPosition +
       ' isSrt=' + !!card?.isSrtCard +
@@ -3731,14 +3863,17 @@
   window.notifyCardIndexChanged = function (cardIdx) {
     if (!chunks?.length || !Number.isFinite(cardIdx)) return;
     let chunkIdx = -1;
-    // SRT-cards: card index IS cue index. Walk neighbors if unmapped.
+    // SRT-cards: map the card index → its anchor CUE index (combined cards hold
+    // many cues), then index the cue→chunk map. Walk neighbors if unmapped.
     if (Array.isArray(window.allNotes) && window.allNotes[0]?.isSrtCard && abCueToChunk) {
-      if (cardIdx >= 0 && cardIdx < abCueToChunk.length) {
-        chunkIdx = abCueToChunk[cardIdx];
+      const cueIdx = (typeof window._srtCardToCueAnchor === 'function')
+        ? window._srtCardToCueAnchor(cardIdx) : cardIdx;
+      if (cueIdx >= 0 && cueIdx < abCueToChunk.length) {
+        chunkIdx = abCueToChunk[cueIdx];
         if (chunkIdx < 0) {
-          for (let i = cardIdx - 1; i >= 0; i--) if (abCueToChunk[i] >= 0) { chunkIdx = abCueToChunk[i]; break; }
+          for (let i = cueIdx - 1; i >= 0; i--) if (abCueToChunk[i] >= 0) { chunkIdx = abCueToChunk[i]; break; }
           if (chunkIdx < 0) {
-            for (let i = cardIdx + 1; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) { chunkIdx = abCueToChunk[i]; break; }
+            for (let i = cueIdx + 1; i < abCueToChunk.length; i++) if (abCueToChunk[i] >= 0) { chunkIdx = abCueToChunk[i]; break; }
           }
         }
       }

@@ -1163,23 +1163,27 @@
         //   - body is in mode-read (not card / audio mode)
         //   - lookupContext has a valid cue + audio path
         // so the section is absent in non-reader popups.
+        // Shown in READ mode (jump to the cue's start in the reader) AND CARD mode
+        // (play from the start of the SRT cue containing the looked-up word).
         const inReadMode = document.body.classList.contains('mode-read');
+        const inCardMode = document.body.classList.contains('mode-card');
         const ctx = window.lookupContext || {};
         // Show whenever THIS lookup resolved to a real cue with audio (epub+SRT+
         // audiobook titles). EPUB-only lookups resolve no cue → cueAudioPath /
         // cueStartMs are null → hidden. The stale-context leak that made it
         // appear on EPUB-only is handled by clearing window.lookupContext on
         // title load (resetCrossTitlePositionState).
-        const hasCue = inReadMode &&
+        const hasCue = (inReadMode || inCardMode) &&
                        !!ctx.cueAudioPath &&
                        Number.isFinite(ctx.cueStartMs);
         let playheadSection = '';
         if (hasCue) {
             const mmss = _formatMs(ctx.cueStartMs);
+            // Line-triangle (skip-to-start) icon — matches the "Play card" pill.
             playheadSection = `
                 <div class="dict-popup-playhead-section">
                     <button id="setPlayheadBtn" type="button" class="dict-popup-playhead-btn">
-                        <span class="dict-popup-playhead-icon">▶▌</span>
+                        <span class="dict-popup-playhead-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="4" y="5" width="2.6" height="14" rx="1"/><path d="M9 5l11 7-11 7z"/></svg></span>
                         <span class="dict-popup-playhead-label">Set playhead</span>
                         <span class="dict-popup-playhead-time">${mmss}</span>
                     </button>
@@ -2002,7 +2006,13 @@
                 // position instead of the cue start.
                 try { window._clearLookupPauseFlag?.(); } catch (_) {}
                 let ok = false;
-                if (typeof window.pagedPlayFromCue === 'function' &&
+                // CARD mode: play from the START of the cue holding the word
+                // (continuous flags armed) — the paged-reader helper doesn't apply.
+                if (document.body.classList.contains('mode-card') &&
+                    typeof window.playSrtCueFromMs === 'function' &&
+                    Number.isFinite(ctx.cueStartMs)) {
+                    ok = await window.playSrtCueFromMs(ctx.cueStartMs, ctx.cueAudioPath, ctx.cueEndMs);
+                } else if (typeof window.pagedPlayFromCue === 'function' &&
                     Number.isFinite(ctx.cueIndex)) {
                     ok = await window.pagedPlayFromCue(ctx.cueIndex);
                 }
@@ -2898,11 +2908,33 @@
         // _currentReadingCueStartMs which tracks the playing cue, not the
         // visible card — produced the user's "audio is from the previous
         // card" report.
-        function bindCardLookupContext() {
+        function bindCardLookupContext(tappedEl) {
             try {
                 const idx = window.currentCardIndex;
                 const card = Array.isArray(window.allNotes) ? window.allNotes[idx] : null;
                 if (!card) { window.lookupContext = null; return; }
+                // Combined card: bind to the TAPPED subtitle (or the active one),
+                // so "send word to Anki" defaults to that SINGLE subtitle's bounds.
+                // The waveform editor still lets the user expand to neighbors.
+                if (card.isSrtCard && card.combined) {
+                    const cueEl = (tappedEl && tappedEl.closest) ? tappedEl.closest('.combo-cue') : null;
+                    const src = cueEl || document.querySelector('#comboSubtitle .combo-cue-active');
+                    if (src) {
+                        const cs = parseFloat(src.getAttribute('data-cs'));
+                        const ce = parseFloat(src.getAttribute('data-ce'));
+                        window.lookupContext = {
+                            source: 'card', card, cardIdx: idx,
+                            sentence: (src.textContent || '').trim(),
+                            cueAudioPath: card.audiobookPath,
+                            cueStartMs: Number.isFinite(cs) ? cs : card.audiobookStartMs,
+                            cueEndMs:   Number.isFinite(ce) ? ce : card.audiobookEndMs,
+                            cueIndex:   parseInt(src.getAttribute('data-gi')),
+                            cues: null,
+                            comboCardText: (card.cueTexts || []).join('')
+                        };
+                        return;
+                    }
+                }
                 if (card.isSrtCard && Number.isFinite(card.audiobookStartMs)) {
                     window.lookupContext = {
                         source: 'card',
@@ -2950,7 +2982,7 @@
                 if (moved) return; // scrolled, not a tap
                 e.preventDefault();
                 e.stopPropagation();
-                bindCardLookupContext();
+                bindCardLookupContext(span);
                 const text = spans.map(s => s.textContent).join('');
                 const charIndex = spans.slice(0, index)
                     .reduce((sum, s) => sum + s.textContent.length, 0);
@@ -3171,9 +3203,16 @@
             // Boot warmup went from ~20 s to near-instant for users who
             // don't immediately do a lookup.
 
-            console.log('🔧 Wrapping text for current card...');
-            wrapTextInSpans();
-            console.log('✅ Text wrapping complete!');
+            // Combined card (combo-card.js already built per-cue .dict-frag
+            // spans): DON'T flatten — that would destroy the per-subtitle
+            // structure + line breaks. Just wire the existing spans.
+            if (document.querySelector('.subtitle-text.combo')) {
+                console.log('🔧 Combined card: skip flatten, wire existing spans');
+            } else {
+                console.log('🔧 Wrapping text for current card...');
+                wrapTextInSpans();
+                console.log('✅ Text wrapping complete!');
+            }
 
             console.log('🎯 Setting up lookup handlers...');
             setupLookupHandlers();
@@ -3228,35 +3267,80 @@
            thing I tapped on". Now: 28% alpha of the mode's accent, native
            text color inherited (white), and a 2px underline in the accent
            so even partially-transparent picks remain visible. */
+        /* Dict-lookup pick = BACKGROUND highlight only. The underline was added
+           for visibility but adding/removing text-decoration reflows the line on
+           iOS WebKit (the subtitle "jiggle" on tap). A stronger 40% background
+           keeps the pick clearly visible without any metric change. */
         .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 28%, transparent) !important;
-            text-decoration: underline 2px var(--accent-cyan, #00ffcc) !important;
-            text-underline-offset: 3px !important;
-            border-radius: 2px;
+            background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 40%, transparent) !important;
+            border-radius: 3px;
         }
         body.mode-card  .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-card, #ff9550) 28%, transparent) !important;
-            text-decoration: underline 2px var(--accent-card, #ff9550) !important;
+            background: color-mix(in srgb, var(--accent-card, #ff9550) 40%, transparent) !important;
         }
         body.mode-read  .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-read, #4caf50) 28%, transparent) !important;
-            text-decoration: underline 2px var(--accent-read, #4caf50) !important;
+            background: color-mix(in srgb, var(--accent-read, #4caf50) 40%, transparent) !important;
         }
         body.mode-audio .dict-frag.highlight {
-            background: color-mix(in srgb, var(--accent-audio, #b794f6) 28%, transparent) !important;
-            text-decoration: underline 2px var(--accent-audio, #b794f6) !important;
+            background: color-mix(in srgb, var(--accent-audio, #b794f6) 40%, transparent) !important;
         }
-        
+
+        /* ---- Combined card (multiple short subtitles on one card) ---- */
+        /* Each unit (sentence/quote) is its own block → line break between
+           sentences; cues flow within a unit. The currently-narrated subtitle is
+           painted in the card accent (orange); the rest stay normal. A bounded
+           height makes a long card autoscroll to keep the active line in view. */
+        /* NOTE: the #cardContainer prefix is REQUIRED — theme.css's base rule
+           "#cardContainer .subtitle-text { max-height:55vh; overflow-y:auto }"
+           has ID specificity and would otherwise override these (combos would
+           still scroll + ignore the screen-fit budget). Matching the ID lets the
+           extra .combo / .srt-active class win. */
+        #cardContainer .subtitle-text.combo {
+            display: block;
+            /* Height fits the screen (set by applyComboMaxHeightVar from the
+               screen-fit budget). A COMBINED card NEVER scrolls — a scroll
+               container swallows the swipe up/down transport shortcuts — so the
+               line budget is responsible for making it fit; overflow is clipped
+               as a safety, never scrolled. */
+            max-height: var(--combo-max-h, 62vh);
+            overflow: hidden;
+            line-height: 1.5;
+        }
+        /* A SINGLE subtitle (1 cue, no combine) is the ONLY thing allowed to
+           scroll, and only when it's exceptionally long (taller than the screen
+           budget). Normal single subtitles fit and don't scroll. */
+        #cardContainer .subtitle-text.srt-active {
+            max-height: var(--combo-max-h, 62vh);
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+        .subtitle-text.combo .combo-cue { color: inherit; transition: color .15s ease; }
+        /* Line break after each quote/sentence, with ~half a line of extra gap. */
+        .subtitle-text.combo .combo-nl { display: block; height: 0.5em; }
+        /* Anti-orphan: glue the last few chars of each sentence so a single
+           trailing char (e.g. "た。") can't land alone on the final line. */
+        .subtitle-text.combo .combo-keep { white-space: nowrap; }
+        body.mode-card .subtitle-text.combo .combo-cue-active,
+        body.mode-card .subtitle-text.combo .combo-cue-active .dict-frag {
+            color: var(--accent-card, #ff9550) !important;
+        }
+        /* Single-subtitle SRT card: the whole (only) subtitle IS the current
+           line, so color it like the active cue. */
+        body.mode-card .subtitle-text.srt-active,
+        body.mode-card .subtitle-text.srt-active .dict-frag {
+            color: var(--accent-card, #ff9550) !important;
+        }
+
         .subtitle-text {
             user-select: none !important;
             -webkit-user-select: none !important;
             white-space: pre-wrap !important;
             line-height: 1.4 !important;
             font-size: 2.4rem !important; /* Decreased from 2.8rem */
-            width: 80% !important;
+            width: 92% !important;
             background-color: transparent !important;
-            left: 10% !important;
-            right: 10% !important;
+            left: 4% !important;
+            right: 4% !important;
             position: absolute !important;
             top: calc(env(safe-area-inset-top, 0px) + var(--subtitle-offset, 65px)) !important;
             padding: 12px 20px !important;

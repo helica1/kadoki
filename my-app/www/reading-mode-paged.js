@@ -1391,9 +1391,14 @@
       // Use the robust resolver (map → bounded local → book-wide) so short
       // common text doesn't false-match a far chunk and the highlight is
       // always placed.
-      if (pagedCues[idx]?.text && pagedCues[idx].text === card.expression) {
-        chunk = resolveCueChunk(idx, pagedCues[idx].text, true);
-        if (chunk) highlightText = pagedCues[idx].text;
+      // Combined/grouper cards carry cueIndices; resolve via the card's FIRST
+      // (anchor) cue rather than indexing pagedCues by the card index (which is
+      // wrong once a card holds many cues, and card.expression is joined text).
+      const _hasCueArr = Array.isArray(card.cueIndices) && card.cueIndices.length;
+      const _aCueIdx = _hasCueArr ? card.cueIndices[0] : idx;
+      if (pagedCues[_aCueIdx]?.text && (_hasCueArr || pagedCues[_aCueIdx].text === card.expression)) {
+        chunk = resolveCueChunk(_aCueIdx, pagedCues[_aCueIdx].text, true);
+        if (chunk) highlightText = pagedCues[_aCueIdx].text;
       }
       // Deck-derived card whose expression isn't a cue → search near the
       // current position first, then book-wide.
@@ -3210,6 +3215,7 @@
     try { activeCueHighlight?.clear?.(); } catch (e) {}
     try { CSS.highlights?.delete?.('cue-active'); } catch (e) {}
     try { CSS.highlights?.delete?.('cue-pending'); } catch (e) {}
+    try { window._clearCueRubyColor && window._clearCueRubyColor(); } catch (e) {}
     document.body.classList.remove('has-cue-highlight');
   }
 
@@ -3332,6 +3338,9 @@
       // browsers paint immediately on add, others need the registry
       // re-publish to trigger invalidation).
       CSS.highlights.set('cue-active', activeCueHighlight);
+      // iOS: ::highlight color doesn't reach the kanji BASE of <ruby>, only the
+      // furigana — color the active cue's ruby elements directly (no DOM mutation).
+      try { window._applyCueRubyColor && window._applyCueRubyColor(r, chunk); } catch (_) {}
       document.body.classList.add('has-cue-highlight');
       // Remember which chunk is green — anchors the bounded local search.
       lastHighlightedChunkIdx = chunks.indexOf(chunk);

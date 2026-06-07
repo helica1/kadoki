@@ -132,6 +132,9 @@
     document.body.classList.toggle('pref-audio-waveform-off', audioS.showWaveform === false);
     document.body.classList.toggle('pref-audio-nextsub-on',   audioS.showNextSub === true);
     try { window._liveWaveformApplyVisibility && window._liveWaveformApplyVisibility(); } catch (_) {}
+    // A card font-size change alters how much text fits per screen → re-fit the
+    // combined SRT cards to the new line budget (place-safe; debounced).
+    try { window.onCardLayoutChanged && window.onCardLayoutChanged(); } catch (_) {}
   }
 
   const current = load();

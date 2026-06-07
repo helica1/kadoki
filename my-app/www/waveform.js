@@ -29,6 +29,15 @@
       playheadRAF = null;
       return;
     }
+    // Canvas not laid out yet (0-width on the first card before its ancestor is
+    // shown): don't paint a blank frame or advance the clock — just keep the loop
+    // alive so the cursor resumes the moment layout settles. Refreshing _tickTs
+    // avoids a large frameDt jump on the resuming frame.
+    if (state.canvas && state.canvas.clientWidth <= 0) {
+      state._tickTs = performance.now();
+      playheadRAF = requestAnimationFrame(tickPlayhead);
+      return;
+    }
     // SMOOTH playhead: a free-running clock advanced at the CONSTANT requested
     // playback rate (constant velocity ⇒ no frame-to-frame speed wobble), only
     // GENTLY phase-locked to the real position. Measuring the rate from the
@@ -130,6 +139,30 @@
     const dpr = window.devicePixelRatio || 1;
     const cssW = c.clientWidth;
     const cssH = c.clientHeight;
+    // On the FIRST card of a title the canvas can have 0 layout width (its
+    // ancestor isn't laid out / visible yet at this synchronous render). Painting
+    // + snapshotting now would cache a blank 0-width layer that the playhead loop
+    // keeps blitting → "waveform doesn't fully draw the first time". Bail without
+    // snapshotting and re-render once layout settles (subsequent cards measure
+    // fine, so they never hit this).
+    if (cssW <= 0 || cssH <= 0) {
+      // When PLAYING, tickPlayhead keeps its own rAF loop alive and will drive a
+      // re-render once layout settles — so don't start a SECOND loop here. When
+      // NOT playing, schedule a BOUNDED retry: a waveform that's permanently
+      // 0-width (hidden via pref, or while in read/audio mode) must NOT spin a
+      // rAF forever (battery drain) — cap it and give up.
+      if (!state.playheadPlaying) {
+        state._layoutRetries = (state._layoutRetries || 0) + 1;
+        if (state._layoutRetries <= 60 && !state._awaitingLayout) {
+          state._awaitingLayout = true;
+          requestAnimationFrame(() => {
+            if (state) { state._awaitingLayout = false; render(); }
+          });
+        }
+      }
+      return;
+    }
+    state._layoutRetries = 0;   // laid out — reset the retry budget
     if (c.width !== cssW * dpr || c.height !== cssH * dpr) {
       c.width = cssW * dpr;
       c.height = cssH * dpr;
@@ -234,8 +267,9 @@
     // — the editor's own state listener attaches async per re-show and can miss
     // a pause that lands right after a card advance, so the bounds wouldn't show.
     // Editor (not cardMode): handles ALWAYS shown so they stay grabbable.
-    // Card mode: hidden during playback, shown when stopped.
-    if (!state.cardMode || !window._bgPlaying) {
+    // Card mode: handles removed entirely (they no longer make sense on the live
+    // card waveform) — only the gray out-of-bounds shading + moving cursor show.
+    if (!state.cardMode) {
       // ---- selection frame ----
       ctx.strokeStyle = rgba(accent, 0.6);
       ctx.lineWidth = 1.5;
@@ -284,6 +318,7 @@
   function snapshotStatic() {
     if (!state || !state.canvas) return;
     const c = state.canvas;
+    if (c.width <= 0 || c.height <= 0) return;   // never cache a blank 0-size layer
     let s = state._staticLayer || (state._staticLayer = document.createElement('canvas'));
     if (s.width !== c.width || s.height !== c.height) { s.width = c.width; s.height = c.height; }
     const sctx = s.getContext('2d');
@@ -343,7 +378,8 @@
   }
 
   function hitTestHandle(xPx) {
-    if (!state) return null;
+    // No draggable bounds handles in card mode (only the editor has them).
+    if (!state || state.cardMode) return null;
     const c = state.canvas;
     const cssW = c.clientWidth;
     const wfRange = state.wfEndMs - state.wfStartMs;
@@ -588,10 +624,11 @@
           <span data-role="end">–:––</span>
         </div>
         <canvas data-role="canvas" style="width:100%;height:96px;display:block;background:#0c0c0c;border:1px solid #1f1f1f;border-radius:8px;touch-action:none;"></canvas>
+        ${cardMode ? '' : `
         <div style="display:flex;gap:8px;margin-top:8px;justify-content:center;">
           <button data-role="preview" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid #333;padding:6px 16px;border-radius:999px;font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;">Preview</button>
           <button data-role="reset" style="background:transparent;color:#666;border:1px solid #2a2a2a;padding:6px 14px;border-radius:999px;font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;">Reset</button>
-        </div>
+        </div>`}
       `;
       // Robust playhead seed: start from the CURRENT audio position and free-run
       // IMMEDIATELY when playing — don't depend on `carry` (often null on Android
@@ -665,8 +702,12 @@
         // cursor to truth rather than slowly phase-lock (the start-stick).
         _seedSnap:        true
       };
-      container.querySelector('[data-role="preview"]').addEventListener('click', () => this.preview());
-      container.querySelector('[data-role="reset"]').addEventListener('click', () => {
+      // Preview/Reset only exist in the editor (cardMode omits them — the card UI
+      // has its own "Play card" pill). Guard the lookups.
+      const _pvBtn = container.querySelector('[data-role="preview"]');
+      if (_pvBtn) _pvBtn.addEventListener('click', () => this.preview());
+      const _rsBtn = container.querySelector('[data-role="reset"]');
+      if (_rsBtn) _rsBtn.addEventListener('click', () => {
         state.startMs = state.origStartMs;
         state.endMs = state.origEndMs;
         render();
@@ -799,6 +840,15 @@
     // Re-paint on demand (app.js calls this from its persistent bg 'state'
     // listener so the bounds reliably appear/vanish on pause/play in card mode).
     renderNow() { if (state) { try { render(); } catch (_) {} } },
+    // Synchronously freeze / resume the playhead cursor — so a swipe-down PAUSE
+    // stops the cursor INSTANTLY instead of free-running until the native 'state'
+    // event round-trips back to us.
+    setPlaying(playing) {
+      if (!state) return;
+      state.playheadPlaying = !!playing;
+      if (playing) { startPlayheadAnim(); }
+      else { stopPlayheadAnim(); try { render(); } catch (_) {} }
+    },
 
     hide() {
       cancelPreview();

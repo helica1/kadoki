@@ -4,6 +4,20 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.4.0 — 2026-06-07
+
+### Fixed
+- **Your place is kept.** Fixed cases where the reading/listening position could jump *backwards* (or reset) after a resume, a mode switch, or the app refreshing in the background — your spot is now preserved. Switching titles also reliably refreshes the cards, so you never get stuck on the previous book's cards.
+
+### Added
+- **Combine short subtitles (Card mode).** Short subtitle fragments are merged into one card — fragments of a sentence and whole quotes stay together, and separate short sentences pack onto a card with line breaks. The currently-narrated subtitle is highlighted, and cards are sized to fit your screen (no scrolling unless a single subtitle is exceptionally long). Toggle in **Preferences → Card subtitles**.
+- **Redesigned card-mode controls.** The waveform sits at the bottom with a row beneath it: **Play card** (play from the card's start), **Copy SRT** (the current subtitle), **Copy Card** (the whole card), and an **Auto-advance** toggle.
+- **"Set playhead" in Card mode.** Open a word in the dictionary and jump the audio to the start of that subtitle (previously Read mode only).
+- **Picture position** (Top / Centered / Bottom) for Anki deck card images — **Preferences → Appearance**.
+
+### Changed
+- Smoother card transitions (the upcoming subtitle scrolls up into the active position) and reader highlighting; the upcoming subtitle no longer crowds the waveform; various Card/Read polish.
+
 ## v1.3.3 — 2026-06-06
 
 ### Added

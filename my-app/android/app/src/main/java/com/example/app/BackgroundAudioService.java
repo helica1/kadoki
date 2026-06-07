@@ -491,6 +491,10 @@ public class BackgroundAudioService extends Service {
 
     public boolean isCurrentlyPlaying() { return wantPlaying; }
 
+    // The url currently loaded — exposed via getState so JS can confirm "same
+    // audio" before adopting the native playhead as truth on resume.
+    public String getCurrentUrl() { return currentUrl; }
+
     public int getPositionMs() {
         // Refresh the cache when called on the player (main) looper — the
         // plugin's 150 ms position poll runs there, keeping it fresh. Off-thread

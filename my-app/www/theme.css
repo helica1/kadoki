@@ -90,8 +90,19 @@ html, body {
    appearance.js has a chance to apply the body class. */
 ::highlight(cue-active) {
   background: transparent;
-  text-decoration: none;
+  /* Reserve the SAME underline geometry as cue-pending (just transparent) so a
+     cue going pending(dashed underline) → active doesn't drop the underline and
+     reflow the line — that drop was the "jiggle"/size-shift the user saw. */
+  text-decoration: underline solid transparent 2px;
+  text-underline-offset: 4px;
+  text-decoration-skip-ink: none;
   color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
+  /* iOS-only bug: with a text-color highlight over <ruby>, WebKit applied the
+     color to the furigana (rt) but NOT the kanji BASE. The glyph fill on WebKit
+     is governed by -webkit-text-fill-color (a Highlight-API-allowed property),
+     which the ruby-base painting path honors where plain `color` does not — so
+     setting it green colors the kanji too. Harmless on Chrome/Android (same hue). */
+  -webkit-text-fill-color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
 }
 ::highlight(cue-pending) {
   background: transparent;
@@ -99,6 +110,17 @@ html, body {
     color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%) 2px;
   text-underline-offset: 4px;
   color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
+  -webkit-text-fill-color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
+}
+/* iOS ruby-base fix (text-color mode): ::highlight color reaches the furigana
+   (rt) but not the kanji BASE inside <ruby> on WebKit. reading-mode adds the
+   .cue-ruby-active class to the EXISTING ruby elements in the active cue (no DOM
+   mutation), and this colors the base+rt green directly. Background mode keeps
+   normal text, so it's excluded. */
+body:not(.highlight-bg) #readingModeContent ruby.cue-ruby-active,
+body:not(.highlight-bg) #readingModeContent ruby.cue-ruby-active rb {
+  color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%) !important;
+  -webkit-text-fill-color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%) !important;
 }
 /* Reader dictionary lookup highlight — used in place of dict-frag spans.
    Painted by reading-mode's lookupAtPoint via CSS.highlights.set, with no
@@ -106,10 +128,9 @@ html, body {
    tree (previously the DOM-wrap path triggered the "screen goes black"
    crash in vertical-rl). */
 ::highlight(reader-dict-lookup) {
+  /* Background highlight only — the wavy underline reflowed the line on tap
+     (the "jiggle"); the 60% fill alone marks the looked-up word clearly. */
   background: color-mix(in srgb, var(--accent-read, #4caf50) 60%, transparent);
-  text-decoration: underline wavy var(--accent-read, #4caf50) 3px;
-  text-underline-offset: 5px;
-  text-decoration-skip-ink: none;
   border-radius: 2px;
 }
 
@@ -118,13 +139,18 @@ body.highlight-bg ::highlight(cue-active) {
   background: var(--reader-highlight-bg, rgba(76, 175, 80, 0.4));
   text-decoration: underline solid var(--accent-read, #4caf50) 2px;
   text-underline-offset: 4px;
+  text-decoration-skip-ink: none;
   color: inherit;
+  /* Background mode keeps the normal text fill (don't inherit the text-mode
+     green -webkit-text-fill-color set on the base rule above). */
+  -webkit-text-fill-color: inherit;
 }
 body.highlight-bg ::highlight(cue-pending) {
   background: transparent;
   text-decoration: underline dashed var(--accent-read, #4caf50) 2px;
   text-underline-offset: 4px;
   color: inherit;
+  -webkit-text-fill-color: inherit;
 }
 /* When a precise cue highlight is set, the active chunk's chrome stays
    completely invisible — the cue's coloured characters carry all the
@@ -168,6 +194,12 @@ body.mode-card #cardContainer .card-text {
   font-size: var(--font-size-card) !important;
   text-align: var(--align-card) !important;
   font-family: var(--font-family-card) !important;
+}
+/* Anki DECK flashcards (not SRT cards — no body.card-srt) are always centered;
+   the Center/Left align pref only governs SRT subtitle cards. */
+body.mode-card:not(.card-srt) #cardContainer .subtitle-text,
+body.mode-card:not(.card-srt) #cardContainer .card-text {
+  text-align: center !important;
 }
 body.mode-card #cardContainer img,
 body.mode-card #cardContainer .card-image img {
@@ -247,13 +279,27 @@ body.pref-audio-nextsub-on #audiobookNextCueText { display: block; }
    stacking superimposes. Position this one absolutely just BELOW it — top is
    set per-card by JS (_positionCardNextSub); the calc is a 1-line fallback. */
 .subtitle-next {
-  position: absolute; left: 10%; right: 10%; width: 80%; box-sizing: border-box;
+  position: absolute; left: 4%; right: 4%; width: 92%; box-sizing: border-box;
   top: calc(env(safe-area-inset-top, 0px) + var(--subtitle-offset, 65px) + 3.2em);
   padding: 2px 20px;
   text-shadow: 1px 1px 6px rgba(0,0,0,.9), -1px -1px 6px rgba(0,0,0,.9);
 }
-body.mode-card .subtitle-next { font-family: var(--font-family-card); font-size: calc(var(--font-size-card, 1.875rem) * 0.62); }
+/* Upcoming subtitle: SAME size + alignment as the live subtitle, distinguished
+   only by the gray color (the .subtitle-next opacity/color above). */
+body.mode-card .subtitle-next { font-family: var(--font-family-card); font-size: var(--font-size-card, 1.875rem); text-align: var(--align-card, center); }
 body.pref-card-nextsub-on .subtitle-next { display: block; }
+/* Anki DECK cards (not SRT — no body.card-srt) never show an upcoming subtitle. */
+body.mode-card:not(.card-srt) .subtitle-next { display: none !important; }
+/* When the upcoming subtitle is clamped to fit above the bottom cluster
+   (_positionCardNextSub), hide overflow and fade it out VERY gradually, reaching
+   FULLY transparent well before the bottom edge so the text clearly dissolves
+   into black (nothing to scroll to) instead of getting cut into the waveform.
+   Percentage-based → more gradual the longer the visible upcoming subtitle. */
+.subtitle-next.subtitle-next-clamped {
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 16%, transparent 78%);
+          mask-image: linear-gradient(to bottom, #000 16%, transparent 78%);
+}
 
 /* =====================================================================
  * Utility classes
@@ -594,46 +640,68 @@ body.mode-audio #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-a
   transition: transform .22s ease, opacity .18s ease;
 }
 body.mode-card #cardCopyBtn { display: inline-block; }
+/* SRT cards have their own in-row Copy SRT / Copy Card pills, so the fixed COPY
+   pill is for DECK cards only — hide it while an SRT card is showing. */
+body.mode-card.card-srt #cardCopyBtn { display: none; }
 body.chrome-hidden #cardCopyBtn {
   transform: translateX(-50%) translateY(110%);
   opacity: 0;
   pointer-events: none;
 }
 
-/* ---- Landscape card-mode layout ----
-   In portrait the SRT-card waveform sits centered vertically inside
-   cardContainer via `margin: auto auto X auto` and COPY pills at
-   bottom-center. In landscape that puts the waveform at mid-height
-   (cardContainer is short) and centers COPY on top of it. Pin the
-   waveform to the bottom-left and COPY to the bottom-right so they
-   don't overlap. */
-@media (orientation: landscape) {
-  body.mode-card #srtCardWaveform {
-    position: fixed !important;
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px) !important;
-    left:  calc(env(safe-area-inset-left,   0px) + 16px) !important;
-    /* Hold a fixed gap from the right edge so the COPY pill sits in
-       that gap, vertically centered on the waveform. */
-    right: 96px !important;
-    width: auto !important;
-    max-width: none !important;
-    margin: 0 !important;
-    z-index: 2810 !important;
-  }
-  body.mode-card #cardCopyBtn {
-    /* Sit on the same baseline as the waveform's Preview/Reset button
-       row. The waveform container's `bottom: env-bottom + 12px` IS the
-       bottom edge of those buttons (they're the last row), so matching
-       that value puts COPY inline with them. */
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 12px) !important;
-    left:  auto !important;
-    right: calc(env(safe-area-inset-right, 0px) + 8px) !important;
-    transform: none !important;
-  }
-  body.mode-card.chrome-hidden #cardCopyBtn {
-    transform: translateY(140%) !important;
-  }
+/* ---- SRT card-mode button row (under the waveform): Play card · Copy SRT ·
+   Copy Card · Auto-Advance. In-flow at the bottom of #cardContainer. ---- */
+.card-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+  align-self: stretch;
+  padding: 0 8px;
+  margin: 0 0 calc(12px + env(safe-area-inset-bottom, 0px)) 0;
+  transition: transform .22s ease, opacity .18s ease;
 }
+.card-pill {
+  background: transparent;
+  color: var(--accent-card, #ff9550);
+  border: 1px solid var(--accent-card, #ff9550);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: .62rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  font-family: var(--font-sans);
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.card-pill-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 12px;
+}
+.card-pill.off { opacity: 0.5; }
+/* The waveform carries margin-top:auto to pin the bottom cluster to the bottom.
+   When the waveform is hidden (pref off) the row is the only in-flow item, so it
+   needs the auto-margin itself to stay pinned. */
+body.pref-card-waveform-off #cardBtnRow { margin-top: auto; }
+body.chrome-hidden #cardBtnRow {
+  transform: translateY(150%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* (Auto-Advance is now an in-row .card-pill rendered under the waveform — see
+   .card-btn-row above. The old fixed #autoAdvanceBtn styles were removed.) */
+
+/* Landscape: the waveform + button row are now in-flow and pinned to the bottom
+   of the flex column (waveform margin-top:auto, row below it), so the old
+   fixed-position landscape overrides are no longer needed — the in-flow layout
+   works in both orientations and the screen-fit line budget keeps the (shorter)
+   landscape cards from overflowing. */
 
 /* #progressBar removed 2026-05-30 — the top-left position strip
    now serves as the single mode-aware position display + tap
@@ -696,7 +764,28 @@ body.chrome-hidden #progressBar {
   overscroll-behavior: contain;
   word-break: break-word;
   overflow-wrap: anywhere;
+  /* Reduce straggly last-line characters (e.g. an orphan "た。"): text-wrap:
+     pretty nudges earlier line breaks so the last line isn't 1–2 chars
+     (progressive — ignored on older WebViews). line-break: strict applies
+     Japanese kinsoku so 。、 and small kana never start a line. */
+  text-wrap: pretty;
+  line-break: strict;
 }
+
+/* Smooth card transition: a quick upward fade-in on the new subtitle text when
+   advancing between cards (card mode / SRT cards only — Anki-deck flashcards
+   keep their instant flip). Applied via the .card-rise class in displayCard. */
+/* The new active subtitle rises from EXACTLY where the grayed upcoming subtitle
+   sat (--card-slot, measured per-advance from the old next vs old active; 40px
+   fallback) up to the active position, resolving faint→full — so it reads as the
+   upcoming subtitle scrolling up and becoming active rather than a flash. */
+@keyframes cardRiseIn {
+  from { opacity: 0.32; transform: translateY(var(--card-slot, 40px)); }
+  to   { opacity: 1;    transform: translateY(0); }
+}
+body.mode-card .subtitle-text.card-rise { animation: cardRiseIn 0.5s ease-out; }
+/* The fresh upcoming subtitle is hidden during the rise and faded in (via an
+   inline opacity transition) once it's correctly placed — see displayCard. */
 
 /* ---- Per-mode stats blocks ---- */
 .stats-block {

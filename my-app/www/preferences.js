@@ -362,6 +362,27 @@
 
       // Display toggles.
       if (mode === 'card') {
+        block.appendChild(row('Text alignment', (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['center', 'Center'], ['left', 'Left']].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          sel.value = (get().align === 'left') ? 'left' : 'center';
+          sel.addEventListener('change', () => apply('card', { align: sel.value }));
+          return sel;
+        })()));
+        block.appendChild(row('Picture position', (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['flex-start', 'Top'], ['center', 'Centered'], ['flex-end', 'Bottom']].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          const cur = get().imageAlign;
+          sel.value = (cur === 'flex-start' || cur === 'flex-end') ? cur : 'center';
+          sel.addEventListener('change', () => apply('card', { imageAlign: sel.value }));
+          return sel;
+        })()));
         block.appendChild(row('Show background image', toggle(
           () => get().showBgImage !== false,
           (on) => apply('card', { showBgImage: on })
@@ -667,6 +688,23 @@
     });
   }
 
+  // "Combine short subtitles" toggle (card mode). Stored as KADOKI_COMBINE_SUBS
+  // ('1'/'0', default on). The per-card size is no longer a manual value — it's
+  // derived from the screen (computeCardLineBudget in app.js), so the old
+  // KADOKI_COMBINE_SUBS_MAX char-limit input was removed.
+  async function setupCombineSubsPref() {
+    const cb = document.getElementById('combineSubsToggle');
+    if (!cb) return;
+    try {
+      const rv = await getPref('KADOKI_COMBINE_SUBS');
+      cb.checked = (rv === null || rv === undefined) ? true : (rv !== '0' && rv !== 'false');
+    } catch (_) { cb.checked = true; }
+    if (!cb.dataset.wired) {
+      cb.dataset.wired = '1';
+      cb.addEventListener('change', () => { setPref('KADOKI_COMBINE_SUBS', cb.checked ? '1' : '0'); });
+    }
+  }
+
   window.openPreferences = async function() {
     const modal = document.getElementById('preferencesModal');
     if (!modal) return;
@@ -678,6 +716,7 @@
 
     buildAppearanceSection();
     buildDictionarySection();
+    await setupCombineSubsPref();
     await wireAnkiSection();
     setupIOSAnkiPickers();
 

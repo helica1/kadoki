@@ -66,6 +66,10 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     // MARK: - State
 
     private var player: AVAudioPlayer?
+    // The exact `url` string JS last asked us to play. Exposed via getState so JS
+    // can confirm "same audio" before adopting the native playhead as truth on a
+    // resume (the backwards-place-jump fix). Stored raw so it matches what JS sent.
+    private var currentUrlStr: String = ""
     private var positionTimer: Timer?
     private var currentRate: Float = 1.0
     private var nowPlayingTitle: String = "Audiobook"
@@ -185,6 +189,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("url required")
             return
         }
+        currentUrlStr = urlStr   // remember what JS asked us to play (for getState "same audio" check)
         // call.getInt/getDouble — getDouble is reliable for fractional JSON Numbers.
         let startMs = call.getDouble("startMs") ?? 0
         let rate = Float(call.getDouble("rate") ?? 1.0)
@@ -303,6 +308,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         stopPositionTimer()
         player?.stop()
         player = nil
+        currentUrlStr = ""
         emitState(playing: false)
         clearNowPlaying()
         call.resolve()
@@ -357,7 +363,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "playing":    p?.isPlaying ?? false,
             "ready":      p != nil,
             "positionMs": positionMs,
-            "durationMs": durationMs
+            "durationMs": durationMs,
+            "url":        (p != nil) ? currentUrlStr : ""
         ])
     }
 

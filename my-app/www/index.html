@@ -880,6 +880,19 @@ body.dimmed .card-image {
 
 
         <details class="prefs-section">
+          <summary class="prefs-heading">Card subtitles</summary>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="combineSubsToggle" style="flex:1;line-height:1.35;">Combine short subtitles
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
+                Merge short subtitle fragments into one card (sentences &amp; quotes stay together); the playing line is highlighted.
+              </span>
+            </label>
+            <input type="checkbox" id="combineSubsToggle" />
+          </div>
+          <div style="font-size:.7rem;color:#777;margin:2px 2px 0;">Cards are sized to fit your screen automatically (no scrolling unless a single subtitle is very long). Reopen the title for the on/off change to take effect.</div>
+        </details>
+
+        <details class="prefs-section">
           <summary class="prefs-heading">Dictionaries</summary>
           <div style="font-size:.74rem;color:#777;margin:4px 0 8px;">
             Toggle dictionaries on/off and drag-reorder. Order is the search priority (top first).
@@ -1019,8 +1032,9 @@ body.dimmed .card-image {
   </div>
 
 
-  <!-- Card-mode COPY button: small text button sitting above the bottom bar.
-       Hidden in read + audio modes. Hides with chrome. -->
+  <!-- Card-mode COPY button for DECK (Anki flashcard) cards: small text button
+       above the bottom bar. SRT cards hide this and use the in-row Copy SRT /
+       Copy Card pills instead. Hidden in read + audio modes; hides with chrome. -->
   <button id="cardCopyBtn" onclick="copyCurrentCardText()">COPY</button>
 
   <!-- #progressBar removed 2026-05-30 — redundant with top-left
@@ -1323,6 +1337,8 @@ body.dimmed .card-image {
   <script src="enhanced-dictionary.js"></script>
   <script src="local-audio.js"></script>
   <script src="srt-parser.js"></script>
+  <script src="cue-grouper.js"></script>
+  <script src="combo-card.js"></script>
   <script src="cue-alignment.js"></script>
   <script src="waveform.js"></script>
   <script src="livewaveform.js"></script>

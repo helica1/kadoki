@@ -230,11 +230,13 @@ public class BackgroundAudioPlugin extends Plugin {
             ret.put("positionMs", 0);
             ret.put("durationMs", 0);
             ret.put("ready", false);
+            ret.put("url", "");
         } else {
             ret.put("playing", s.isCurrentlyPlaying());
             ret.put("positionMs", Math.max(0, s.getPositionMs()));
             ret.put("durationMs", Math.max(0, s.getDurationMs()));
             ret.put("ready", s.isReady());
+            ret.put("url", s.getCurrentUrl() != null ? s.getCurrentUrl() : "");
         }
         call.resolve(ret);
     }

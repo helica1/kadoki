@@ -13,7 +13,7 @@
 (function () {
   'use strict';
   const KEY = 'BOOKMARKS_V1';
-  const MAX = 3;
+  const MAX = 5;
   const SAME_SPOT_CHARS = 400;   // two read spots within ~a page count as "same"
   const MIN_GAP_MS = 55000;      // keep bookmarks ~1 minute apart (prevent crowding)
   const PREF = window.Capacitor?.Plugins?.Preferences;
@@ -44,7 +44,16 @@
     if (!bm || (bm.mode !== 'card' && bm.mode !== 'read')) return;
     const list = loadSync().filter(x => !sameSpot(x, bm));
     list.unshift(bm);
-    persist(list.slice(0, MAX));
+    // Bookmarks are PER TITLE: keep the last MAX for EACH title (newest first),
+    // so adding one to title B never evicts (and the menu never leaks) title A's.
+    const perTitle = {};
+    const kept = [];
+    for (const b of list) {
+      const t = b.titleId || '';
+      perTitle[t] = (perTitle[t] || 0) + 1;
+      if (perTitle[t] <= MAX) kept.push(b);
+    }
+    persist(kept);
   }
   function list() { return loadSync(); }
 
@@ -133,15 +142,23 @@
       // Throttle: keep the list uncrowded — bookmarks stay ~1 minute apart.
       const recent = loadSync()[0];
       if (recent && (Date.now() - recent.ts) < MIN_GAP_MS) return;
-      let location = null;
+      let location = null, audioMs;
       if (mode === 'read') {
         location = (typeof window.pagedGetReadLocation === 'function') ? window.pagedGetReadLocation() : null;
+        // Audio time of the read cursor's cue → a comparable "% of book".
+        if (typeof window._pagedReadCueStartMs === 'function') audioMs = window._pagedReadCueStartMs();
       } else {
         const ci = window.currentCardIndex;
-        if (Number.isFinite(ci)) location = { cardIndex: ci };
+        if (Number.isFinite(ci)) {
+          location = { cardIndex: ci };
+          const n = window.allNotes;
+          if (Array.isArray(n) && n[ci]) audioMs = n[ci].audiobookStartMs;
+        }
       }
       if (!location) return;            // never record a garbage / not-ready spot
-      record({ mode, ts: Date.now(), titleId, titleName: '', location });
+      const bm = { mode, ts: Date.now(), titleId, titleName: '', location };
+      if (Number.isFinite(audioMs)) bm.audioMs = audioMs;
+      record(bm);
     } catch (_) {}
   }
 
@@ -177,6 +194,35 @@
   }
 
   // ---- menu UI: a centered list of the last 3 bookmarks ----
+  // Unified "% of book" so card / read / furthest spots are directly comparable.
+  // Every position maps to an audio time; pct = time / total audiobook duration.
+  function totalDurationMs() {
+    try {
+      const n = window.allNotes;
+      const last = Array.isArray(n) && n.length ? n[n.length - 1] : null;
+      if (last && last.isSrtCard) return last.audiobookEndMs || 0;
+    } catch (_) {}
+    return 0;
+  }
+  function pctOf(ms) {
+    const d = totalDurationMs();
+    if (!d || !Number.isFinite(ms) || ms < 0) return null;
+    return Math.max(0, Math.min(100, Math.round((ms / d) * 100)));
+  }
+  function bmAudioMs(bm) {
+    if (bm && Number.isFinite(bm.audioMs)) return bm.audioMs;
+    // Fallback for card bookmarks saved before audioMs was stored.
+    if (bm && bm.mode === 'card' && bm.location && Number.isFinite(bm.location.cardIndex)) {
+      const n = window.allNotes;
+      if (Array.isArray(n) && n[bm.location.cardIndex]) return n[bm.location.cardIndex].audiobookStartMs;
+    }
+    return null;
+  }
+  function pctTag(ms) {
+    const p = pctOf(ms);
+    return (p != null) ? `<span style="color:#bd9;font-weight:700;">${p}%</span> · ` : '';
+  }
+
   function rowHtml(bm, nameById) {
     const when = (() => { try { return new Date(bm.ts).toLocaleString(); } catch (_) { return ''; } })();
     const where = bm.mode === 'read'
@@ -185,15 +231,16 @@
     const modeLabel = bm.mode === 'read' ? 'Read' : 'Card';
     const tName = (nameById && nameById.get(bm.titleId)) || bm.titleName || '';
     const sub = (tName ? (tName + ' · ') : '') + when;
-    return `<div style="font-size:.9rem;color:#eee;">${modeLabel} · ${where}</div>` +
+    return `<div style="font-size:.9rem;color:#eee;">${pctTag(bmAudioMs(bm))}${modeLabel} · ${where}</div>` +
            `<div style="color:#888;font-size:.72rem;margin-top:2px;">${sub}</div>`;
   }
 
   async function openMenu() {
     const prev = document.getElementById('bookmarksOverlay');
     if (prev) prev.remove();
-    const items = list();
     const activeTitleId = window._activeTitleId || null;
+    // Per title: only show bookmarks belonging to the title you're currently in.
+    const items = list().filter(b => activeTitleId && b.titleId === activeTitleId);
     const furthest = activeTitleId ? getFurthest(activeTitleId) : null;
     // Resolve title names for nicer rows (best-effort; menu still works without).
     let nameById = new Map();
@@ -224,7 +271,7 @@
       fb.className = 'menu-item';
       fb.style.cssText = 'display:block;width:100%;text-align:left;background:#15201b;border:1px solid #2e5a3f;border-radius:8px;padding:10px 12px;margin-bottom:8px;cursor:pointer;';
       fb.innerHTML =
-        `<div style="font-size:.9rem;color:#bff0cf;">↻ Furthest listened · ${fmtMs(furthest.ms)}</div>` +
+        `<div style="font-size:.9rem;color:#bff0cf;">↻ Furthest listened · ${pctTag(furthest.ms)}${fmtMs(furthest.ms)}</div>` +
         `<div style="color:#7fae8e;font-size:.72rem;margin-top:2px;">${fName ? (fName + ' · ') : ''}tap to resume here</div>`;
       fb.addEventListener('click', () => { overlay.remove(); jumpToFurthest(furthest.ms); });
       card.appendChild(fb);
