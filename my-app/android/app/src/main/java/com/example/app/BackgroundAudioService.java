@@ -5,7 +5,9 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.content.ComponentName;
 import android.os.Build;
@@ -123,12 +125,58 @@ public class BackgroundAudioService extends Service {
     private volatile String metaSubtitle = "";
     private volatile android.graphics.Bitmap metaArt;   // lock-screen cover art (persists across cue updates)
 
+    // Durable position store (BookPlayer-style "the player layer owns the save").
+    // The SERVICE persists {url, ms} to its own SharedPreferences from this
+    // process ~every 5s while playing + on pause/background/kill, INDEPENDENT of
+    // the WebView. So even when iOS suspends the WebView or Android LMK reaps it
+    // mid-listen (the JS saver freezes there), the saved position keeps tracking
+    // the real playhead and a cold restart resumes within seconds of the true
+    // spot. JS reads it back via getLastSavedPosition() as a forward-only floor.
+    private static final String POS_PREFS = "kadoki_audio_pos";
+    private static final String POS_KEY_URL = "lastUrl";
+    private static final String POS_KEY_MS = "lastMs";
+
     @Override
     public void onCreate() {
         super.onCreate();
         instance = this;
         ensureNotificationChannel();
         ensureMediaSession();
+        playerHandler.postDelayed(durableSaveTick, 5000);
+    }
+
+    // ~5s durable-save heartbeat (main looper = the player thread, so reading
+    // the live position is safe). Saves only while playing; runs for the life of
+    // the service. Worst-case loss on a hard crash is ~5s (vs the JS saver's 30s
+    // and its freeze during background).
+    private final Runnable durableSaveTick = new Runnable() {
+        @Override public void run() {
+            if (wantPlaying) saveLastPositionNow();
+            playerHandler.postDelayed(this, 5000);
+        }
+    };
+
+    // Persist the live playhead now. Callable from any thread (reads volatile
+    // currentUrl + the position cache). apply() is async, so this is cheap.
+    public void saveLastPositionNow() {
+        try {
+            String url = currentUrl;
+            int ms = getPositionMs();
+            if (url == null || ms < 0) return;
+            getSharedPreferences(POS_PREFS, Context.MODE_PRIVATE).edit()
+                .putString(POS_KEY_URL, url).putInt(POS_KEY_MS, ms).apply();
+        } catch (Exception ignored) {}
+    }
+
+    // Last durably-saved url — STATIC so JS can read it even when no service
+    // instance exists (cold boot after a kill). "" when none.
+    public static String readSavedUrl(Context ctx) {
+        try { return ctx.getSharedPreferences(POS_PREFS, Context.MODE_PRIVATE).getString(POS_KEY_URL, ""); }
+        catch (Exception e) { return ""; }
+    }
+    public static int readSavedMs(Context ctx) {
+        try { return ctx.getSharedPreferences(POS_PREFS, Context.MODE_PRIVATE).getInt(POS_KEY_MS, -1); }
+        catch (Exception e) { return -1; }
     }
 
     @Override
@@ -168,6 +216,7 @@ public class BackgroundAudioService extends Service {
             });
             updateNotification("Paused");
             updatePlaybackState();
+            saveLastPositionNow();   // durably snapshot place on every pause
         } else if (ACTION_RESUME.equals(action)) {
             tryRun(() -> {
                 if (exo != null && prepared) {
@@ -747,8 +796,18 @@ public class BackgroundAudioService extends Service {
         try { r.run(); } catch (Exception e) { Log.e(TAG, "tryRun", e); }
     }
 
+    // User swiped the app away from Recents — persist place before the system
+    // tears us down (the WebView/JS saver may already be gone).
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        saveLastPositionNow();
+        super.onTaskRemoved(rootIntent);
+    }
+
     @Override
     public void onDestroy() {
+        saveLastPositionNow();                       // final durable snapshot
+        playerHandler.removeCallbacks(durableSaveTick);
         stopPlayback();
         if (mediaSession != null) {
             mediaSession.setActive(false);

@@ -33,6 +33,13 @@ public class BackgroundAudioPlugin extends Plugin {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable positionPoll;
     private boolean polling = false;
+    // Foreground/visible state. The 150ms position poll only needs to be tight
+    // while the UI is visible (smooth subtitle highlighting). Backgrounded /
+    // screen-off, JS can't show anything, so we slow the JS-facing emit to ~1s —
+    // the biggest battery win for the "screen off, listening for hours" case.
+    // The lock screen is driven by the MediaSession PlaybackState, not this poll.
+    private volatile boolean uiVisible = true;
+    private int pollIntervalMs() { return uiVisible ? 150 : 1000; }
 
     private final BackgroundAudioService.OnStateChangeListener stateListener =
         new BackgroundAudioService.OnStateChangeListener() {
@@ -68,6 +75,23 @@ public class BackgroundAudioPlugin extends Plugin {
     @Override
     public void load() {
         // Service might not yet exist; attach listener whenever we touch it.
+    }
+
+    // App came to the foreground → tighten the position poll for smooth UI.
+    @Override
+    public void handleOnResume() {
+        uiVisible = true;
+        super.handleOnResume();
+    }
+
+    // App backgrounded / screen off → slow the position poll to save battery.
+    // Also flush a durable position snapshot so a background kill keeps place.
+    @Override
+    public void handleOnPause() {
+        uiVisible = false;
+        BackgroundAudioService s = BackgroundAudioService.getInstance();
+        if (s != null) s.saveLastPositionNow();
+        super.handleOnPause();
     }
 
     private void ensureListener() {
@@ -115,10 +139,10 @@ public class BackgroundAudioPlugin extends Plugin {
                     return;
                 }
                 emitPosition(s.getPositionMs(), s.getDurationMs());
-                // Tight cue tracking: 150 ms granularity feels instant for
-                // sentence-level highlighting. Trade-off is bridge traffic,
-                // which is negligible for ~6 events/sec of two small ints.
-                mainHandler.postDelayed(this, 150);
+                // Tight (150ms) while the UI is visible for instant subtitle
+                // highlighting; slow (~1s) when backgrounded/screen-off where
+                // nobody sees it — see pollIntervalMs / uiVisible.
+                mainHandler.postDelayed(this, pollIntervalMs());
             }
         };
         mainHandler.post(positionPoll);
@@ -238,6 +262,21 @@ public class BackgroundAudioPlugin extends Plugin {
             ret.put("ready", s.isReady());
             ret.put("url", s.getCurrentUrl() != null ? s.getCurrentUrl() : "");
         }
+        call.resolve(ret);
+    }
+
+    // The last position the SERVICE durably saved (url + ms), readable even when
+    // no service instance exists (cold boot after a background kill). JS uses it
+    // as a forward-only, url-matched floor on restore so a reaped WebView never
+    // resumes behind the real playhead. { url, positionMs, hasSaved }.
+    @PluginMethod
+    public void getLastSavedPosition(PluginCall call) {
+        JSObject ret = new JSObject();
+        String url = BackgroundAudioService.readSavedUrl(getContext());
+        int ms = BackgroundAudioService.readSavedMs(getContext());
+        ret.put("url", url != null ? url : "");
+        ret.put("positionMs", Math.max(0, ms));
+        ret.put("hasSaved", ms >= 0 && url != null && !url.isEmpty());
         call.resolve(ret);
     }
 

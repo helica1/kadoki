@@ -3011,6 +3011,22 @@
             await new Promise((r) => setTimeout(r, 50));
           }
         }
+        // COLD-BOOT floor: when the native service is DEAD (LMK reaped it / app
+        // was killed mid-listen), getState above reports not-ready, so the live
+        // playhead is gone — but the SERVICE durably saved {url, ms} ~every 5s
+        // from its own process (getLastSavedPosition). Adopt it as the same
+        // forward-only, url-matched floor so a cold restart resumes within ~5s of
+        // the true spot instead of the up-to-30s-stale JS save. Still NEVER moves
+        // backward and never crosses titles.
+        if (!_floorRaised && _bg && typeof _bg.getLastSavedPosition === 'function' && _mine) {
+          try {
+            const _ls = await _bg.getLastSavedPosition();
+            if (_ls && _ls.hasSaved && _ls.url && _norm(_ls.url) === _mine &&
+                Number(_ls.positionMs) > startMs) {
+              startMs = _ls.positionMs;
+            }
+          } catch (_) {}
+        }
       } catch (_) {}
     }
     console.log('[ab] openAudiobookMode seek=' + !!opts.seekToCurrentPosition +

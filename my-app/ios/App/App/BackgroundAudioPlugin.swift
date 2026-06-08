@@ -48,9 +48,25 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "seek",        returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setRate",     returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getState",    returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getLastSavedPosition", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setMetadata", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setSubtitleArt", returnType: CAPPluginReturnPromise),
     ]
+
+    // MARK: - Durable position store (BookPlayer-style: the player layer owns the
+    // save). We persist {url, ms} to UserDefaults from THIS process ~every 5s
+    // while playing + on background/pause, independent of the WebView. iOS
+    // suspends the WebView (freezing the JS saver) for the whole background
+    // listen, so without this the saved place could be minutes behind; this keeps
+    // it within ~5s. JS reads it via getLastSavedPosition() as a forward-only floor.
+    private static let posKeyUrl = "kadoki.audio.lastUrl"
+    private static let posKeyMs  = "kadoki.audio.lastMs"
+    /// Foreground/visible flag — the 150ms position emit slows to ~1s in the
+    /// background/screen-off (nobody sees it), the biggest battery win for long
+    /// listens. The lock screen is driven by Now Playing, not this emit.
+    private var uiVisible = true
+    /// Throttle for the in-timer durable save (~5s).
+    private var lastDurableSaveAt: TimeInterval = 0
 
     // MARK: - Constants
 
@@ -91,21 +107,75 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     override public func load() {
         configureAudioSession()
         setupRemoteCommands()
+        // Foreground/background transitions: throttle the position emit and flush
+        // a durable position snapshot when we background (so a background kill
+        // keeps place even though the JS saver is suspended).
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(appDidBackground),
+                       name: UIApplication.didEnterBackgroundNotification, object: nil)
+        nc.addObserver(self, selector: #selector(appWillForeground),
+                       name: UIApplication.willEnterForegroundNotification, object: nil)
+        nc.addObserver(self, selector: #selector(appWillTerminate),
+                       name: UIApplication.willTerminateNotification, object: nil)
     }
+
+    @objc private func appDidBackground() {
+        uiVisible = false
+        saveLastPositionNow()
+        if positionTimer != nil { startPositionTimer() }   // re-arm at the slow cadence
+    }
+    @objc private func appWillForeground() {
+        uiVisible = true
+        if positionTimer != nil { startPositionTimer() }   // re-arm at the fast cadence
+    }
+    @objc private func appWillTerminate() { saveLastPositionNow() }
 
     // MARK: - Audio session
 
-    /// Activate the playback category. `.spokenAudio` mode hints to the OS
-    /// that this is dialogue/narration (better behavior with Bluetooth,
-    /// AirPods, and other audio).
+    /// Configure the playback category. `.spokenAudio` mode hints to the OS that
+    /// this is dialogue/narration (better behavior with Bluetooth, AirPods, etc.).
+    /// We do NOT activate here — activation is lazy (first play) and the session
+    /// is deactivated on stop(), so iOS can suspend the app when nothing plays
+    /// (an always-active .playback session kept the process resident).
     private func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playback, mode: .spokenAudio, options: [])
-            try session.setActive(true)
         } catch {
-            NSLog("[BackgroundAudio] AudioSession setup failed: \(error.localizedDescription)")
+            NSLog("[BackgroundAudio] AudioSession category failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Activate the audio session right before playback (lazy). Safe to call
+    /// repeatedly — AVAudioSession.setActive(true) is idempotent.
+    private func ensureSessionActive() {
+        do { try AVAudioSession.sharedInstance().setActive(true) }
+        catch { NSLog("[BackgroundAudio] session activate failed: \(error.localizedDescription)") }
+    }
+
+    // MARK: - Durable position
+
+    /// Persist the live playhead now (url + ms) to UserDefaults.
+    private func saveLastPositionNow() {
+        guard let p = player, !currentUrlStr.isEmpty else { return }
+        let ms = Int(p.currentTime * 1000)
+        let d = UserDefaults.standard
+        d.set(currentUrlStr, forKey: Self.posKeyUrl)
+        d.set(ms, forKey: Self.posKeyMs)
+        lastDurableSaveAt = Date().timeIntervalSince1970
+    }
+
+    /// The last durably-saved {url, ms} — readable even with no live player
+    /// (cold launch). JS applies it as a forward-only, url-matched floor.
+    @objc func getLastSavedPosition(_ call: CAPPluginCall) {
+        let d = UserDefaults.standard
+        let url = d.string(forKey: Self.posKeyUrl) ?? ""
+        let ms = d.object(forKey: Self.posKeyMs) != nil ? d.integer(forKey: Self.posKeyMs) : -1
+        call.resolve([
+            "url": url,
+            "positionMs": max(0, ms),
+            "hasSaved": ms >= 0 && !url.isEmpty
+        ])
     }
 
     // MARK: - Remote commands (lock screen / Control Center / headphones)
@@ -117,6 +187,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
         cmd.playCommand.addTarget { [weak self] _ in
             guard let p = self?.player else { return .commandFailed }
+            self?.ensureSessionActive()
             p.play()
             self?.startPositionTimer()
             self?.emitState(playing: true)
@@ -141,6 +212,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self?.stopPositionTimer()
                 self?.emitState(playing: false)
             } else {
+                self?.ensureSessionActive()
                 p.play()
                 self?.startPositionTimer()
                 self?.emitState(playing: true)
@@ -190,6 +262,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         currentUrlStr = urlStr   // remember what JS asked us to play (for getState "same audio" check)
+        ensureSessionActive()    // lazy activation (session is deactivated on stop)
         // call.getInt/getDouble — getDouble is reliable for fractional JSON Numbers.
         let startMs = call.getDouble("startMs") ?? 0
         let rate = Float(call.getDouble("rate") ?? 1.0)
@@ -288,6 +361,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func resume(_ call: CAPPluginCall) {
         guard let p = player else { call.resolve(); return }
+        ensureSessionActive()   // re-activate if a prior stop() deactivated it
         fadeGeneration += 1 // supersede any pending faded-pause so it doesn't stop us
         let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
         if fadeMs > 0 {
@@ -311,6 +385,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         currentUrlStr = ""
         emitState(playing: false)
         clearNowPlaying()
+        // Deactivate the session so iOS can suspend the app when nothing is
+        // playing (an always-active .playback session kept the process resident
+        // and Doze-resistant). .notifyOthersOnDeactivation lets other apps' audio
+        // resume. Re-activated lazily on the next play()/resume().
+        do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        catch { NSLog("[BackgroundAudio] session deactivate failed: \(error.localizedDescription)") }
         call.resolve()
     }
 
@@ -511,11 +591,18 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // during scrolling / modal presentation. This is the bug that made
         // cues / subtitles / reader-follow appear frozen while audio still
         // played fine.
-        let timer = Timer(timeInterval: 0.15, repeats: true) { [weak self] _ in
+        // 150ms while visible (instant cue tracking); ~1s backgrounded/screen-off
+        // where nobody sees it (battery). updateNowPlaying keeps the lock screen
+        // correct via the playbackRate-extrapolated scrubber regardless.
+        let interval: TimeInterval = uiVisible ? 0.15 : 1.0
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             guard let self = self, let p = self.player else { return }
             self.emitPosition(positionMs: Int(p.currentTime * 1000),
                               durationMs: Int(p.duration * 1000),
                               playing: p.isPlaying)
+            // Durable place snapshot ~every 5s while playing (BookPlayer-style).
+            let now = Date().timeIntervalSince1970
+            if p.isPlaying && now - self.lastDurableSaveAt >= 5 { self.saveLastPositionNow() }
             if !p.isPlaying {
                 self.stopPositionTimer()
             }
