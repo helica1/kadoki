@@ -34,10 +34,18 @@
     // alive so the cursor resumes the moment layout settles. Refreshing _tickTs
     // avoids a large frameDt jump on the resuming frame.
     if (state.canvas && state.canvas.clientWidth <= 0) {
+      // Keep the loop alive so the cursor resumes once layout settles, but CAP
+      // the wait so a permanently-0-width / detached canvas (e.g. leaving card
+      // mode without pausing, or a #cardContainer innerHTML rebuild) can't spin
+      // a no-paint rAF at 60fps forever, pinning the main thread. After ~2s of
+      // 0-width give up; the next show()/position event restarts it.
+      state._tickWaits = (state._tickWaits || 0) + 1;
+      if (state._tickWaits > 120) { state._tickWaits = 0; playheadRAF = null; return; }
       state._tickTs = performance.now();
       playheadRAF = requestAnimationFrame(tickPlayhead);
       return;
     }
+    state._tickWaits = 0;
     // SMOOTH playhead: a free-running clock advanced at the CONSTANT requested
     // playback rate (constant velocity ⇒ no frame-to-frame speed wobble), only
     // GENTLY phase-locked to the real position. Measuring the rate from the
@@ -67,12 +75,19 @@
     if (Math.abs(err) > 1200) state.playheadDispMs = target;
     else state.playheadDispMs += err * 0.08;
     state.playheadInterpMs = state.playheadDispMs;
-    paintFromSnapshot();
     // Card mode: sweep through the window (incl. the silence to the next cue).
     // Editor (not cardMode): stop at the SELECTION end so a Preview never plays
     // past the chosen range.
     const _stopAt = state.cardMode ? state.wfEndMs : state.endMs;
-    if (state.playheadInterpMs >= _stopAt) {
+    const _stopping = state.playheadInterpMs >= _stopAt;
+    // ~30fps paint cap: the physics above runs every rAF for a smooth glide, but
+    // the clear+blit only needs ~30fps — halves the cursor's per-frame canvas
+    // cost across a whole card-mode listen. Always paint the final (stop) frame.
+    if (_stopping || now - (state._tickPaintTs || 0) >= 33) {
+      state._tickPaintTs = now;
+      paintFromSnapshot();
+    }
+    if (_stopping) {
       playheadRAF = null;
       return;
     }
@@ -750,6 +765,19 @@
       if (bg) {
         bg.addListener('position', (d) => {
           if (!state) return;
+          // Card-mode waveform that's currently OFF-SCREEN (user is in audio or
+          // read mode — #cardContainer is never display:none, so without this the
+          // listener would repaint an invisible canvas on every ~150ms position
+          // event for the whole listen). Track the position cheaply, stop the
+          // cursor rAF, and skip all paint/anim. The editor waveform (cardMode
+          // false) is unaffected. Nothing is torn down → no re-show needed; the
+          // next on-screen position event (or displayCard's show()) re-arms it.
+          if (state.cardMode && !document.body.classList.contains('mode-card')) {
+            if (Number.isFinite(d.positionMs)) state.playheadMs = d.positionMs;
+            state.playheadPlaying = !!d.playing;
+            stopPlayheadAnim();
+            return;
+          }
           const prevPos = state.playheadMs;
           const prevInterp = state.playheadInterpMs;
           // Measure the ACTUAL playback velocity (ms audio per ms real) from

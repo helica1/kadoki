@@ -2711,6 +2711,11 @@
   // Last time we persisted the audio playhead (throttle for the per-position
   // durability save below). Module-scoped so it throttles globally.
   let _abLastSaveAt = 0;
+  // Last time the top-left progress strip was updated from a position event.
+  // In READ mode the strip update scans every chunk via getBoundingClientRect
+  // (a forced synchronous reflow); at the raw ~6.7Hz position cadence that was
+  // a full-EPUB reflow 6-7x/sec for the whole whispersync listen. Throttle it.
+  let _abStripUpdateAt = 0;
 
   // ── Native-truth reconcile — fix for the BACKWARDS place-jump on resume ──
   // While the WebView is suspended (iOS background) or recreated (Android LMK),
@@ -2814,21 +2819,35 @@
           try { saveAudiobookLastPosition(_deck, abPositionRef.ms, _ci); } catch (_) {}
         }
       }
-      const label = document.getElementById('audiobookTimeLabel');
-      if (label) label.textContent = `${abFmtMs(abPositionRef.ms)} / ${abFmtMs(abPositionRef.durMs)}`;
-      if (!abScrubbing) {
-        const scrub = document.getElementById('audiobookScrub');
-        if (scrub && abPositionRef.durMs > 0) {
-          scrub.value = String(Math.round((abPositionRef.ms / abPositionRef.durMs) * 1000));
+      // The audiobook time label + scrub live on the (hidden) legacy audiobook
+      // view — only worth writing when audio mode is actually showing. Equality-
+      // guarded so an unchanged value isn't re-written every ~150ms tick. This
+      // listener is attached once and never removed, so without the mode gate it
+      // mutated hidden DOM ~6.7x/sec for the whole listen in card/read mode too.
+      const _inAudioMode = document.body.classList.contains('mode-audio');
+      if (_inAudioMode) {
+        const label = document.getElementById('audiobookTimeLabel');
+        const _lt = `${abFmtMs(abPositionRef.ms)} / ${abFmtMs(abPositionRef.durMs)}`;
+        if (label && label.textContent !== _lt) label.textContent = _lt;
+        if (!abScrubbing) {
+          const scrub = document.getElementById('audiobookScrub');
+          if (scrub && abPositionRef.durMs > 0) {
+            const _sv = String(Math.round((abPositionRef.ms / abPositionRef.durMs) * 1000));
+            if (scrub.value !== _sv) scrub.value = _sv;
+          }
         }
       }
       abUpdateCueDisplay(abPositionRef.ms);
-      // Drive the top-left progress strip from the audiobook position
-      // events too. Listener attaches the moment audio mode opens so
-      // the strip updates immediately on first audio-mode entry —
-      // without this, the strip stayed at "—" until a mode switch
-      // round-trip re-fired the cue-update path.
-      try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
+      // Drive the top-left progress strip from the audiobook position events too.
+      // Throttled to ~3Hz: in READ mode this scans every chunk via
+      // getBoundingClientRect (forced reflow) and at the raw ~6.7Hz cadence it
+      // was a full-EPUB reflow 6-7x/sec the whole whispersync session. app.js's
+      // own position-strip caller is already throttled to 300ms; match it.
+      const _nowStrip = Date.now();
+      if (_nowStrip - _abStripUpdateAt >= 300) {
+        _abStripUpdateAt = _nowStrip;
+        try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
+      }
     });
     bg.addListener('state', (d) => {
       const btn = document.getElementById('audiobookPlayPause');

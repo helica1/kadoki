@@ -342,10 +342,19 @@
   }
 
   // ---------- continuous rAF loop (visible only) ----------
+  // ~30fps draw cap: rAF fires ~60fps but a slow left-scrolling waveform needs
+  // no more than ~30fps. Gating draw() on an elapsed-time accumulator ~halves
+  // GPU/CPU and the per-frame gradient allocation on the primary listening
+  // screen (a confirmed battery win) with no perceptible difference.
+  let lastDrawAt = 0;
+  const DRAW_MIN_MS = 33;
   function frame() {
     if (!running) { rafHandle = null; return; }
     const inAudio = document.body.classList.contains('mode-audio') && waveformPrefOn();
-    if (inAudio) { try { draw(); } catch (e) {} }
+    if (inAudio) {
+      const _t = performance.now();
+      if (_t - lastDrawAt >= DRAW_MIN_MS) { lastDrawAt = _t; try { draw(); } catch (e) {} }
+    }
     // Keep the loop alive only while playing, or briefly after a wake so the
     // ease settles; otherwise idle to save battery. Leaving audio mode also
     // idles it (setVisible(false) calls stopLoop, this is the backstop).
@@ -393,6 +402,11 @@
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (!bg?.addListener) { setTimeout(attachBg, 250); return; }
     bg.addListener('position', (d) => {
+      // Outside audio mode the live waveform is never drawn — skip the rate math
+      // + scheduleDraw (which would otherwise spawn a wasted rAF on every ~150ms
+      // native tick during a card/read listen). The 'state' listener below still
+      // tracks play/pause so re-entering audio mode resumes correctly.
+      if (!document.body.classList.contains('mode-audio')) return;
       if (Number.isFinite(d?.positionMs)) {
         const t = performance.now();
         if (lastPositionAt) {

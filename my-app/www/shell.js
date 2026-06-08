@@ -789,18 +789,18 @@
     const btn = el('shellPlayBtn');
     if (!btn) return;
     if (currentMode === 'audio') {
-      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
-      if (bg && typeof bg.getState === 'function') {
-        bg.getState().then(s => {
-          const actual = !!s.playing;
-          if (!_shouldApplyActualState(actual)) return;
-          if (window._lastBgPlaying !== actual) {
-            window._lastBgPlaying = actual;
-            setPlayBtnState(btn, actual);
-          }
-        }).catch(() => {});
-        return;
+      // Read the cached play state kept fresh by the bg 'state' event listener
+      // (app.js:3994 sets window._bgPlaying on every play/pause) instead of a
+      // bg.getState() native bridge round-trip every 800ms while in audio mode
+      // (incl. while paused/idle) — the event is authoritative, the poll was
+      // redundant native IPC.
+      const actual = !!window._bgPlaying;
+      if (!_shouldApplyActualState(actual)) return;
+      if (window._lastBgPlaying !== actual) {
+        window._lastBgPlaying = actual;
+        setPlayBtnState(btn, actual);
       }
+      return;
     }
     const playing = typeof window.isReadingPlaying === 'function' && window.isReadingPlaying();
     if (!_shouldApplyActualState(playing)) return;

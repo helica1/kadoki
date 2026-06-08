@@ -4591,8 +4591,18 @@ window.addEventListener('DOMContentLoaded', () => {
   // existence per-tap via dictStore.existsBulk, so there is no boot scan.)
 });
 
-/* Periodic persistence */
+/* Periodic persistence — dirty-checked so we don't issue two native Preferences
+ * (flash) writes every 5s forever even when nothing changed (the stopwatch is
+ * usually not running and the note counter rarely grows). Only writes the value
+ * that actually changed since the last write. */
+let _lastPersistedStopwatch = null, _lastPersistedNoteCount = null;
 setInterval(() => {
-  setPersistent('STOPWATCH_ELAPSED', stopwatchSeconds);
-  setPersistent('NOTE_COUNTER', viewedNotes.size);
+  if (stopwatchSeconds !== _lastPersistedStopwatch) {
+    _lastPersistedStopwatch = stopwatchSeconds;
+    setPersistent('STOPWATCH_ELAPSED', stopwatchSeconds);
+  }
+  if (viewedNotes.size !== _lastPersistedNoteCount) {
+    _lastPersistedNoteCount = viewedNotes.size;
+    setPersistent('NOTE_COUNTER', viewedNotes.size);
+  }
 }, 5000);
