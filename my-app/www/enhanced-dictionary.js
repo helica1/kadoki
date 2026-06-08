@@ -2982,6 +2982,17 @@
                 if (moved) return; // scrolled, not a tap
                 e.preventDefault();
                 e.stopPropagation();
+                // If the dict popup is already open, THIS tap is a dismiss — just
+                // close it and swallow the tap; do NOT trigger a new lookup on the
+                // tapped word. Mirrors read mode (a tap that dismisses the popup
+                // does nothing else). Stamp the dismissed-ts so other handlers
+                // (paged reader / global) also skip a same-gesture lookup.
+                const _pop = document.getElementById('dictPopup');
+                if (_pop && _pop.style.display !== 'none') {
+                    try { window.hideDictPopup?.(); } catch (_) {}
+                    window._dictPopupDismissedTs = Date.now();
+                    return;
+                }
                 bindCardLookupContext(span);
                 const text = spans.map(s => s.textContent).join('');
                 const charIndex = spans.slice(0, index)

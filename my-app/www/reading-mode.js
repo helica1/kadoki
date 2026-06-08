@@ -2953,23 +2953,44 @@
         if (Number.isFinite(readMs)) startMs = readMs;
       }
     }
+    let _floorRaised = false;   // true ⇒ native is already playing THIS audio ahead of the saved spot
     if (startMs == null) {
       const last = await getAudiobookLastPosition(deck);
       startMs = last.ms || 0;
       // Never resume BEHIND where this SAME audio is already playing natively.
       // On a warm resume (iOS suspended the WebView / Android recreated it while
       // the audio service survived) the saved value is stale but native kept
-      // advancing — the live playhead is the truth. url-gated (so we never adopt
-      // a DIFFERENT title's position) and forward-only (only raises startMs).
+      // advancing — the live playhead is the truth. url-matched (so we never adopt
+      // a DIFFERENT title's position) and FORWARD-ONLY (only raises startMs).
       // This is the core backwards-jump fix; it touches ONLY the stale-saved
       // fallback path — never the Bookmarks one-shot or a deliberate
       // seekToCurrentPosition (which may legitimately go backward to re-listen).
+      // Robust to: (a) the native bridge reporting not-ready for a tick right
+      // after foreground (brief retry — without it the floor was skipped and we
+      // seeked backward to the stale save); (b) url scheme/encoding differences
+      // between the saved path and what native reports (normalized compare).
       try {
         const _bg = window.Capacitor?.Plugins?.BackgroundAudio;
-        const _url = abAudioPath.startsWith('file://') ? abAudioPath : 'file://' + abAudioPath;
-        const _s = _bg && typeof _bg.getState === 'function' ? await _bg.getState() : null;
-        if (_s && _s.ready && _s.url && _s.url === _url && Number(_s.positionMs) > startMs) {
-          startMs = _s.positionMs;
+        // Strip ALL leading slashes after the scheme (file:// vs file:/// vary by
+        // platform) + decode, so the same file matches despite scheme/encoding.
+        const _norm = (u) => { try { return decodeURIComponent(String(u || '').replace(/^file:\/{2,}/, '')); } catch (_) { return String(u || '').replace(/^file:\/{2,}/, ''); } };
+        const _mine = _norm(abAudioPath);
+        if (_bg && typeof _bg.getState === 'function' && _mine) {
+          for (let _try = 0; _try < 4; _try++) {
+            let _s = null;
+            try { _s = await _bg.getState(); } catch (_) {}
+            if (!_s) break;                                   // no bridge state → nothing to floor
+            const _matches = _s.url && _norm(_s.url) === _mine;
+            if (_s.ready) {
+              if (_matches && Number(_s.positionMs) > startMs) { startMs = _s.positionMs; _floorRaised = true; }
+              break;                                          // ready → decision made (raise or not)
+            }
+            // Only WAIT when native is mid-spin-up of OUR audio (the case where a
+            // retry pays off). A dead service (cold boot, killed) or a different
+            // audio reports not-ready/other-url → break immediately, no wasted delay.
+            if (!_matches) break;
+            await new Promise((r) => setTimeout(r, 50));
+          }
         }
       } catch (_) {}
     }
@@ -3002,6 +3023,21 @@
             await bg.resume();
             didResume = true;
           }
+        } catch (_) {}
+      } else if (_floorRaised && pendingStartMs == null && !opts.seekToCurrentPosition) {
+        // Native is already playing THIS exact audio AHEAD of our saved spot (the
+        // floor above raised startMs to it). Resume in place instead of re-issuing
+        // play({startMs}) — which would re-seek the LIVE playhead back by
+        // AUDIO_START_OFFSET_MS (150ms) and cause a decode hitch on every warm
+        // re-entry. We already confirmed ready+matching-url+ahead, so this is
+        // forward-safe. Skipped for an explicit target / deliberate seek.
+        try {
+          await bg.resume();
+          didResume = true;
+          // We resumed at native's actual position (≈ startMs), NOT adjStart — so
+          // correct the session-start marker (it was set to adjStart=startMs-150
+          // above, which only applies when we play({adjStart})).
+          window._audiobookSessionStartMs = Math.max(0, Math.round(startMs));
         } catch (_) {}
       }
       if (!didResume) {
