@@ -996,6 +996,7 @@ window._srtCardToCueAnchor = function (cardIdx) {
 function updateCardIndex(newIndex) {
   if (newIndex >= 0 && newIndex < allNotes.length && newIndex !== currentCardIndex) {
     debugLog(`Updating card index from ${currentCardIndex} to ${newIndex}`);
+    const _prevIdx = currentCardIndex;   // for the per-PAGE stats gate below
     // A genuine card navigation (swipe / keyboard / number-jump / auto-advance)
     // lifts the open/restart auto-play suppression, so this card and the ones
     // after it play normally. The INITIAL card on open/restart sets
@@ -1022,19 +1023,37 @@ function updateCardIndex(newIndex) {
       try { window.pagedUpdateProgressForCue(window._srtCardToCueAnchor(newIndex)); } catch (_) {}
     }
 
-    // Save state whenever card changes
-    saveDeckState();
-    // Persist per-title card index for SRT-cards titles too. Saved in CUE space
-    // (the card's first cue) so combined cards restore to the right place even if
-    // the combine toggle / char limit changes — see the restore in loadTitleAsSrtCards.
-    if (window._activeTitleId && window.titleStore?.setCardIndex) {
-      window.titleStore.setCardIndex(window._activeTitleId, window._srtCardToCueAnchor(newIndex)).catch(() => {});
+    // Durable writes (deck state + per-title lastCardIndex) are the only costly
+    // part here. With 1 cue == 1 card, auto-advance calls this EVERY cue (~every
+    // few seconds) during continuous playback, so persisting on every silent
+    // advance would write the prefs blob N× more than the old per-page model.
+    // Throttle the durable writes during SILENT auto-advance to ~1.2s; a MANUAL
+    // nav (no _skipNextCardAudioRestart) always persists immediately. Place stays
+    // safe: the audio playhead is saved independently (native 5s + on pause), and
+    // on resume the card re-syncs to it — so a ≤1.2s-stale lastCardIndex self-
+    // corrects and never causes a backward jump. Saved in CUE space (== card
+    // index now) so a combine-pref / layout change still restores correctly.
+    const _isAutoAdvance = !!window._skipNextCardAudioRestart;
+    const _nowP = Date.now();
+    if (!_isAutoAdvance || !window._lastCardPersistAt || (_nowP - window._lastCardPersistAt) >= 1200) {
+      window._lastCardPersistAt = _nowP;
+      saveDeckState();
+      if (window._activeTitleId && window.titleStore?.setCardIndex) {
+        window.titleStore.setCardIndex(window._activeTitleId, window._srtCardToCueAnchor(newIndex)).catch(() => {});
+      }
     }
     // Stats: a card advance counts toward the card-mode counter (even if
     // it came from a swipe in card mode or a cross-mode sync). Also count
     // characters from the NEW card's expression so chars/hr reflects real
     // reading throughput, not just card flips.
-    if (window.stats?.incrementCardCount) window.stats.incrementCardCount();
+    // "Cards read" should count on-screen PAGES, not cues — with 1 cue == 1 card
+    // the auto-advance fires per cue, so gate the count on a real page change so
+    // the metric keeps its historical (per-visible-card) meaning. Chars are still
+    // summed per cue below (total throughput stays exact). [review #6]
+    const _pageChanged = !(Array.isArray(allNotes) && allNotes[0]?.isSrtCard && window._srtCueToPage &&
+      _prevIdx < window._srtCueToPage.length && newIndex < window._srtCueToPage.length &&
+      window._srtCueToPage[_prevIdx] === window._srtCueToPage[newIndex]);
+    if (_pageChanged && window.stats?.incrementCardCount) window.stats.incrementCardCount();
     if (window.stats?.incrementCardChars) {
       const newCard = allNotes[newIndex];
       const txt = newCard?.expression || '';
@@ -1228,12 +1247,20 @@ function _copyTextWithFlash(text, btnId) {
     } catch (e) { flash('FAILED'); }
   }
 }
-// Copy the WHOLE card (all combined subtitles). btnId defaults to the fixed
-// deck-card COPY pill so the existing index.html onclick still flashes it.
+// Copy the WHOLE visible card. For SRT-card titles that's the on-screen PAGE
+// (all visible cues); "Copy SRT" copies just the single active cue. btnId
+// defaults to the fixed deck-card COPY pill so the existing onclick still flashes.
 window.copyCurrentCardText = function (btnId) {
   const card = allNotes?.[currentCardIndex];
   if (!card) return;
-  _copyTextWithFlash(card.expression || '', btnId || 'cardCopyBtn');
+  let text = card.expression || '';
+  try {
+    if (card.isSrtCard && window._srtPages && window._srtCueToPage && window._srtPageText) {
+      const pg = window._srtPages[window._srtCueToPage[currentCardIndex]];
+      if (pg) text = window._srtPageText(pg) || text;
+    }
+  } catch (_) {}
+  _copyTextWithFlash(text, btnId || 'cardCopyBtn');
 };
 // Copy just the CURRENT (narrated/active) single subtitle. On a combined card
 // that's the active cue; on a single-cue card it's the whole (one-cue) card.
@@ -2889,7 +2916,9 @@ function _positionCardNextSub() {
     const wf = document.getElementById('srtCardWaveform');
     const row = document.getElementById('cardBtnRow');
     let boundaryTop = 0;
-    if (wf && wf.offsetParent !== null) boundaryTop = wf.getBoundingClientRect().top;
+    // Require real waveform height (not just offsetParent) so a freshly-shown-but-
+    // empty waveform doesn't mis-clamp the preview. [review P3]
+    if (wf && wf.offsetParent !== null && wf.getBoundingClientRect().height > 20) boundaryTop = wf.getBoundingClientRect().top;
     else if (row && row.offsetParent !== null) boundaryTop = row.getBoundingClientRect().top;
     sn.style.maxHeight = '';
     sn.classList.remove('subtitle-next-clamped');
@@ -2978,95 +3007,103 @@ async function displayCard() {
   // SRT-card path: this card's audio is a segment of an audiobook. Play via
   // BackgroundAudio plugin (no per-card mp3 file). Skip the new-Audio path.
   if (card.isSrtCard) {
-    const _combo = !!(window.comboCard && window.comboCard.isCombined(card));
-    // A single-subtitle SRT card has no "active cue" to highlight, so it would
-    // render white while combined cards highlight their playing line orange.
-    // Mark it .srt-active so the ONLY subtitle is colored like the current line.
-    const _subHtml = _combo
-      ? window.comboCard.buildSubtitleHTML(card)
-      : `<div class="subtitle-text srt-active">${card.expression}</div>`;
-    // Measure the "slot" = vertical distance from the live subtitle to the grayed
-    // upcoming subtitle, BEFORE we replace the DOM. The new active subtitle (whose
-    // text IS the old upcoming one) will rise from exactly that spot, so it reads
-    // as the upcoming subtitle scrolling up into the active position. offsetTop is
-    // used (not getBoundingClientRect) so a still-animating old card doesn't skew
-    // it. 0 ⇒ no visible upcoming subtitle → fall back to the default 40px rise.
-    let _cardSlot = 0;
-    try {
-      const _oldA = container.querySelector('.subtitle-text');
-      const _oldN = container.querySelector('.subtitle-next');
-      // offsetParent !== null rules out display:none (pref off); the inline
-      // visibility check rules out the clamp-hidden state (_positionCardNextSub
-      // sets visibility:hidden when there's no room) — both mean "no visible
-      // upcoming subtitle to rise from" → fall back to the default 40px rise.
-      if (_oldA && _oldN && _oldN.offsetParent !== null && _oldN.style.visibility !== 'hidden') {
-        const _d = _oldN.offsetTop - _oldA.offsetTop;
-        // Clamp so a very tall previous card doesn't start the new active far
-        // down the screen (janky); 100px is still a clear, deliberate scroll-up.
-        if (_d > 0) _cardSlot = Math.min(Math.round(_d), 100);
-      }
-    } catch (_) {}
-    container.innerHTML = `
-      ${_subHtml}
-      ${nextHtml}
-      <div id="srtCardWaveform" style="width:100%;max-width:none;margin:auto 0 6px 0;order:2;align-self:stretch;flex:0 0 auto;"></div>
-      <div id="cardBtnRow" class="card-btn-row" style="order:3;">
-        <button type="button" class="card-pill card-pill-icon" id="cardPlayBtn" aria-label="Play card from start" onclick="window.playCardFromStart && window.playCardFromStart()">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="4" y="5" width="2.6" height="14" rx="1"/><path d="M9 5l11 7-11 7z"/></svg>
-        </button>
-        <button type="button" class="card-pill" id="cardCopySrtBtn" onclick="window.copyCurrentSrtText && window.copyCurrentSrtText('cardCopySrtBtn')">Copy SRT</button>
-        <button type="button" class="card-pill" id="cardCopyCardBtn" onclick="window.copyCurrentCardText && window.copyCurrentCardText('cardCopyCardBtn')">Copy Card</button>
-        <button type="button" class="card-pill" id="autoAdvanceBtn" onclick="window.toggleAutoAdvance && window.toggleAutoAdvance()">Auto: ON</button>
-      </div>
-    `;
-    // The fixed COPY pill (index.html) is for DECK cards; hide it while an SRT
-    // card is showing (the in-row Copy SRT / Copy Card replace it).
-    document.body.classList.add('card-srt');
-    // Reflect the persisted auto-advance state on the freshly-built row button.
-    if (typeof _refreshAutoAdvanceBtn === 'function') _refreshAutoAdvanceBtn();
-    // Smooth card transition: the new subtitle rises up (from where the grayed
-    // upcoming subtitle sat) and resolves faint→full, so it reads as the next
-    // subtitle moving up and becoming active. Card mode + SRT only (Anki-deck
-    // flashcards keep their instant flip). Fresh element each card → re-runs.
-    const _riseEl = container.querySelector('.subtitle-text');
-    if (_riseEl) {
-      // Rise from the measured upcoming-subtitle slot (else the 40px fallback).
-      if (_cardSlot > 0) _riseEl.style.setProperty('--card-slot', _cardSlot + 'px');
-      // Keep the fresh upcoming subtitle hidden DURING the rise: its position is
-      // measured from the live subtitle, which is mid-transform, so it would be
-      // parked too low and flash. Reveal + place it once the rise settles.
-      const _nextEl = container.querySelector('.subtitle-next');
-      if (_nextEl) _nextEl.style.opacity = '0';
-      _riseEl.classList.add('card-rise');
-      _riseEl.addEventListener('animationend', () => {
-        _positionCardNextSub();                       // settled transform → correct position
-        const n = container.querySelector('.subtitle-next');
-        if (n) { n.style.transition = 'opacity .3s ease-out'; n.style.opacity = ''; }  // fade in to its CSS 0.42
-      }, { once: true });
-    }
-    // Wire dictionary tap handlers. For combined cards wrapSubtitleTokens skips
-    // the flatten (the per-cue spans are already built) and just wires the
-    // existing .dict-frag spans, so lookup works the same.
-    if (window.wrapSubtitleTokens) window.wrapSubtitleTokens();
-    if (_combo) {
-      window.comboCard.reset();
-      // Paint the first subtitle now, then snap to the LIVE native playhead so
-      // switching INTO card mode mid-sentence highlights the playing subtitle
-      // (and autoscrolls to it) without a flash of the first one.
-      window.comboCard.afterRender(container, card, card.audiobookStartMs || 0);
+    // PAGED card mode. card index == cue index (allNotes is 1 note per cue), so
+    // the card count == cue count and never shifts with layout. A "page" is a
+    // RENDER-time grouping of cues that fits the screen; the active cue
+    // (currentCardIndex) is highlighted within its page, and the page only
+    // re-flows when the active cue crosses a boundary (the "paged" feel).
+    const _pageIdx = (window._srtCueToPage && capturedIndex < window._srtCueToPage.length)
+      ? window._srtCueToPage[capturedIndex] : capturedIndex;
+    const _page = (window._srtPages && window._srtPages[_pageIdx]) ||
+                  { lo: capturedIndex, hi: capturedIndex, units: null, startDepth: 0 };
+    const _activeOrdinal = capturedIndex - _page.lo;
+    // FAST PATH: active cue is still inside the page already in the DOM → just
+    // move the orange highlight. No innerHTML rebuild, no rise animation, no
+    // waveform re-show (the page waveform stays; its cursor glides to the cue via
+    // the seek below). Keeps per-cue advance cheap during continuous playback.
+    // Fast path also applies to SINGLE-cue pages (no #comboSubtitle): when the
+    // page is unchanged, leave the existing DOM in place instead of rebuilding +
+    // re-firing the rise animation on a non-navigation displayCard (e.g. PLAY
+    // from paused, or a same-cue mode re-entry). For a single-cue page there's
+    // nothing to re-highlight; setActiveOrdinal below is a no-op there. [review #10]
+    const _fastPath = (window._lastRenderedTitleId === window._activeTitleId) &&
+                      (_pageIdx === window._lastRenderedPageIdx) &&
+                      !!container.querySelector('.subtitle-text');
+    if (_fastPath) {
+      try { window.comboCard.setActiveOrdinal(_activeOrdinal); } catch (_) {}
+    } else {
+      // PAGE REBUILD (open / page flip / re-fit): render the page block with the
+      // active cue highlighted and the next page grayed + faded below (cues that
+      // don't fit the page spill into that preview — "incomplete cues faded").
+      const _pageCard = window._buildSrtPageCard(_page);
+      const _combo = _pageCard.cueIndices.length > 1;
+      const _subHtml = _combo
+        ? window.comboCard.buildSubtitleHTML(_pageCard)
+        : `<div class="subtitle-text srt-active">${(window._srtCues && window._srtCues[capturedIndex] && window._srtCues[capturedIndex].text) || card.expression}</div>`;
+      // Grayed faded preview = the NEXT page's text (what the rise animation
+      // brings up when the active cue crosses this page's last cue).
+      const _nextPage = window._srtPages && window._srtPages[_pageIdx + 1];
+      const _nextTxt = _nextPage ? window._srtPageText(_nextPage) : '';
+      const _nextHtmlPage = _nextTxt ? `<div class="subtitle-next">${_nextTxt}</div>` : '';
+      // Measure the rise slot (old active → old next) BEFORE replacing the DOM,
+      // so the new page rises from exactly where the grayed preview sat.
+      let _cardSlot = 0;
       try {
-        const _bgp = window.Capacitor?.Plugins?.BackgroundAudio;
-        if (_bgp?.getState) Promise.resolve(_bgp.getState()).then((s) => {
-          // Bail if the user swiped to another card while getState was in flight
-          // (else we'd paint the new card's element from the old card's cues).
-          if (allNotes[currentCardIndex] !== card) return;
-          if (s && Number.isFinite(s.positionMs) && s.positionMs > 0) window.comboCard.updateActive(card, s.positionMs, true);
-        }).catch(() => {});
+        const _oldA = container.querySelector('.subtitle-text');
+        const _oldN = container.querySelector('.subtitle-next');
+        if (_oldA && _oldN && _oldN.offsetParent !== null && _oldN.style.visibility !== 'hidden') {
+          const _d = _oldN.offsetTop - _oldA.offsetTop;
+          if (_d > 0) _cardSlot = Math.min(Math.round(_d), 100);
+        }
       } catch (_) {}
-    }
-    requestAnimationFrame(_positionCardNextSub);
-    if (window.syncReadingToCard) {
-      try { window.syncReadingToCard(card.expression); } catch (e) {}
+      container.innerHTML = `
+        ${_subHtml}
+        ${_nextHtmlPage}
+        <div id="srtCardWaveform" style="width:100%;max-width:none;margin:auto 0 6px 0;order:2;align-self:stretch;flex:0 0 auto;"></div>
+        <div id="cardBtnRow" class="card-btn-row" style="order:3;">
+          <button type="button" class="card-pill card-pill-icon" id="cardPlayBtn" aria-label="Play card from start" onclick="window.playCardFromStart && window.playCardFromStart()">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="4" y="5" width="2.6" height="14" rx="1"/><path d="M9 5l11 7-11 7z"/></svg>
+          </button>
+          <button type="button" class="card-pill" id="cardCopySrtBtn" onclick="window.copyCurrentSrtText && window.copyCurrentSrtText('cardCopySrtBtn')">Copy SRT</button>
+          <button type="button" class="card-pill" id="cardCopyCardBtn" onclick="window.copyCurrentCardText && window.copyCurrentCardText('cardCopyCardBtn')">Copy Card</button>
+          <button type="button" class="card-pill" id="autoAdvanceBtn" onclick="window.toggleAutoAdvance && window.toggleAutoAdvance()">Auto: ON</button>
+        </div>
+      `;
+      // The fixed COPY pill (index.html) is for DECK cards; hide it while an SRT
+      // card is showing (the in-row Copy SRT / Copy Card replace it).
+      document.body.classList.add('card-srt');
+      if (typeof _refreshAutoAdvanceBtn === 'function') _refreshAutoAdvanceBtn();
+      // Smooth page transition: the new page rises up (from where the grayed
+      // next-page preview sat) and resolves faint→full — the "animation between
+      // pages." Fresh element each rebuild → re-runs.
+      const _riseEl = container.querySelector('.subtitle-text');
+      if (_riseEl) {
+        if (_cardSlot > 0) _riseEl.style.setProperty('--card-slot', _cardSlot + 'px');
+        const _nextEl = container.querySelector('.subtitle-next');
+        if (_nextEl) _nextEl.style.opacity = '0';
+        _riseEl.classList.add('card-rise');
+        _riseEl.addEventListener('animationend', () => {
+          _positionCardNextSub();                       // settled transform → correct position
+          const n = container.querySelector('.subtitle-next');
+          if (n) { n.style.transition = 'opacity .3s ease-out'; n.style.opacity = ''; }  // fade in to its CSS 0.42
+        }, { once: true });
+      }
+      // Wire dictionary tap handlers. For a multi-cue page wrapSubtitleTokens
+      // skips the flatten (the per-cue spans are already built) and just wires
+      // the existing .dict-frag spans, so per-cue lookup works the same.
+      if (window.wrapSubtitleTokens) window.wrapSubtitleTokens();
+      if (_combo) {
+        window.comboCard.reset();
+        // Highlight the ACTIVE cue (currentCardIndex), not the playhead — the
+        // index is the single source of truth, kept synced by auto-advance.
+        window.comboCard.afterRender(container, _pageCard, null, _activeOrdinal);
+      }
+      requestAnimationFrame(_positionCardNextSub);
+      window._lastRenderedPageIdx = _pageIdx;
+      window._lastRenderedTitleId = window._activeTitleId;
+      if (window.syncReadingToCard) {
+        try { window.syncReadingToCard(card.expression); } catch (e) {}
+      }
     }
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (bg && card.audiobookPath && card.audiobookStartMs != null) {
@@ -3123,26 +3160,23 @@ async function displayCard() {
         }
       }
     }
-    // Render the per-card waveform with draggable endpoints. Adjusting the
-    // bounds updates the card object in-memory; auto-advance and Anki sends
-    // will use the adjusted bounds. Continuous play re-shows this for each new
-    // cue; waveform.show() carries the playhead across a same-source re-show so
-    // the cursor glides through cue boundaries instead of cold-starting.
-    if (window.waveform && card.audiobookPath &&
+    // Render the per-PAGE waveform — REBUILD ONLY (on the fast path the page
+    // waveform stays and its cursor just glides to the new cue). It spans the
+    // whole page (first cue start → last cue end) plus the trailing silence up to
+    // the next page, so the cursor is seen advancing across the page as the
+    // orange highlight marches through its cues — and pre-renders the next page's
+    // window so a page flip is instant. waveform.show() carries the playhead
+    // across a same-source re-show so a flip doesn't cold-start the cursor.
+    if (!_fastPath && window.waveform && card.audiobookPath &&
         !document.body.classList.contains('pref-card-waveform-off')) {
-      // Window each card from its cue start through the trailing silence up to
-      // the NEXT cue (full width), so the playhead is seen advancing through the
-      // gap between cards — and pre-render the next card's window so its swap is
-      // instant (no decode flash).
-      const _i = capturedIndex;
-      const _nxt = allNotes[_i + 1], _nxt2 = allNotes[_i + 2];
+      const _cs = window._srtCues || [];
       const _WF_LEAD = 400, _WF_TRAIL = 1500;
+      const _pageSpan = (pg) => pg ? {
+        audiobookStartMs: (_cs[pg.lo] && _cs[pg.lo].startMs) || 0,
+        audiobookEndMs: (_cs[pg.hi] && _cs[pg.hi].endMs) || 0,
+      } : null;
       const _wfWin = (c, after) => {
         const s = Math.max(0, (c.audiobookStartMs || 0) - _WF_LEAD);
-        // Always include the WHOLE card through its last subtitle's end + a trail,
-        // so a long combined card's last subtitle is never cut off (the old
-        // _WF_MAX cap clipped it). Extend to the next card's start only when that
-        // gap is small.
         let e = (c.audiobookEndMs || 0) + _WF_TRAIL;
         if (after && Number.isFinite(after.audiobookStartMs) && after.audiobookStartMs > e &&
             (after.audiobookStartMs - (c.audiobookEndMs || 0)) <= _WF_TRAIL) {
@@ -3151,21 +3185,19 @@ async function displayCard() {
         if (e <= s) e = s + 1000;
         return { s, e };
       };
-      const _win = _wfWin(card, _nxt);
-      const _pre = _nxt ? _wfWin(_nxt, _nxt2) : null;
+      const _curSpan = _pageSpan(_page) || { audiobookStartMs: card.audiobookStartMs || 0, audiobookEndMs: card.audiobookEndMs || 0 };
+      const _nextSpan = _pageSpan(window._srtPages && window._srtPages[_pageIdx + 1]);
+      const _next2Span = _pageSpan(window._srtPages && window._srtPages[_pageIdx + 2]);
+      const _win = _wfWin(_curSpan, _nextSpan);
+      const _pre = _nextSpan ? _wfWin(_nextSpan, _next2Span) : null;
       window.waveform.show({
         container: document.getElementById('srtCardWaveform'),
         srcPath: card.audiobookPath,
-        startMs: card.audiobookStartMs,
-        endMs: card.audiobookEndMs,
+        startMs: _curSpan.audiobookStartMs,
+        endMs: _curSpan.audiobookEndMs,
         viewStartMs: _win.s, viewEndMs: _win.e,
-        cacheKey: 'c' + _i,
-        preload: _pre ? { viewStartMs: _pre.s, viewEndMs: _pre.e, key: 'c' + (_i + 1) } : null,
-        onChange: ({ startMs, endMs }) => {
-          card.audiobookStartMs = startMs;
-          card.audiobookEndMs = endMs;
-          _srtCardEndMs = endMs;
-        }
+        cacheKey: 'p' + _pageIdx,
+        preload: _pre ? { viewStartMs: _pre.s, viewEndMs: _pre.e, key: 'p' + (_pageIdx + 1) } : null,
       });
     }
     updateProgressBar();
@@ -3847,7 +3879,17 @@ window.ensureCardRenderedForActiveTitle = function () {
   try {
     if (!Array.isArray(window.allNotes) || window.allNotes.length === 0) return;
     if (window._activeTitleId == null) return;                       // unknown title — leave as-is
-    if (window._cardRenderedTitleId === window._activeTitleId) return; // already fresh
+    // Also re-render when the DOM page no longer contains the active cue, not
+    // only on a title change. persistReadCue (reading past a page boundary in
+    // read mode) advances currentCardIndex WITHOUT rendering a card, so a paused
+    // read→card re-entry could otherwise leave the stale page on screen with the
+    // wrong line highlighted (displayCard is now the sole highlight driver).
+    // displayCard is cheap when nothing moved (fast path). [review P2]
+    const _srt = !!window.allNotes[0]?.isSrtCard;
+    const _pageMismatch = _srt && window._srtCueToPage &&
+      window.currentCardIndex < window._srtCueToPage.length &&
+      window._srtCueToPage[window.currentCardIndex] !== window._lastRenderedPageIdx;
+    if (window._cardRenderedTitleId === window._activeTitleId && !_pageMismatch) return; // already fresh
     if (typeof window.displayCard === 'function') window.displayCard();
   } catch (_) {}
 };
@@ -4041,13 +4083,11 @@ function _ensureBgListenersForSrtCards() {
       window._lastStripUpdateAt = now;
       try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
     }
-    // Combined card: keep the orange highlight on the currently-narrated
-    // subtitle (and autoscroll it into view) as the playhead crosses sub-cues.
-    // updateActive early-returns when the active subtitle hasn't changed.
-    if (document.body.classList.contains('mode-card') && window.comboCard &&
-        Array.isArray(allNotes) && allNotes[currentCardIndex]?.combined) {
-      try { window.comboCard.updateActive(allNotes[currentCardIndex], d.positionMs || 0, false); } catch (_) {}
-    }
+    // Paged card mode: the orange highlight is driven by currentCardIndex (the
+    // active cue), which the auto-advance below keeps synced to the playhead via
+    // updateCardIndex → displayCard (fast path = move highlight). No separate
+    // playhead-driven highlight here (it would double-drive + drift across the
+    // inter-cue silence).
     // Continuous play-through (card mode, PLAY pressed): the audiobook flows
     // past cue boundaries — including the silences between sentences — and we
     // advance the DISPLAYED card to track the playhead WITHOUT restarting audio
@@ -4122,15 +4162,37 @@ window.computeCardLineBudget = function () {
     // (most accurate, device-exact); else estimate.
     let availH = 0;
     const sub = document.querySelector('#cardContainer .subtitle-text');
+    // Measure to the boundary BELOW the subtitle = the waveform when it's showing,
+    // else the button row (waveform pref off → display:none → offsetParent null) —
+    // the same boundary pick _positionCardNextSub uses. This sizes the page to the
+    // ACTUAL available height whether or not the waveform is visible, so a page
+    // never overflows into the waveform when it's shown (the reported bug).
     const wf = document.getElementById('srtCardWaveform');
-    if (sub && wf) {
+    const row = document.getElementById('cardBtnRow');
+    const waveOff = document.body.classList.contains('pref-card-waveform-off');
+    let boundaryTop = 0;
+    // Only treat the waveform as the boundary when it has REAL height. offsetParent
+    // alone is fooled by a freshly-shown-but-EMPTY (height≈0, margin-top:auto →
+    // bottom-pinned) waveform right after toggling the pref ON, which would size
+    // pages as if no waveform existed and then let a page overflow it once it
+    // actually renders (the reported "cues overwrite the waveform" bug). [review P3]
+    if (wf && wf.offsetParent !== null && wf.getBoundingClientRect().height > 20) {
+      boundaryTop = wf.getBoundingClientRect().top;
+    } else if (waveOff && row && row.offsetParent !== null) {
+      boundaryTop = row.getBoundingClientRect().top;
+    }
+    // (waveform ON but not yet laid out → boundaryTop stays 0 → use the estimate
+    // below, which conservatively reserves the waveform via bottomReserve.)
+    if (sub && boundaryTop > 0) {
       const subTop = sub.getBoundingClientRect().top;
-      const wfTop = wf.getBoundingClientRect().top;
-      if (wfTop > subTop + lineH) availH = wfTop - subTop - 8;
+      if (boundaryTop > subTop + lineH) availH = boundaryTop - subTop - 8;
     }
     if (!availH) {
-      const topReserve = 110;     // safe-area-top + --subtitle-offset + padding (estimate)
-      const bottomReserve = 200;  // waveform (~130) + button row (~46) + margins (~24)
+      // First open (no card laid out yet) → estimate. Reserve for the bottom
+      // cluster: waveform (~130) + button row (~46) + margins when the waveform
+      // is on, or just the button row when its pref is off.
+      const topReserve = 110;                      // safe-area-top + --subtitle-offset + padding
+      const bottomReserve = waveOff ? 90 : 200;    // (waveform 130 +) button row 46 + margins
       availH = Math.max(lineH * 2, vh - topReserve - bottomReserve);
     }
     const maxLines = Math.max(2, Math.floor(availH / lineH) - 1);  // −1 line breathing room
@@ -4146,58 +4208,124 @@ window.computeCardLineBudget = function () {
 window.applyComboMaxHeightVar = function (budget) {
   try {
     const b = budget || window.computeCardLineBudget();
-    if (b && Number.isFinite(b.maxHeightPx) && b.maxHeightPx > 0) {
-      document.documentElement.style.setProperty('--combo-max-h', b.maxHeightPx + 'px');
+    let px = (b && Number.isFinite(b.maxHeightPx)) ? b.maxHeightPx : 0;
+    // NEVER leave the CSS default (62vh — far taller than the gap above the
+    // waveform, which is exactly what let a page paint over the waveform). If the
+    // measure/estimate failed, fall back to the same conservative reserve the
+    // estimate branch uses (not a flat half-viewport, which over-allocates on
+    // short/landscape screens). [review #14]
+    if (!(px > 0)) {
+      const vh = window.innerHeight || 700;
+      const waveOff = document.body.classList.contains('pref-card-waveform-off');
+      px = Math.max(120, vh - 110 - (waveOff ? 90 : 200));
     }
+    document.documentElement.style.setProperty('--combo-max-h', px + 'px');
   } catch (_) {}
 };
 
-// Shared SRT-note builder (title-open + layout re-fit). Reads window._srtCombineOn
-// and groups with a LINE budget when one is provided.
+// Shared SRT-note builder (title-open + layout re-fit). ALWAYS one note per cue
+// → allNotes.length === cue count, currentCardIndex === cue index, swipe = ±1
+// cue. The multi-cue-on-screen view is now a RENDER-time PAGE (see
+// _computeSrtPages / the displayCard SRT branch), NOT baked into the note list,
+// so the card count never changes with layout (font / screen / waveform) and
+// place can't be lost to regrouping. cueToCard stays null (identity) — every
+// persistence/restore site already handles the null case as cue==card.
 window._buildSrtNotesFromCues = function (cues, abPath, budget) {
-  let notes, cueToCard = null;
-  if (window._srtCombineOn && window.cueGrouper && typeof window.cueGrouper.groupCues === 'function') {
+  const notes = cues.map((c) => ({
+    expression: c.text,
+    imageFilename: null, audioFilename: null, imageHtml: '', audioSrc: '',
+    audiobookPath: abPath,
+    audiobookStartMs: c.startMs,
+    audiobookEndMs: c.endMs,
+    cueIndex: c.index,
+    isSrtCard: true,
+  }));
+  return { notes, cueToCard: null };
+};
+
+// ---------------------------------------------------------------------------
+// Render-time PAGE layer. A "page" is a screen-fit run of cues shown together
+// in card mode (the active cue highlighted). Pages are a DISPLAY grouping only
+// — the note list stays 1-per-cue, so the card count == cue count regardless of
+// layout. _srtPages[p] = {lo, hi, units, startDepth} over cue indices;
+// _srtCueToPage[cueIdx] = page index. Recomputed on title-open + layout change;
+// currentCardIndex (place) is never touched by a recompute.
+// ---------------------------------------------------------------------------
+window._srtPages = null;
+window._srtCueToPage = null;
+window._computeSrtPages = function (budget) {
+  const cues = window._srtCues;
+  if (!Array.isArray(cues) || !cues.length) { window._srtPages = null; window._srtCueToPage = null; return; }
+  let groups;
+  // _srtCombineOn OFF ⇒ one cue per page (single-cue cards). ON (default) ⇒
+  // pack cues into screen-fit pages via the (repurposed) cue grouper — same math
+  // that used to size the combined CARDS, now sizing display PAGES.
+  if (window._srtCombineOn !== false && window.cueGrouper && typeof window.cueGrouper.groupCues === 'function') {
     const opts = (budget && Number.isFinite(budget.maxLines) && Number.isFinite(budget.charsPerLine))
       ? { maxLines: budget.maxLines, charsPerLine: budget.charsPerLine }
       : { maxChars: 80 };
-    const grouped = window.cueGrouper.groupCues(cues, opts);
-    cueToCard = new Int32Array(cues.length);
-    notes = grouped.map((cd, ci) => {
-      cd.cueIndices.forEach((gi) => { if (gi >= 0 && gi < cueToCard.length) cueToCard[gi] = ci; });
-      return {
-        expression: cd.cueTexts.join(''),
-        imageFilename: null, audioFilename: null, imageHtml: '', audioSrc: '',
-        audiobookPath: abPath,
-        audiobookStartMs: cd.startMs,
-        audiobookEndMs: cd.endMs,
-        cueIndex: cd.cueIndices[0],
-        isSrtCard: true,
-        combined: cd.cueIndices.length > 1,
-        cueIndices: cd.cueIndices,
-        cueTexts: cd.cueTexts,
-        cueStartMs: cd.cueStartMs,
-        cueEndMs: cd.cueEndMs,
-        units: cd.units,
-      };
-    });
+    groups = window.cueGrouper.groupCues(cues, opts) || [];
   } else {
-    notes = cues.map((c) => ({
-      expression: c.text,
-      imageFilename: null, audioFilename: null, imageHtml: '', audioSrc: '',
-      audiobookPath: abPath,
-      audiobookStartMs: c.startMs,
-      audiobookEndMs: c.endMs,
-      cueIndex: c.index,
-      isSrtCard: true,
-    }));
+    groups = cues.map((c, i) => ({ cueIndices: [i] }));
   }
-  return { notes, cueToCard };
+  const pages = [];
+  const cueToPage = new Int32Array(cues.length);
+  let covered = 0;
+  groups.forEach((g) => {
+    const idxs = g.cueIndices;
+    if (!idxs || !idxs.length) return;
+    const lo = idxs[0], hi = idxs[idxs.length - 1];
+    const p = pages.length;
+    pages.push({ lo, hi, units: g.units, startDepth: g.startDepth || 0 });
+    for (let c = lo; c <= hi && c < cueToPage.length; c++) { cueToPage[c] = p; covered++; }
+  });
+  // Safety: the grouper should cover every cue contiguously, but if it ever
+  // didn't, fall back to 1-cue pages so no cue is unaddressable (place safety).
+  if (covered !== cues.length || !pages.length) {
+    pages.length = 0;
+    for (let i = 0; i < cues.length; i++) { pages.push({ lo: i, hi: i, units: null, startDepth: 0 }); cueToPage[i] = i; }
+  }
+  window._srtPages = pages;
+  window._srtCueToPage = cueToPage;
 };
 
-// Re-group the active SRT-card title for the current screen size — PLACE-SAFE.
-// Fires on orientation / font-size change (not normal reading). Anchors on the
-// cue currently shown, regroups, then re-displays the card holding that cue —
-// never resets to 0 (honors the never-lose-place invariant).
+// Transient comboCard-shaped object for one page (a contiguous cue slice).
+window._buildSrtPageCard = function (page) {
+  const cues = window._srtCues || [];
+  const lo = page.lo, hi = page.hi;
+  const cueTexts = [], cueStartMs = [], cueEndMs = [], cueIndices = [];
+  for (let i = lo; i <= hi; i++) {
+    const c = cues[i] || {};
+    cueTexts.push((c.text || '').trim());
+    cueStartMs.push(c.startMs);
+    cueEndMs.push(c.endMs);
+    cueIndices.push(i);
+  }
+  return {
+    combined: cueIndices.length > 1,
+    cueTexts, cueStartMs, cueEndMs, cueIndices,
+    units: page.units || [[0, Math.max(0, hi - lo)]],
+    startDepth: page.startDepth || 0,
+    startMs: cueStartMs[0], endMs: cueEndMs[cueEndMs.length - 1],
+    audiobookPath: window._srtAbPath,
+  };
+};
+
+// Plain joined text of a page — the grayed/faded .subtitle-next preview of the
+// NEXT page (parity with the old next-card preview: raw cue text).
+window._srtPageText = function (page) {
+  const cues = window._srtCues || [];
+  let t = '';
+  for (let i = page.lo; i <= page.hi; i++) t += (cues[i] && cues[i].text ? cues[i].text : '');
+  return t;
+};
+
+// Re-fit the active SRT-card title for the current screen size — PLACE-SAFE BY
+// CONSTRUCTION. Fires on orientation / font-size / waveform-toggle change. The
+// note list (1 per cue) NEVER changes with layout, so this only recomputes the
+// render PAGE boundaries and re-renders the page holding the (unchanged) active
+// cue. currentCardIndex is never reassigned → a re-fit can't move the user's
+// place (this deletes the old cue↔card index remap that used to run here).
 window._refitSrtCardsForLayout = function () {
   try {
     if (!Array.isArray(window.allNotes) || !window.allNotes.length) return;
@@ -4205,29 +4333,23 @@ window._refitSrtCardsForLayout = function () {
     if (!Array.isArray(window._srtCues) || !window._srtCues.length) return;
     const budget = window.computeCardLineBudget();
     window.applyComboMaxHeightVar(budget);
-    // Skip the (heavier) regroup when the budget didn't materially change — a
-    // keyboard resize etc. Always update the max-height var above though.
+    // Skip the (heavier) page recompute when the budget didn't materially change
+    // (a keyboard resize etc.). The max-height var was already updated above.
     const prev = window._lastCardBudget;
     if (prev && budget && prev.maxLines === budget.maxLines && prev.charsPerLine === budget.charsPerLine) return;
     window._lastCardBudget = budget;
-    if (!window._srtCombineOn) return;  // not combining → 1 cue == 1 card, nothing to regroup
-    // Anchor: first cue of the card currently shown.
-    const anchorCue = (typeof window._srtCardToCueAnchor === 'function')
-      ? window._srtCardToCueAnchor(window.currentCardIndex) : null;
-    const rebuilt = window._buildSrtNotesFromCues(window._srtCues, window._srtAbPath, budget);
-    if (!rebuilt || !rebuilt.notes || !rebuilt.notes.length) return;
-    allNotes = rebuilt.notes;
-    window.allNotes = allNotes;
-    window._srtCueToCard = rebuilt.cueToCard;
-    let idx = 0;
-    if (Number.isFinite(anchorCue) && rebuilt.cueToCard &&
-        anchorCue >= 0 && anchorCue < rebuilt.cueToCard.length) idx = rebuilt.cueToCard[anchorCue];
-    idx = Math.max(0, Math.min(rebuilt.notes.length - 1, idx));
-    currentCardIndex = idx;
-    window.currentCardIndex = idx;
-    window._cardRenderedTitleId = null;          // force a fresh render
-    window._skipNextCardAudioRestart = true;     // don't restart audio on re-display
-    if (document.body.classList.contains('mode-card') && typeof displayCard === 'function') displayCard();
+    window._computeSrtPages(budget);             // re-flow display pages only
+    window._lastRenderedPageIdx = -1;            // page set changed → force a rebuild
+    // Arm the audio-restart skip ONLY when we're actually about to re-render in
+    // card mode. Arming it unconditionally would leave a STALE flag when the
+    // refit fires in read/audio mode (no displayCard to consume it) — a later
+    // swipe would then take the silent branch (no bg.seek, no _cardAdvanceGuard)
+    // and the next position event would snap the card back to the playhead,
+    // reverting the swipe (a backward jump). [review P1]
+    if (document.body.classList.contains('mode-card') && typeof displayCard === 'function') {
+      window._skipNextCardAudioRestart = true;
+      displayCard();
+    }
     if (typeof updateProgressBar === 'function') updateProgressBar();
   } catch (e) { try { debugLog('refit: ' + (e?.message || e)); } catch (_) {} }
 };
@@ -4333,7 +4455,12 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   window._lastCardBudget = _budget;
   const _built = window._buildSrtNotesFromCues(cues, ab.cachePath, _budget);
   let notes = _built.notes, cueToCard = _built.cueToCard;
-  window._srtCueToCard = cueToCard;   // null ⇒ 1 cue == 1 card
+  window._srtCueToCard = cueToCard;   // null ⇒ 1 cue == 1 card (always)
+  // Build the render-time page layer for the current screen, and force a fresh
+  // page render on open.
+  window._computeSrtPages(_budget);
+  window._lastRenderedPageIdx = -1;
+  window._lastRenderedTitleId = null;
 
   // Stop any prior background-processing of a previous deck.
   if (typeof backgroundProcessor === 'object' && backgroundProcessor) {

@@ -2913,12 +2913,16 @@
                 const idx = window.currentCardIndex;
                 const card = Array.isArray(window.allNotes) ? window.allNotes[idx] : null;
                 if (!card) { window.lookupContext = null; return; }
-                // Combined card: bind to the TAPPED subtitle (or the active one),
-                // so "send word to Anki" defaults to that SINGLE subtitle's bounds.
-                // The waveform editor still lets the user expand to neighbors.
-                if (card.isSrtCard && card.combined) {
+                // Paged card: a multi-cue PAGE is rendered as a #comboSubtitle of
+                // tappable .combo-cue spans (in the paged model every NOTE is 1
+                // cue, so don't gate on card.combined — detect the rendered combo
+                // DOM). Bind to the TAPPED cue (or the active one) so lookup/Send
+                // defaults to that single subtitle's bounds; the waveform editor
+                // still lets the user expand to neighbors.
+                const _comboRoot = document.getElementById('comboSubtitle');
+                if (card.isSrtCard && _comboRoot && _comboRoot.querySelector('.combo-cue')) {
                     const cueEl = (tappedEl && tappedEl.closest) ? tappedEl.closest('.combo-cue') : null;
-                    const src = cueEl || document.querySelector('#comboSubtitle .combo-cue-active');
+                    const src = cueEl || _comboRoot.querySelector('.combo-cue-active');
                     if (src) {
                         const cs = parseFloat(src.getAttribute('data-cs'));
                         const ce = parseFloat(src.getAttribute('data-ce'));
@@ -2930,7 +2934,16 @@
                             cueEndMs:   Number.isFinite(ce) ? ce : card.audiobookEndMs,
                             cueIndex:   parseInt(src.getAttribute('data-gi')),
                             cues: null,
-                            comboCardText: (card.cueTexts || []).join('')
+                            // Full on-screen PAGE text (for a future "expand to card").
+                            // In the paged model the note is 1 cue with no cueTexts;
+                            // derive the page text from the page layer.
+                            comboCardText: (function () {
+                                try {
+                                    const pg = window._srtPages && window._srtCueToPage &&
+                                        window._srtPages[window._srtCueToPage[idx]];
+                                    return (pg && window._srtPageText) ? window._srtPageText(pg) : (card.expression || '');
+                                } catch (_) { return card.expression || ''; }
+                            })()
                         };
                         return;
                     }

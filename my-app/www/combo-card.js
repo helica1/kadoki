@@ -140,55 +140,84 @@
 
   // After the card HTML is in the DOM: capture-phase tap binding (so the tapped
   // subtitle's context is set BEFORE the dict lookup fires) + initial highlight.
-  function afterRender(container, card, posMs) {
+  // posMs path (legacy/playhead) OR an explicit window-local ORDINAL (the paged
+  // renderer: the active cue is currentCardIndex, so the highlight is driven by
+  // the index, not the playhead). When `ordinal` is a finite number it wins.
+  function afterRender(container, card, posMs, ordinal) {
     const root = container.querySelector('#comboSubtitle');
     if (!root) return;
+    _curCard = card;
     preventOrphans(root);
     if (!root._comboTapHooked) {
       root._comboTapHooked = true;
       root.addEventListener('pointerdown', (e) => {
         const cueEl = e.target && e.target.closest ? e.target.closest('.combo-cue') : null;
-        if (cueEl) bindCueContext(cueEl, card);
+        if (cueEl) bindCueContext(cueEl, _curCard);
       }, true);
     }
-    updateActive(card, posMs, true);
+    if (Number.isFinite(ordinal)) { _lastOrdinal = -1; setActiveOrdinal(ordinal); }
+    else updateActive(card, posMs, true);
   }
 
   // Find the active subtitle for a playhead position and paint it orange +
   // autoscroll. ordinal = last cue whose start <= posMs (clamped to 0).
   let _lastOrdinal = -1;
+  let _curCard = null;   // the page/window card currently rendered in the DOM
   function activeOrdinal(card, posMs) {
     const starts = card.cueStartMs;
     let o = 0;
     for (let i = 0; i < starts.length; i++) { if (starts[i] <= posMs) o = i; else break; }
     return o;
   }
+  // Paint the orange highlight on the cue at window-local ordinal `o` and point
+  // the lookup/Anki context at it (overridden on a specific tap by the capture
+  // listener in afterRender). No autoscroll: the page is screen-fit +
+  // overflow:hidden (never scrolls, to keep the swipe up/down transport).
+  function paintOrdinal(o) {
+    const root = document.getElementById('comboSubtitle');
+    if (!root) return;
+    const cues = root.querySelectorAll('.combo-cue');
+    let activeEl = null;
+    cues.forEach((el) => { if (parseInt(el.getAttribute('data-co')) === o) activeEl = el; });
+    // An all-whitespace/empty cue produces no .combo-cue span for its ordinal
+    // (buildSubtitleHTML only emits spans for chars). Keep the PRIOR highlight +
+    // context rather than clearing everything, so a blank music/sound cue doesn't
+    // make the highlight vanish for its whole duration.
+    if (!activeEl) return;
+    _lastOrdinal = o;
+    cues.forEach((el) => el.classList.toggle('combo-cue-active', el === activeEl));
+    if (_curCard) bindCueContext(activeEl, _curCard);
+    window._comboActiveContext = ctxFromCueEl(activeEl);
+    // Keep the highlighted line visible inside a CLIPPED page (a long single
+    // sentence spanning several cues can exceed --combo-max-h; .combo is
+    // overflow:hidden, not scroll). Scroll the clip box programmatically —
+    // overflow:hidden still honors scrollTop, so the swipe up/down transport is
+    // preserved (the box is never user-scrollable).
+    try {
+      if (root.scrollHeight > root.clientHeight + 1) {
+        const top = activeEl.offsetTop, bot = top + activeEl.offsetHeight;
+        if (top < root.scrollTop) root.scrollTop = Math.max(0, top - 8);
+        else if (bot > root.scrollTop + root.clientHeight) root.scrollTop = bot - root.clientHeight + 8;
+      }
+    } catch (_) {}
+  }
+  // Highlight the active cue by its window-local ordinal (currentCardIndex −
+  // page.lo). Used by the paged renderer's fast path (move the highlight without
+  // a full re-render). No-op if the ordinal hasn't changed.
+  function setActiveOrdinal(o) {
+    if (!Number.isFinite(o) || o === _lastOrdinal) return;
+    paintOrdinal(o);
+  }
   function updateActive(card, posMs, force) {
     const root = document.getElementById('comboSubtitle');
     if (!root || !isCombined(card)) return;
     const o = (Number.isFinite(posMs) && posMs > 0) ? activeOrdinal(card, posMs) : 0;
     if (!force && o === _lastOrdinal) return;
-    _lastOrdinal = o;
-    const cues = root.querySelectorAll('.combo-cue');
-    let activeEl = null;
-    cues.forEach((el) => {
-      const on = parseInt(el.getAttribute('data-co')) === o;
-      el.classList.toggle('combo-cue-active', on);
-      if (on) activeEl = el;
-    });
-    // Default the lookup/Anki context to the playing subtitle (overridden on a
-    // specific tap by the capture listener above).
-    if (activeEl) {
-      bindCueContext(activeEl, card);
-      window._comboActiveContext = ctxFromCueEl(activeEl);
-      // No autoscroll: combined cards are screen-fit + overflow:hidden (never
-      // scroll, to keep the swipe up/down transport shortcuts). The whole card
-      // is visible, so the active subtitle is always in view. (A scrollIntoView
-      // here would instead scroll the #cardContainer ancestor on a clipped card.)
-    }
+    _curCard = card;
+    paintOrdinal(o);
   }
 
-  function reset() { _lastOrdinal = -1; }
+  function reset() { _lastOrdinal = -1; _curCard = null; }
 
   // For the swipe-up card send: the single active subtitle's text/bounds.
   function activeContext(card) {
@@ -196,5 +225,5 @@
     return window._comboActiveContext || ctxFromCueEl(document.querySelector('#comboSubtitle .combo-cue-active'));
   }
 
-  window.comboCard = { isCombined, buildSubtitleHTML, afterRender, updateActive, reset, activeContext };
+  window.comboCard = { isCombined, buildSubtitleHTML, afterRender, updateActive, setActiveOrdinal, reset, activeContext };
 })();
