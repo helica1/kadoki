@@ -1607,19 +1607,60 @@
     _edgeMaskRafPending = true;
     requestAnimationFrame(() => { _edgeMaskRafPending = false; try { _updateEdgeMask(); } catch (_) {} });
   }
+  // True when a top-2/3 horizontal swipe should navigate SUBTITLES instead of
+  // turning the page: an audiobook+SRT title (cues exist) with a known current
+  // cue. Pure EPUB-only books (no cues) keep the whole-page page-turn unchanged.
+  function _readerCueSwipeAvailable() {
+    const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+    if (!cues.length) return false;
+    const cur = (Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0)
+      ? window._lastAudioCueIdx
+      : (Number.isFinite(lastReadCueIdx) ? lastReadCueIdx : -1);
+    return cur >= 0;
+  }
+
+  // Read-mode "transport" swipe: a horizontal swipe in the TOP 2/3 of the reader
+  // navigates by ONE SUBTITLE (like card / audio mode) instead of turning the
+  // page. Seeks the audiobook to the prev/next cue with the same brief audio
+  // fade, and moves the reader (paint + smooth scroll) to follow — so it works
+  // whether audio is playing or paused. Base = the active (highlighted) cue =
+  // the audio playhead, like the other modes' transport; falls back to the read
+  // cursor if the playhead is unknown. dir: +1 next subtitle, -1 previous.
+  function readerCueSwipe(dir) {
+    try {
+      const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+      if (!cues.length) return;
+      let cur = window._lastAudioCueIdx;
+      if (!Number.isFinite(cur) || cur < 0) cur = Number.isFinite(lastReadCueIdx) ? lastReadCueIdx : -1;
+      if (!Number.isFinite(cur) || cur < 0) return;
+      const target = Math.max(0, Math.min(cues.length - 1, cur + dir));
+      if (target === cur) return;   // already at the first / last cue
+      const cue = cues[target];
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (bg && cue && Number.isFinite(cue.startMs)) {
+        const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
+        try { bg.seek({ ms, fadeMs: 70 }); } catch (_) {}   // brief fade, like the other modes
+      }
+      window._lastAudioCueIdx = target;
+      if (typeof window.persistReadCue === 'function') { try { window.persistReadCue(target); } catch (_) {} }
+      try { ensureGreenOnEnter(target); } catch (_) {}       // move the reader to follow (paint + scroll)
+    } catch (e) { log('readerCueSwipe err: ' + (e?.message || e)); }
+  }
+
   function installPagedPhysics() {
     if (!scrollEl || scrollEl._physWired || !_physEnabled()) return;
     scrollEl._physWired = true;
     scrollEl.style.touchAction = 'none'; // take touch off the native scroller
     let sx = 0, sy = 0, anchor = 0;
     let committed = false;
+    let cueMode = false, cueDx = 0;   // top-2/3 horizontal swipe = subtitle nav (enriched titles)
     let lastX = 0, lastT = 0, vel = 0;
     let anchorMaskTotal = 0; // mask widths at the page we're turning FROM (for the page step)
     scrollEl.addEventListener('touchstart', (e) => {
       const t = e.touches?.[0]; if (!t) return;
       _cancelPhysAnim();
       sx = t.clientX; sy = t.clientY; anchor = scrollEl.scrollLeft;
-      committed = false; physDragging = false;
+      committed = false; physDragging = false; cueMode = false; cueDx = 0;
       // Captured NOW (page settled at the anchor) — during the drag the masks
       // update to the peeked position, which would skew the page step.
       anchorMaskTotal = (_maskLW || 0) + (_maskRW || 0);
@@ -1632,14 +1673,31 @@
       if (!committed) {
         if (adx > PHYS.COMMIT_PX && adx > ady) {
           committed = true; physDragging = true;
-          // A committed horizontal drag is the user actively reading — start
-          // (or keep alive) the read timer even for a slight jiggle that
-          // springs back. The native 'scroll' listener can't catch this: the
-          // physics drag tags its own scrollLeft writes as programmatic
-          // (lastProgrammaticScrollTime), which suppresses its bumpRead.
-          try { if (document.body.classList.contains('mode-read')) window.stats?.bumpRead?.(); } catch (_) {}
+          // ZONE SPLIT: a horizontal swipe that STARTS in the top 2/3 of the
+          // reader navigates SUBTITLES (one cue, like card/audio mode) instead of
+          // turning the page — but ONLY for enriched (audiobook+SRT) titles that
+          // have cues. EPUB-only books (no cues) keep the whole-page page-turn.
+          // The bottom 1/3 always turns the page.
+          const _rect = scrollEl.getBoundingClientRect();
+          const _localY = sy - _rect.top;
+          cueMode = (_localY >= 0 && _localY < _rect.height * (2 / 3)) && _readerCueSwipeAvailable();
+          // A committed horizontal PAGE drag is the user actively reading — start
+          // (or keep alive) the read timer even for a slight jiggle that springs
+          // back (NOT for a cue-nav swipe, which isn't a page move). The native
+          // 'scroll' listener can't catch this: the physics drag tags its own
+          // scrollLeft writes as programmatic (lastProgrammaticScrollTime), which
+          // suppresses its bumpRead.
+          if (!cueMode) { try { if (document.body.classList.contains('mode-read')) window.stats?.bumpRead?.(); } catch (_) {} }
         }
         else return; // vertical-first or still a tap → leave it to the other handlers
+      }
+      if (cueMode) {
+        // Don't rubber-band/peek the page; just block native scroll, remember the
+        // direction, and fire the cue nav on release (a discrete swipe like card
+        // mode, not a drag-follow).
+        if (e.cancelable) e.preventDefault();
+        cueDx = dx;
+        return;
       }
       if (e.cancelable) e.preventDefault();
       const now = Date.now();
@@ -1655,6 +1713,15 @@
     }, { passive: false });
     const onEnd = () => {
       if (!committed) { physDragging = false; return; }
+      if (cueMode) {
+        // Discrete subtitle swipe: navigate one cue by direction (swipe-left =
+        // forward = next subtitle, matching the page-turn + card mode). A small
+        // committed jiggle below the gesture threshold is a no-op.
+        if (Math.abs(cueDx) > 30) readerCueSwipe(cueDx < 0 ? 1 : -1);
+        cueMode = false; cueDx = 0;
+        setTimeout(() => { physDragging = false; }, 60);
+        return;
+      }
       const W = _columnWidth();
       const dim = scrollEl.clientWidth || cw || 360;
       // Advance by the columns actually VISIBLE BETWEEN the edge masks. Plain
