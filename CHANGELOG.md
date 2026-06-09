@@ -4,6 +4,11 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.4.2 — 2026-06-08
+
+### Fixed
+- **Android: the playback notification can now be dismissed.** The media notification (lock screen / notification shade) used to stay pinned forever once you'd played anything — even while paused — with no close button, so force-stopping the app was the only way to clear it. It now behaves like a normal media app: pinned while playing, and **swipe-to-dismiss when paused** (swiping it stops playback and clears it).
+
 ## v1.4.1 — 2026-06-08
 
 ### Changed

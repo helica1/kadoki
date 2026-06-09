@@ -214,7 +214,7 @@ public class BackgroundAudioService extends Service {
                     fadeOutThenPause(fadeMs);
                 }
             });
-            updateNotification("Paused");
+            showPausedNotification("Paused");
             updatePlaybackState();
             saveLastPositionNow();   // durably snapshot place on every pause
         } else if (ACTION_RESUME.equals(action)) {
@@ -224,7 +224,7 @@ public class BackgroundAudioService extends Service {
                     fadeInOnResume(fadeMs);
                 }
             });
-            updateNotification("Playing");
+            startInForeground("Playing");
             updatePlaybackState();
         } else if (ACTION_STOP.equals(action)) {
             stopPlayback();
@@ -254,6 +254,7 @@ public class BackgroundAudioService extends Service {
                 wantPlaying = false;
                 if (listener != null) listener.onEnded();
                 updatePlaybackState();
+                showPausedNotification("Finished");   // book ended → notification becomes dismissible
             }
         }
         @Override public void onPlayerError(PlaybackException error) {
@@ -323,7 +324,7 @@ public class BackgroundAudioService extends Service {
             try { p.setVolume(1f); } catch (Exception ignored) {}
         }
         wantPlaying = true;
-        updateNotification("Playing");
+        startInForeground("Playing");
         updatePlaybackState();
         if (listener != null) {
             listener.onPlayingStateChanged(true);
@@ -399,7 +400,7 @@ public class BackgroundAudioService extends Service {
             startPlayback(currentUrl);
             return;
         }
-        updateNotification("Playing");
+        startInForeground("Playing");
         updatePlaybackState();
         if (listener != null) {
             listener.onPlayingStateChanged(true);
@@ -473,7 +474,7 @@ public class BackgroundAudioService extends Service {
             // Publish the paused transport state now that wantPlaying is false
             // (the synchronous update in onStartCommand ran while still playing).
             updatePlaybackState();
-            updateNotification("Paused");
+            showPausedNotification("Paused");
             return;
         }
         rampVolume(1f, 0f, fadeMs);
@@ -493,7 +494,7 @@ public class BackgroundAudioService extends Service {
             // The state published in onStartCommand ran while wantPlaying was
             // still true (fade in flight); correct the lock screen to PAUSED now.
             updatePlaybackState();
-            updateNotification("Paused");
+            showPausedNotification("Paused");
             pendingPauseAfterFade = null;
         };
         fadeHandler.postDelayed(pendingPauseAfterFade, fadeMs);
@@ -679,6 +680,7 @@ public class BackgroundAudioService extends Service {
                 if (exo != null && prepared) {
                     exo.play();
                     wantPlaying = true;
+                    startInForeground("Playing");   // re-pin the notification while playing
                     if (listener != null) listener.onPlayingStateChanged(true);
                     updatePlaybackState();
                 }
@@ -695,6 +697,7 @@ public class BackgroundAudioService extends Service {
                     if (listener != null) listener.onPlayingStateChanged(false);
                     updatePlaybackState();
                 }
+                showPausedNotification("Paused");   // make the notification swipe-dismissible
             }
             @Override public void onSeekTo(long pos) {
                 seekToMs((int) pos);
@@ -738,26 +741,64 @@ public class BackgroundAudioService extends Service {
 
     // ----- Notification + lifecycle -----
 
+    // Promote to a foreground service with a PINNED (ongoing, non-dismissible)
+    // notification — used while PLAYING. The system forces a foreground service's
+    // notification ongoing, so this is what keeps it non-swipeable during playback.
     private void startInForeground(String text) {
-        Notification n = buildNotification(text);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // 34
-            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-        } else {
-            startForeground(NOTIFICATION_ID, n);
+        Notification n = buildNotification(text, true);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) { // 34
+                startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+            } else {
+                startForeground(NOTIFICATION_ID, n);
+            }
+        } catch (Exception e) {
+            // startForeground can throw if invoked from the background on Android
+            // 12+ (rare — promotion happens on user-initiated play). Fall back to a
+            // plain notification so the transport controls still appear.
+            Log.e(TAG, "startForeground", e);
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) nm.notify(NOTIFICATION_ID, n);
         }
     }
 
+    // Passive notification refresh (e.g. the subtitle changed) — keep the CURRENT
+    // dismiss state: pinned while playing, swipe-dismissible while paused.
     private void updateNotification(String text) {
-        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification(text));
+        if (wantPlaying) startInForeground(text);
+        else showPausedNotification(text);
     }
 
-    private Notification buildNotification(String text) {
+    // Demote from foreground so the (non-ongoing) notification becomes SWIPE-
+    // DISMISSIBLE — used while PAUSED / ENDED. The notification stays visible (with
+    // controls); swiping it away fires ACTION_STOP (setDeleteIntent) → stop + clear.
+    // We only ever demote when NOT actively playing, so the OS can't kill audio
+    // mid-playback; place is already saved, so a later kill is harmless.
+    private void showPausedNotification(String text) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(Service.STOP_FOREGROUND_DETACH);
+            } else {
+                stopForeground(false);
+            }
+        } catch (Exception ignored) {}
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification(text, false));
+    }
+
+    private Notification buildNotification(String text) { return buildNotification(text, true); }
+    private Notification buildNotification(String text, boolean ongoing) {
         Intent openApp = getPackageManager().getLaunchIntentForPackage(getPackageName());
         PendingIntent contentPi = openApp != null
             ? PendingIntent.getActivity(this, 0, openApp,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE)
             : null;
+        // Swipe-to-dismiss → stop. A non-ongoing (paused/ended) notification can be
+        // swiped away; that fires ACTION_STOP, which stops playback and clears it.
+        // Harmless while ongoing (it can't be swiped then).
+        PendingIntent stopPi = PendingIntent.getService(this, 1,
+            new Intent(this, BackgroundAudioService.class).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         // Display the current sentence (subtitle) as the title on lock screen
         // when set, with the book/app name as the secondary line.
         String displayTitle = (metaSubtitle != null && !metaSubtitle.isEmpty()) ? metaSubtitle : metaTitle;
@@ -766,7 +807,8 @@ public class BackgroundAudioService extends Service {
             .setContentTitle(displayTitle)
             .setContentText(displayText)
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setOngoing(true)
+            .setOngoing(ongoing)
+            .setDeleteIntent(stopPi)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
         if (metaArt != null) b.setLargeIcon(metaArt); // lock-screen cover art
