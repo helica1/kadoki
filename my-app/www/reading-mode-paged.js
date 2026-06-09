@@ -1643,8 +1643,29 @@
       }
       window._lastAudioCueIdx = target;
       if (typeof window.persistReadCue === 'function') { try { window.persistReadCue(target); } catch (_) {} }
+      // The seek lands at (target.start − AUDIO_START_OFFSET_MS), i.e. a beat
+      // BEFORE the target cue, so the first position event would make the live
+      // audio-follow briefly paint the PREVIOUS cue green before playback crosses
+      // in. Arm a guard so the live-follow holds the swiped-to highlight until the
+      // playhead actually reaches the target (mirrors the card-mode post-swipe
+      // guard). ensureGreenOnEnter below paints the target by INDEX (not guarded).
+      window._readerCueHlGuardTarget = target;
+      window._readerCueHlGuardUntil  = Date.now() + 1500;
       try { ensureGreenOnEnter(target); } catch (_) {}       // move the reader to follow (paint + scroll)
     } catch (e) { log('readerCueSwipe err: ' + (e?.message || e)); }
+  }
+
+  // True while a read-mode subtitle swipe is holding the highlight: the playhead
+  // hasn't yet reached the swiped-to cue, so a position-derived paint of an
+  // EARLIER cue should be suppressed (else the previous cue flashes green).
+  // Releases as soon as the playhead reaches the target, or after a failsafe.
+  function _readerCueHlGuarded(idx) {
+    const until = window._readerCueHlGuardUntil || 0;
+    if (!until || Date.now() > until) { window._readerCueHlGuardUntil = 0; return false; }
+    const target = window._readerCueHlGuardTarget;
+    if (!Number.isFinite(target)) return false;
+    if (idx >= target) { window._readerCueHlGuardUntil = 0; return false; }  // playhead arrived → release
+    return true;                                                            // still in the lead-in → hold
   }
 
   function installPagedPhysics() {
@@ -3304,6 +3325,7 @@
       return;
     }
     const idx = window.srtParser.findCueAtTime(pagedCues, positionMs);
+    if (_readerCueHlGuarded(idx)) return;   // post-swipe: hold the swiped-to green until the playhead arrives
     if (idx === lastHighlightedCue) return;
     lastHighlightedCue = idx;
     log(`onPositionUpdate: cue ${idx} @ ${positionMs}ms`);
@@ -4223,6 +4245,7 @@
       try { updateProgress({ cueIdx: idx }); } catch (_) {}
     }
     if (_readerHidden()) { clearCueHighlight(); return; }   // drop stale green: it would paint on the hidden-but-laid-out reader on iOS
+    if (_readerCueHlGuarded(idx)) return;   // post-swipe: hold the swiped-to green until the playhead arrives (no prev-cue flash)
     if (idx === lastHighlightedCue) return;
     lastHighlightedCue = idx;
     if (idx < 0 || !cue?.text) { clearCueHighlight(); return; }
