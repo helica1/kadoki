@@ -4,6 +4,23 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.4.1 — 2026-06-08
+
+### Changed
+- **Card mode shows one card per subtitle.** The number of cards now always equals the number of subtitles and never changes with screen size, font, or whether the waveform is shown — multiple subtitles still appear on screen at once (the current one highlighted), and a left/right swipe moves **exactly one subtitle**. Subtitles that don't fit fade out at the bottom, and the text no longer overflows into the waveform.
+
+### Added
+- **Read mode — swipe to move one subtitle.** In an audiobook + subtitle title, a horizontal swipe in the **top two-thirds** of the page jumps back/forward one subtitle (with the same brief audio fade as the other modes); the **bottom third** still turns the page. EPUB-only books keep full-page swipes everywhere.
+- **Dictionary popup font.** Pick the popup's font — System, Serif, Sans-serif, or any font you've imported — in **Preferences → Appearance → Dictionary popup**.
+
+### Fixed
+- **Reader dictionary lookups could miss the first character of a word** (you had to tap a little higher in vertical text / to the left in horizontal). Taps now reliably select the character under your finger.
+- **Dictionary popup placement in Card mode.** The popup now appears next to the word you tapped — above or below, whichever has room — instead of always at the bottom, so it no longer covers the surrounding text when the word is low on the screen.
+- **Your place is kept, more reliably.** The listening position is now saved by the audio player itself, so resuming after the app has been closed or backgrounded for a long time lands within a few seconds of where you were — including on Android.
+
+### Performance
+- **Lower battery use.** Waveforms animate more efficiently, off-screen animations idle instead of running, redundant background polling was removed, and the audio position updates less frequently while the screen is off.
+
 ## v1.4.0 — 2026-06-07
 
 ### Fixed

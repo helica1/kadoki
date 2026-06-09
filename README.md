@@ -86,8 +86,12 @@ A full epub reader designed specifically for narrated reading.
 
 | Gesture | Action |
 | --- | --- |
+| Swipe **left / right** (top ⅔) | Previous / next subtitle\* |
+| Swipe **left / right** (bottom ⅓) | Turn page |
 | Swipe **down** | Play / pause audio |
 | **Tap** a word | Open dictionary → "Set Playhead" |
+
+\*Subtitle navigation applies to audiobook + subtitle titles; EPUB-only books turn the page on any horizontal swipe.
 
 The rubber-band scrolling system lets you temporarily explore nearby lines without permanently losing your reading position. To keep the explored position visible until the next automatic page-follow, tap with another finger while scrolling.
 
