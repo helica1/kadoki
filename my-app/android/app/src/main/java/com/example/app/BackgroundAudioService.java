@@ -181,14 +181,16 @@ public class BackgroundAudioService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        // Safety: we were started via startForegroundService, so we MUST call
-        // startForeground within 5 seconds or Android will crash us. Get into
-        // foreground immediately, then process the action (including STOP,
-        // which itself calls stopForeground afterwards).
-        startInForeground(metaSubtitle.isEmpty() ? metaTitle : metaSubtitle);
-
         String action = intent != null ? intent.getAction() : null;
         Log.d(TAG, "onStartCommand action=" + action);
+        // We were started via startForegroundService (the plugin), so we MUST call
+        // startForeground within 5s or Android crashes us — promote here for every
+        // action EXCEPT STOP. STOP tears the service down itself; promoting first
+        // would, on a BACKGROUND notification-swipe (getService delivery), throw
+        // and leave a stuck non-foreground ongoing notification (the reported bug).
+        if (!ACTION_STOP.equals(action)) {
+            startInForeground(metaSubtitle.isEmpty() ? metaTitle : metaSubtitle);
+        }
         if (ACTION_PLAY.equals(action)) {
             String url = intent.getStringExtra(EXTRA_URL);
             int startMs = intent.getIntExtra(EXTRA_START_MS, 0);
@@ -227,8 +229,23 @@ public class BackgroundAudioService extends Service {
             startInForeground("Playing");
             updatePlaybackState();
         } else if (ACTION_STOP.equals(action)) {
+            // Briefly enter foreground to satisfy the startForegroundService 5s
+            // contract, then fully tear down + REMOVE the notification. try/catch
+            // covers the notification-swipe deleteIntent (getService delivery),
+            // where startForeground from the background can throw — we stop anyway.
+            try {
+                Notification n = buildNotification("", false);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                } else {
+                    startForeground(NOTIFICATION_ID, n);
+                }
+            } catch (Exception ignored) {}
+            saveLastPositionNow();      // persist BEFORE stopPlayback wipes currentUrl
             stopPlayback();
-            stopForeground(true);
+            stopForeground(true);       // STOP_FOREGROUND_REMOVE
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(NOTIFICATION_ID);
             stopSelf();
         }
         return START_NOT_STICKY;
@@ -264,6 +281,10 @@ public class BackgroundAudioService extends Service {
                 listener.onError("ExoPlayer error " + error.errorCode + "/" + error.getErrorCodeName());
             }
             updatePlaybackState(); // don't leave the lock screen stuck on STATE_PLAYING
+            // Demote so a playback error doesn't leave a pinned, non-dismissible
+            // notification with no audio (the reported stuck-notification bug on the
+            // error path). wantPlaying is false above, so this actually demotes.
+            showPausedNotification("Stopped");
         }
     };
 
@@ -697,6 +718,7 @@ public class BackgroundAudioService extends Service {
                     if (listener != null) listener.onPlayingStateChanged(false);
                     updatePlaybackState();
                 }
+                saveLastPositionNow();              // persist before the demote makes us reapable
                 showPausedNotification("Paused");   // make the notification swipe-dismissible
             }
             @Override public void onSeekTo(long pos) {
@@ -755,10 +777,11 @@ public class BackgroundAudioService extends Service {
         } catch (Exception e) {
             // startForeground can throw if invoked from the background on Android
             // 12+ (rare — promotion happens on user-initiated play). Fall back to a
-            // plain notification so the transport controls still appear.
+            // NON-ongoing (dismissible) notification — an ongoing one here would be
+            // stuck (not backed by a foreground service), the reported bug class.
             Log.e(TAG, "startForeground", e);
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-            if (nm != null) nm.notify(NOTIFICATION_ID, n);
+            if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification(text, false));
         }
     }
 
@@ -775,13 +798,19 @@ public class BackgroundAudioService extends Service {
     // We only ever demote when NOT actively playing, so the OS can't kill audio
     // mid-playback; place is already saved, so a later kill is harmless.
     private void showPausedNotification(String text) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(Service.STOP_FOREGROUND_DETACH);
-            } else {
-                stopForeground(false);
-            }
-        } catch (Exception ignored) {}
+        // Only DEMOTE when not actively playing — never drop foreground while audio
+        // is still playing. (Called from ACTION_PAUSE before the fade-out pause
+        // actually lands, where wantPlaying is briefly still true; the fade
+        // completion re-calls this with wantPlaying=false to perform the demote.)
+        if (!wantPlaying) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(Service.STOP_FOREGROUND_DETACH);
+                } else {
+                    stopForeground(false);
+                }
+            } catch (Exception ignored) {}
+        }
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification(text, false));
     }
@@ -851,6 +880,14 @@ public class BackgroundAudioService extends Service {
         saveLastPositionNow();                       // final durable snapshot
         playerHandler.removeCallbacks(durableSaveTick);
         stopPlayback();
+        // Remove the notification on teardown — a service destroyed while DEMOTED
+        // (paused) won't auto-clear its detached notification, which would leave it
+        // posted with no backing service.
+        try {
+            stopForeground(true);
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(NOTIFICATION_ID);
+        } catch (Exception ignored) {}
         if (mediaSession != null) {
             mediaSession.setActive(false);
             mediaSession.release();
