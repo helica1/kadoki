@@ -776,6 +776,23 @@
         p = p.parentNode;
       }
       if (!skip) {
+        // caretRangeFromPoint snaps to the nearest character BOUNDARY, so a tap
+        // past a glyph's midpoint returns the next boundary → the word would
+        // start one char too far in the reading direction ("misses the first
+        // letter", device-dependent on Android). Correct to the glyph whose box
+        // actually contains the tap (parallels reading-mode-paged.js).
+        try {
+          const _len = node.nodeValue ? node.nodeValue.length : 0;
+          const _in = (s, e) => {
+            if (s < 0 || e > _len || s >= e) return false;
+            const rr = document.createRange(); rr.setStart(node, s); rr.setEnd(node, e);
+            const rcs = rr.getClientRects();
+            for (let i = 0; i < rcs.length; i++) { const rc = rcs[i];
+              if (x >= rc.left - 0.5 && x <= rc.right + 0.5 && y >= rc.top - 0.5 && y <= rc.bottom + 0.5) return true; }
+            return false;
+          };
+          if (!_in(offset, offset + 1) && _in(offset - 1, offset)) offset = offset - 1;
+        } catch (_) {}
         let acc = 0;
         for (const tn of textNodes) {
           if (tn === node) { charIndex = acc + offset; break; }

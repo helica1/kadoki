@@ -2649,6 +2649,36 @@
     }
   };
 
+  // caretRangeFromPoint snaps to the nearest character BOUNDARY (the gap between
+  // glyphs), so a tap past a glyph's midpoint returns the NEXT boundary — which
+  // would start the word one character too far IN THE READING DIRECTION ("misses
+  // the first letter"; device-dependent because Android WebViews round
+  // differently; direction-dependent: users had to tap higher in tategaki / left
+  // in yokogaki to compensate). Refine the caret offset to the character whose
+  // ACTUAL glyph box contains the tap, so it's correct in both writing modes and
+  // on every device. Only ever corrects toward the char under the finger (or
+  // no-ops where the caret was already right) — never regresses a working tap.
+  function refineCharOffset(node, offset, x, y) {
+    try {
+      const len = node.nodeValue ? node.nodeValue.length : 0;
+      const hit = (s, e) => {
+        if (s < 0 || e > len || s >= e) return false;
+        const r = document.createRange();
+        r.setStart(node, s); r.setEnd(node, e);
+        const rects = r.getClientRects();
+        for (let i = 0; i < rects.length; i++) {
+          const rc = rects[i];
+          if (x >= rc.left - 0.5 && x <= rc.right + 0.5 &&
+              y >= rc.top - 0.5 && y <= rc.bottom + 0.5) return true;
+        }
+        return false;
+      };
+      if (hit(offset, offset + 1)) return offset;       // tap is over the char at the caret → keep
+      if (hit(offset - 1, offset)) return offset - 1;   // tap is over the PREVIOUS char (boundary snapped forward)
+    } catch (_) {}
+    return offset;                                       // gap/edge → trust the caret unchanged
+  }
+
   // Dict lookup via caretRangeFromPoint + CSS Custom Highlight API. No
   // DOM mutation, no scroll-state corruption.
   async function lookupAt(x, y) {
@@ -2668,6 +2698,9 @@
       if (t) { node = t; offset = 0; } else return;
     }
     if (!innerEl.contains(node)) return;
+    // Correct the half-character boundary snap so the word starts on the glyph
+    // actually under the finger (the "misses the first letter" fix).
+    offset = refineCharOffset(node, offset, x, y);
     // Walk up to nearest reading-chunk (or block-level ancestor).
     let cur = node.parentNode, chunk = null;
     while (cur && cur !== innerEl) {
