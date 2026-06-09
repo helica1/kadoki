@@ -1312,20 +1312,60 @@
         // display:flex always now; visibility is the toggle — check both.
         const pagedActive = pagedView && pagedView.style.display !== 'none' && pagedView.style.visibility !== 'hidden';
 
-        // Card mode: anchor below the subtitle text. Works for BOTH classic
-        // image+subtitle cards AND SRT-cards (subtitle + waveform, no image).
+        // Card mode: anchor to the LOOKED-UP WORD (the highlighted .dict-frag
+        // spans), flipping the popup ABOVE or BELOW the word to whichever side
+        // has more room — so a word low on the card no longer forces the popup to
+        // the very bottom (covering the continuation / next title), and a word
+        // high up lets it sit just below. Falls back to below the whole subtitle
+        // block when the word rect isn't available yet.
         const subtitleEl = document.querySelector('.subtitle-text');
         const subtitleVisible = subtitleEl && subtitleEl.offsetParent !== null;
         if (subtitleVisible && !pagedActive) {
-            const subRect = subtitleEl.getBoundingClientRect();
-            const top = Math.max(margin, subRect.bottom + margin);
-            const maxH = Math.min(vh * 0.72, 520, Math.max(180, vh - top - margin * 2));
             const w = Math.min(vw * 0.92, 560);
-            popup.style.width     = `${w}px`;
-            popup.style.height    = 'auto';
-            popup.style.maxHeight = `${maxH}px`;
-            popup.style.left      = `${(vw - w) / 2}px`;
-            popup.style.top       = `${top}px`;
+            const gap = 12;
+            const headerH = (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--app-header-h')) || 64);
+            const safeTop = headerH + margin;
+            const safeBottom = vh - margin;
+            popup.style.width  = `${w}px`;
+            popup.style.height = 'auto';
+            popup.style.left   = `${(vw - w) / 2}px`;
+            // Union rect of the highlighted (looked-up) word spans (lastHovered).
+            let wordTop = NaN, wordBottom = NaN;
+            try {
+                if (lastHovered && lastHovered.length) {
+                    let t = Infinity, b = -Infinity;
+                    for (const el of lastHovered) {
+                        const rc = el.getBoundingClientRect();
+                        if (rc && rc.width && rc.height) { t = Math.min(t, rc.top); b = Math.max(b, rc.bottom); }
+                    }
+                    if (b > t) { wordTop = t; wordBottom = b; }
+                }
+            } catch (_) {}
+            if (Number.isFinite(wordTop)) {
+                const spaceBelow = safeBottom - wordBottom - gap;
+                const spaceAbove = wordTop - safeTop - gap;
+                if (spaceBelow >= spaceAbove) {
+                    // Below the word.
+                    const top = wordBottom + gap;
+                    popup.style.maxHeight = `${Math.min(vh * 0.72, 520, Math.max(140, safeBottom - top))}px`;
+                    popup.style.top       = `${top}px`;
+                } else {
+                    // Above the word — set maxHeight, then measure the laid-out
+                    // height and pin `top` so the popup's bottom sits just above
+                    // the word (content-driven; uses `top` only, like every other
+                    // branch, since the popup is position:absolute).
+                    const maxH = Math.min(vh * 0.72, 520, Math.max(140, spaceAbove));
+                    popup.style.maxHeight = `${maxH}px`;
+                    const ph = Math.min(popup.offsetHeight || maxH, maxH);
+                    popup.style.top = `${Math.max(safeTop, (wordTop - gap) - ph)}px`;
+                }
+            } else {
+                // Fallback: below the whole subtitle block (original behavior).
+                const subRect = subtitleEl.getBoundingClientRect();
+                const top = Math.max(margin, subRect.bottom + margin);
+                popup.style.maxHeight = `${Math.min(vh * 0.72, 520, Math.max(180, vh - top - margin * 2))}px`;
+                popup.style.top       = `${top}px`;
+            }
             return;
         }
         // PAGED-READER fast path: text flows in vertical columns, so
@@ -3395,7 +3435,10 @@
            Reading sits above the term, source pill in mode color, sense
            cards with a numbered head row. */
         #dictPopup {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+            /* Dictionary popup font — user-selectable in Preferences → Appearance
+               (incl. imported TTF/OTF). Falls back to the system stack. Applies to
+               the word/readings/definitions (the chrome buttons set their own font). */
+            font-family: var(--font-family-dict, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", system-ui, sans-serif);
         }
         .dict-popup-playhead-section {
             margin: -4px 0 12px;

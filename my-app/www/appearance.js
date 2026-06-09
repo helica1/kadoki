@@ -46,8 +46,25 @@
              highlightStyle: 'text' },
     audio: { fontSize: '1.875rem', align: 'center', fontFamily: 'serif',
              imageDisplay: 'block', imageOpacity: 0.6, imageAlign: 'center',
-             showWaveform: true, showNextSub: false }
+             showWaveform: true, showNextSub: false },
+    // Dictionary popup — font only (not a reading "mode"). Default 'system'
+    // preserves the popup's original look; the picker also offers serif/sans +
+    // any imported custom TTF/OTF font.
+    dict:  { fontFamily: 'system' }
   };
+
+  // Resolve a stored fontFamily value to a full CSS font-family stack. Handles
+  // 'custom:<id>' (an imported TTF/OTF → its registered FontFace, with JP-aware
+  // fallbacks used while loading / for missing glyphs) and the built-in
+  // FONT_STACKS keys; anything unknown falls back to serif.
+  function resolveFontFamily(fontKey) {
+    if (typeof fontKey === 'string' && fontKey.indexOf('custom:') === 0) {
+      const fam = (window.fonts && window.fonts.familyFor) ? window.fonts.familyFor(fontKey.slice(7)) : null;
+      return fam ? `"${fam}", "Noto Sans CJK JP", "Hiragino Kaku Gothic Pro", sans-serif`
+                 : FONT_STACKS.serif;
+    }
+    return FONT_STACKS[fontKey] || FONT_STACKS.serif;
+  }
 
   function deepMerge(into, from) {
     for (const k of Object.keys(from)) {
@@ -89,16 +106,7 @@
       // exposes serif/sans; any other legacy stored value falls back to serif.
       // (Custom fonts are honoured for ALL modes — read included — so fonts can
       // be set per mode.)
-      let resolved;
-      if (typeof fontKey === 'string' && fontKey.indexOf('custom:') === 0) {
-        const fam = (window.fonts && window.fonts.familyFor) ? window.fonts.familyFor(fontKey.slice(7)) : null;
-        resolved = fam ? `"${fam}", "Noto Sans CJK JP", "Hiragino Kaku Gothic Pro", sans-serif`
-                       : FONT_STACKS.serif;
-      } else {
-        resolved = FONT_STACKS[fontKey];
-        if (fontKey !== 'serif' && fontKey !== 'sans') resolved = FONT_STACKS.serif;
-      }
-      root.style.setProperty(`--font-family-${mode}`, resolved || FONT_STACKS.serif);
+      root.style.setProperty(`--font-family-${mode}`, resolveFontFamily(fontKey));
       root.style.setProperty(`--image-${mode}-display`,  s.imageDisplay || DEFAULTS[mode].imageDisplay);
       root.style.setProperty(`--image-${mode}-opacity`,  s.imageOpacity ?? DEFAULTS[mode].imageOpacity);
       const imgAlign = s.imageAlign || DEFAULTS[mode].imageAlign;
@@ -112,6 +120,9 @@
                     : 'center';
       root.style.setProperty(`--image-${mode}-objpos`, objPos);
     }
+    // Dictionary popup font (a single global setting, not a per-mode block).
+    root.style.setProperty('--font-family-dict',
+      resolveFontFamily((state.dict && state.dict.fontFamily) || DEFAULTS.dict.fontFamily));
     // Reading-mode highlight style: 'bg' (translucent fill + underline)
     // vs 'text' (recolor the cue text). Toggled via a body class so
     // CSS in theme.css can swap the visual.

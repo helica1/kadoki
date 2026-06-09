@@ -152,10 +152,10 @@
       if (host) { host.dataset.built = ''; buildAppearanceSection(); }
     }
     // Per-mode font picker: built-in serif/sans + imported customs + Import.
-    function fontControl(mode, getCurrent) {
+    function fontControl(mode, getCurrent, baseOptions) {
       const sel = document.createElement('select');
       const cur = getCurrent();
-      [['Serif', 'serif'], ['Sans-serif', 'sans']].forEach(([label, val]) => {
+      (baseOptions || [['Serif', 'serif'], ['Sans-serif', 'sans']]).forEach(([label, val]) => {
         const o = document.createElement('option'); o.value = val; o.textContent = label;
         if (cur === val) o.selected = true; sel.appendChild(o);
       });
@@ -419,6 +419,23 @@
     host.appendChild(modeBlock('card'));
     host.appendChild(modeBlock('read'));
     host.appendChild(modeBlock('audio'));
+
+    // Dictionary popup font — a single global setting (not a reading "mode").
+    // Offers System (default) / Serif / Sans-serif + any imported custom font,
+    // applied to the popup's word / readings / definitions.
+    (() => {
+      const dblock = document.createElement('div');
+      dblock.className = 'appearance-mode';
+      const dlbl = document.createElement('div');
+      dlbl.className = 'mode-label';
+      dlbl.textContent = 'Dictionary popup';
+      dblock.appendChild(dlbl);
+      const getDict = () => window.appearance?.get?.('dict') ||
+        (window.appearance?.defaults?.() || {}).dict || { fontFamily: 'system' };
+      dblock.appendChild(row('Font family', fontControl('dict', () => getDict().fontFamily,
+        [['System', 'system'], ['Serif', 'serif'], ['Sans-serif', 'sans']])));
+      host.appendChild(dblock);
+    })();
 
     // Imported-fonts manager — list + delete (preview each name in its font).
     const imported = (window.fonts && window.fonts.list && window.fonts.list()) || [];
