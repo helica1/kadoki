@@ -396,6 +396,17 @@
           (on) => apply('card', { showNextSub: on })
         )));
       }
+      if (mode === 'read') {
+        // Invert LINE ART (ink drawings / scanned text pages) so it renders
+        // white-on-black in the dark theme. The reader classifies each image
+        // at load time — grayscale photos/shaded art and color artwork never
+        // auto-invert (they'd look like film negatives); the image viewer's
+        // ◑ Invert button covers those by hand.
+        block.appendChild(row('Invert line art (dark mode)', toggle(
+          () => get().invertBwImages === true,
+          (on) => apply('read', { invertBwImages: on })
+        )));
+      }
       if (mode === 'audio') {
         block.appendChild(row('Show waveform', toggle(
           () => get().showWaveform !== false,

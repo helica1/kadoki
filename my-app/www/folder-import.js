@@ -275,7 +275,11 @@
     };
     for (const t of (titles || [])) {
       const a = t && t.attachments;
-      if (!t?.id || !a || a.cover) continue;
+      // cover?.dataUri, not just cover: the lean TITLES_V1 keeps a cover STUB
+      // ({mime,source,name}) with the dataUri stored separately — if the
+      // covers blob is ever lost (storage eviction), the stub must not block
+      // re-extraction or the cover would never self-heal.
+      if (!t?.id || !a || a.cover?.dataUri) continue;
       let cover = null;
       if (a.epub?.uri && window.coverExtract.fromEpub) {
         try {

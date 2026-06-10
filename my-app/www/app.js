@@ -241,7 +241,20 @@ async function saveDeckState() {
       debugLog('Not saving deck state - no valid file name');
       return;
     }
-    
+
+    // DIRTY CHECK: skip the whole multi-key write burst when nothing
+    // meaningful changed since the last successful save — the 30s interval
+    // re-wrote identical values forever (incl. screen-off). lastAccessed is
+    // deliberately excluded from the signature: it changes on every call by
+    // construction, and persisting it only matters alongside a real change
+    // (recency ordering still updates on load and card advances).
+    const _sig = fileName + '|' + cardIndex + '|' + (currentFileUri || '') + '|' +
+                 allNotes.length + '|' + (!!window.currentFieldMappings);
+    if (window._lastDeckStateSig === _sig) {
+      debugLog('Deck state unchanged - skipping save');
+      return;
+    }
+
     // Create deck info object with field mapping reference
     const deckInfo = {
       fileName: fileName,
@@ -283,7 +296,8 @@ async function saveDeckState() {
       
       // Manage deck list
       await addDeckToList(deckInfo, true); // true = use Capacitor
-      
+
+      window._lastDeckStateSig = _sig;   // only after every write landed
       debugLog(`✅ Saved deck metadata (Capacitor): card ${currentCardIndex}`);
     } else {
       // Fallback to localStorage
@@ -297,7 +311,8 @@ async function saveDeckState() {
       
       // Manage deck list
       await addDeckToList(deckInfo, false); // false = use localStorage
-      
+
+      window._lastDeckStateSig = _sig;   // only after every write landed
       debugLog(`✅ Saved deck metadata (localStorage): card ${currentCardIndex}`);
     }
   } catch (error) {
@@ -4113,9 +4128,11 @@ function _ensureBgListenersForSrtCards() {
   });
   bg.addListener('position', (d) => {
     // Same constraint as the state handler — only repaint the strip
-    // in audio mode. ~3 Hz throttle still applies.
+    // in audio mode, never while the page is hidden (screen off: the strip
+    // isn't visible; the first foreground tick repaints). ~3 Hz throttle.
     const now = Date.now();
-    if (document.body.classList.contains('mode-audio') &&
+    if (!document.hidden &&
+        document.body.classList.contains('mode-audio') &&
         (!window._lastStripUpdateAt || (now - window._lastStripUpdateAt) > 300)) {
       window._lastStripUpdateAt = now;
       try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}

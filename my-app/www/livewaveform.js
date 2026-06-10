@@ -406,6 +406,11 @@
       // + scheduleDraw (which would otherwise spawn a wasted rAF on every ~150ms
       // native tick during a card/read listen). The 'state' listener below still
       // tracks play/pause so re-entering audio mode resumes correctly.
+      // document.hidden: same skip with the screen off in audio mode — the rAF
+      // wouldn't paint anyway. Drop the rate baseline so the first foreground
+      // event RE-BASELINES instead of measuring a "rate" across the whole
+      // background span (one wildly-extrapolated playhead frame otherwise).
+      if (document.hidden) { lastPositionAt = 0; return; }
       if (!document.body.classList.contains('mode-audio')) return;
       if (Number.isFinite(d?.positionMs)) {
         const t = performance.now();
@@ -466,6 +471,22 @@
       refreshFromGlobals();
       resizeCanvas();
       scheduleDraw();
+    });
+    // Foreground return while staying in audio mode: the position handler
+    // drops events while hidden, and a PAUSED return gets no event at all —
+    // re-baseline from the shared position refs and paint once so the film
+    // shows the real playhead instead of the screen-off frame. Run twice:
+    // immediately, and again after reading-mode's async reconcile has had
+    // time to adopt the live native position into those refs.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') return;
+      const _refresh = () => {
+        if (!document.body.classList.contains('mode-audio')) return;
+        refreshFromGlobals();
+        scheduleDraw();
+      };
+      _refresh();
+      setTimeout(_refresh, 800);
     });
     if (document.body.classList.contains('mode-audio')) {
       refreshAccent();

@@ -83,6 +83,9 @@ A full epub reader designed specifically for narrated reading.
 - Quick dictionary access
 - Audio synchronization
 - Flexible playhead control
+- **Inline images** — covers, illustrations, and image pages render in the page flow; **double-tap** any image for a full-screen viewer with pinch-zoom and a **◑ Invert** button
+- **Line-art inversion for dark mode** *(optional)* — ink drawings and scanned text pages render white-on-black; grayscale and color artwork is detected automatically and keeps its original look
+- Polished vertical-text typography — furigana is never clipped at page edges, and page turns land in one smooth motion
 
 | Gesture | Action |
 | --- | --- |
@@ -102,7 +105,8 @@ Listen to the audiobook while staying synchronized with the reading modes.
 - Background playback
 - Continuous listening statistics
 - Sync with reading progress
-- Lock-screen subtitles — the current sentence shows large on the lock screen / Always-On Display while you listen (iOS)
+- Lock-screen subtitles — the current sentence shows large on the lock screen / Always-On Display while you listen (optional — turn it off in Preferences to show the book cover instead and save battery)
+- Efficient screen-off listening — overnight sessions do minimal background work
 
 Audio keeps playing as you switch between Card, Read, and Audio, and every view stays locked to the same playhead — so you can freely alternate between intensive reading and passive listening without ever stopping playback. To jump back to where you were reading before you started listening, use **Bookmarks** (in the hamburger menu): each time you switch into Audio, Kadoki quietly saves your last reading spot.
 
@@ -176,7 +180,7 @@ Playback speed can be configured globally across all modes, or separately for ea
 
 ## Preferences
 
-- **Per-mode appearance** (Card / Read / Audio): font size, **font family — including your own imported TTF/OTF fonts**, and toggles for the card background image, the waveform, and an upcoming-subtitle preview
+- **Per-mode appearance** (Card / Read / Audio): font size, **font family — including your own imported TTF/OTF fonts**, and toggles for the card background image, the waveform, an upcoming-subtitle preview, line-art inversion (Read), and the lock-screen subtitle artwork (Audio)
 - Mode color customization
 - Dictionary import
 - Audio archive import

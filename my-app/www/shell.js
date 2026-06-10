@@ -590,7 +590,12 @@
   function startTimerPoll() {
     if (timerPollHandle) return;
     refreshTimerLabel();
-    timerPollHandle = setInterval(refreshTimerLabel, 1000);
+    // document.hidden gate (here and on the other shell tickers below): these
+    // intervals only repaint chrome nobody can see while the screen is off /
+    // app is backgrounded — yet they kept waking the JS thread for the whole
+    // background listen (battery audit 2026-06-10). Each self-heals on its
+    // first foreground tick.
+    timerPollHandle = setInterval(() => { if (!document.hidden) refreshTimerLabel(); }, 1000);
   }
 
   // Tap the timer pill = pause / unpause the current mode's timer. Debounced
@@ -952,13 +957,13 @@
     installChromeTapHandler();
     attachShellButtonListeners();
     startTimerPoll();
-    setInterval(refreshShellPlayLabel, 800);
-    setInterval(resyncTabsFromDom, 800);
+    setInterval(() => { if (!document.hidden) refreshShellPlayLabel(); }, 800);
+    setInterval(() => { if (!document.hidden) resyncTabsFromDom(); }, 800);
     refreshTabAvailability();
-    setInterval(refreshTabAvailability, 3000);
+    setInterval(() => { if (!document.hidden) refreshTabAvailability(); }, 3000);
     updateTabsUI(currentMode);
     setInterval(() => {
-      if (typeof window.updateProgressBar === 'function') window.updateProgressBar();
+      if (!document.hidden && typeof window.updateProgressBar === 'function') window.updateProgressBar();
     }, 500);
     // Ensure the top-left progress strip exists from app boot — needed
     // for Anki-only titles where the reader never opens, so the strip's
@@ -970,7 +975,7 @@
         window.pagedEnsureProgressStrip();
         // Keep the card counter live as the user swipes through cards.
         setInterval(() => {
-          if (document.body.classList.contains('mode-card')) {
+          if (!document.hidden && document.body.classList.contains('mode-card')) {
             window.pagedEnsureProgressStrip();
           }
         }, 500);
@@ -1093,6 +1098,7 @@
     // user-driven (library tap) so there's no race-sensitive deadline.
     paintCardBackground();
     setInterval(() => {
+      if (document.hidden) return;
       checkTitleChange();
       paintCardBackground();
     }, 500);

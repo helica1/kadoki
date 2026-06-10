@@ -2657,7 +2657,14 @@
     }
     if (idx === abCurrentCueIdx) return;
     abCurrentCueIdx = idx;
-    const cueEl = document.getElementById('audiobookCueText');
+    // SCREEN-OFF FAST PATH: while hidden, skip every in-app DOM write (the
+    // per-character token spans were the heaviest per-cue work) and the
+    // highlight sync — invisible until the screen comes back, when the
+    // visibilitychange handler resets abCurrentCueIdx and the next position
+    // event re-renders everything. The lock-screen artwork/metadata push and
+    // the __onPagedCueUpdate hook (listening stats) below STILL run.
+    const _hidden = !!document.hidden;
+    const cueEl = _hidden ? null : document.getElementById('audiobookCueText');
     if (cueEl) {
       if (idx >= 0) {
         renderAudiobookCueTokens(cueEl, abCues[idx].text, idx);
@@ -2667,7 +2674,7 @@
     }
     // Upcoming cue (grayed, plain text → not dict-tappable). Always kept in
     // sync here; CSS (body.pref-audio-nextsub-on) decides whether it shows.
-    const nextEl = document.getElementById('audiobookNextCueText');
+    const nextEl = _hidden ? null : document.getElementById('audiobookNextCueText');
     if (nextEl) {
       const nx = (idx >= 0 && idx + 1 < abCues.length) ? abCues[idx + 1] : null;
       nextEl.textContent = (nx && nx.text) ? nx.text : '';
@@ -2691,7 +2698,7 @@
     // toggle. Must check BOTH or this reads "paged active" even in audio/card mode
     // (which left the audio subtitle's cue-active highlight painting green on iOS).
     const pagedActive = !!(pagedView && pagedView.style.display !== 'none' && pagedView.style.visibility !== 'hidden');
-    if (abCueToChunk && idx >= 0) {
+    if (!_hidden && abCueToChunk && idx >= 0) {
       let chunkIdx = abCueToChunk[idx];
       if (chunkIdx < 0) {
         let prevCue = -1, prevChunk = -1;
@@ -2758,7 +2765,7 @@
       }
       bg.setMetadata(meta).catch(() => {});
     }
-    updateAudiobookCardImage(idx);
+    if (!_hidden) updateAudiobookCardImage(idx);   // in-app image: invisible while hidden
   }
 
   // Image-resolution side-effect — runs async, isolated from cue sync.
@@ -2911,6 +2918,24 @@
     } catch (_) {}
   }
 
+  // Audio-mode time label + scrub painter — shared by the per-tick position
+  // listener (visible only) and the foreground-return rebuild below. While
+  // PAUSED no position events fire, so the rebuild must paint these directly
+  // or they'd stay frozen at the screen-off values until the user pressed
+  // play (review finding, screen-off slimming 2026-06-10).
+  function _abPaintTimeLabelScrub() {
+    const label = document.getElementById('audiobookTimeLabel');
+    const _lt = `${abFmtMs(abPositionRef.ms)} / ${abFmtMs(abPositionRef.durMs)}`;
+    if (label && label.textContent !== _lt) label.textContent = _lt;
+    if (!abScrubbing) {
+      const scrub = document.getElementById('audiobookScrub');
+      if (scrub && abPositionRef.durMs > 0) {
+        const _sv = String(Math.round((abPositionRef.ms / abPositionRef.durMs) * 1000));
+        if (scrub.value !== _sv) scrub.value = _sv;
+      }
+    }
+  }
+
   // Foreground/background hooks — attached once. visibilitychange is the
   // cross-platform signal (fires on iOS WKWebView AND Android WebView app
   // background/foreground). Reconcile is idempotent + forward-only, so
@@ -2921,8 +2946,24 @@
     _abFgHooked = true;
     try {
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') reconcileAudioFromNative();
-        else flushAudioPositionNow();
+        if (document.visibilityState === 'visible') {
+          // Rebuild everything the hidden fast-path skipped. Order matters:
+          // set the force-flags FIRST, then reconcile (it adopts the live
+          // native position and re-runs the cue display itself), then paint
+          // the surfaces no position event will refresh while PAUSED — with
+          // playback stopped there IS no "next event ≤150ms away" to self-
+          // heal from, so the label/scrub/waveform must be painted here.
+          abCurrentCueIdx = -2;
+          try { window.__pagedForceCueRepaint?.(); } catch (_) {}
+          Promise.resolve(reconcileAudioFromNative()).then(() => {
+            try { abUpdateCueDisplay(abPositionRef.ms); } catch (_) {}
+            if (document.body.classList.contains('mode-audio')) {
+              try { _abPaintTimeLabelScrub(); } catch (_) {}
+            }
+          }).catch(() => {});
+        } else {
+          flushAudioPositionNow();
+        }
       });
       window.addEventListener('pageshow', () => reconcileAudioFromNative());
       window.addEventListener('focus', () => reconcileAudioFromNative());
@@ -2977,19 +3018,16 @@
       // guarded so an unchanged value isn't re-written every ~150ms tick. This
       // listener is attached once and never removed, so without the mode gate it
       // mutated hidden DOM ~6.7x/sec for the whole listen in card/read mode too.
-      const _inAudioMode = document.body.classList.contains('mode-audio');
-      if (_inAudioMode) {
-        const label = document.getElementById('audiobookTimeLabel');
-        const _lt = `${abFmtMs(abPositionRef.ms)} / ${abFmtMs(abPositionRef.durMs)}`;
-        if (label && label.textContent !== _lt) label.textContent = _lt;
-        if (!abScrubbing) {
-          const scrub = document.getElementById('audiobookScrub');
-          if (scrub && abPositionRef.durMs > 0) {
-            const _sv = String(Math.round((abPositionRef.ms / abPositionRef.durMs) * 1000));
-            if (scrub.value !== _sv) scrub.value = _sv;
-          }
-        }
-      }
+      // SCREEN-OFF FAST PATH (battery): while the page is hidden (screen off /
+      // app backgrounded) nobody can see the in-app DOM, so every per-tick
+      // DOM write below is skipped. What MUST keep running while hidden:
+      // position refs, the furthest mark, the 30s durable save (all above),
+      // and abUpdateCueDisplay (it drives the lock-screen artwork/metadata —
+      // the one surface the user CAN see — plus listening-stats crediting;
+      // it gates its own DOM work on the same signal). The visibilitychange
+      // handler forces a full re-render on return to foreground.
+      const _inAudioMode = !document.hidden && document.body.classList.contains('mode-audio');
+      if (_inAudioMode) _abPaintTimeLabelScrub();
       abUpdateCueDisplay(abPositionRef.ms);
       // Drive the top-left progress strip from the audiobook position events too.
       // Throttled to ~3Hz: in READ mode this scans every chunk via
@@ -2997,7 +3035,9 @@
       // was a full-EPUB reflow 6-7x/sec the whole whispersync session. app.js's
       // own position-strip caller is already throttled to 300ms; match it.
       const _nowStrip = Date.now();
-      if (_nowStrip - _abStripUpdateAt >= 300) {
+      // document.hidden: the strip isn't visible, and in READ mode this is a
+      // full-book getBoundingClientRect scan — skip it entirely screen-off.
+      if (!document.hidden && _nowStrip - _abStripUpdateAt >= 300) {
         _abStripUpdateAt = _nowStrip;
         try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
       }

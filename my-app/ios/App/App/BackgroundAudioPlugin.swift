@@ -666,6 +666,12 @@ extension BackgroundAudioPlugin: AVAudioPlayerDelegate {
         emitState(playing: false)
         self.notifyListeners("ended", data: [:])
         updateNowPlaying()
+        // Natural end-of-file: release the audio session like stop() does —
+        // a finished overnight book otherwise kept the .playback session
+        // active, holding the app resident and unsuspendable for hours
+        // (battery audit 2026-06-10). play()/resume() re-activate lazily.
+        do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        catch { NSLog("[BackgroundAudio] EOF session deactivate failed: \(error.localizedDescription)") }
     }
     public func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
         self.notifyListeners("error", data: ["message": error?.localizedDescription ?? "unknown decode error"])

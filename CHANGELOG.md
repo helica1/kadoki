@@ -4,10 +4,12 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
-## Unreleased
+## v1.5.0 — 2026-06-10
 
 ### Added
 - **Images in EPUBs.** Read mode now shows the book's images (covers, illustrations, SVG image pages) inline, sized to fit the page. Previously all images were stripped.
+- **Opening progress.** Opening a title now shows a progress overlay while its audio/subtitle files are prepared — previously the app sat frozen-looking for a second or more on first opens.
+- **Invert line art (Preferences → read).** Ink drawings and scanned text pages can render white-on-black to match the dark theme. The reader detects true line art — grayscale and color images are never auto-inverted (they'd look like film negatives). The full-screen image viewer also gains a manual **◑ Invert** button for any image.
 
 ### Fixed
 - **iOS: the active line's kanji now turn green.** When the currently-narrated line contained furigana, only the furigana was colored on iOS — the kanji stayed white. (The fallback that colors ruby text directly was only wired to the old reader, never the current one.)
@@ -18,6 +20,11 @@ All notable changes to Kadoki are documented here. Newest first.
 
 ### Removed
 - **The "Location bookmarked" toast.** Your place is still saved automatically exactly as before — the popup announcing it was just noise.
+
+### Battery
+- **Lock screen subtitle artwork is now optional** (Preferences → audio → "Lock screen: subtitle as cover art"). When off, the title's cover is shown instead — re-rendering the artwork on every subtitle was one of the largest screen-off battery costs.
+- **Position saves no longer rewrite cover images to storage.** Cover art and subtitle-alignment caches moved out of the settings store, whose design rewrites *everything* on *every* save — so each tiny position save (every few seconds, all session) was a multi-MB flash write. Existing data migrates automatically and covers gain an extra on-disk backup.
+- **Screen-off listening does far less work.** While the screen is off, the app no longer updates invisible UI on every playback tick (subtitle text rebuilds, time labels, progress bars, waveform math, a dozen housekeeping timers) — everything visible is rebuilt the moment the screen comes back on. Lock-screen artwork, listening stats, and position saving are unaffected. A finished audiobook also now releases iOS's audio session, so the app can sleep instead of staying awake for hours after a book ends overnight.
 
 ## v1.4.3 — 2026-06-09
 

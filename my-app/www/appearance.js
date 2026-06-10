@@ -43,7 +43,12 @@
              imageDisplay: 'none',  imageOpacity: 1, imageAlign: 'flex-start',
              // 'bg' = current behavior (translucent fill + underline);
              // 'text' = recolor the cue text only (less artifact-prone).
-             highlightStyle: 'text' },
+             highlightStyle: 'text',
+             // Invert LINE ART (ink drawings, scanned text pages) so it reads
+             // white-on-black in the dark theme. Only images the reader
+             // CLASSIFIES as line art invert (.kadoki-bw — bimodal, not
+             // grayscale/color, which would look like film negatives). Opt-in.
+             invertBwImages: false },
     audio: { fontSize: '1.875rem', align: 'center', fontFamily: 'serif',
              imageDisplay: 'block', imageOpacity: 0.6, imageAlign: 'center',
              showWaveform: true, showNextSub: false },
@@ -136,7 +141,8 @@
     // grayed upcoming-subtitle elements. The livewaveform hook re-evaluates
     // its canvas + idles the rAF loop when hidden (so it's not just CSS-hidden
     // while still drawing). Hooks may not exist yet at boot — guarded.
-    const cardS = state.card || {}, audioS = state.audio || {};
+    const cardS = state.card || {}, audioS = state.audio || {}, readS = state.read || {};
+    document.body.classList.toggle('pref-read-invertbw-on',   readS.invertBwImages === true);
     document.body.classList.toggle('pref-card-waveform-off',  cardS.showWaveform === false);
     document.body.classList.toggle('pref-card-bgimage-off',   cardS.showBgImage === false);
     document.body.classList.toggle('pref-card-nextsub-on',    cardS.showNextSub === true);

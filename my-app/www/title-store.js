@@ -23,6 +23,50 @@
   const COVERS_KEY = 'TITLE_COVERS_V1';
   let _lastCoversSig = '';
 
+  // Covers blob storage: IndexedDB via blobStore (NOT Capacitor Preferences).
+  // Preferences rewrites its entire store on every set() (Android
+  // SharedPreferences XML / iOS UserDefaults plist), so a multi-MB covers
+  // blob in there turned every tiny position save into a multi-MB flash
+  // rewrite — battery audit 2026-06-10. Reads fall back to the legacy
+  // Preferences key for installs blob-store.js hasn't swept yet; writes go
+  // to IndexedDB only (with a Preferences fallback if IndexedDB is broken,
+  // so covers are never silently dropped).
+  // Read order: IndexedDB → legacy Preferences key (pre-sweep installs;
+  // blob-store.js migrates + deletes it) → the rarely-written file backup
+  // (survives even an IndexedDB wipe; see setCoversRaw).
+  async function getCoversRaw() {
+    try {
+      const v = await window.blobStore?.get?.(COVERS_KEY);
+      if (v) return v;
+    } catch (_) {}
+    const legacy = await getPref(COVERS_KEY);
+    if (legacy) return legacy;
+    try {
+      const FS = window.Capacitor?.Plugins?.Filesystem;
+      if (FS) {
+        const r = await FS.readFile({ path: COVERS_BACKUP_PATH, directory: 'DATA', encoding: 'utf8' });
+        if (r && r.data) return typeof r.data === 'string' ? r.data : String(r.data);
+      }
+    } catch (_) {}
+    return null;
+  }
+  const COVERS_BACKUP_PATH = 'kadoki-covers-backup.json';
+  async function setCoversRaw(json) {
+    // Covers change rarely, so each write also mirrors to a plain app-data
+    // file — durability outside the WebView's (evictable) storage, at zero
+    // per-position-save cost. Fire-and-forget: the mirror is a backup, not
+    // the source of truth.
+    try {
+      const FS = window.Capacitor?.Plugins?.Filesystem;
+      if (FS) FS.writeFile({ path: COVERS_BACKUP_PATH, directory: 'DATA', data: json, encoding: 'utf8' }).catch(() => {});
+    } catch (_) {}
+    try {
+      await window.blobStore.set(COVERS_KEY, json);
+      return;
+    } catch (_) {}
+    await setPref(COVERS_KEY, json);    // IndexedDB unavailable — degrade to the old path
+  }
+
   function isCap() {
     return typeof window.isCapacitorEnvironment === 'function' && window.isCapacitorEnvironment();
   }
@@ -83,7 +127,7 @@
     // Merge the separately-stored cover dataURIs back into the titles.
     let hadCoversKey = false;
     try {
-      const craw = await getPref(COVERS_KEY);
+      const craw = await getCoversRaw();
       if (craw) {
         hadCoversKey = true;
         const covers = JSON.parse(craw) || {};
@@ -144,7 +188,18 @@
           const du = t.attachments && t.attachments.cover && t.attachments.cover.dataUri;
           if (du) covers[t.id] = du;
         }
-        await setPref(COVERS_KEY, JSON.stringify(covers));
+        // MERGE over the stored blob instead of replacing it: if this
+        // session's covers read failed (IndexedDB hiccup → in-memory view is
+        // partial or empty), a plain write here would destroy every cover we
+        // didn't load. Union with in-memory winning per title — a fresh edit
+        // always lands; covers we never saw are preserved. Orphan entries for
+        // deleted titles are harmless (never merged back into titles).
+        let stored = {};
+        try {
+          const cur = await window.blobStore?.get?.(COVERS_KEY);
+          if (cur) stored = JSON.parse(cur) || {};
+        } catch (_) {}
+        await setCoversRaw(JSON.stringify(Object.assign(stored, covers)));
         _lastCoversSig = sig;
       }
     } catch (e) {

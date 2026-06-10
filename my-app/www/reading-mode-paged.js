@@ -298,6 +298,14 @@
         max-height: min(100%, 88vh) !important;
         break-inside: avoid;
       }
+      /* Opt-in (Preferences → read → "Invert B&W images"): flip near-
+         monochrome images (line art, scanned text pages) to white-on-black
+         for the dark theme. Only images CLASSIFIED b&w invert (.kadoki-bw,
+         tagged at decode time by _tagBwImage) — color covers/illustrations
+         keep their colors. */
+      body.pref-read-invertbw-on #readingPagedInner img.kadoki-bw {
+        filter: invert(1);
+      }
       /* Inline glyph images (gaiji): one character's footprint. height = the
          inline advance in vertical-rl (one glyph), width = line thickness. */
       #readingPagedInner img.kadoki-gaiji {
@@ -3506,6 +3514,47 @@
     return ps.join('\n');
   }
 
+  // Tag LINE ART (and scanned text pages) so the "Invert B&W images"
+  // appearance toggle can flip them for dark mode — but NOT grayscale
+  // photos/shaded illustrations, which look like film negatives inverted
+  // (user request 2026-06-10). Line art is BIMODAL: bright paper dominates,
+  // real dark strokes exist, and midtones are rare; grayscale art is
+  // midtone-heavy. Sampling is nearest-neighbor (imageSmoothingEnabled =
+  // false) — smooth downscaling AVERAGES strokes into midtones and would
+  // make line art read as grayscale. Color (>2% saturated pixels) never
+  // inverts. Black strokes on a TRANSPARENT background (gaiji, decorations)
+  // are near-invisible on the dark page, so they invert too. Verified on a
+  // WebKit+Blink test matrix: line art / text scan / transparent ink /
+  // manga halftone → invert; gray gradient / shaded illustration / color /
+  // white-on-dark art → skip. Object URLs are same-origin (no canvas taint).
+  function _tagBwImage(im) {
+    try {
+      if (!im || !im.naturalWidth) return;
+      const S = 48;
+      const c = document.createElement('canvas');
+      c.width = c.height = S;
+      const x = c.getContext('2d', { willReadFrequently: true });
+      x.imageSmoothingEnabled = false;
+      x.drawImage(im, 0, 0, S, S);
+      const d = x.getImageData(0, 0, S, S).data;
+      let opaque = 0, trans = 0, colorful = 0, dark = 0, mid = 0, bright = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] < 16) { trans++; continue; }
+        opaque++;
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        if (Math.max(r, g, b) - Math.min(r, g, b) > 32) colorful++;
+        const lum = (r + g + b) / 3;
+        if (lum < 60) dark++; else if (lum > 195) bright++; else mid++;
+      }
+      const total = opaque + trans;
+      if (!opaque || colorful / opaque >= 0.02) return;
+      const isLineArt = (trans / total > 0.3)
+        ? dark / opaque > 0.6                                   // ink on transparent
+        : bright / opaque >= 0.5 && dark / opaque >= 0.003 && mid / opaque <= 0.22;
+      if (isLineArt) im.classList.add('kadoki-bw');
+    } catch (_) {}
+  }
+
   // Object URLs for images extracted from the current EPUB — revoked on the
   // next book load so a long session of book switches can't leak image memory.
   let _epubImgUrls = [];
@@ -3519,7 +3568,7 @@
   // to pan while zoomed, double-tap inside toggles 1×↔2.5×, ✕ or a backdrop
   // tap closes. The overlay consumes ALL touches, so page-turn / physics /
   // chrome-toggle gestures can never fire beneath it.
-  function _openImageLightbox(src) {
+  function _openImageLightbox(src, invert) {
     if (!src || document.getElementById('pagedImageLightbox')) return;
     const ov = document.createElement('div');
     ov.id = 'pagedImageLightbox';
@@ -3533,7 +3582,25 @@
     x.textContent = '✕';
     x.style.cssText = 'position:fixed;top:calc(env(safe-area-inset-top,0px) + 10px);right:14px;' +
       'font-size:1.5rem;color:#ddd;padding:8px 14px;';
-    ov.appendChild(img); ov.appendChild(x);
+    // Manual INVERT toggle — the auto-classifier only flips clear line art,
+    // so grayscale/color images can still be inverted by hand here. Initial
+    // state carries the reader's inversion in (a flipped page must not flash
+    // back to blinding white when zoomed). Viewer-local: it never changes
+    // the inline image or the preference.
+    const inv = document.createElement('div');
+    inv.textContent = '◑ Invert';
+    inv.style.cssText = 'position:fixed;top:calc(env(safe-area-inset-top,0px) + 12px);left:14px;' +
+      'font:600 13px var(--font-sans,system-ui);color:#ddd;padding:9px 14px;' +
+      'border:1px solid #555;border-radius:999px;background:rgba(20,20,20,.75);';
+    let inverted = !!invert;
+    const applyInv = () => {
+      img.style.filter = inverted ? 'invert(1)' : '';
+      inv.style.color = inverted ? '#bfe8c2' : '#ddd';
+      inv.style.borderColor = inverted ? 'var(--accent-read, #4caf50)' : '#555';
+    };
+    applyInv();
+    inv.addEventListener('click', () => { inverted = !inverted; applyInv(); }); // mouse / pointer fallback
+    ov.appendChild(img); ov.appendChild(x); ov.appendChild(inv);
     document.body.appendChild(ov);
 
     let scale = 1, tx = 0, ty = 0;
@@ -3573,6 +3640,7 @@
       mode = null;
       if (wasPinch || tapMoved) return;
       if (e.target === x) { close(); return; }
+      if (e.target === inv) { inverted = !inverted; applyInv(); return; }
       const now = Date.now();
       if (now - tapAt < 320) {                      // double-tap: toggle zoom
         tapAt = 0;
@@ -3603,7 +3671,8 @@
       const now = Date.now();
       if (_imgTapEl === t && now - _imgTapAt < 350) {
         _imgTapEl = null;
-        _openImageLightbox(t.currentSrc || t.src);
+        _openImageLightbox(t.currentSrc || t.src,
+          t.classList.contains('kadoki-bw') && document.body.classList.contains('pref-read-invertbw-on'));
       } else { _imgTapEl = t; _imgTapAt = now; }
     }, { passive: true });
   }
@@ -3750,7 +3819,9 @@
           const _imgs = [...innerEl.querySelectorAll('img')];
           if (_imgs.length) {
             let _decodeTimedOut = false;
-            const _allDecoded = Promise.all(_imgs.map(im => im.decode().catch(() => {})));
+            // Piggyback the B&W classification on each image's decode (it
+            // needs decoded pixels; ~1ms per image on a 24px downsample).
+            const _allDecoded = Promise.all(_imgs.map(im => im.decode().then(() => _tagBwImage(im)).catch(() => {})));
             await Promise.race([
               _allDecoded,
               new Promise(r => setTimeout(() => { _decodeTimedOut = true; r(); }, 4000)),
@@ -4975,6 +5046,15 @@
   // than register a second listener (which fought legacy for the same
   // CSS.highlights 'cue-active' key and lost the race), we piggyback.
   // Receives (idx, cue) — `cue` may be null when idx<0.
+  // Foreground-return hook (reading-mode.js visibilitychange): the hidden
+  // fast-paths skip highlight paint / autoscroll / strip updates, so force
+  // the next cue update to treat its cue as fresh and repaint + catch the
+  // reader up to wherever the playhead got to while the screen was off.
+  window.__pagedForceCueRepaint = function () {
+    lastHighlightedCue = -1;
+    try { updateProgress({ cueIdx: window._lastAudioCueIdx ?? -1 }); } catch (_) {}
+  };
+
   window.__onPagedCueUpdate = function (idx, cue, positionMs) {
     // Update the top-left progress strip regardless of whether the
     // paged reader view is visible — the strip lives at body level
@@ -5058,8 +5138,18 @@
         window._audioStatsLastPosMs  = posMs;
       }
       window._lastAudioCueIdx = idx;
-      try { updateProgress({ cueIdx: idx }); } catch (_) {}
+      // Strip repaint skipped while the PAGE is hidden (screen off): nothing
+      // is visible, and in read mode updateProgress scans chunk rects.
+      if (!document.hidden) try { updateProgress({ cueIdx: idx }); } catch (_) {}
     }
+    // SCREEN-OFF FAST PATH: the stats crediting above must run for background
+    // listening (that's real listening), but the paint + read-along credit +
+    // cue autoscroll below are for a visible reader. Skip WITHOUT clearing
+    // the existing highlight (no churn); window.__pagedForceCueRepaint —
+    // called on return to foreground — resets lastHighlightedCue so the next
+    // cue update repaints and the autoscroll catches the reader up to the
+    // playhead.
+    if (document.hidden) return;
     if (_readerHidden()) { clearCueHighlight(); return; }   // drop stale green: it would paint on the hidden-but-laid-out reader on iOS
     if (_readerCueHlGuarded(idx)) return;   // post-swipe: hold the swiped-to green until the playhead arrives (no prev-cue flash)
     if (idx === lastHighlightedCue) return;

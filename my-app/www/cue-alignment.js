@@ -325,7 +325,19 @@
     return 'CUE_ALIGN_v' + SCHEMA_VERSION + '_' + (titleId || 'default');
   }
 
+  // Alignment caches live in IndexedDB via blobStore, NOT Capacitor
+  // Preferences: at ~10k cues a serialized alignment is hundreds of KB per
+  // title, and Preferences rewrites its ENTIRE store on every set() — so
+  // these blobs were taxing every tiny position save with a multi-MB flash
+  // rewrite (battery audit 2026-06-10). Reads fall back to the legacy
+  // Preferences key (pre-sweep installs; blob-store.js migrates + deletes
+  // them at boot); writes go to IndexedDB, degrading to Preferences only
+  // if IndexedDB is broken so a computed alignment is never just dropped.
   async function _getPref(key) {
+    try {
+      const v = await window.blobStore?.get?.(key);
+      if (v) return v;
+    } catch (e) {}
     try {
       if (window.Capacitor?.Plugins?.Preferences) {
         const r = await window.Capacitor.Plugins.Preferences.get({ key });
@@ -336,6 +348,10 @@
   }
   async function _setPref(key, value) {
     try {
+      await window.blobStore.set(key, String(value));
+      return;
+    } catch (e) {}
+    try {
       if (window.Capacitor?.Plugins?.Preferences) {
         await window.Capacitor.Plugins.Preferences.set({ key, value: String(value) });
       } else {
@@ -344,6 +360,7 @@
     } catch (e) {}
   }
   async function _removePref(key) {
+    try { await window.blobStore?.remove?.(key); } catch (e) {}
     try {
       if (window.Capacitor?.Plugins?.Preferences) {
         await window.Capacitor.Plugins.Preferences.remove({ key });

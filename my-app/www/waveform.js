@@ -109,6 +109,29 @@
     if (state) try { render(); } catch (e) {}
   });
 
+  // Foreground return in card mode: the position handler takes the cheap
+  // tracking-only branch while hidden, so the canvas pixels freeze at the
+  // screen-off frame — and a PAUSED return gets no position event to heal
+  // from. Sync the displayed accumulators to the tracked playhead and paint
+  // once (or restart the anim loop if playing). Double-shot so the second
+  // pass lands after reading-mode's async native reconcile.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !state) return;
+    const _wake = () => {
+      if (!state || !state.cardMode || !document.body.classList.contains('mode-card')) return;
+      try {
+        if (Number.isFinite(state.playheadMs)) {
+          state.playheadDispMs = state.playheadMs;
+          state.playheadInterpMs = state.playheadMs;
+        }
+        if (state.playheadPlaying && state.playheadWarmed) startPlayheadAnim();
+        else render();
+      } catch (e) {}
+    };
+    _wake();
+    setTimeout(_wake, 800);
+  });
+
   function fmtMs(ms) {
     if (!Number.isFinite(ms) || ms < 0) return '–:––';
     const total = Math.floor(ms / 1000);
@@ -772,7 +795,9 @@
           // cursor rAF, and skip all paint/anim. The editor waveform (cardMode
           // false) is unaffected. Nothing is torn down → no re-show needed; the
           // next on-screen position event (or displayCard's show()) re-arms it.
-          if (state.cardMode && !document.body.classList.contains('mode-card')) {
+          // document.hidden (screen off in card mode) takes the same cheap
+          // branch: track the position, no paint; foreground re-arms it.
+          if (state.cardMode && (document.hidden || !document.body.classList.contains('mode-card'))) {
             if (Number.isFinite(d.positionMs)) state.playheadMs = d.positionMs;
             state.playheadPlaying = !!d.playing;
             stopPlayheadAnim();
