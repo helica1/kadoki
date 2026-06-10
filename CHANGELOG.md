@@ -4,7 +4,7 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
-## v1.5.0 — 2026-06-09
+## v1.4.3 — 2026-06-09
 
 ### Added
 - **Smart rewind.** After a break of 10 minutes or more, resuming in audio mode starts **30 seconds back** so you can re-establish context before new material. Deliberate jumps (Bookmarks, "play from here") are never rewound, and your saved position and furthest-listened mark are untouched.
