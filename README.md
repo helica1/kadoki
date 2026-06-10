@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><strong>⬇ Download the latest APK</strong></a> ·
+  <a href="../../releases/latest"><strong>⬇ Download the latest APK</strong></a> 
 
 </p>
 
