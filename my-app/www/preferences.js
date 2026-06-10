@@ -405,6 +405,20 @@
           () => get().showNextSub === true,
           (on) => apply('audio', { showNextSub: on })
         )));
+        // Lock-screen subtitle artwork: when ON, every subtitle change
+        // re-renders a 600px image and pushes it as the Now Playing cover
+        // (~every few seconds for the whole listening session — a measurable
+        // battery cost, especially on Android where the image crosses the JS
+        // bridge as base64 and re-issues the media notification). OFF = the
+        // title's cover art is pushed once and stays. Stored in the
+        // localStorage key reading-mode.js already gates on.
+        block.appendChild(row('Lock screen: subtitle as cover art', toggle(
+          () => { try { return localStorage.getItem('LOCKSCREEN_SUBTITLE_ART') !== '0'; } catch (_) { return true; } },
+          (on) => {
+            try { localStorage.setItem('LOCKSCREEN_SUBTITLE_ART', on ? '1' : '0'); } catch (_) {}
+            try { window._refreshLockscreenArt?.(); } catch (_) {}
+          }
+        )));
       }
 
       // Card-only extras (moved from the deleted Card mode prefs section).

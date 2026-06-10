@@ -2608,6 +2608,36 @@
       return cv.toDataURL('image/jpeg', 0.9);
     } catch (_) { return ''; }
   }
+  // Re-push the lock-screen artwork to match the CURRENT preference state.
+  // Called by the Preferences "subtitle as cover art" toggle so flipping it
+  // takes effect immediately (not at the next play-start): ON → re-render the
+  // current cue's subtitle art; OFF → restore the title's cover (or clear to
+  // plain if the title has none).
+  window._refreshLockscreenArt = async function () {
+    try {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg) return;
+      const cueText = (abCurrentCueIdx >= 0 && abCues[abCurrentCueIdx]) ? abCues[abCurrentCueIdx].text : '';
+      if (_subtitleArtEnabled()) {
+        if (!cueText) return;                  // nothing playing yet — next cue will paint
+        if (bg.setSubtitleArt) {
+          bg.setSubtitleArt({ text: cueText }).catch(() => {});
+        } else {
+          const art = renderSubtitleArtwork(cueText);
+          if (art) bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: cueText, artwork: art }).catch(() => {});
+        }
+      } else {
+        let coverArt = '';
+        try {
+          if (window.titleStore && window._activeTitleId) {
+            const t = await window.titleStore.get(window._activeTitleId);
+            coverArt = t?.attachments?.cover?.dataUri || '';
+          }
+        } catch (_) {}
+        bg.setMetadata({ title: abAudioName || 'Audiobook', subtitle: cueText, artwork: coverArt }).catch(() => {});
+      }
+    } catch (_) {}
+  };
 
   // Synchronous path: cue idx → text, chunk highlight, cue-precise paint.
   // Runs every position event. Nothing here can await — that was the bug
@@ -2732,15 +2762,27 @@
   }
 
   // Image-resolution side-effect — runs async, isolated from cue sync.
+  // Cover lookup memoized per title: this runs on EVERY cue change (~every
+  // 3-5s for an entire listening session, screen-off included on Android),
+  // and titleStore.list() is a Preferences-bridge read + JSON.parse of the
+  // whole titles blob each call. The cover cannot change mid-title, so one
+  // lookup per title is enough.
+  let _abCoverCacheTitleId = null, _abCoverCacheSrc = '';
   async function updateAudiobookCardImage(idx) {
     const imgEl = document.getElementById('audiobookCardImage');
     if (!imgEl) return;
     let src = '';
     try {
       if (window._activeTitleId && window.titleStore?.list) {
-        const titles = await window.titleStore.list();
-        const tit = titles.find(t => t.id === window._activeTitleId);
-        if (tit?.attachments?.cover?.dataUri) src = tit.attachments.cover.dataUri;
+        if (_abCoverCacheTitleId === window._activeTitleId) {
+          src = _abCoverCacheSrc;
+        } else {
+          const titles = await window.titleStore.list();
+          const tit = titles.find(t => t.id === window._activeTitleId);
+          src = tit?.attachments?.cover?.dataUri || '';
+          _abCoverCacheTitleId = window._activeTitleId;
+          _abCoverCacheSrc = src;
+        }
       }
     } catch (e) {}
     if (!src && abCueToChunk && idx >= 0) {
