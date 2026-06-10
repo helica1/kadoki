@@ -444,22 +444,79 @@
     try { window.Capacitor?.Plugins?.BackgroundAudio?.pause?.(); } catch (e) {}
   }
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') {
-      pauseAudioForBackgroundIfInteractive();
-      scheduleBackgroundStop();
-    } else if (document.visibilityState === 'visible') {
-      cancelBackgroundStop();
+  // ── Background → AUDIO mode auto-switch ──
+  // Backgrounding (screen off / home / app switch) while in READ or CARD mode
+  // with audio playing seamlessly switches to AUDIO mode instead of pausing:
+  // the read/card timer stops at the real hide moment and audio time starts
+  // accruing (both happen synchronously via setShellMode → shell:mode-change →
+  // reconcileMode, so an iOS WebView freeze right after can't corrupt them —
+  // timers are wall-clock based). On foreground we return to the previous mode
+  // synced to wherever the audio has reached. An in-flight Anki round-trip
+  // (<1s hop to AnkiDroid/AnkiMobile) is exempt and behaves exactly as before.
+  function handleAppHidden() {
+    const b = document.body.classList;
+    const interactive = b.contains('mode-read') ? 'read' : (b.contains('mode-card') ? 'card' : null);
+    if (!_ankiRoundtripActive && interactive && window._bgPlaying &&
+        typeof window.setShellMode === 'function' && !window._autoAudioPrevMode) {
+      window._autoAudioPrevMode = interactive;
+      try {
+        // autoSwitch: skip the per-title lastMode persist — TITLES_V1 keeps
+        // saying read/card, so a process death in background cold-boots into
+        // the user's real mode at the position flushed by the leave-read hook.
+        window.setShellMode('audio', { force: true, resumeOnly: true, autoSwitch: true });
+      } catch (e) { window._autoAudioPrevMode = null; }
+      scheduleBackgroundStop();   // backstop only — timers already reconciled
+      return;
     }
+    pauseAudioForBackgroundIfInteractive();
+    scheduleBackgroundStop();
+  }
+  async function handleAppVisible() {
+    cancelBackgroundStop();
+    const prev = window._autoAudioPrevMode;
+    if (!prev) return;
+    window._autoAudioPrevMode = null;
+    // Refresh the cue cursors from the live native playhead BEFORE switching
+    // back — on iOS they froze at the pre-background value and the read/card
+    // sync (ensureGreenOnEnter / syncCardToCurrentCue) reads them.
+    try {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (bg?.getState) {
+        const s = await bg.getState();
+        if (s && Number(s.positionMs) > 0 && typeof window.abResyncCueFromMs === 'function') {
+          window.abResyncCueFromMs(s.positionMs);
+        }
+      }
+    } catch (_) {}
+    // The hidden-time switch's async tail may still be in flight (iOS parks it
+    // until thaw) and setShellMode silently drops calls while _switchInFlight —
+    // retry until the mode actually flips. Abort (and re-arm) if re-hidden,
+    // and DEFER TO THE USER: if the mode is anything other than the
+    // auto-switch 'audio' or the target, the user navigated themselves —
+    // forcing prev on top of their choice would yank them around.
+    for (let i = 0; i < 6; i++) {
+      if (document.visibilityState === 'hidden') { window._autoAudioPrevMode = prev; return; }
+      const b = document.body.classList;
+      if (b.contains('mode-' + prev)) return;                       // arrived
+      if (!b.contains('mode-audio')) return;                        // user went elsewhere — leave it
+      try { window.setShellMode(prev, { force: true }); } catch (_) {}
+      await new Promise(r => setTimeout(r, 120));
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') handleAppHidden();
+    else if (document.visibilityState === 'visible') handleAppVisible();
   });
   // Capacitor App plugin gives us authoritative app-active state — fires
   // even when the WebView's visibilitychange is unreliable (e.g., app
   // switcher gestures on iOS that don't always trip the page hidden
-  // state immediately). Belt and suspenders.
+  // state immediately). Belt and suspenders (both handlers are idempotent:
+  // a duplicate hidden sees mode-audio/_autoAudioPrevMode already set).
   //
   // On isActive=true we ALSO auto-clear an active anki round-trip flag
-  // (in addition to cancelling the background-stop timer) — that's the
-  // "we're back from AnkiMobile" signal.
+  // (in addition to the foreground handling) — that's the "we're back from
+  // AnkiMobile" signal.
   function hookCapApp() {
     const App = window.Capacitor?.Plugins?.App;
     if (!App?.addListener || window._statsCapAppHooked) return;
@@ -468,11 +525,14 @@
       App.addListener('appStateChange', (state) => {
         if (!state) return;
         if (state.isActive === false) {
-          pauseAudioForBackgroundIfInteractive();
-          scheduleBackgroundStop();
+          // iOS fires resign-active for Control Center / notification-shade
+          // peeks while the page stays VISIBLE — don't mode-switch on those.
+          // visibilitychange is the primary trigger; this is only the
+          // belt-and-suspenders for a missed/late hidden event.
+          if (document.visibilityState === 'hidden') handleAppHidden();
         } else if (state.isActive === true) {
-          cancelBackgroundStop();
           if (_ankiRoundtripActive) markAnkiRoundtripDone();
+          handleAppVisible();
         }
       });
     } catch (e) {}

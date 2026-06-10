@@ -220,11 +220,39 @@ public class BackgroundAudioService extends Service {
             updatePlaybackState();
             saveLastPositionNow();   // durably snapshot place on every pause
         } else if (ACTION_RESUME.equals(action)) {
+            if (exo == null || currentUrl == null) {
+                // Nothing loaded: the service was re-created EMPTY (paused
+                // notification dismissed → stopSelf, or process recycled) or
+                // the player ERRORED (onPlayerError clears currentUrl).
+                // Promoting here pinned a non-dismissible "Playing" 0:00
+                // notification with no audio. Satisfy the FGS-start contract
+                // briefly, then tear down — the JS side detects not-ready and
+                // falls back to a fresh bg.play() at the saved position.
+                // NOTE: exo != null && !prepared (a play() still buffering)
+                // deliberately does NOT take this path — tearing down a
+                // mid-prepare playback would kill audio that's about to start;
+                // the no-op resume below keeps the old semantics there.
+                try {
+                    Notification n = buildNotification("", false);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                        startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                    } else {
+                        startForeground(NOTIFICATION_ID, n);
+                    }
+                } catch (Exception ignored) {}
+                stopForeground(true);
+                NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+                if (nm != null) nm.cancel(NOTIFICATION_ID);
+                stopSelf();
+                return START_NOT_STICKY;
+            }
             tryRun(() -> {
-                if (exo != null && prepared) {
+                if (prepared) {
                     int fadeMs = intent.getIntExtra(EXTRA_FADE_MS, DEFAULT_FADE_MS);
                     fadeInOnResume(fadeMs);
                 }
+                // !prepared: play() is mid-prepare; playWhenReady is already
+                // true, onFirstReady will start it — nothing to do.
             });
             startInForeground("Playing");
             updatePlaybackState();
@@ -274,9 +302,37 @@ public class BackgroundAudioService extends Service {
                 showPausedNotification("Finished");   // book ended → notification becomes dismissible
             }
         }
+        @Override public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
+            // ExoPlayer now self-pauses on permanent audio-focus loss (another
+            // app takes over) and on becoming-noisy (BT/headphone disconnect) —
+            // see setAudioAttributes/setHandleAudioBecomingNoisy in
+            // startPlayback. Mirror those into the service state exactly like
+            // an explicit pause; otherwise the notification stays "Playing",
+            // JS keeps _bgPlaying=true, and the playhead silently runs away.
+            if (!playWhenReady &&
+                (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS ||
+                 reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY)) {
+                Log.d(TAG, "self-pause (focus/noisy) reason=" + reason);
+                // Abort any in-flight fade ramp: a fade-in racing this pause
+                // would keep ramping volume on a paused player and leave it
+                // at the wrong level for the next resume.
+                cancelFade();
+                wantPlaying = false;
+                saveLastPositionNow();
+                updatePlaybackState();
+                showPausedNotification("Paused");
+                if (listener != null) listener.onPlayingStateChanged(false);
+            }
+        }
         @Override public void onPlayerError(PlaybackException error) {
             Log.e(TAG, "ExoPlayer error code=" + error.errorCode + " (" + error.getErrorCodeName() + ")", error);
             wantPlaying = false;
+            // Reset the load state so the next play() takes the FULL
+            // startPlayback rebuild — the same-url fast path on an errored
+            // (IDLE) player ran replayLoaded without prepare(), leaving
+            // playback dead with a frozen playhead until a title switch.
+            prepared = false;
+            currentUrl = null;
             if (listener != null) {
                 listener.onError("ExoPlayer error " + error.errorCode + "/" + error.getErrorCodeName());
             }
@@ -301,9 +357,16 @@ public class BackgroundAudioService extends Service {
                 .setUsage(C.USAGE_MEDIA)
                 .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
                 .build();
-            // handleAudioFocus=false matches the old MediaPlayer (which never
-            // requested focus); the app drives its own pause logic.
-            p.setAudioAttributes(attrs, false);
+            // handleAudioFocus=true: ExoPlayer requests audio focus and
+            // self-pauses on permanent loss (and ducks/suppresses during a
+            // phone call, resuming after). Without it a call never paused
+            // playback — the position ran away FORWARD and the never-regress
+            // furthest mark durably committed it. The self-pause is mirrored
+            // into service/JS state in onPlayWhenReadyChanged above.
+            p.setAudioAttributes(attrs, true);
+            // Pause when the audio route becomes noisy (Bluetooth/headphone
+            // disconnect) instead of blasting the speaker + running away.
+            p.setHandleAudioBecomingNoisy(true);
             // Hold a partial wake lock while playing so screen-off CPU sleep
             // can't stall background playback (WAKE_LOCK is granted in the
             // manifest). The old MediaPlayer relied solely on the foreground
@@ -724,6 +787,12 @@ public class BackgroundAudioService extends Service {
             @Override public void onSeekTo(long pos) {
                 seekToMs((int) pos);
                 updatePlaybackState();
+                // Durably persist a lock-screen scrub — while PAUSED nothing
+                // else saves it (the heartbeat only runs while playing), and
+                // the demoted paused service is reapable: an LMK kill reverted
+                // the scrub to the pre-scrub position. Delayed so the
+                // marshalled (and possibly fade-deferred) seek has landed.
+                playerHandler.postDelayed(() -> saveLastPositionNow(), 600);
             }
             // ⏮ / ⏭ jump by SUBTITLE CUE. JS owns cue boundaries, so we just
             // notify it (mirrors the iOS nextTrack/previousTrack handlers).
@@ -734,6 +803,7 @@ public class BackgroundAudioService extends Service {
                 if (listener != null) listener.onRemoteCommand("prevCue");
             }
             @Override public void onStop() {
+                saveLastPositionNow();   // before stopPlayback wipes currentUrl (ACTION_STOP already does this)
                 stopPlayback();
                 stopForeground(true);
                 stopSelf();

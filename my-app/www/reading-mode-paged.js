@@ -1398,7 +1398,15 @@
       const _aCueIdx = _hasCueArr ? card.cueIndices[0] : idx;
       if (pagedCues[_aCueIdx]?.text && (_hasCueArr || pagedCues[_aCueIdx].text === card.expression)) {
         chunk = resolveCueChunk(_aCueIdx, pagedCues[_aCueIdx].text, true);
-        if (chunk) highlightText = pagedCues[_aCueIdx].text;
+        if (chunk) {
+          highlightText = pagedCues[_aCueIdx].text;
+          // The user navigated HERE in card mode — make the read cursor agree
+          // BEFORE the programmatic centering scroll below fires the 400ms
+          // debounced save. Without this, that save persisted the PREVIOUS
+          // read session's lastReadCueIdx, silently regressing the title's
+          // card index below the card the user is looking at.
+          lastReadCueIdx = _aCueIdx;
+        }
       }
       // Deck-derived card whose expression isn't a cue → search near the
       // current position first, then book-wide.
@@ -1427,6 +1435,12 @@
       // fallback" pair — those produced the "highlight slightly
       // off-screen" cases the user reported.
       log('[scroll-trace] centerOnActiveCard → scrollChunkNearRightWithContext');
+      // Tag the scroll programmatic + suppress the debounced save while it
+      // animates (mirrors restoreReadScrollIfNoCard): this centering must
+      // never count as user reading nor persist a position by itself.
+      suppressScrollSave = true;
+      lastProgrammaticScrollTime = Date.now();
+      setTimeout(() => { suppressScrollSave = false; }, 200);
       scrollChunkNearRightWithContext(chunk, 3, { allowFarJump: true });
     } catch (e) { log('centerOnActiveCard error:', e.message); }
   }
@@ -1642,6 +1656,11 @@
         try { bg.seek({ ms, fadeMs: 70 }); } catch (_) {}   // brief fade, like the other modes
       }
       window._lastAudioCueIdx = target;
+      // Advance the module read cursor too: the programmatic follow-scroll
+      // below schedules the 400ms debounced save, which persists
+      // lastReadCueIdx — leaving it at the pre-swipe value silently REVERTED
+      // the persistReadCue(target) on the next line.
+      lastReadCueIdx = target;
       if (typeof window.persistReadCue === 'function') { try { window.persistReadCue(target); } catch (_) {} }
       // The seek lands at (target.start − AUDIO_START_OFFSET_MS), i.e. a beat
       // BEFORE the target cue, so the first position event would make the live
@@ -2938,6 +2957,13 @@
       _bookmarkChunkIdx = -1;
       _lastToastedBookmarkIdx = -2;
       _clearBookmarkTimer();
+      // Reset the cue cursor + suppress scroll-saves for the WHOLE load: the
+      // DOM collapse below fires scroll events whose 400ms debounced save
+      // would otherwise persist the OUTGOING title's lastReadCueIdx (and a
+      // collapsed ~0 scrollLeft) under the INCOMING title's keys. The restore
+      // tail re-arms suppress and clears it after the position is applied.
+      lastReadCueIdx = -1;
+      suppressScrollSave = true;
       innerEl.innerHTML = `<p style="color:#888;text-align:center;margin-top:30vh;">Loading ${name}…</p>`;
 
       const { path } = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri });
@@ -3086,6 +3112,8 @@
       setTimeout(() => { suppressScrollSave = false; }, 200);
     } catch (e) {
       log('loadEpub error:', e);
+      // Never leave scroll-saves suppressed for the session on a failed load.
+      suppressScrollSave = false;
       if (innerEl) innerEl.innerHTML =
         `<p style="color:#f66;text-align:center;margin-top:30vh;padding:0 20px;">Failed to load: ${e.message}</p>`;
     }
@@ -3756,6 +3784,13 @@
       }
     } catch (_) {}
   }
+  // Exposed for shell.js: it must flush BEFORE its synchronous visibility flip
+  // hides the reader — the shell:mode-change listener below sees the view
+  // already hidden (pagedShown=false) and skips, which silently killed the
+  // leave-read flush on every in-app switch AND on the background→audio
+  // auto-switch (whose handler hides the view before our own visibilitychange
+  // handler gets to run).
+  window.flushReadPosition = flushReadPosition;
   function closeView() {
     flushReadPosition();
     if (viewEl) { viewEl.style.visibility = 'hidden'; viewEl.style.pointerEvents = 'none'; }  // hide but KEEP layout
@@ -4281,6 +4316,14 @@
         if (_jpEnd > 0) window.stats?.noteReadPosition?.(_jpEnd);
         window.stats?.bumpRead?.();
       } catch (_) {}
+      // READ-ALONG cursor: the reader is visibly tracking the spoken line, so
+      // it IS the user's reading place. Audio-follow scrolls are programmatic
+      // (the user-scroll path never runs), which froze lastReadCueIdx at the
+      // session-entry line — a kill or background flush then restored an
+      // hour-old position. The follow-scroll's own debounced save now
+      // persists the advancing cue continuously. (A user reading independently
+      // keeps overwriting this via the user-scroll path — last writer wins.)
+      lastReadCueIdx = idx;
     }
     const range = setCueRangeHighlight(chunk, cue.text);
     if (!range || !scrollEl) return;

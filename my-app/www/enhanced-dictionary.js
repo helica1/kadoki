@@ -1687,6 +1687,13 @@
     }
     function maybeResumeAfterLookup() {
         console.log('[dict-resume] called, flag=' + _lookupPausedPlayback);
+        // Waveform bounds editor open: never start playback under it — only
+        // its Preview button may play. Keep the flag SET so the resume still
+        // happens at the real popup dismissal after the editor flow ends.
+        if (document.getElementById('waveformEditorOverlay')) {
+            console.log('[dict-resume] skipped: waveform editor open');
+            return;
+        }
         if (!_lookupPausedPlayback) return;
         _lookupPausedPlayback = false;
         const bg = window.Capacitor?.Plugins?.BackgroundAudio;
@@ -2907,6 +2914,12 @@
         // target carries the `.dict-frag` class, which this guard
         // already excluded).
         document.addEventListener('click', (e) => {
+            // Waveform bounds editor open: every tap belongs to IT, not to
+            // popup dismissal — dismissing here resumed playback mid-edit
+            // (hidePopup → maybeResumeAfterLookup) while the user dragged
+            // the audio bounds. The editor sits above the popup; leave the
+            // popup alone until the editor flow finishes.
+            if (document.getElementById('waveformEditorOverlay')) return;
             const pagedView = document.getElementById('readingPagedView');
             if (pagedView && pagedView.style.display !== 'none' &&
                 pagedView.style.visibility !== 'hidden' && pagedView.contains(e.target)) return;
@@ -2930,6 +2943,11 @@
         // running on the same tap. The paged reader stamps the ts
         // itself when appropriate, so this listener is redundant there.
         document.addEventListener('touchstart', (e) => {
+            // Waveform bounds editor open: don't dismiss (and via
+            // maybeResumeAfterLookup, un-pause audio) on the user's
+            // drag/tap gestures inside the editor — capture-phase runs
+            // before the editor overlay can stop propagation.
+            if (document.getElementById('waveformEditorOverlay')) return;
             const pagedView = document.getElementById('readingPagedView');
             if (pagedView && pagedView.style.display !== 'none' &&
                 pagedView.style.visibility !== 'hidden' && pagedView.contains(e.target)) return;

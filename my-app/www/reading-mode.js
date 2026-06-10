@@ -19,7 +19,8 @@
     SRT_PAIR_PREFIX: 'READING_SRT_PAIR_',         // <deck> → srt cache file path
     SRT_NAME_PREFIX: 'READING_SRT_NAME_',         // <deck> → srt display name
     AUDIO_LAST_POS_PREFIX: 'READING_AUDIO_LAST_POS_', // <deck> → ms position
-    AUDIO_LAST_CHUNK_PREFIX: 'READING_AUDIO_LAST_CHUNK_' // <deck> → chunk idx
+    AUDIO_LAST_CHUNK_PREFIX: 'READING_AUDIO_LAST_CHUNK_', // <deck> → chunk idx
+    AUDIO_LAST_TS_PREFIX: 'READING_AUDIO_LAST_TS_' // <deck> → wall-clock ms of last LISTENING (drives smart rewind)
   };
 
   const DEFAULT_HIGHLIGHT = '#4caf50'; // green — matches the read-mode accent
@@ -138,13 +139,18 @@
     if (!path) return null;
     return { path, name: name || 'subtitles' };
   }
-  async function saveAudiobookLastPosition(deckName, ms, chunkIdx) {
+  async function saveAudiobookLastPosition(deckName, ms, chunkIdx, listenTs) {
     if (!deckName) return;
     if (Number.isFinite(ms) && ms >= 0) {
       await setPref(KEYS.AUDIO_LAST_POS_PREFIX + deckName, Math.floor(ms));
     }
     if (Number.isFinite(chunkIdx) && chunkIdx >= 0) {
       await setPref(KEYS.AUDIO_LAST_CHUNK_PREFIX + deckName, chunkIdx);
+    }
+    // Last-LISTENED wall clock (not last-saved: the foreground reconcile saves
+    // without listening). Powers the smart rewind across cold boots.
+    if (Number.isFinite(listenTs) && listenTs > 0) {
+      await setPref(KEYS.AUDIO_LAST_TS_PREFIX + deckName, Math.floor(listenTs));
     }
   }
   // Expose deck-pairing getters to the shell so it can grey out tabs for
@@ -1312,13 +1318,27 @@
   // to wherever the user was — audio cue if playing, otherwise reader cursor.
   // Sets a global flag so displayCard skips its bg.play() (audio is already
   // running at the right position; restarting would cause a back-jump).
-  window.syncCardToCurrentCue = function () {
+  window.syncCardToCurrentCue = function (prevMode) {
     if (!Array.isArray(window.allNotes)) return;
     const isSrt = !!window.allNotes[0]?.isSrtCard;
 
     // Pick the most reliable source-of-truth for "where the user is".
     // Order: audio cue → reader cursor (lastMatchedIdx → chunk → cue).
-    let cueIdx = abCurrentCueIdx;
+    // Ownership gate: abCurrentCueIdx belongs to the audio context the engine
+    // has LOADED — on a title open the new title's notes are in while the
+    // engine may still hold the PREVIOUS title's cues, and syncing from that
+    // cursor persisted the old title's position into the new title's card
+    // index. Treat the cue as unknown instead.
+    let cueIdx = abEngineOwnsActiveDeck() ? abCurrentCueIdx : -1;
+    // Coming from READ with audio PAUSED: the user's reading line is fresher
+    // than where the audio last stopped (silent read-ahead is normal) —
+    // prefer the live paged read cursor. While playing, the audio cue stays
+    // the source of truth (continuous-mode follow).
+    if (prevMode === 'read' && !window._bgPlaying &&
+        typeof window._pagedReadCueIdx === 'function') {
+      const rc = window._pagedReadCueIdx();
+      if (Number.isFinite(rc) && rc >= 0) cueIdx = rc;
+    }
     if (cueIdx < 0 && abChunkToCue && lastMatchedIdx >= 0) {
       const mapped = abChunkToCue[lastMatchedIdx];
       if (mapped >= 0) cueIdx = mapped;
@@ -2082,6 +2102,16 @@
   let abListenersAttached = false;
   let abScrubbing = false;
   let abPositionRef = { ms: 0, durMs: 0 };
+  // ── Smart rewind (audio mode only) ──
+  // After ≥10 min without listening, the next audio-mode resume starts 30s
+  // early to re-establish context. Applied only at a paused→playing transition
+  // (or to the play({startMs}) target) — never to a running playhead — and the
+  // furthest-listened high-water mark is untouched.
+  const SMART_REWIND_IDLE_MS = 10 * 60 * 1000;
+  const SMART_REWIND_MS = 30 * 1000;
+  let _lastListenWallMs = 0;   // wall clock of the last observed playhead ADVANCE
+  let _abPrevEventMs = -1;     // advance detector for the position listener
+  let abOpenedDeckName = null; // deck that owns the open audio session (save key)
 
   // Expose abCues + abAudioPath to the paged reader as a fallback —
   // its own loadAudiobookCues can fail silently (title-store missing
@@ -2483,9 +2513,9 @@
       if (dy > 50 && ay > ax * 1.5 && !window._inSystemGestureZone?.(startY)) {
         const bg = window.Capacitor?.Plugins?.BackgroundAudio;
         if (!bg) return;
-        bg.getState().then(s => {
+        bg.getState().then(async (s) => {
           if (s?.playing) bg.pause();
-          else if (s?.ready) bg.resume();
+          else if (s?.ready) { await maybeSmartRewindBeforeResume(bg, s); bg.resume(); }
         }).catch(() => {});
       }
     };
@@ -2734,6 +2764,17 @@
   // a full-EPUB reflow 6-7x/sec for the whole whispersync listen. Throttle it.
   let _abStripUpdateAt = 0;
 
+  // True when the audio engine's loaded context (cues + audio file) belongs to
+  // the ACTIVE title. During a title switch there is a window where the old
+  // title's audio still emits position events after #deckName/_activeTitleId
+  // already flipped — attributing those writes to the new title was the
+  // cross-title position/furthest pollution. When ownership is unclear we SKIP
+  // the JS saves entirely: the native durable save + the url-matched restore
+  // floors cover the gap, and a skipped save can never corrupt a key.
+  function abEngineOwnsActiveDeck() {
+    return !!abContextLoadedForDeck && abContextLoadedForDeck === currentDeckName();
+  }
+
   // ── Native-truth reconcile — fix for the BACKWARDS place-jump on resume ──
   // While the WebView is suspended (iOS background) or recreated (Android LMK),
   // native audio keeps advancing but our JS 'position' events stop arriving, so
@@ -2757,14 +2798,26 @@
       // would leave abPositionRef stale-high and then save that wrong value.)
       abPositionRef.ms = s.positionMs;
       if (Number(s.durationMs) > 0) abPositionRef.durMs = s.durationMs;
-      const deck = currentDeckName();
+      // Native was playing through the background → the user kept listening;
+      // refresh the smart-rewind clock so foregrounding doesn't rewind.
+      if (s.playing) _lastListenWallMs = Date.now();
+      // Refresh the CUE cursors too (abCurrentCueIdx, _lastAudioCueIdx, the
+      // displayed subtitle). Adopting only the ms left them frozen at the
+      // pre-background value while paused — a cue swipe or lock-screen ⏮⏭
+      // right after foregrounding then navigated relative to a position from
+      // hours ago. Ownership-gated: mapping another title's position against
+      // the active title's cues would store a bogus cross-title cue index.
+      if (abEngineOwnsActiveDeck()) { try { abUpdateCueDisplay(s.positionMs); } catch (_) {} }
+      // Ownership gate: only persist when the engine's audio belongs to the
+      // ACTIVE title (see abEngineOwnsActiveDeck) — else skip, never mis-key.
+      const deck = abEngineOwnsActiveDeck() ? currentDeckName() : null;
       if (deck) {
         const ci = (abCueToChunk && abCurrentCueIdx >= 0) ? abCueToChunk[abCurrentCueIdx] : -1;
         _abLastSaveAt = Date.now();
-        try { saveAudiobookLastPosition(deck, abPositionRef.ms, ci); } catch (_) {}
+        try { saveAudiobookLastPosition(deck, abPositionRef.ms, ci, _lastListenWallMs); } catch (_) {}
       }
       try {
-        if (window._activeTitleId && window.bookmarks?.updateFurthest) {
+        if (deck && window._activeTitleId && window.bookmarks?.updateFurthest) {
           window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
         }
       } catch (_) {}
@@ -2777,18 +2830,48 @@
   function flushAudioPositionNow() {
     try {
       if (!(abPositionRef.ms > 0)) return;
+      // Ownership gate — see abEngineOwnsActiveDeck. A flush during a title
+      // switch used to write the OLD audio's playhead under the NEW deck key.
+      if (!abEngineOwnsActiveDeck()) return;
       const deck = currentDeckName();
       if (!deck) return;
       const ci = (abCueToChunk && abCurrentCueIdx >= 0) ? abCueToChunk[abCurrentCueIdx] : -1;
       _abLastSaveAt = Date.now();
-      saveAudiobookLastPosition(deck, abPositionRef.ms, ci);
+      saveAudiobookLastPosition(deck, abPositionRef.ms, ci, _lastListenWallMs);
+    } catch (_) {}
+  }
+
+  // ── Smart rewind helper ──
+  // One-shot −30s before a paused→playing resume in audio mode when the user
+  // hasn't listened for ≥10 min. `st` may be a pre-fetched getState() result.
+  // Unknown last-listen time or already-playing audio → strictly a no-op. The
+  // rewind is a real seek of the live playhead, so every existing persistence
+  // path treats it like a user seek (kill right after = re-hear ≤30s, never a
+  // forward place loss; AUDIO_FURTHEST_V1 is forward-only and unaffected).
+  async function maybeSmartRewindBeforeResume(bg, st) {
+    try {
+      if (!bg) return;
+      if (!(_lastListenWallMs > 0)) {
+        // Fresh boot: fall back to the durable per-deck last-listened stamp.
+        const deck = abOpenedDeckName || currentDeckName();
+        if (!deck) return;
+        const ts = parseInt(await getPref(KEYS.AUDIO_LAST_TS_PREFIX + deck));
+        if (!(Number.isFinite(ts) && ts > 0)) return;
+        _lastListenWallMs = ts;
+      }
+      if (Date.now() - _lastListenWallMs < SMART_REWIND_IDLE_MS) return;
+      const s = st || await bg.getState();
+      if (!s || s.playing || !s.ready || !(Number(s.positionMs) > 0)) return;
+      const target = Math.max(0, Math.round(s.positionMs) - SMART_REWIND_MS);
+      _lastListenWallMs = Date.now();   // latch BEFORE the seek — never double-apply
+      await bg.seek({ ms: target });
+      console.log('[ab] smart rewind: idle ≥10min → resume at ' + target + 'ms (−30s)');
     } catch (_) {}
   }
 
   // Foreground/background hooks — attached once. visibilitychange is the
   // cross-platform signal (fires on iOS WKWebView AND Android WebView app
-  // background/foreground). @capacitor/app is not installed, so we deliberately
-  // don't rely on appStateChange. Reconcile is idempotent + forward-only, so
+  // background/foreground). Reconcile is idempotent + forward-only, so
   // firing it from several events is harmless.
   let _abFgHooked = false;
   function abAttachForegroundHooksOnce() {
@@ -2811,13 +2894,23 @@
     if (!bg) return;
     abListenersAttached = true;
     bg.addListener('position', (d) => {
+      // Smart-rewind clock: a position event whose ms ADVANCED means the user
+      // is actually listening right now (a paused poll repeats the same ms).
+      if (Number(d.positionMs) > 0 && d.positionMs !== _abPrevEventMs) {
+        _abPrevEventMs = d.positionMs;
+        _lastListenWallMs = Date.now();
+      }
       abPositionRef.ms = d.positionMs || 0;
       abPositionRef.durMs = d.durationMs || 0;
       // Furthest-listened high-water mark (per active title) → feeds the
       // Bookmarks "Furthest listened" recovery entry. Advances only; the
       // bookmarks module throttles its own durable persistence.
       try {
-        if (abPositionRef.ms > 0 && window._activeTitleId && window.bookmarks?.updateFurthest) {
+        // Ownership gate: during a title switch, tail position events from the
+        // OLD audio arrive after _activeTitleId flipped — they permanently
+        // polluted the NEW title's never-regress furthest mark.
+        if (abPositionRef.ms > 0 && abEngineOwnsActiveDeck() &&
+            window._activeTitleId && window.bookmarks?.updateFurthest) {
           window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
         }
       } catch (_) {}
@@ -2830,10 +2923,11 @@
       const _now = Date.now();
       if (abPositionRef.ms > 0 && _now - _abLastSaveAt > 30000) {
         _abLastSaveAt = _now;
-        const _deck = currentDeckName();
+        // Ownership gate — see abEngineOwnsActiveDeck.
+        const _deck = abEngineOwnsActiveDeck() ? currentDeckName() : null;
         if (_deck) {
           const _ci = (abCueToChunk && abCurrentCueIdx >= 0) ? abCueToChunk[abCurrentCueIdx] : -1;
-          try { saveAudiobookLastPosition(_deck, abPositionRef.ms, _ci); } catch (_) {}
+          try { saveAudiobookLastPosition(_deck, abPositionRef.ms, _ci, _lastListenWallMs); } catch (_) {}
         }
       }
       // The audiobook time label + scrub live on the (hidden) legacy audiobook
@@ -2896,6 +2990,12 @@
     });
   }
 
+  // Recompute the cue display/cursors from an absolute audio ms — used by the
+  // background→audio auto-switch's return path to refresh cue cursors that
+  // froze while the WebView was suspended (iOS) before switching back into
+  // read/card.
+  window.abResyncCueFromMs = (ms) => { try { abUpdateCueDisplay(ms); } catch (_) {} };
+
   window.openAudiobookMode = async function (opts) {
     opts = opts || {};
     // Show the audiobook view IMMEDIATELY (before any awaits) so the user
@@ -2949,6 +3049,9 @@
     installAudiobookCueTapHandler();
     installAudiobookSwipeHandler();
     window.audiobookActive = true;
+    // Capture the deck that owns this audio session — closeAudiobookMode must
+    // save under THIS key even if #deckName has already flipped to a new title.
+    abOpenedDeckName = abContextLoadedForDeck || currentDeckName();
     // Fresh audio-chars baseline for this listening session, so re-entering at
     // an earlier position credits cleanly (and the first cue is never dumped).
     window._lastAudioCueIdxForStats = -1;
@@ -2990,7 +3093,10 @@
       }
     }
     let _floorRaised = false;   // true ⇒ native is already playing THIS audio ahead of the saved spot
+    let _nativePlaying = false; // true ⇒ getState() saw this audio actively playing
+    let _fromSavedPos = false;  // true ⇒ startMs came from the saved-position fallback
     if (startMs == null) {
+      _fromSavedPos = true;
       const last = await getAudiobookLastPosition(deck);
       startMs = last.ms || 0;
       // Never resume BEHIND where this SAME audio is already playing natively.
@@ -3007,16 +3113,42 @@
       // between the saved path and what native reports (normalized compare).
       try {
         const _bg = window.Capacitor?.Plugins?.BackgroundAudio;
-        // Strip ALL leading slashes after the scheme (file:// vs file:/// vary by
-        // platform) + decode, so the same file matches despite scheme/encoding.
-        const _norm = (u) => { try { return decodeURIComponent(String(u || '').replace(/^file:\/{2,}/, '')); } catch (_) { return String(u || '').replace(/^file:\/{2,}/, ''); } };
+        // Strip the scheme AND any leading slashes on BOTH sides, then decode.
+        // Native reports file:///data/… while abAudioPath is the bare
+        // /data/… — the old normalizer removed the slashes only on the
+        // file:// side ("data/…" vs "/data/…"), so the compare NEVER matched
+        // and both forward-only floors below were silently dead: every
+        // restart/resume fell back to the stale JS save (the backward jump).
+        const _norm = (u) => {
+          const s = String(u || '').replace(/^file:\/+/, '').replace(/^\/+/, '');
+          try { return decodeURIComponent(s); } catch (_) { return s; }
+        };
+        // Suffix fallback: the saved/native path can differ from the current
+        // one by its PREFIX only — iOS rotates the app-container UUID on every
+        // app update, and a re-materialized cache can live in a new directory.
+        // The cache FILENAME (deck_<contenthash>.<ext>) is content-stable, so
+        // a basename match identifies the same audio. Restricted to the
+        // deck_ naming so two titles with a generic shared filename
+        // (audiobook.m4b) can never cross-match positions.
+        const _tail = (u) => {
+          const s = _norm(u);
+          const t = s.slice(s.lastIndexOf('/') + 1);
+          return t.startsWith('deck_') ? t : '';
+        };
+        const _sameAudio = (a, b) => {
+          if (!a || !b) return false;
+          if (a === b) return true;
+          const ta = _tail(a), tb = _tail(b);
+          return !!ta && ta === tb;
+        };
         const _mine = _norm(abAudioPath);
         if (_bg && typeof _bg.getState === 'function' && _mine) {
           for (let _try = 0; _try < 4; _try++) {
             let _s = null;
             try { _s = await _bg.getState(); } catch (_) {}
             if (!_s) break;                                   // no bridge state → nothing to floor
-            const _matches = _s.url && _norm(_s.url) === _mine;
+            if (_s.playing) _nativePlaying = true;
+            const _matches = _s.url && _sameAudio(_norm(_s.url), _mine);
             if (_s.ready) {
               if (_matches && Number(_s.positionMs) > startMs) { startMs = _s.positionMs; _floorRaised = true; }
               break;                                          // ready → decision made (raise or not)
@@ -3038,7 +3170,7 @@
         if (!_floorRaised && _bg && typeof _bg.getLastSavedPosition === 'function' && _mine) {
           try {
             const _ls = await _bg.getLastSavedPosition();
-            if (_ls && _ls.hasSaved && _ls.url && _norm(_ls.url) === _mine &&
+            if (_ls && _ls.hasSaved && _ls.url && _sameAudio(_norm(_ls.url), _mine) &&
                 Number(_ls.positionMs) > startMs) {
               startMs = _ls.positionMs;
             }
@@ -3046,6 +3178,35 @@
         }
       } catch (_) {}
     }
+    // Smart rewind — saved-position entries only (cold boot / plain tab-in).
+    // Never on an explicit target (Bookmarks one-shot, seekToCurrentPosition),
+    // never on actively-playing audio, and not when the floor was raised on a
+    // paused-warm native (_floorRaised) or on resumeOnly — those resume in
+    // place below, where maybeSmartRewindBeforeResume applies the same rewind
+    // to the LIVE position instead. Ordering matters: the floors above are
+    // forward-only and would silently cancel a rewind applied before them.
+    try {
+      if (_fromSavedPos && !_floorRaised && !_nativePlaying && !opts.resumeOnly &&
+          Number(startMs) > 0) {
+        let _ts = _lastListenWallMs;
+        if (!(_ts > 0)) {
+          const _tsRaw = parseInt(await getPref(KEYS.AUDIO_LAST_TS_PREFIX + deck));
+          if (Number.isFinite(_tsRaw) && _tsRaw > 0) _ts = _tsRaw;
+        }
+        // Unknown last-listen time → no rewind (safe default: don't move).
+        if (_ts > 0 && Date.now() - _ts >= SMART_REWIND_IDLE_MS) {
+          startMs = Math.max(0, startMs - SMART_REWIND_MS);
+          _lastListenWallMs = Date.now();   // latch — never double-apply
+          console.log('[ab] smart rewind (entry): startMs → ' + startMs);
+        }
+      }
+    } catch (_) {}
+    // Seed the live-position ref with the resolved start. abPositionRef is
+    // otherwise written only by native position events / the foreground
+    // reconcile, so an audio-mode exit BEFORE the first event used to persist
+    // its initial 0 (or a previous title's leftover) via closeAudiobookMode —
+    // wiping the real save.
+    if (Number.isFinite(startMs)) abPositionRef.ms = Math.max(0, Math.round(startMs));
     console.log('[ab] openAudiobookMode seek=' + !!opts.seekToCurrentPosition +
       ' isSrt=' + !!card?.isSrtCard +
       ' cardStart=' + (card?.audiobookStartMs ?? 'n/a') +
@@ -3071,11 +3232,25 @@
       if (opts.resumeOnly && pendingStartMs == null) {
         try {
           const s = await bg.getState();
-          if (s && (s.ready || s.positionMs > 0)) {
+          if (s && s.playing) {
+            // Already playing (background→audio auto-switch, lock-screen play
+            // follow-up): just attach the UI — no transport call. Re-issuing
+            // resume() on playing audio caused an audible dip on iOS (its
+            // resume always restarts the fade from volume 0).
+            didResume = true;
+          } else if (s && (s.ready || s.positionMs > 0)) {
+            await maybeSmartRewindBeforeResume(bg, s);
             await bg.resume();
             didResume = true;
           }
         } catch (_) {}
+        // Background→audio auto-switch: NEVER fall through to a cold
+        // bg.play() restart — a getState hiccup while the app is backgrounding
+        // would re-seek the LIVE playhead back to the saved position, and a
+        // fresh play() during iOS backgrounding can fail outright and kill the
+        // audio. Worst case of skipping: the UI attaches without a transport
+        // call and the position events sync it within ~1s.
+        if (!didResume && opts.autoSwitch) didResume = true;
       } else if (_floorRaised && pendingStartMs == null && !opts.seekToCurrentPosition) {
         // Native is already playing THIS exact audio AHEAD of our saved spot (the
         // floor above raised startMs to it). Resume in place instead of re-issuing
@@ -3084,6 +3259,7 @@
         // re-entry. We already confirmed ready+matching-url+ahead, so this is
         // forward-safe. Skipped for an explicit target / deliberate seek.
         try {
+          await maybeSmartRewindBeforeResume(bg);
           await bg.resume();
           didResume = true;
           // We resumed at native's actual position (≈ startMs), NOT adjStart — so
@@ -3134,10 +3310,16 @@
     if (bg && !opts.keepPlaying) {
       try { await bg.pause(); } catch (e) {}
     }
-    const deck = currentDeckName();
-    if (deck) {
+    // Save under the deck that OWNED this audio session (captured at open):
+    // on a title switch #deckName has already flipped when this runs, which
+    // used to write title A's playhead under title B's key. And only persist
+    // a real position — abPositionRef starts at {ms:0}, so an exit before the
+    // first position event used to wipe the good save with 0 (its sibling
+    // flushAudioPositionNow always had this guard; this path didn't).
+    const deck = abOpenedDeckName || currentDeckName();
+    if (deck && abPositionRef.ms > 0) {
       const chunkIdx = (abCueToChunk && abCurrentCueIdx >= 0) ? abCueToChunk[abCurrentCueIdx] : -1;
-      await saveAudiobookLastPosition(deck, abPositionRef.ms, chunkIdx);
+      await saveAudiobookLastPosition(deck, abPositionRef.ms, chunkIdx, _lastListenWallMs);
     }
     // Card mode can resume normal audio playback now.
     window.audiobookActive = false;
@@ -3148,7 +3330,16 @@
     if (!bg) return;
     const s = await bg.getState();
     if (s.playing) await bg.pause();
-    else await bg.resume();
+    else if (s.ready || Number(s.positionMs) > 0) {
+      await maybeSmartRewindBeforeResume(bg, s);
+      await bg.resume();
+    } else {
+      // Service gone (paused notification dismissed → stopSelf, or the
+      // process was recycled): resume() silently no-ops, leaving the PLAY
+      // button dead. Re-enter through the full open path — saved position,
+      // native floors, and smart rewind all apply.
+      try { await window.openAudiobookMode(); } catch (_) {}
+    }
   };
 
   window.audiobookSkip = async function (deltaMs) {

@@ -2445,6 +2445,9 @@ const namesFor = (mid) => {
       currentCardIndex = window.pendingCardIndex;
       window.currentCardIndex = currentCardIndex;
       window.pendingCardIndex = undefined;
+      // Sync the paged reader / shared cue cursor to the restored index
+      // (displayCard below doesn't notify; only manual nav did).
+      try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
       showToast(`🎯 Resumed at card ${currentCardIndex + 1}`, 2000);
     } else {
       // Target card not loaded yet, will restore after background processing
@@ -2492,6 +2495,10 @@ const namesFor = (mid) => {
               window.currentCardIndex = currentCardIndex;
               displayCard();
               updateProgressBar();
+              // Tell the paged reader the index landed — without this the
+              // reader stayed anchored at card 0 (the book start) and could
+              // persist THAT over the real bookmark.
+              try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
               showToast(`🎯 Resumed at card ${currentCardIndex + 1}`, 2000);
               window.pendingCardIndex = undefined;
             }
@@ -2522,6 +2529,7 @@ const namesFor = (mid) => {
           window.currentCardIndex = currentCardIndex;
           displayCard();
           updateProgressBar();
+          try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
           showToast(`🎯 Resumed at card ${currentCardIndex + 1}`, 2000);
           window.pendingCardIndex = undefined;
         }
@@ -3933,11 +3941,29 @@ window.persistReadCue = function (cueIdx) {
 // lock-screen prev/next-track (⏮⏭) buttons. The audiobook is already loaded
 // while in audio mode, so a plain seek is enough; the position events repaint
 // the cue text + waveform.
-window.lockScreenCueJump = function (dir) {
+window.lockScreenCueJump = async function (dir) {
   const cues = (window.pagedCues?.length ? window.pagedCues : window.__abCues) || [];
   const bg = window.Capacitor?.Plugins?.BackgroundAudio;
   if (!cues.length || !bg) return;
-  const cur = window._lastAudioCueIdx;
+  // Derive the current cue from the LIVE native playhead. _lastAudioCueIdx is
+  // a shared cursor that reader scrolling / reader entry / card renders all
+  // overwrite WITHOUT moving the audio — so lock-screen ⏮⏭ used to navigate
+  // relative to the READ spot (possibly far from what's playing). The cursor
+  // remains only the fallback when native state is unavailable.
+  let cur = -1;
+  try {
+    const s = await bg.getState();
+    const pos = Number(s?.positionMs);
+    if (s && (s.ready || pos > 0) && Number.isFinite(pos) && pos >= 0) {
+      let lo = 0, hi = cues.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if ((cues[mid].startMs ?? 0) <= pos) lo = mid; else hi = mid - 1;
+      }
+      cur = lo;
+    }
+  } catch (_) {}
+  if (cur < 0 && Number.isFinite(window._lastAudioCueIdx)) cur = window._lastAudioCueIdx;
   // Playhead unknown → STAY PUT. Never coerce to 0 and seek the book start:
   // the lock-screen ⏮⏭ used to jump to the very beginning when the cursor was
   // -1/NaN. prev/next only navigates relative to a real, known playhead.
@@ -4060,6 +4086,17 @@ function _ensureBgListenersForSrtCards() {
   // guarantees we never mis-attribute the time to card/read.
   bg.addListener('remoteCommand', (d) => {
     const action = d?.action;
+    // Staleness guard: on iOS, lock-screen commands fired while the WebView is
+    // suspended queue up and REPLAY on foreground — possibly minutes later,
+    // when acting on them would yank a long-running playback (a stale prevCue
+    // = a big backward seek). Native stamps `ts` (epoch ms, same device
+    // clock); drop anything older than a few seconds. Commands without ts
+    // (older native build) pass through unchanged.
+    const ts = Number(d?.ts);
+    if (Number.isFinite(ts) && ts > 0 && Date.now() - ts > 5000) {
+      debugLog(`[remote] dropping stale '${action}' (${Math.round((Date.now() - ts) / 1000)}s old)`);
+      return;
+    }
     if (action === 'play') {
       // Disarm the SRT-card end-boundary auto-pause IMMEDIATELY (synchronously)
       // so the ~150ms position events can't pause the audio the lock screen

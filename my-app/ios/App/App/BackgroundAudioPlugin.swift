@@ -195,12 +195,15 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             // Tell JS this play came from the lock screen / Control Center, so
             // it can force AUDIO mode (audiobook + audio timer) regardless of
             // whatever mode the app was in.
-            self?.notifyListeners("remoteCommand", data: ["action": "play"])
+            // ts: lets JS drop this command if it thaws out of a suspended
+            // WebView minutes later (stale-replay guard).
+            self?.notifyListeners("remoteCommand", data: ["action": "play", "ts": Int(Date().timeIntervalSince1970 * 1000)])
             return .success
         }
         cmd.pauseCommand.addTarget { [weak self] _ in
             self?.player?.pause()
             self?.stopPositionTimer()
+            self?.saveLastPositionNow()   // durable: a paused suspended app can be jetsam-killed with no further save
             self?.emitState(playing: false)
             self?.updateNowPlaying()
             return .success
@@ -210,13 +213,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             if p.isPlaying {
                 p.pause()
                 self?.stopPositionTimer()
+                self?.saveLastPositionNow()
                 self?.emitState(playing: false)
             } else {
                 self?.ensureSessionActive()
                 p.play()
                 self?.startPositionTimer()
                 self?.emitState(playing: true)
-                self?.notifyListeners("remoteCommand", data: ["action": "play"])
+                self?.notifyListeners("remoteCommand", data: ["action": "play", "ts": Int(Date().timeIntervalSince1970 * 1000)])
             }
             self?.updateNowPlaying()
             return .success
@@ -228,18 +232,21 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         cmd.skipBackwardCommand.isEnabled = false
         cmd.nextTrackCommand.isEnabled = true
         cmd.nextTrackCommand.addTarget { [weak self] _ in
-            self?.notifyListeners("remoteCommand", data: ["action": "nextCue"])
+            self?.notifyListeners("remoteCommand", data: ["action": "nextCue", "ts": Int(Date().timeIntervalSince1970 * 1000)])
             return .success
         }
         cmd.previousTrackCommand.isEnabled = true
         cmd.previousTrackCommand.addTarget { [weak self] _ in
-            self?.notifyListeners("remoteCommand", data: ["action": "prevCue"])
+            self?.notifyListeners("remoteCommand", data: ["action": "prevCue", "ts": Int(Date().timeIntervalSince1970 * 1000)])
             return .success
         }
         cmd.changePlaybackPositionCommand.addTarget { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent,
                   let p = self?.player else { return .commandFailed }
             p.currentTime = event.positionTime
+            // Durable: a PAUSED lock-screen scrub had no other writer (timer
+            // stopped, no JS event) — a jetsam kill discarded it entirely.
+            self?.saveLastPositionNow()
             self?.updateNowPlaying()
             return .success
         }
@@ -338,6 +345,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.player?.pause()
                 self.player?.volume = 1.0 // restore for next play
                 self.stopPositionTimer()
+                self.saveLastPositionNow()   // durable on every pause (parity with Android ACTION_PAUSE)
                 self.emitState(playing: false)
                 self.updateNowPlaying()
             }
@@ -353,6 +361,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             player?.pause()
             player?.volume = 1.0
             stopPositionTimer()
+            saveLastPositionNow()   // durable on every pause (parity with Android ACTION_PAUSE)
             emitState(playing: false)
             updateNowPlaying()
         }
@@ -380,6 +389,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func stop(_ call: CAPPluginCall) {
         stopPositionTimer()
+        saveLastPositionNow()   // before the player/url are cleared (parity with Android ACTION_STOP)
         player?.stop()
         player = nil
         currentUrlStr = ""

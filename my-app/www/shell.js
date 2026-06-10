@@ -337,6 +337,16 @@
       try { window.bookmarks.capture(currentMode); } catch (_) {}
     }
 
+    // Leaving READ: flush the read place NOW, while the reader is still the
+    // visible view. The paged reader's own leave-flush (shell:mode-change
+    // listener) and background-flush (visibilitychange) both gate on the view
+    // being visible — and the flip below hides it before either runs, so
+    // without this call the last page-turn/cue was silently dropped on every
+    // read→card/audio switch and on the background→audio auto-switch.
+    if (currentMode === 'read' && mode !== 'read') {
+      try { window.flushReadPosition?.(); } catch (_) {}
+    }
+
     // === SYNCHRONOUS visibility flip ===
     // Flip views + tab UI THIS frame, before any await. That makes tab
     // taps feel instant: the user sees the new tab go active and the
@@ -381,7 +391,11 @@
     // ticks. localStorage LAST_MODE_V1 (in updateTabsUI) stays as the global
     // fallback for the very first launch before any title has a stored mode.
     try {
-      if (window._activeTitleId && window.titleStore?.setMode) {
+      // autoSwitch (background→audio handoff): keep the DURABLE per-title mode
+      // at the user's real read/card mode, so a process death while
+      // backgrounded restores them where they actually were — the auto-switch
+      // is a transient playback arrangement, not a user choice.
+      if (!(opts && opts.autoSwitch) && window._activeTitleId && window.titleStore?.setMode) {
         window.titleStore.setMode(window._activeTitleId, mode);
       }
     } catch (_) {}
@@ -502,7 +516,10 @@
           const isRestore = !!(opts && opts.titleOpen);
           await window.openAudiobookMode({
             seekToCurrentPosition: (prevMode === 'card' || prevMode === 'read') && !resumeOnly && !isRestore,
-            resumeOnly
+            resumeOnly,
+            // background→audio handoff: openAudiobookMode must not issue any
+            // transport call that could disturb the already-playing audio.
+            autoSwitch: !!(opts && opts.autoSwitch)
           });
           window._reentryDismissedByTab = false;
         } else if (mode === 'read' && typeof window.openReadingMode === 'function') {
@@ -520,11 +537,15 @@
           // off the card) runs after it and overwrites + fights it (the card↔read
           // drift + oscillation). NOT set on titleOpen (handled above, untouched),
           // so a plain title-open still lands on the M1 bookmark.
-          if (prevMode === 'card' && Number.isFinite(window.currentCardIndex) && window.currentCardIndex >= 0) {
+          // NOT on a title-open/boot restore: prevMode is just the boot default
+          // ('card') there, and currentCardIndex may still be the PREVIOUS
+          // title's — this signal would bypass the M1 bookmark restore.
+          if (prevMode === 'card' && !(opts && opts.titleOpen) &&
+              Number.isFinite(window.currentCardIndex) && window.currentCardIndex >= 0) {
             window._reentryCardCueIdx = window.currentCardIndex;
           }
           await window.openReadingMode();
-        } else if (mode === 'card' && (prevMode === 'read' ||
+        } else if (mode === 'card' && !(opts && opts.titleOpen) && (prevMode === 'read' ||
                    (continuous && prevMode === 'audio'))) {
           // read → card: re-sync the card index to the reader cursor
           // (read and card share the same logical position). For
@@ -532,7 +553,10 @@
           // handles "follow audio" vs "stay". In CONTINUOUS mode there
           // is no dialog, so audio → card snaps the card to the live
           // playhead instead (syncCardToCurrentCue reads abCurrentCueIdx).
-          if (typeof window.syncCardToCurrentCue === 'function') window.syncCardToCurrentCue();
+          // NOT on a titleOpen: prevMode is meaningless there and the engine
+          // cue cursor may still be the PREVIOUS title's — the title's own
+          // restore (autoRestoreFromTitles) owns the card index.
+          if (typeof window.syncCardToCurrentCue === 'function') window.syncCardToCurrentCue(prevMode);
         }
         // Entering card mode: guarantee the card view reflects the ACTIVE title.
         // syncCardToCurrentCue / the reentry dialog only re-render when the card

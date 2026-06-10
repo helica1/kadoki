@@ -4,6 +4,23 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.5.0 — 2026-06-09
+
+### Added
+- **Smart rewind.** After a break of 10 minutes or more, resuming in audio mode starts **30 seconds back** so you can re-establish context before new material. Deliberate jumps (Bookmarks, "play from here") are never rewound, and your saved position and furthest-listened mark are untouched.
+- **Audio keeps playing when the screen turns off.** Locking the screen (or switching apps) while in read or card mode with audio playing now hands off seamlessly to audio-mode playback — the time counts as listening, your reading position is saved at that instant, and when you come back the app returns to read/card mode synced to wherever the audio has reached. Sending a card to Anki is exempt (the brief hop no longer interrupts anything).
+
+### Fixed
+- **Your place is restored correctly after restarting or resuming the app.** The restore logic that adopts the audio player's real position was being silently skipped (it compared file paths in two different formats), so the app fell back to an older saved spot — the main cause of "it jumped back after I reopened the app." Quick exits from audio mode could also overwrite a good position with 0; both are fixed, and positions now survive app updates on iOS too.
+- **Switching titles can no longer mix up positions between books.** A switch while the previous book's audio was still winding down could write that book's position — or its furthest-listened mark — under the new title.
+- **Read mode keeps your line while listening along.** During read-along the saved reading position now advances with the audio, so closing or losing the app mid-listen restores the line you were on, not where you started. Subtitle swipes no longer get reverted moments later, entering read mode from a card lands on (and keeps) that card's line, and leaving read mode reliably saves your spot.
+- **Reopening a deck restores deep card positions properly.** Restoring to a card far into a deck no longer briefly shows the book start in the reader (or saves it over your bookmark).
+- **Phone calls and Bluetooth disconnects now pause playback.** Previously a call never paused the audio (the position silently ran ahead), and unplugging headphones blasted the speaker.
+- **Android: PLAY works after dismissing the paused notification**, and playback recovers after an audio error instead of staying silent until a title switch.
+- **Lock screen: ⏮⏭ follow the real playback position** (they could jump relative to where you'd scrolled in the reader), stale taps from before the phone slept are ignored, and scrubbing while paused is now saved durably on both platforms.
+- **iOS: the position is saved durably on every pause, scrub, and stop** — it survives the app being killed while suspended in the background.
+- **Send-to-Anki bounds editor: audio no longer starts playing on its own while you adjust the bounds.** Only the Preview button plays audio.
+
 ## v1.4.2 — 2026-06-08
 
 ### Fixed
