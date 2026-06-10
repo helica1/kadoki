@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <a href=https://testflight.apple.com/join/SpY7rqgR><strong>iOS from TestFlight</strong></a> </p>
+
+
+<p align="center">
   <img src="docs/screenshots/screenshot1.jpeg" width="300" alt="Narrated epub reader with integrated Yomitan dictionary support">
 </p>
 
