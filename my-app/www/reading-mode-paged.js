@@ -2229,7 +2229,6 @@
   const BOOKMARK_SETTLE_MS = 5000;
   let _bookmarkChunkIdx = -1;
   let _bookmarkTimer = null;
-  let _lastToastedBookmarkIdx = -2;
 
   // The current reading line (right edge) + frontier char offset (leftmost
   // visible), read from the live viewport. Returns null if nothing valid is on
@@ -2389,7 +2388,9 @@
     } catch (_) {}
   }
 
-  // 5 s of stillness → bookmark the current line, credit reading, toast.
+  // 5 s of stillness → bookmark the current line, credit reading. Silent:
+  // the "Location bookmarked" toast was removed 2026-06-10 (bookmarking is
+  // automatic background behavior now, the popup was just noise).
   function _settleBookmark() {
     try {
       _bookmarkTimer = null;
@@ -2401,10 +2402,6 @@
       _bookmarkChunkIdx = a.readingIdx;
       _persistBookmark();
       try { window.stats?.noteReadPosition?.(a.frontierOff); } catch (_) {}
-      if (a.readingIdx !== _lastToastedBookmarkIdx) {     // one toast per new line
-        _lastToastedBookmarkIdx = a.readingIdx;
-        try { window.showToast?.('Location bookmarked', 1200); } catch (_) {}
-      }
     } catch (_) {}
   }
 
@@ -3626,7 +3623,6 @@
       // book's settle timer against this one (the title-flip place-loss). The
       // real value for THIS book is loaded from its pref further down.
       _bookmarkChunkIdx = -1;
-      _lastToastedBookmarkIdx = -2;
       _clearBookmarkTimer();
       // Reset the cue cursor + suppress scroll-saves for the WHOLE load: the
       // DOM collapse below fires scroll events whose 400ms debounced save
@@ -3873,7 +3869,6 @@
       const _bmRaw = await getPref(KEY_BOOKMARK_PREFIX + name);
       const _bmIdx = (_bmRaw != null && _bmRaw !== '') ? parseInt(_bmRaw) : -1;
       _bookmarkChunkIdx = (Number.isFinite(_bmIdx) && _bmIdx >= 0) ? _bmIdx : -1;
-      _lastToastedBookmarkIdx = -2; // a fresh open may toast again on first settle
       await setPref(KEY_LAST_NAME, name);
       suppressScrollSave = true;
       lastProgrammaticScrollTime = Date.now(); // this restore is not "reading"

@@ -16,6 +16,9 @@ All notable changes to Kadoki are documented here. Newest first.
 - **Stray furigana from the next page no longer peeks in at the left edge.**
 - **iOS: dictionary-lookup highlight now covers the kanji.** Looking up a word with furigana used to skip the leading kanji and tint the furigana instead; the highlight now hugs the word's characters and leaves the furigana clear.
 
+### Removed
+- **The "Location bookmarked" toast.** Your place is still saved automatically exactly as before — the popup announcing it was just noise.
+
 ## v1.4.3 — 2026-06-09
 
 ### Added
