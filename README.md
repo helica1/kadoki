@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="../../releases/latest"><strong>⬇ Download the latest APK</strong></a> ·
-  <a href="CHANGELOG.md">Changelog</a>
+
 </p>
 
 <p align="center">
