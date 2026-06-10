@@ -116,9 +116,15 @@ html, body {
    (rt) but not the kanji BASE inside <ruby> on WebKit. reading-mode adds the
    .cue-ruby-active class to the EXISTING ruby elements in the active cue (no DOM
    mutation), and this colors the base+rt green directly. Background mode keeps
-   normal text, so it's excluded. */
+   normal text, so it's excluded.
+   MUST cover BOTH readers: the rule was originally scoped to the legacy
+   #readingModeContent only, so in the PAGED reader (#readingPagedInner — the
+   one actually in use) the class was applied but matched nothing and the kanji
+   stayed white on iOS. That was the whole bug. */
 body:not(.highlight-bg) #readingModeContent ruby.cue-ruby-active,
-body:not(.highlight-bg) #readingModeContent ruby.cue-ruby-active rb {
+body:not(.highlight-bg) #readingModeContent ruby.cue-ruby-active rb,
+body:not(.highlight-bg) #readingPagedInner ruby.cue-ruby-active,
+body:not(.highlight-bg) #readingPagedInner ruby.cue-ruby-active rb {
   color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%) !important;
   -webkit-text-fill-color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%) !important;
 }

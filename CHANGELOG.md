@@ -4,6 +4,18 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## Unreleased
+
+### Added
+- **Images in EPUBs.** Read mode now shows the book's images (covers, illustrations, SVG image pages) inline, sized to fit the page. Previously all images were stripped.
+
+### Fixed
+- **iOS: the active line's kanji now turn green.** When the currently-narrated line contained furigana, only the furigana was colored on iOS — the kanji stayed white. (The fallback that colors ruby text directly was only wired to the old reader, never the current one.)
+- **Furigana no longer cut off at the right edge of the page.** The edge cleanup strip that hides partial columns was also covering the furigana of the right-most line (both platforms); it now leaves room for it.
+- **Page swipes land in one smooth motion — no more jerk after the page settles.** The post-swipe corrections (column alignment, furigana room) are now computed into the swipe animation's landing spot instead of running as separate jumps after it stops.
+- **Stray furigana from the next page no longer peeks in at the left edge.**
+- **iOS: dictionary-lookup highlight now covers the kanji.** Looking up a word with furigana used to skip the leading kanji and tint the furigana instead; the highlight now hugs the word's characters and leaves the furigana clear.
+
 ## v1.4.3 — 2026-06-09
 
 ### Added

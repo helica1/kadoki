@@ -252,13 +252,61 @@
         column-width: auto !important;
         columns: auto !important;
       }
+      /* Ruby internals: re-assert sane ruby layout AFTER the universal hammer
+         above, which forces text-align:start / vertical-align:top on EVERY
+         descendant — including <ruby>/<rb>/<rt>. Desktop WebKit/Blink ignore
+         those on ruby internal boxes (verified by geometry probe 2026-06-09),
+         but device WebKit honors more of the cascade inside <ruby>: furigana
+         bunched toward the word start instead of centered, annotation lane
+         collapsing onto the base glyphs, ruby words displaced sideways out of
+         the column (the iPad "alignment off" screenshots). These are no-ops
+         where the engine already does the right thing. Wins over the
+         universal rule: a type selector beats * at equal !important level
+         ((0,1,0,1) vs (0,1,0,0)). */
+      #readingPagedInner ruby,
+      #readingPagedInner rb,
+      #readingPagedInner rt {
+        text-align: center !important;
+        text-align-last: auto !important;
+        vertical-align: baseline !important;
+        ruby-align: space-around;
+      }
+      /* Guard against EPUB inline styles on rt (stylesheets are stripped but
+         style="" attributes survive); 0.5em is the UA default we rely on for
+         the furigana-lane measurements. */
+      #readingPagedInner rt {
+        font-size: 0.5em !important;
+      }
+      /* EPUB images flow as thick "lines" in vertical-rl. Cap by the
+         VIEWPORT, not the containing block — max-width:100% was useless here
+         (the containing block is the whole multi-page-wide inner element). */
       #readingPagedInner img,
-      #readingPagedInner svg,
+      #readingPagedInner svg {
+        /* min(100%, 88vh): belt-and-suspenders — if innerEl's height ever
+           resolves as indefinite (% would then NOT clamp), the vh cap still
+           keeps a tall illustration inside the viewport so it can't warp the
+           column geometry the snap/mask math depends on. */
+        max-height: min(100%, 88vh) !important;
+        max-width: 85vw !important;
+        width: auto !important;
+        height: auto !important;
+        break-inside: avoid;
+      }
       #readingPagedInner figure,
       #readingPagedInner table {
-        max-width: 100% !important;
-        max-height: 100% !important;
+        max-width: 85vw !important;
+        max-height: min(100%, 88vh) !important;
         break-inside: avoid;
+      }
+      /* Inline glyph images (gaiji): one character's footprint. height = the
+         inline advance in vertical-rl (one glyph), width = line thickness. */
+      #readingPagedInner img.kadoki-gaiji {
+        height: 1em !important;
+        width: auto !important;
+        max-width: 1.2em !important;
+        max-height: 1em !important;
+        vertical-align: baseline !important;
+        break-inside: auto !important;
       }
       /* Highlight for dict lookup — same key as the legacy reader so the
          popup-close handler clears it via window._clearReaderDictHighlight.
@@ -337,8 +385,11 @@
       }
       ::highlight(reader-dict-lookup) {
         background: color-mix(in srgb, var(--accent-read, #4caf50) 60%, transparent);
-        text-decoration: underline wavy var(--accent-read, #4caf50) 3px;
-        text-underline-offset: 5px;
+        /* NO underline: the wavy decoration rendered as a squiggle to the LEFT
+           of the column in vertical-rl (and Chromium dragged it across the
+           furigana line too) — theme.css already dropped it for the same
+           reason; this injected copy was overriding that. The 60% fill alone
+           marks the word. */
         text-decoration-skip-ink: none;
       }
     `;
@@ -1501,17 +1552,34 @@
     if (Math.abs(delta) < 0.5) { if (onDone) onDone(); return; }
     const t0 = performance.now();
     const ease = (p) => 1 - Math.pow(1 - p, 3); // ease-out cubic
+    let lastWritten = null; // actual post-write value (read back, so clamping at scroll bounds isn't mistaken for an external write)
     const step = (now) => {
+      // ABORT if someone else moved the scroll between frames (a restore,
+      // the 600ms re-force verifier, a cue jump): this loop writes ABSOLUTE
+      // positions from a `from` captured at start, so reasserting its stale
+      // trajectory would silently erase the other writer's position — the
+      // place-keeping bug class. The new owner's flow is responsible for
+      // its own completion work, so onDone is intentionally skipped.
+      if (lastWritten !== null && Math.abs(scrollEl.scrollLeft - lastWritten) > 2) {
+        _physAnim = null;
+        return;
+      }
       const p = Math.min(1, (now - t0) / ms);
       lastProgrammaticScrollTime = Date.now();
       scrollEl.scrollLeft = from + delta * ease(p); // browser clamps to scroll bounds
+      lastWritten = scrollEl.scrollLeft;
       if (p < 1) _physAnim = requestAnimationFrame(step);
       else { _physAnim = null; if (onDone) onDone(); }
     };
     _physAnim = requestAnimationFrame(step);
   }
   // Settle the reading (right) edge exactly onto a column boundary so no
-  // vertical line is ever partially rendered. This is the SAME alignment
+  // vertical line is ever partially rendered. NOTE: no longer wired to the
+  // page-turn — _predictLandingTarget folds this exact correction into the
+  // turn's animation target instead (the post-hoc instant scrollBy here was
+  // the post-swipe jerk). Kept as the reference implementation of the
+  // fold/cluster math and as a manual realignment helper.
+  // This is the SAME alignment
   // autoScrollForRange uses for cues — align a line-box right edge to
   // (sr.right - pad), where `pad` reserves room for the furigana that sits to
   // the right of the base column — but applied to the NEAREST column on any
@@ -1524,36 +1592,173 @@
   //   • the MEDIAN residual over every visible column (the grid is one
   //     continuous pitch since the CSS zeroes all chunk margins/padding) — so
   //     a stray glyph rect can't skew the alignment.
+  // THE one furigana gutter, used by EVERY right-edge aligner (column snap,
+  // cue autoscroll, chunk positioning): at least the rt extent (~0.55em of
+  // the reader font). The aligners used to carry different pads (16px / 24px
+  // / 5%), so some rest positions reserved less room than the furigana
+  // needed and the rt fell beyond the SCROLLPORT — where no edge-mask logic
+  // can ever reveal it.
+  function _furiGutter(srWidth) {
+    let fs = 24;
+    try { fs = parseFloat(getComputedStyle(innerEl).fontSize) || 24; } catch (_) {}
+    return Math.max(Math.min(24, srWidth * 0.05), fs * 0.55);
+  }
+  // How far the furigana of lines whose base glyphs sit AT-OR-LEFT-OF `edgeX`
+  // pokes past edgeX (px, 0 if none). MEASURE THE <rt> ELEMENTS, NOT <ruby>:
+  // in BOTH engines the rt annotation box lies entirely OUTSIDE the ruby
+  // element's bounding rect (geometry probe 2026-06-09, WebKit & Blink) —
+  // every earlier ruby-rect based check here was blind to the furigana,
+  // which is why right-edge furigana kept getting cut off / masked on both
+  // platforms. The same probe shows the ruby rect spans EXACTLY the base
+  // glyph column, which the admit test below leans on:
+  //   admit a ruby only when its base column ENDS at/left of edgeX
+  //   (br.right <= edgeX + 2) — i.e. the base glyphs themselves are fully on
+  //   the visible side. The earlier "base STARTS left of edgeX" test also
+  //   admitted the masked previous-page column at the reading edge (its base
+  //   starts a few px inside the viewport but lives under the mask), so its
+  //   furigana — a full column off-screen — was counted as "overhang", and
+  //   the page-turn prediction landed every fling ~1em short of the grid.
+  //   The base-END test keeps that hidden column out while still admitting
+  //   the left-mask case (the next page's first line, whose base ends under
+  //   the mask, left of the mask edge). Fragmented rubies (base split across
+  //   a column break) have a multi-column union rect and get excluded by the
+  //   same test — a missed reveal at worst, never a wrong one.
+  // `shift` subtracts a predicted scroll delta so the page-turn physics can
+  // evaluate the LANDING position before animating (screenX_at_landing =
+  // rect.x - shift); callers measuring the current position pass 0.
+  function _rtOverhangPast(edgeX, chunkList, shift = 0) {
+    let need = 0, scanned = 0;
+    let fs = 24;
+    try { fs = parseFloat(getComputedStyle(innerEl).fontSize) || 24; } catch (_) {}
+    const maxBaseW = fs * 1.9;   // one base column ≈ fs wide; wider = fragmented across a column break
+    for (const ch of chunkList) {
+      let rubies; try { rubies = ch.querySelectorAll('ruby'); } catch (_) { continue; }
+      for (const rb of rubies) {
+        if (++scanned > 600) return need;  // hard cap: degenerate chunking can't melt a scroll frame
+        let br; try { br = rb.getBoundingClientRect(); } catch (_) { continue; }
+        if (!br.width || br.right - shift > edgeX + 2) continue; // base glyphs not fully on the visible side
+        // A ruby whose base wraps across a column break reports a multi-
+        // column UNION rect — its rt rects can't be attributed to one column,
+        // so skip it (a missed reveal at worst, never a wrong one).
+        if (br.width > maxBaseW) continue;
+        let rts; try { rts = rb.querySelectorAll('rt'); } catch (_) { continue; }
+        for (const rt of rts) {
+          let rr; try { rr = rt.getBoundingClientRect(); } catch (_) { continue; }
+          if (!rr.width) continue;
+          const right = rr.right - shift;
+          if (right > edgeX + 1) need = Math.max(need, right - edgeX);
+        }
+      }
+    }
+    return need;
+  }
   function _snapToColumn() {
     if (!scrollEl || physDragging || !_physEnabled()) return;
     if (!document.body.classList.contains('mode-read')) return;
     const sr = scrollEl.getBoundingClientRect();
     if (sr.width < 40) return;
     const W = _columnWidth();
-    const pad = Math.min(24, sr.width * 0.05);
+    const pad = _furiGutter(sr.width);
     const targetX = sr.right - pad;            // reading edge, furigana room reserved
     const list = (chunks && chunks.length) ? chunks : (innerEl ? [innerEl] : []);
+    // A chunk's bounding-box RIGHT edge IS a true column boundary — furigana
+    // included (it's the element's full extent) and free of the per-glyph
+    // noise that getClientRects gives (ruby annotations emit their own rects
+    // offset from the base column, which skewed the old median by ~a column).
+    //
+    // PHASE: text chunks between two images share one continuous grid of
+    // pitch W, but an inline IMAGE has arbitrary width, so chunks AFTER an
+    // image are phase-shifted (imageWidth mod W) relative to chunks before
+    // it. The old global median could then FLIP between the two phase
+    // clusters on a settle and fold the page by up to ~a full column —
+    // swallowing an unread line (the "lines get skipped on swipe" bug that
+    // appeared when EPUB images started rendering). Anchor the settle to the
+    // phase of the chunk nearest the READING edge — the line the user is
+    // about to read can then never be folded past — and use the median only
+    // over chunks IN THAT SAME PHASE (keeps the original stray-rect
+    // robustness without mixing clusters).
     const res = [];
+    let edgeD = null, edgeDist = Infinity;
     for (const ch of list) {
       let cb; try { cb = ch.getBoundingClientRect(); } catch (_) { continue; }
       if (cb.width < 1 || cb.height < 1) continue;
       if (cb.right < sr.left - W || cb.left > sr.right + W) continue; // not near viewport
-      // A chunk's bounding-box RIGHT edge IS a true column boundary — furigana
-      // included (it's the element's full extent) and free of the per-glyph
-      // noise that getClientRects gives (ruby annotations emit their own rects
-      // offset from the base column, which skewed the old median by ~a column).
-      // Chunks are contiguous (CSS zeroes their margins) so they share one
-      // continuous column grid of pitch W.
       let d = cb.right - targetX;               // residual to this chunk's leading column edge
       d -= W * Math.round(d / W);               // fold to nearest boundary, [-W/2, W/2]
       res.push(d);
+      const dist = Math.abs(cb.right - targetX);
+      if (dist < edgeDist) { edgeDist = dist; edgeD = d; }
     }
     if (!res.length) return;
-    res.sort((a, b) => a - b);
-    const off = res[Math.floor(res.length / 2)]; // median over chunks (robust)
+    let cluster = res;
+    if (edgeD !== null) {
+      // Same-phase = folded residual within W/4 of the edge chunk's (allowing
+      // the wrap-around at ±W/2).
+      cluster = res.filter(d => {
+        const dd = Math.abs(d - edgeD);
+        return dd <= W / 4 || Math.abs(dd - W) <= W / 4;
+      });
+      if (!cluster.length) cluster = [edgeD];
+    }
+    cluster.sort((a, b) => a - b);
+    const off = cluster[Math.floor(cluster.length / 2)]; // median within the reading-edge phase
     if (Math.abs(off) < 4) return;               // already on a boundary (autoscroll's own tolerance)
     lastProgrammaticScrollTime = Date.now();
     scrollEl.scrollBy({ left: off });            // same sign convention as autoScrollForRange
+  }
+  // Landing-spot prediction for the physics page-turn: evaluate, at the
+  // TARGET scroll position, the same two corrections that used to run as
+  // post-turn fixups (the column-phase settle from _snapToColumn, then the
+  // furigana-overhang nudge), and fold them INTO the animation target — one
+  // smooth motion, nothing moves after it stops. The post-hoc versions were
+  // the "jitter after page swipes": a 300ms ease finished, then an instant
+  // scrollBy yanked the page a few px (and 450ms later the nudge could yank
+  // it again). Layout is static during scrolling, so rects measured NOW are
+  // exact at the landing after subtracting the scroll delta — the prediction
+  // sees the post-image phase shift, the landing edge line's furigana, all
+  // of it, before a single frame is animated.
+  function _predictLandingTarget(baseTarget) {
+    const sr = scrollEl.getBoundingClientRect();
+    if (sr.width < 40) return baseTarget;
+    const W = _columnWidth();
+    const pad = _furiGutter(sr.width);
+    const targetX = sr.right - pad;
+    const shift = baseTarget - scrollEl.scrollLeft;  // screenX_at_landing = rect.x - shift
+    const list = (chunks && chunks.length) ? chunks : (innerEl ? [innerEl] : []);
+    // Column-phase residual at the landing — same fold/cluster median as
+    // _snapToColumn, on shifted rects (see that function for the why).
+    const res = [];
+    let edgeD = null, edgeDist = Infinity;
+    const nearRight = [];
+    for (const ch of list) {
+      let cb; try { cb = ch.getBoundingClientRect(); } catch (_) { continue; }
+      if (cb.width < 1 || cb.height < 1) continue;
+      const right = cb.right - shift, left = cb.left - shift;
+      if (right < sr.left - W || left > sr.right + W) continue;
+      if (right > sr.right - W * 1.6) nearRight.push(ch);
+      let d = right - targetX;
+      d -= W * Math.round(d / W);
+      res.push(d);
+      const dist = Math.abs(right - targetX);
+      if (dist < edgeDist) { edgeDist = dist; edgeD = d; }
+    }
+    let off = 0;
+    if (res.length && edgeD !== null) {
+      let cluster = res.filter(d => {
+        const dd = Math.abs(d - edgeD);
+        return dd <= W / 4 || Math.abs(dd - W) <= W / 4;
+      });
+      if (!cluster.length) cluster = [edgeD];
+      cluster.sort((a, b) => a - b);
+      off = cluster[Math.floor(cluster.length / 2)];
+      if (Math.abs(off) < 2) off = 0;   // already on-grid: don't churn subpixels
+    }
+    // Furigana overhang at the phase-corrected landing: if the landing edge
+    // line's rt would stick past the scrollport, advance just enough to show
+    // it (same measurement the settle-nudge uses, evaluated pre-flight).
+    const over = _rtOverhangPast(sr.right, nearRight, shift + off);
+    if (over > 1) off += Math.min(over + 2, W);
+    return baseTarget + off;
   }
   function _ensureEdgeMasks() {
     const mk = (id) => {
@@ -1586,25 +1791,108 @@
     const W = _columnWidth();
     const list = (chunks && chunks.length) ? chunks : (innerEl ? [innerEl] : []);
     const lefts = [], rights = [];
+    const edgeChunks = [];   // chunks near the reading (right) edge — see furigana allowance below
+    const leftEdgeChunks = []; // chunks near the far (left) edge — for the left-mask rt extension
+    // PHASE anchors: inline images have arbitrary width, so chunks before and
+    // after one sit on DIFFERENT column grids (phase-shifted by imageWidth
+    // mod W). A global median over mixed phases could pick the WRONG side and
+    // size a mask a near-full column off — which showed half-rendered glyphs
+    // at the left edge near images. Anchor each mask to the phase of the
+    // chunk actually AT its edge, and take the median only within that phase.
+    let lAnchor = null, lBest = Infinity, rAnchor = null, rBest = Infinity;
     for (const ch of list) {
       let cb; try { cb = ch.getBoundingClientRect(); } catch (_) { continue; }
       if (cb.width < 1 || cb.height < 1) continue;
       if (cb.right < sr.left - W || cb.left > sr.right + W) continue;
+      if (cb.right > sr.right - W * 1.6) edgeChunks.push(ch);
+      if (cb.left < sr.left + W * 1.6) leftEdgeChunks.push(ch);
       // cb.right is a true column boundary; the grid has uniform pitch W.
       // Left: from sr.left to the leftmost grid boundary still >= sr.left.
-      lefts.push(cb.right + Math.ceil((sr.left - cb.right) / W) * W - sr.left);   // in [0, W)
+      const lv = cb.right + Math.ceil((sr.left - cb.right) / W) * W - sr.left;     // in [0, W)
       // Right: from the rightmost grid boundary still <= sr.right to sr.right.
-      rights.push(sr.right - (cb.right + Math.floor((sr.right - cb.right) / W) * W)); // in [0, W)
+      const rv = sr.right - (cb.right + Math.floor((sr.right - cb.right) / W) * W); // in [0, W)
+      lefts.push(lv); rights.push(rv);
+      const dL = (cb.left <= sr.left && cb.right >= sr.left) ? 0
+               : Math.min(Math.abs(cb.left - sr.left), Math.abs(cb.right - sr.left));
+      if (dL < lBest) { lBest = dL; lAnchor = lv; }
+      const dR = (cb.left <= sr.right && cb.right >= sr.right) ? 0
+               : Math.min(Math.abs(cb.left - sr.right), Math.abs(cb.right - sr.right));
+      if (dR < rBest) { rBest = dR; rAnchor = rv; }
     }
     let bg = '#000';
     try {
       bg = getComputedStyle(scrollEl).backgroundColor;
       if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') bg = getComputedStyle(document.body).backgroundColor || '#000';
     } catch (_) {}
-    const med = (a) => { if (!a.length) return 0; a.sort((x, y) => x - y); return a[Math.floor(a.length / 2)]; };
+    // Median within the edge-anchored phase cluster (W-wraparound aware).
+    const med = (a, anchor) => {
+      if (!a.length) return 0;
+      let c = a;
+      if (anchor !== null) {
+        c = a.filter(v => {
+          const d = Math.abs(v - anchor);
+          return d <= W / 4 || Math.abs(d - W) <= W / 4;
+        });
+        if (!c.length) c = [anchor];
+      }
+      c.sort((x, y) => x - y);
+      return c[Math.floor(c.length / 2)];
+    };
     const effW = (raw) => (raw > 1.5 ? Math.min(raw, W) : 0);
-    _maskLW = effW(med(lefts));
-    _maskRW = effW(med(rights));
+    _maskLW = effW(med(lefts, lAnchor));
+    _maskRW = effW(med(rights, rAnchor));
+    // Furigana allowance (right/reading edge only), applied CONDITIONALLY and
+    // MEASURED: a line's <rt> renders to the RIGHT of its base column — past
+    // the boundary where this mask begins — so the mask painted over the
+    // furigana of whichever line sat at the reading edge. This bites at BOTH
+    // kinds of rest position: after a page-turn settle (_snapToColumn parks
+    // the boundary `pad` inside the viewport precisely to make furigana room,
+    // and the mask residual then equals that pad — covering the very gutter
+    // the snap reserved) AND at free-scroll stops (boundary anywhere). A
+    // fixed shrink was tried first and was not enough (rt extent varies with
+    // font size/family). So: find every <ruby> that STARTS in the visible
+    // area but EXTENDS under the mask's left edge (= the edge line's
+    // overhanging furigana; a ruby fully under the mask belongs to the hidden
+    // partial column and must stay hidden), MEASURE the deepest overhang, and
+    // pull the mask back exactly that far (+2px). Furigana-free edge lines
+    // keep the strict edge so no viewable width is wasted. Recomputed every
+    // scroll frame, so it tracks the hybrid free-scroll/paginated motion.
+    // (When a free-scroll stop puts the boundary within ~an rt-height of the
+    // viewport edge, the rt is beyond the SCROLLPORT itself — no mask can
+    // reveal it; the snap gutter makes that rare at settled positions.)
+    // CRITICAL: the allowance shrinks only the PAINTED overlay width
+    // (_maskRPaint), never _maskRW itself — the physics page-turn derives its
+    // whole-column count from `dim − (_maskLW + _maskRW)` (anchorMaskTotal),
+    // and shrinking the logical width broke that identity by up to 0.6 W, so
+    // round() counted one extra column and every turn past a furigana edge
+    // line SWALLOWED an unread line. Paint and arithmetic are now separate.
+    // Furigana refinements run only with real chunking: under the [innerEl]
+    // fallback the "edge chunk" is the whole book and the per-frame ruby scan
+    // would walk every ruby in it (this runs once per scroll frame).
+    const _realChunks = !!(chunks && chunks.length);
+    let _maskRPaint = _maskRW;
+    if (_maskRW > 0 && edgeChunks.length && _realChunks) {
+      const need = _rtOverhangPast(sr.right - _maskRW, edgeChunks);
+      if (need > 0) _maskRPaint = Math.max(0, _maskRW - Math.min(need + 2, W * 0.6));
+    }
+    // LEFT mask, mirrored problem, opposite remedy: the hidden partial column
+    // under the left mask is the NEXT page's first line, and its furigana
+    // pokes RIGHT of the mask's edge (rt sits to the right of its base
+    // column) — the stray "leading-edge furigana from the next page" sliver.
+    // EXTEND the painted strip to cover the deepest such rt. Safe to widen:
+    // the region just right of the boundary is the inter-column gap where
+    // that same rt lives — the last visible line's own base glyphs start
+    // beyond it. Like the right side, only the PAINTED width grows; the
+    // logical _maskLW stays on the column boundary for the page-step math.
+    let _maskLPaint = _maskLW;
+    if (leftEdgeChunks.length && _realChunks) {
+      const needL = _rtOverhangPast(sr.left + _maskLW, leftEdgeChunks);
+      // Cap at 0.35W: a genuine rt sliver is at most the annotation lane
+      // (~0.33W at line-height 1.8); a bigger "need" is a mismeasure
+      // (fragmented ruby etc.) and widening further would start covering the
+      // newest visible line's glyphs.
+      if (needL > 0) _maskLPaint = _maskLW + Math.min(needL + 2, W * 0.35);
+    }
     const apply = (m, w, side) => {
       if (!(w > 0)) { m.style.width = '0'; return; }
       m.style.background = bg;
@@ -1613,13 +1901,81 @@
       m.style.width = w + 'px';
       m.style.left = (side === 'right' ? (sr.right - w) : sr.left) + 'px';
     };
-    apply(_edgeMaskL, _maskLW, 'left');
-    apply(_edgeMaskR, _maskRW, 'right');
+    apply(_edgeMaskL, _maskLPaint, 'left');
+    apply(_edgeMaskR, _maskRPaint, 'right');
   }
   function _scheduleEdgeMask() {
     if (_edgeMaskRafPending) return;
     _edgeMaskRafPending = true;
     requestAnimationFrame(() => { _edgeMaskRafPending = false; try { _updateEdgeMask(); } catch (_) {} });
+  }
+  // Furigana settle-nudge (free-scroll rest positions): if a line that STARTS
+  // inside the viewport has its <rt> extending past the scrollport's right
+  // edge, scroll just enough to bring the furigana back in. Distinct from the
+  // edge MASK fix: the mask can only un-cover pixels that exist — furigana
+  // beyond the scrollport isn't rendered at all. Conservative: smallest
+  // sufficient nudge (capped at one column), user scrolls only, never while
+  // the physics drag/animation or a recent programmatic scroll owns motion.
+  let _furiNudgeTimer = null;
+  let _furiNudgeLastAt = 0;
+  function _maybeFuriganaNudge() {
+    try {
+      if (!scrollEl || !innerEl || !_physEnabled()) return;
+      if (physDragging || _physAnim) return;
+      if (suppressScrollSave) return;   // a restore owns the position right now
+      if (!document.body.classList.contains('mode-read') || _readerHidden()) return;
+      // Never move the page while the dict popup is open: on iOS the word
+      // highlight is overlay divs that clear on the first scroll, so a nudge
+      // here would erase the highlight under the user's eyes mid-lookup.
+      const _pp = document.getElementById('dictPopup');
+      if (_pp && _pp.style.display !== 'none') return;
+      // QUIET WINDOW: 900ms of programmatic silence before the backstop may
+      // move anything — longer than every staged programmatic write
+      // (scrollChunkNearRightWithContext's 600ms re-force verifier was the
+      // killer: a 400ms window let the nudge animate absolute positions
+      // INTERLEAVED with the verifier's write). When blocked, RE-ARM once —
+      // the blocking write may not produce another scroll event (no-op
+      // re-force), and the timer must not depend on one.
+      if (Date.now() - lastProgrammaticScrollTime < 900) {
+        if (_furiNudgeTimer) clearTimeout(_furiNudgeTimer);
+        _furiNudgeTimer = setTimeout(_maybeFuriganaNudge, 700);
+        return;
+      }
+      const sr = scrollEl.getBoundingClientRect();
+      if (sr.width < 40) return;
+      const W = _columnWidth();
+      const list = (chunks && chunks.length) ? chunks : [];
+      const near = [];
+      for (const ch of list) {
+        let cb; try { cb = ch.getBoundingClientRect(); } catch (_) { continue; }
+        if (cb.width < 1 || cb.right < sr.right - W * 1.6 || cb.left > sr.right + W) continue;
+        near.push(ch);
+      }
+      const over = _rtOverhangPast(sr.right, near);
+      let fs = 24;
+      try { fs = parseFloat(getComputedStyle(innerEl).fontSize) || 24; } catch (_) {}
+      // Guards against a backward RATCHET: each nudge shifts content left, so
+      // from a badly misaligned rest the PREVIOUS line's base can slide into
+      // the visibility predicate and re-trigger the nudge — repeating every
+      // settle-debounce, a slow backward creep (place-keeping violation).
+      //   • over ≤ 1em: a real edge-line overhang is at most the furigana
+      //     lane (~0.55em) + inter-column gap; anything bigger means the PAGE
+      //     is misaligned, which is the snap/mask's job, not the nudge's.
+      //   • one nudge per rest position (1.5s latch): the correction either
+      //     worked or it won't — never iterate.
+      if (over > 1 && over <= fs && Date.now() - _furiNudgeLastAt > 1500) {
+        // SMOOTH correction (not an instant scrollBy): this is the backstop
+        // that fires at a settled rest position, so any motion here is in
+        // the user's face — the instant jump was the "jerky movement after
+        // the swipe" complaint. The physics easing makes it a short glide;
+        // the primary path (the page-turn pre-computing this overhang into
+        // its landing target) means it should rarely fire at all.
+        _furiNudgeLastAt = Date.now();
+        lastProgrammaticScrollTime = Date.now();
+        _physAnimateTo(scrollEl.scrollLeft + Math.min(over + 2, W), 180);
+        log('[furi-nudge] +' + Math.round(over + 2) + 'px to clear edge furigana');
+      }
+    } catch (_) {}
   }
   // True when a top-2/3 horizontal swipe should navigate SUBTITLES instead of
   // turning the page: an audiobook+SRT title (cues exist) with a known current
@@ -1774,15 +2130,29 @@
         ? Math.max(1, Math.round((dim - anchorMaskTotal) / W))
         : Math.max(1, Math.floor(dim / W));
       if (Math.abs(vel) > PHYS.FLING_V) {
-        // Quick swipe → advance one page of WHOLE columns, then settle the
-        // reading edge precisely onto a column boundary (no partial line).
+        // Quick swipe → advance one page of WHOLE columns. The landing spot
+        // is PRE-COMPUTED: column-phase correction (inline images shift the
+        // grid) and the landing line's furigana overhang are folded into the
+        // animation target, so the page settles in ONE smooth motion. The
+        // old shape — animate, then _snapToColumn's instant scrollBy, then
+        // possibly the furigana nudge — was the "jerky movement after the
+        // page swipe".
         const sign = vel < 0 ? -1 : 1;
-        // No post-turn column snap: the smooth animation stops where it lands
-        // and the edge masks hide any leftover partial column. (The snap's
-        // instant scrollBy was the "rough, unnatural stop" on iPhone — and
-        // since each turn advances by WHOLE columns, an already-aligned page
-        // stays aligned without it; the next autoscroll re-aligns regardless.)
-        _physAnimateTo(anchor - PHYS.DIR * sign * cols * W, PHYS.TURN_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); _creditReadFrontier(); _armBookmarkTimer(); });
+        const baseTarget = anchor - PHYS.DIR * sign * cols * W;
+        let landing = baseTarget;
+        try { landing = _predictLandingTarget(baseTarget); } catch (_) {}
+        // Sanity clamps: the corrected landing must be a real number AND
+        // still advance in the fling's direction by a meaningful fraction of
+        // the page step — at cols==1 (huge font / narrow viewport) a phase +
+        // overhang correction could otherwise eat most of the single-column
+        // step. Falling back to the uncorrected target just means the masks
+        // / backstop handle the edges like they did before prediction.
+        const _step = baseTarget - anchor;
+        if (!Number.isFinite(landing) ||
+            (landing - anchor) * Math.sign(_step) < Math.abs(_step) * 0.4) {
+          landing = baseTarget;
+        }
+        _physAnimateTo(landing, PHYS.TURN_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); _creditReadFrontier(); _armBookmarkTimer(); });
       } else {
         // Slow drag → spring back to where you started.
         _physAnimateTo(anchor, PHYS.SNAP_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); _creditReadFrontier(); _armBookmarkTimer(); });
@@ -1881,7 +2251,7 @@
       lineHeightPx = parseFloat(cs.lineHeight);
       if (!Number.isFinite(lineHeightPx) || lineHeightPx <= 0) lineHeightPx = (parseFloat(cs.fontSize) || 18) * 1.8;
     } catch (_) {}
-    const pad = Math.min(16, sr.width * 0.04);
+    const pad = _furiGutter(sr.width);   // MUST mirror scrollChunkNearRightWithContext (save/restore symmetry)
     const targetRightX = sr.right - pad - lineHeightPx * 3;   // 3 = the restore's contextLines
 
     let edgeChunk = null, edgeDist = Infinity;
@@ -2088,6 +2458,14 @@
         _creditReadCharsFromVisible();
         _armBookmarkTimer();   // user moved → (re)start the 5 s bookmark countdown
       }
+      // Furigana settle-nudge — armed on EVERY scroll (user, momentum,
+      // programmatic settle alike) and debounced past the quiesce: ANY rest
+      // position can leave the edge line's furigana beyond the scrollport,
+      // where no edge-mask logic can reveal it. With the unified _furiGutter
+      // the aligners shouldn't produce such positions, so this is the
+      // backstop; it no-ops (over=0) whenever the gutter did its job.
+      if (_furiNudgeTimer) clearTimeout(_furiNudgeTimer);
+      _furiNudgeTimer = setTimeout(_maybeFuriganaNudge, 450);
       updateProgress();
       if (suppressScrollSave) return;
       if (pendingSave) clearTimeout(pendingSave);
@@ -2786,6 +3164,123 @@
     return offset;                                       // gap/edge → trust the caret unchanged
   }
 
+  // ── iOS dict-highlight overlay rects ──
+  // iOS WKWebView refuses to paint ::highlight backgrounds on ruby BASE text
+  // entirely — even single-node ranges fully inside the base text node — so a
+  // furigana word showed NO highlight at all on iOS. Paint the word with
+  // fixed-position overlay rects taken from the BASE glyph geometry instead
+  // (no DOM mutation inside the reader content, so the vertical-rl WKWebView
+  // relayout crash class isn't touched). Bonus: glyph rects exclude the
+  // furigana lane, so the box hugs the character column instead of bleeding
+  // to its right. Cleared with the shared highlight and on the first scroll
+  // (the rects are viewport-fixed).
+  let _dictHlOverlays = [];
+  function _clearDictHlOverlays() {
+    for (const d of _dictHlOverlays) { try { d.remove(); } catch (_) {} }
+    _dictHlOverlays = [];
+  }
+  function _paintDictHlOverlays(ranges) {
+    _clearDictHlOverlays();
+    let color = 'rgba(76,175,80,0.45)';
+    try {
+      const ac = getComputedStyle(document.body).getPropertyValue('--accent-read').trim();
+      if (ac) color = `color-mix(in srgb, ${ac} 45%, transparent)`;
+    } catch (_) {}
+    const boxes = [];
+    const paint = (l, t, w, h, kind) => {
+      if (w < 0.5 || h < 0.5) return;
+      boxes.push({ l, t, w, h, kind });
+    };
+    for (const rg of ranges) {
+      // Ranges are single-text-node by construction (see paintFn). For a node
+      // INSIDE a ruby base, never trust Range.getClientRects(): device
+      // WKWebView returns the ANNOTATION lane's geometry for base-text ranges
+      // (the box landed on the furigana and skipped the kanji — the "leading
+      // kanji not highlighted / highlight covers the furigana" screenshots).
+      // Build the box from ELEMENT geometry instead: the <ruby>/<rb> bounding
+      // rect spans exactly the base lane (both engines keep the rt box
+      // OUTSIDE it — probe 2026-06-09), sliced along the line axis
+      // proportionally by character. CJK base glyphs advance uniformly, so
+      // the proportional slice is exact for the kanji words this matters for.
+      const node = rg.startContainer;
+      let ruby = null;
+      try { if (node?.nodeType === 3) ruby = node.parentElement?.closest('ruby'); } catch (_) {}
+      if (ruby && innerEl && innerEl.contains(ruby)) {
+        const anchorEl = (node.parentElement && node.parentElement.tagName === 'RB')
+          ? node.parentElement : ruby;
+        let er; try { er = anchorEl.getBoundingClientRect(); } catch (_) { continue; }
+        if (!er || er.width < 2 || er.height < 1) continue;
+        // Flatten the anchor's BASE text (rt/rp excluded) to locate this
+        // node's char span within the element's inline extent.
+        let total = 0, before = 0, seen = false;
+        const tw = document.createTreeWalker(anchorEl, NodeFilter.SHOW_TEXT, {
+          acceptNode(n) {
+            let q = n.parentNode;
+            while (q && q !== anchorEl) {
+              if (q.tagName === 'RT' || q.tagName === 'RP') return NodeFilter.FILTER_REJECT;
+              q = q.parentNode;
+            }
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        });
+        let n2;
+        while ((n2 = tw.nextNode())) {
+          if (n2 === node) seen = true;
+          if (!seen) before += n2.nodeValue.length;
+          total += n2.nodeValue.length;
+        }
+        if (!total || !seen) continue;
+        const f0 = (before + rg.startOffset) / total;
+        const f1 = (before + rg.endOffset) / total;
+        paint(er.left, er.top + er.height * f0, er.width, er.height * (f1 - f0), 'ruby');
+      } else {
+        let rects; try { rects = rg.getClientRects(); } catch (_) { continue; }
+        for (const rc of rects) paint(rc.left, rc.top, rc.width, rc.height, 'plain');
+      }
+    }
+    // A ruby slot box includes WebKit's base-spreading slack (annotation
+    // longer than base spreads the base chars over the annotation's extent),
+    // so it can run a few px into the NEXT segment's box in the same column —
+    // a darker double-tint band at 2×45% alpha. Clip each ruby box against
+    // the following box's start. Subranges come in document order = top to
+    // bottom along the vertical line.
+    for (let i = 0; i + 1 < boxes.length; i++) {
+      const a = boxes[i], b = boxes[i + 1];
+      const sameCol = a.l < b.l + b.w - 1 && a.l + a.w > b.l + 1;
+      if (a.kind === 'ruby' && sameCol && b.t < a.t + a.h && b.t > a.t) a.h = b.t - a.t;
+    }
+    for (const bx of boxes) {
+      if (bx.w < 0.5 || bx.h < 0.5) continue;
+      const d = document.createElement('div');
+      d.style.cssText = `position:fixed;left:${bx.l}px;top:${bx.t}px;width:${bx.w}px;height:${bx.h}px;` +
+        `background:${color};border-radius:2px;pointer-events:none;z-index:2600;`;
+      // Parent INSIDE the reader view, like the edge masks: as a body child
+      // these sat in the root stacking context BELOW the opaque reader
+      // (z 2600 vs viewEl's 2800) and were completely invisible — the green
+      // the user did see on iOS was the ::highlight painting kana+rt but not
+      // the ruby base. Inside viewEl they paint above the content, below the
+      // edge masks (2700), and inherit visibility:hidden when the reader
+      // hides (no stale boxes over other modes). position:fixed keeps
+      // viewport anchoring because viewEl never carries a transform.
+      (viewEl || document.body).appendChild(d);
+      _dictHlOverlays.push(d);
+    }
+    // Clear alongside the shared dict highlight (popup close etc.) and on the
+    // first scroll. Wrapped lazily because reading-mode.js defines the global.
+    if (!window._dictHlClearWrapped && typeof window._clearReaderDictHighlight === 'function') {
+      window._dictHlClearWrapped = true;
+      const orig = window._clearReaderDictHighlight;
+      window._clearReaderDictHighlight = function () {
+        _clearDictHlOverlays();
+        try { return orig.apply(this, arguments); } catch (_) {}
+      };
+    }
+    if (scrollEl && !scrollEl._dictHlScrollWired) {
+      scrollEl._dictHlScrollWired = true;
+      scrollEl.addEventListener('scroll', _clearDictHlOverlays, { passive: true });
+    }
+  }
+
   // Dict lookup via caretRangeFromPoint + CSS Custom Highlight API. No
   // DOM mutation, no scroll-state corruption.
   async function lookupAt(x, y) {
@@ -2823,11 +3318,52 @@
       chunk = (cur && cur !== innerEl) ? cur : node.parentNode;
     }
     if (!chunk) return;
-    // Skip if on ruby reading.
-    let p = node.parentNode;
+    // Tap resolved INSIDE the furigana (rt): remap to the ruby BASE instead of
+    // aborting. iOS WKWebView routinely resolves caretRangeFromPoint to the rt
+    // text node when a kanji carries ruby — the old early-return made every
+    // kanji-with-furigana word un-look-uppable there (and the fallback path
+    // then looked up / highlighted the READING text instead of the kanji).
+    let p = node.parentNode, _hitRt = false;
     while (p && p !== chunk) {
-      if (p.tagName === 'RT' || p.tagName === 'RP') return;
+      if (p.tagName === 'RT' || p.tagName === 'RP') { _hitRt = true; break; }
       p = p.parentNode;
+    }
+    if (_hitRt) {
+      const ruby = p.closest('ruby');
+      let base = null;
+      if (ruby) {
+        const tw2 = document.createTreeWalker(ruby, NodeFilter.SHOW_TEXT, {
+          acceptNode(n2) {
+            let q = n2.parentNode;
+            while (q && q !== ruby) {
+              if (q.tagName === 'RT' || q.tagName === 'RP') return NodeFilter.FILTER_REJECT;
+              q = q.parentNode;
+            }
+            return (n2.nodeValue && n2.nodeValue.trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+          }
+        });
+        base = tw2.nextNode();
+      }
+      if (!base) return;
+      // Project the tap onto the base text along the READING axis — in
+      // vertical-rl characters advance along Y and the rt sits BESIDE its
+      // base at the same Y — so tapping the 2nd kanji's furigana starts the
+      // word at the 2nd kanji. Walk ALL base text nodes (a ruby can hold
+      // several, e.g. interleaved per-kanji bases), defaulting to the first.
+      node = base; offset = 0;
+      try {
+        const r2 = document.createRange();
+        let bn = base;
+        outer: do {
+          for (let i = 0; i < bn.nodeValue.length; i++) {
+            r2.setStart(bn, i); r2.setEnd(bn, i + 1);
+            const rc = r2.getBoundingClientRect();
+            if (rc.height > 0 && y >= rc.top - 1 && y <= rc.bottom + 1) {
+              node = bn; offset = i; break outer;
+            }
+          }
+        } while ((bn = tw2.nextNode()));
+      } catch (_) {}
     }
     // Flatten chunk text (skip rt/rp), compute charIndex.
     const textNodes = [];
@@ -2877,18 +3413,51 @@
       if (!sNode) return;
       if (!eNode) { eNode = tns[tns.length - 1]; eOff = eNode.nodeValue.length; }
       try {
-        const r = new Range();
-        r.setStart(sNode, sOff);
-        r.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
         // Mutate-in-place: reuse one Highlight via clear()+add(). With
         // `new Highlight(r)` + set(), iOS WKWebView in vertical-rl leaks
         // ghost paints from the previous range until the next layout
         // pass — same bug class as the cue-active highlight. Forcing
         // a layout read after add() flushes the invalidation.
+        //
+        // Paint PER-TEXT-NODE ranges, not one spanning Range: a word with
+        // furigana is typically several sibling <ruby> elements, and a range
+        // CROSSING ruby boundaries paints wrongly — WebKit lands the fill on
+        // the furigana instead of the kanji base; Chromium drags the
+        // decoration across the rt line too. Single-node ranges never cross
+        // an element boundary, so both engines paint exactly the base text.
         if (!window._dictLookupHl) window._dictLookupHl = new Highlight();
         window._dictLookupHl.clear();
-        window._dictLookupHl.add(r);
-        CSS.highlights.set('reader-dict-lookup', window._dictLookupHl);
+        const subs = [];
+        let a2 = 0;
+        for (const t of tns) {
+          const next = a2 + t.nodeValue.length;
+          const s2 = Math.max(start, a2), e2 = Math.min(end, next);
+          if (s2 < e2) {
+            const sub = new Range();
+            sub.setStart(t, s2 - a2);
+            sub.setEnd(t, e2 - a2);
+            window._dictLookupHl.add(sub);
+            subs.push(sub);
+          }
+          a2 = next;
+          if (next >= end) break;
+        }
+        // iOS: ::highlight backgrounds never reach ruby BASE text in
+        // WKWebView, so the box skipped the kanji — paint overlay rects from
+        // element geometry instead (see _paintDictHlOverlays). Overlays
+        // REPLACE the ::highlight fill there (not supplement it): the
+        // ::highlight would still tint the plain-kana segments, leaving the
+        // word two different shades of green (double paint on kana, single
+        // on kanji). Android keeps the native ::highlight path unchanged.
+        if (window.Capacitor?.getPlatform?.() === 'ios') {
+          try { _paintDictHlOverlays(subs); } catch (_) {}
+        } else {
+          CSS.highlights.set('reader-dict-lookup', window._dictLookupHl);
+        }
+        // Full spanning Range kept ONLY for the popup positioner below.
+        const r = new Range();
+        r.setStart(sNode, sOff);
+        r.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
         // Stash the Range itself so the dict popup positioner can
         // read its bounding rect directly — iterating a Highlight
         // object on iOS WKWebView is unreliable across versions, so
@@ -2940,6 +3509,108 @@
     return ps.join('\n');
   }
 
+  // Object URLs for images extracted from the current EPUB — revoked on the
+  // next book load so a long session of book switches can't leak image memory.
+  let _epubImgUrls = [];
+  function _revokeEpubImages() {
+    for (const u of _epubImgUrls) { try { URL.revokeObjectURL(u); } catch (_) {} }
+    _epubImgUrls = [];
+  }
+
+  // ── Image lightbox ──
+  // Double-tap an EPUB image → fullscreen viewer: pinch to zoom (1–5×), drag
+  // to pan while zoomed, double-tap inside toggles 1×↔2.5×, ✕ or a backdrop
+  // tap closes. The overlay consumes ALL touches, so page-turn / physics /
+  // chrome-toggle gestures can never fire beneath it.
+  function _openImageLightbox(src) {
+    if (!src || document.getElementById('pagedImageLightbox')) return;
+    const ov = document.createElement('div');
+    ov.id = 'pagedImageLightbox';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:13000;background:rgba(0,0,0,0.96);' +
+      'display:flex;align-items:center;justify-content:center;touch-action:none;';
+    const img = document.createElement('img');
+    img.src = src;
+    img.style.cssText = 'max-width:100vw;max-height:100vh;will-change:transform;' +
+      'pointer-events:none;user-select:none;-webkit-user-select:none;';
+    const x = document.createElement('div');
+    x.textContent = '✕';
+    x.style.cssText = 'position:fixed;top:calc(env(safe-area-inset-top,0px) + 10px);right:14px;' +
+      'font-size:1.5rem;color:#ddd;padding:8px 14px;';
+    ov.appendChild(img); ov.appendChild(x);
+    document.body.appendChild(ov);
+
+    let scale = 1, tx = 0, ty = 0;
+    const apply = () => { img.style.transform = `translate(${tx}px,${ty}px) scale(${scale})`; };
+    const close = () => { try { ov.remove(); } catch (_) {} };
+    x.addEventListener('click', close);   // mouse / pointer fallback
+
+    let mode = null;                       // 'pan' | 'pinch'
+    let sx = 0, sy = 0, stx = 0, sty = 0;  // pan start
+    let d0 = 0, s0 = 1;                    // pinch start
+    let tapAt = 0, tapMoved = false, closeTimer = null;
+    const dist = (e) => Math.hypot(e.touches[0].clientX - e.touches[1].clientX,
+                                   e.touches[0].clientY - e.touches[1].clientY);
+    ov.addEventListener('touchstart', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+      tapMoved = false;
+      if (e.touches.length >= 2) { mode = 'pinch'; d0 = dist(e); s0 = scale; }
+      else { mode = 'pan'; sx = e.touches[0].clientX; sy = e.touches[0].clientY; stx = tx; sty = ty; }
+    }, { passive: false });
+    ov.addEventListener('touchmove', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (mode === 'pinch' && e.touches.length >= 2) {
+        scale = Math.max(1, Math.min(5, s0 * (dist(e) / (d0 || 1))));
+        if (scale === 1) { tx = 0; ty = 0; }
+        apply(); tapMoved = true;
+      } else if (mode === 'pan' && e.touches.length === 1) {
+        const dx = e.touches[0].clientX - sx, dy = e.touches[0].clientY - sy;
+        if (Math.abs(dx) + Math.abs(dy) > 6) tapMoved = true;
+        if (scale > 1) { tx = stx + dx; ty = sty + dy; apply(); }
+      }
+    }, { passive: false });
+    ov.addEventListener('touchend', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (e.touches.length > 0) return;            // a finger is still down
+      const wasPinch = mode === 'pinch';
+      mode = null;
+      if (wasPinch || tapMoved) return;
+      if (e.target === x) { close(); return; }
+      const now = Date.now();
+      if (now - tapAt < 320) {                      // double-tap: toggle zoom
+        tapAt = 0;
+        if (scale > 1) { scale = 1; tx = 0; ty = 0; } else { scale = 2.5; }
+        apply();
+        return;
+      }
+      tapAt = now;
+      // Single backdrop tap closes — deferred past the double-tap window so a
+      // zoom toggle doesn't also close the viewer.
+      closeTimer = setTimeout(() => { if (scale === 1) close(); }, 330);
+    }, { passive: false });
+  }
+  let _imgTapAt = 0, _imgTapEl = null;
+  function _wireImageLightbox() {
+    if (!innerEl || innerEl._imgLightboxWired) return;
+    innerEl._imgLightboxWired = true;
+    // Double-tap detection on reader images. Single taps keep their existing
+    // meaning (chrome toggle); a double-tap toggles chrome twice (net no-op)
+    // and opens the viewer.
+    innerEl.addEventListener('touchend', (e) => {
+      const t = e.target;
+      if (!t || t.tagName !== 'IMG') { _imgTapEl = null; return; }
+      // Never open mid-gesture: a drag that ends on an image is a page
+      // turn/pan, not a tap — opening the viewer then would fight the
+      // physics settle.
+      if (physDragging) { _imgTapEl = null; return; }
+      const now = Date.now();
+      if (_imgTapEl === t && now - _imgTapAt < 350) {
+        _imgTapEl = null;
+        _openImageLightbox(t.currentSrc || t.src);
+      } else { _imgTapEl = t; _imgTapAt = now; }
+    }, { passive: true });
+  }
+
   async function loadEpubFromUri(uri, name) {
     try {
       ensureView();
@@ -2964,6 +3635,7 @@
       // tail re-arms suppress and clears it after the position is applied.
       lastReadCueIdx = -1;
       suppressScrollSave = true;
+      _revokeEpubImages();
       innerEl.innerHTML = `<p style="color:#888;text-align:center;margin-top:30vh;">Loading ${name}…</p>`;
 
       const { path } = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri });
@@ -3007,13 +3679,127 @@
           const html = await file.async('string');
           const doc = new DOMParser().parseFromString(html, 'text/html');
           doc.querySelectorAll('script, style, link').forEach(el => el.remove());
-          doc.querySelectorAll('img, image').forEach(el => el.remove());
+          // Images: resolve EPUB-internal references against the zip and
+          // inline them as object URLs (they used to be stripped outright).
+          // data:/http(s) URIs pass through; unresolvable references are
+          // removed so a broken-image icon never renders. SVG <image>
+          // wrappers (the common cover-page pattern) become a plain <img>.
+          const secDir = fullPath.includes('/') ? fullPath.replace(/[^/]+$/, '') : '';
+          const _resolveZipPath = (src) => {
+            const out = [];
+            for (const part of (secDir + src).split('/')) {
+              if (!part || part === '.') continue;
+              if (part === '..') out.pop(); else out.push(part);
+            }
+            return out.join('/');
+          };
+          const _IMG_MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+                              gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+                              bmp: 'image/bmp', avif: 'image/avif' };
+          const _imgUrlFor = async (src) => {
+            if (!src) return null;
+            if (/^(data:|https?:|blob:)/i.test(src)) return src;
+            const p = _resolveZipPath(src);
+            const f = zip.file(p) || zip.file(decodeURIComponent(p));
+            if (!f) return null;
+            const ext = (p.split('.').pop() || '').toLowerCase();
+            const buf = await f.async('arraybuffer');
+            const u = URL.createObjectURL(new Blob([buf], { type: _IMG_MIME[ext] || 'image/jpeg' }));
+            _epubImgUrls.push(u);
+            return u;
+          };
+          for (const im of [...doc.querySelectorAll('img')]) {
+            const u = await _imgUrlFor(im.getAttribute('src'));
+            if (u) {
+              im.setAttribute('src', u); im.removeAttribute('srcset'); im.removeAttribute('sizes');
+              // GAIJI (inline glyph images — dashes / rare kanji rendered as a
+              // tiny image mid-sentence): the EPUB's own stylesheet sized them
+              // ~1em, but stylesheets are stripped, so they rendered at
+              // intrinsic pixel size — a giant box mid-line that broke the
+              // column flow and sat over neighbouring text. An image whose
+              // paragraph ALSO contains real text is inline by definition →
+              // size it like a glyph (CSS rule .kadoki-gaiji).
+              const blk = im.closest('p, div, h1, h2, h3, h4, h5, h6');
+              // Skip images the EPUB explicitly sized large (a real
+              // illustration with an inline caption is not a gaiji).
+              const _wA = parseInt(im.getAttribute('width')) || 0;
+              const _hA = parseInt(im.getAttribute('height')) || 0;
+              if (blk && (blk.textContent || '').trim().length >= 2 &&
+                  _wA <= 100 && _hA <= 100) im.classList.add('kadoki-gaiji');
+            }
+            else im.remove();
+          }
+          for (const sv of [...doc.querySelectorAll('image')]) {
+            const u = await _imgUrlFor(sv.getAttribute('xlink:href') || sv.getAttribute('href'));
+            const host = sv.closest('svg') || sv;
+            if (u) {
+              const im = doc.createElement('img');
+              im.setAttribute('src', u);
+              host.replaceWith(im);
+            } else host.remove();
+          }
           if (doc.body) sections.push(doc.body.innerHTML);
         }
 
         innerEl.innerHTML = sections.join('\n');
         sectionCount = sections.length;
+        // Decode images BEFORE layout settles and the bookmark restore below
+        // runs: an image sizing in AFTER the restore would shift every column
+        // and drift the restored position (place-keeping invariant). Bounded
+        // so one broken image can't hang the open — and if the bound FIRES
+        // (image-heavy book on a slow device), self-heal: once the stragglers
+        // finish decoding, re-land the bookmark line, suppressed and
+        // programmatic, unless the user has already started reading.
+        try {
+          const _imgs = [...innerEl.querySelectorAll('img')];
+          if (_imgs.length) {
+            let _decodeTimedOut = false;
+            const _allDecoded = Promise.all(_imgs.map(im => im.decode().catch(() => {})));
+            await Promise.race([
+              _allDecoded,
+              new Promise(r => setTimeout(() => { _decodeTimedOut = true; r(); }, 4000)),
+            ]);
+            if (_decodeTimedOut) {
+              // PLACE-KEEPING GATES (the re-land can fire MINUTES after open
+              // on a slow decode, and the old 5s touch window was blind to
+              // every non-touch way the user moves: cue-sync during
+              // listening, subtitle swipes, bookmark jumps — it then yanked
+              // the view back to the OPEN-TIME bookmark from pages away):
+              //   • any user touch since arming (not just the last 5s)
+              //   • any audio-cue navigation since arming
+              //   • LOCALITY: the bookmark chunk must still be within ~1.5
+              //     viewports — the re-land is only ever a LOCAL correction
+              //     for image-decode layout drift; if the view is further
+              //     away, whatever moved it owns the position now.
+              const _armedAt = Date.now();
+              const _armedCue = window._lastAudioCueIdx;
+              _allDecoded.then(() => setTimeout(() => {
+                try {
+                  if (currentName !== name) return;                   // another book took over
+                  if (lastUserScrollTime > _armedAt) return;          // user touched since arming
+                  if (Date.now() - lastUserScrollTime < 5000) return; // user is reading — don't yank
+                  if (window._lastAudioCueIdx !== _armedCue) return;  // cue-sync / subtitle nav moved the view
+                  if (_bookmarkChunkIdx >= 0 && _bookmarkChunkIdx < chunks.length) {
+                    const srL = scrollEl.getBoundingClientRect();
+                    let bm; try { bm = chunks[_bookmarkChunkIdx].getBoundingClientRect(); } catch (_) { bm = null; }
+                    if (!bm || bm.right < srL.left - srL.width * 1.5 || bm.left > srL.right + srL.width * 1.5) {
+                      log('loadEpub: late image decode — view moved away from bookmark, skipping re-land');
+                      return;
+                    }
+                    suppressScrollSave = true;
+                    lastProgrammaticScrollTime = Date.now();
+                    try { scrollChunkNearRightWithContext(chunks[_bookmarkChunkIdx], 3, { allowFarJump: true }); } catch (_) {}
+                    setTimeout(() => { suppressScrollSave = false; }, 200);
+                    log('loadEpub: late image decode → re-landed bookmark chunk ' + _bookmarkChunkIdx);
+                  }
+                } catch (_) {}
+              }, 250));
+            }
+          }
+        } catch (_) {}
       }
+
+      _wireImageLightbox();
 
       // Tag block-level descendants as .reading-chunk for dict / scroll-snap.
       // Also accumulate per-chunk char offsets for the bottom progress
@@ -3542,7 +4328,7 @@
     // Cue overflows on one side (or is entirely off-screen). Right-justify
     // the cue's BEGINNING at the viewport's right edge (= top-right of
     // the first vertical column = where reading starts in vertical-rl).
-    const pad = Math.min(24, sr.width * 0.05);
+    const pad = _furiGutter(sr.width);   // unified furigana gutter
     const targetX = sr.right - pad;
     // Positive delta = scroll backward (= rightward in screen space).
     // Negative delta = scroll forward (= leftward, reading direction).
@@ -4053,7 +4839,7 @@
       }
     } catch (_) { lineHeightPx = 40; }
     const contextPx = lineHeightPx * contextLines;
-    const pad = Math.min(16, sr.width * 0.04);
+    const pad = _furiGutter(sr.width);   // unified furigana gutter
     const targetRightX = sr.right - pad - contextPx;
     const idealDelta = cr.right - targetRightX;
     // Clamp so the chunk's LEFT edge stays at least pad inside the

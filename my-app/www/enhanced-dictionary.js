@@ -1535,7 +1535,12 @@
         // active chunk, then nothing.
         let avoid = null;
         try {
-            const hl = window.CSS?.highlights?.get?.('reader-dict-lookup');
+            // window._dictLookupHl fallback: on iOS the paged reader no longer
+            // REGISTERS the highlight (overlay divs paint the word instead —
+            // see _paintDictHlOverlays), but it still fills that Highlight
+            // object with the word's ranges precisely so positioners like
+            // this can read the geometry.
+            const hl = window.CSS?.highlights?.get?.('reader-dict-lookup') || window._dictLookupHl;
             if (hl) {
                 let union = null;
                 // Highlight is iterable across its ranges.
