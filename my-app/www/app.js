@@ -1339,55 +1339,19 @@ window.playSrtCueFromMs = async function (startMs, audioPath, cueEndMs) {
 // the value prompt (precise input).
 window.onProgressBarTap = function (e) {
   const mode = _currentShellMode();
-  if (mode === 'audio') {
-    // Direct seek in audiobook removed 2026-05-30 — too easy to
-    // accidentally lose your spot. Audiobook position can only be
-    // moved via the card/read modes (their dialogs handle the
-    // jump cleanly via "Jump to audiobook position"). Show a
-    // simple info modal explaining this.
-    _showAudioSeekRedirectInfo();
-    return;
-  }
   if (mode === 'read') {
     // READ mode: percent/character jump (works for EPUB-only titles too,
     // which have no cards). Falls back to the card jump only if the paged
     // reader's modal isn't available.
     if (typeof window.pagedOpenJumpModal === 'function') { window.pagedOpenJumpModal(); return; }
   }
+  // Card AND audio mode: promptCardJump is mode-aware — its audio branch
+  // takes mm:ss / seconds / % and seeks via jumpAudioToMs. (The 2026-05-30
+  // audio block ("change playhead in Card/Read only") is lifted: the typed
+  // prompt is a deliberate action, not an accidental bar tap, and the
+  // furthest-listened bookmark + smart rewind now cover spot recovery.)
   promptCardJump();
 };
-
-function _showAudioSeekRedirectInfo() {
-  const old = document.getElementById('audioSeekInfoModal');
-  if (old) old.remove();
-  const overlay = document.createElement('div');
-  overlay.id = 'audioSeekInfoModal';
-  overlay.style.cssText = `
-    position:fixed; inset:0; background:rgba(0,0,0,0.72);
-    display:flex; align-items:center; justify-content:center;
-    z-index:9700; padding:20px; box-sizing:border-box;
-  `;
-  const panel = document.createElement('div');
-  panel.style.cssText = `
-    background:#161616; border:1px solid #303030; border-radius:14px;
-    padding:24px; max-width:380px; width:100%;
-    box-shadow:0 16px 40px rgba(0,0,0,0.6);
-    color:#e8e8e8; text-align:center;
-    font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",system-ui,sans-serif;
-  `;
-  panel.innerHTML = `
-    <h3 style="margin:0 0 10px 0;font-size:15px;font-weight:600;color:var(--accent-audio,#b794f6);letter-spacing:0.04em;">CHANGE PLAYHEAD</h3>
-    <p style="margin:0 0 18px 0;font-size:14px;color:#bbb;line-height:1.5;">
-      Please change playhead position in Card or Read modes only.
-    </p>
-    <button id="audioSeekInfoOk" style="background:var(--accent-audio,#b794f6);color:#0a0a0a;border:none;padding:10px 22px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;letter-spacing:0.04em;">OK</button>
-  `;
-  overlay.appendChild(panel);
-  document.body.appendChild(overlay);
-  const close = () => overlay.remove();
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-  panel.querySelector('#audioSeekInfoOk').addEventListener('click', close);
-}
 
 function openAudioSeekDialog() {
   if (typeof window.getAudioProgress !== 'function') return;
@@ -1799,17 +1763,26 @@ function promptCardJump() {
   if (mode === 'audio' && typeof window.getAudioProgress === 'function') {
     const a = window.getAudioProgress();
     if (!a.dur) return;
+    // Prefill/labels use fmtHms (h:mm:ss past the hour) so they match the
+    // timer strip and round-trip through the 3-part parser below.
     const input = prompt(
-      `Jump to time. mm:ss, seconds, or % (current ${fmtMmSs(a.ms)} / ${fmtMmSs(a.dur)}):`,
-      fmtMmSs(a.ms)
+      `Jump to time. mm:ss, h:mm:ss, hours ("1h23" or "1:23h"), seconds, or % (current ${fmtHms(a.ms)} / ${fmtHms(a.dur)}):`,
+      fmtHms(a.ms)
     );
     if (input == null) return;
     const trimmed = input.trim();
     let targetMs;
+    // Hours:minutes needs an explicit "h" — a bare "1:23" already means
+    // mm:ss. Accepted: "1h", "2.5h", "1h23", "1h23m", "1:23h".
+    // Both regexes put hours in [1] and optional minutes in [2].
+    const hm = trimmed.match(/^(\d+(?:\.\d+)?)\s*h(?:\s*(\d{1,2})\s*m?)?$/i) ||
+               trimmed.match(/^(\d+):(\d{1,2})\s*h$/i);
     if (trimmed.endsWith('%')) {
       const pct = parseFloat(trimmed.replace('%', ''));
       if (!Number.isFinite(pct)) return;
       targetMs = Math.round(a.dur * pct / 100);
+    } else if (hm) {
+      targetMs = Math.round(parseFloat(hm[1]) * 3600000 + parseInt(hm[2] || '0', 10) * 60000);
     } else if (trimmed.includes(':')) {
       const parts = trimmed.split(':').map(s => parseInt(s, 10));
       let s = 0;
@@ -4117,6 +4090,11 @@ function _ensureBgListenersForSrtCards() {
       // so the ~150ms position events can't pause the audio the lock screen
       // just resumed before the async mode switch flips us out of card mode.
       _srtCardEndMs = 0;
+      // A remote play LANDS AND STAYS in audio mode. The native state(true)
+      // event precedes this command and stats.js's hidden auto-switch may have
+      // already recorded the card/read mode for a foreground restore — clear
+      // it, or the restore would bounce the user straight back out of audio.
+      window._autoAudioPrevMode = null;
       // Native already resumed playback; switch to audio mode in RESUME mode
       // so we attach to it without reseeking/restarting.
       if (!document.body.classList.contains('mode-audio') && typeof window.setShellMode === 'function') {
@@ -4127,6 +4105,16 @@ function _ensureBgListenersForSrtCards() {
     }
   });
   bg.addListener('position', (d) => {
+    // Staleness guard (same rationale as remoteCommand above): position events
+    // emitted while the WebView is suspended queue in the bridge and REPLAY in
+    // a burst on foreground. Each replayed event carries a progressively later
+    // (but stale) playhead, and the auto-advance below walked the card through
+    // the whole backlog one page-rebuild at a time — the "scrolling ~2 pages
+    // per second for 20s" bug after a phone call. Drop anything older than a
+    // few seconds; the live ~150ms poll repopulates immediately. Events
+    // without ts (older native build) pass through unchanged.
+    const _ts = Number(d?.ts);
+    if (Number.isFinite(_ts) && _ts > 0 && Date.now() - _ts > 3000) return;
     // Same constraint as the state handler — only repaint the strip
     // in audio mode, never while the page is hidden (screen off: the strip
     // isn't visible; the first foreground tick repaints). ~3 Hz throttle.
@@ -4158,6 +4146,26 @@ function _ensureBgListenersForSrtCards() {
       let idx = currentCardIndex;
       while (idx + 1 < allNotes.length && (allNotes[idx + 1].audiobookStartMs || 0) <= pos) idx++;
       while (idx > 0 && (allNotes[idx].audiobookStartMs || 0) > pos + 1) idx--;
+      // document.hidden: nobody sees the card DOM while backgrounded — skip
+      // updateCardIndex/displayCard (battery: no page rebuilds screen-off) but
+      // KEEP the durable cue anchor tracking the background listen: the
+      // cold-boot restore reads title.lastCardIndex and has no native floor,
+      // so freezing it for a whole background listen would reopen at the
+      // screen-off card (and playing from there = a backward seek). On
+      // foreground, the visibilitychange card re-sync (or the first live
+      // event while playing) walks the DOM to the playhead in one call.
+      if (document.hidden) {
+        if (idx !== currentCardIndex) {
+          const _nowP = Date.now();
+          if (!window._lastCardPersistAt || (_nowP - window._lastCardPersistAt) >= 1200) {
+            window._lastCardPersistAt = _nowP;
+            if (window._activeTitleId && window.titleStore?.setCardIndex) {
+              window.titleStore.setCardIndex(window._activeTitleId, window._srtCardToCueAnchor(idx)).catch(() => {});
+            }
+          }
+        }
+        return;
+      }
       // Post-swipe guard: a swipe just seeked the playhead but position events
       // still report the OLD spot. Until the playhead-derived index reaches the
       // swiped-to target (seek landed), don't move the card — otherwise lagging

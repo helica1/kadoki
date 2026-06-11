@@ -4,6 +4,16 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.5.1 — 2026-06-10
+
+### Fixed
+- **Phone calls now pause the audiobook properly (Android).** A call used to silence playback while the app still showed "Playing" — and when the call ended, the book silently resumed in the background and ran away from your position. Now the app shows paused the moment a call takes over; short interruptions (notification sounds, a declined call) still resume seamlessly, while anything longer than a minute becomes a real pause that stays exactly where you left off. Pausing from the lock screen during a call also works now (it used to be silently ignored).
+- **No more runaway page-scrolling after reopening the app.** Returning from the background could replay a backlog of stale playback events, marching Card mode forward about two pages per second for many seconds.
+- **"Audiobook playback error … FileNotFound" no longer needs an app restart.** The system sometimes clears Kadoki's cached copy of the audiobook while the app is backgrounded; playback now restores the file automatically and resumes at your position.
+
+### Added
+- **Jump to a time in Audio mode.** Tap the top-left location indicator and enter a target: `mm:ss`, `h:mm:ss`, hours (`1h23`, `1:23h`, `2.5h`), plain seconds, or a percentage like `50%`. (Audio mode previously redirected you to Card/Read to move the playhead.)
+
 ## v1.5.0 — 2026-06-10
 
 ### Added

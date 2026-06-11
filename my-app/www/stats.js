@@ -298,7 +298,14 @@
     // starts via bumpRead on the bg 'state' listener; card had no equivalent,
     // so switching into card with audio playing never started the timer.
     const inCard = newMode === 'card';
-    if (window._bgPlaying && inCard && !timers.card.runningSince) startMode('card');
+    // Visibility gate (mirrors _shouldIgnoreBump): a call-end auto-resume can
+    // land while the app is HIDDEN with the body still in card mode (the
+    // suppression mirror cleared _bgPlaying before the hide, so the
+    // hidden-time audio auto-switch was skipped). Restarting the card timer
+    // then accrues phantom card time for the whole pocketed listen — the
+    // backgrounded span must never count as card reading.
+    if (window._bgPlaying && inCard && !timers.card.runningSince &&
+        (document.visibilityState === 'visible' || _ankiRoundtripActive)) startMode('card');
   }
 
   // Periodic check: inactivity timeouts + a mode/audio reconciliation backstop.
@@ -354,6 +361,32 @@
     window._statsAudioHooked = true;
     try {
       bg.addListener('state', (d) => {
+        // Late audio auto-switch: playback can come back while ALREADY hidden
+        // with the body still in card/read — a phone call suppressed playback
+        // (the mirror cleared _bgPlaying), the user backgrounded (so
+        // handleAppHidden skipped its audio auto-switch), then the call ended
+        // within the grace window and native auto-resumed. Run the same
+        // switch handleAppHidden would have done, so a background listen
+        // always lands in audio mode (timer attribution + the "audio is the
+        // only mode that plays while hidden" rule).
+        // Staleness gate: 'state' events queued while the WebView was
+        // suspended replay on foreground — a replayed playing=true must not
+        // trigger a mode switch (whose resumeOnly path can issue a transport
+        // resume) when the user has since paused. Only a LIVE resume counts.
+        const _sts = Number(d?.ts);
+        const _liveEvent = !Number.isFinite(_sts) || _sts <= 0 || (Date.now() - _sts <= 5000);
+        if (d.playing && _liveEvent && document.visibilityState === 'hidden' &&
+            !_ankiRoundtripActive && !window._autoAudioPrevMode &&
+            typeof window.setShellMode === 'function') {
+          const b = document.body.classList;
+          const interactive = b.contains('mode-read') ? 'read' : (b.contains('mode-card') ? 'card' : null);
+          if (interactive) {
+            window._autoAudioPrevMode = interactive;
+            try {
+              window.setShellMode('audio', { force: true, resumeOnly: true, autoSwitch: true });
+            } catch (_) { window._autoAudioPrevMode = null; }
+          }
+        }
         const inAudioMode = document.body.classList.contains('mode-audio');
         const inReadMode  = document.body.classList.contains('mode-read');
         if (d.playing && inAudioMode) startMode('audio');

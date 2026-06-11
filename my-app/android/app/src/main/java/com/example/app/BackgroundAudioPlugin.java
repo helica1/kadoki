@@ -46,6 +46,7 @@ public class BackgroundAudioPlugin extends Plugin {
             @Override public void onPlayingStateChanged(boolean playing) {
                 JSObject d = new JSObject();
                 d.put("playing", playing);
+                d.put("ts", System.currentTimeMillis());
                 notifyListeners("state", d);
                 if (playing) startPositionPoll();
                 else stopPositionPoll();
@@ -55,19 +56,29 @@ public class BackgroundAudioPlugin extends Plugin {
             }
             @Override public void onEnded() {
                 stopPositionPoll();
-                notifyListeners("ended", new JSObject());
+                JSObject d = new JSObject();
+                d.put("ts", System.currentTimeMillis());
+                notifyListeners("ended", d);
             }
             @Override public void onError(String message) {
                 JSObject d = new JSObject();
                 d.put("message", message != null ? message : "unknown");
+                // ts lets JS tell a live error from one that queued while the
+                // WebView was suspended and replayed minutes later (the stale
+                // case must not auto-restart playback at a frozen position).
+                d.put("ts", System.currentTimeMillis());
                 notifyListeners("error", d);
             }
             @Override public void onRemoteCommand(String action) {
                 // Lock-screen / media-button transport. JS listens for
                 // {action:"play"} to force AUDIO mode, "nextCue"/"prevCue" to
                 // jump by subtitle. Matches the iOS "remoteCommand" event.
+                // ts: JS drops commands that queued while the WebView was
+                // suspended and replayed stale on foreground (iOS already
+                // stamps this; the JS guard was dead code on Android without it).
                 JSObject d = new JSObject();
                 d.put("action", action);
+                d.put("ts", System.currentTimeMillis());
                 notifyListeners("remoteCommand", d);
             }
         };
@@ -125,6 +136,10 @@ public class BackgroundAudioPlugin extends Plugin {
         d.put("positionMs", positionMs);
         d.put("durationMs", durationMs);
         d.put("playing", s != null && s.isCurrentlyPlaying());
+        // Emit-time stamp so JS can drop events that queued in the bridge while
+        // the WebView was suspended and replay in a burst on foreground (the
+        // rapid card-scroll bug after a phone call).
+        d.put("ts", System.currentTimeMillis());
         notifyListeners("position", d);
     }
 

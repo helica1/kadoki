@@ -109,6 +109,8 @@ Listen to the audiobook while staying synchronized with the reading modes.
 - Background playback
 - Continuous listening statistics
 - Sync with reading progress
+- Jump to any time — tap the top-left location indicator and enter `mm:ss`, `h:mm:ss`, hours (`1h23`), seconds, or a percentage
+- Reliable interruptions — phone calls pause playback cleanly (short interruptions resume by themselves), and playback recovers automatically if the system clears the cached audio while backgrounded
 - Lock-screen subtitles — the current sentence shows large on the lock screen / Always-On Display while you listen (optional — turn it off in Preferences to show the book cover instead and save battery)
 - Efficient screen-off listening — overnight sessions do minimal background work
 
@@ -150,7 +152,7 @@ Optional: install the local audio archive.
 Tap any empty space to show or hide the toolbar.
 
 - **Top left** — mode switching: Card / Read / Audio
-- **Location indicator** — changes with the active mode; tap it to jump to a specific location
+- **Location indicator** — changes with the active mode; tap it to jump to a specific location (card number, reading position, or audio time)
 - **Timer** — tap to pause/resume timing; includes intelligent auto-timeout logic for accuracy (and a slight scroll in Read mode resumes it automatically)
 - **Top right menu** (hamburger) — Library · Stats · Bookmarks · Playback Speed · Print · Preferences
 

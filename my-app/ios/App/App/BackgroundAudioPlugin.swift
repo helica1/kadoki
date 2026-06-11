@@ -626,16 +626,24 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         positionTimer = nil
     }
 
+    // ts: emit-time stamp (epoch ms, same convention as the remoteCommand
+    // events above) so JS can drop events that queued while the WebView was
+    // suspended and replay in a stale burst on foreground — the rapid
+    // card-scroll / stale-restart guards key off it.
     private func emitPosition(positionMs: Int, durationMs: Int, playing: Bool) {
         self.notifyListeners("position", data: [
             "positionMs": positionMs,
             "durationMs": durationMs,
-            "playing":    playing
+            "playing":    playing,
+            "ts":         Int(Date().timeIntervalSince1970 * 1000)
         ])
     }
 
     private func emitState(playing: Bool) {
-        self.notifyListeners("state", data: ["playing": playing])
+        self.notifyListeners("state", data: [
+            "playing": playing,
+            "ts":      Int(Date().timeIntervalSince1970 * 1000)
+        ])
     }
 
     // MARK: - Now Playing (lock screen + Control Center)
@@ -674,6 +682,19 @@ extension BackgroundAudioPlugin: AVAudioPlayerDelegate {
         catch { NSLog("[BackgroundAudio] EOF session deactivate failed: \(error.localizedDescription)") }
     }
     public func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
-        self.notifyListeners("error", data: ["message": error?.localizedDescription ?? "unknown decode error"])
+        stopPositionTimer()
+        // Order matters: 'error' BEFORE the state(false) — the JS error
+        // handler captures _bgPlaying at entry to decide whether to restart
+        // playback after the self-heal (matches the Android onPlayerError).
+        // ts lets JS tell a live error from one replayed from the suspended
+        // bridge backlog (a stale error must not auto-restart playback).
+        self.notifyListeners("error", data: [
+            "message": error?.localizedDescription ?? "unknown decode error",
+            "ts":      Int(Date().timeIntervalSince1970 * 1000)
+        ])
+        // Playback is dead: tell JS explicitly so window._bgPlaying can't
+        // stay stale-true (the position poll above just stops silently).
+        emitState(playing: false)
+        updateNowPlaying()
     }
 }

@@ -117,6 +117,21 @@ public class BackgroundAudioService extends Service {
     // (onStartCommand / startPlayback / stopPlayback all run there).
     private String currentUrl = null;
 
+    // Transient audio-focus suppression (phone call, navigation prompt — and,
+    // because we declare CONTENT_TYPE_SPEECH, even "duckable" notification
+    // dings): ExoPlayer keeps playWhenReady=true but silences playback, then
+    // silently AUTO-RESUMES on focus regain — even minutes later with the app
+    // backgrounded. That was the reported runaway: a phone call "paused" the
+    // book, the call ended while minimized, ExoPlayer resumed into idle
+    // earbuds, and the position (and the durable saves) ran forward for the
+    // whole background span. We mirror suppression as a visible pause
+    // (lock screen, notification state, JS) and arm a deadline: a short loss
+    // auto-resumes seamlessly, anything longer than SUPPRESSION_GRACE_MS is
+    // converted into a REAL pause so playback never resumes behind the
+    // user's back. Volatile: read by isCurrentlyPlaying() off-thread.
+    private static final long SUPPRESSION_GRACE_MS = 60_000;
+    private volatile boolean suppressed = false;
+
     private MediaSessionCompat mediaSession;
     // Metadata fields: written via setMetadata (marshalled to the main looper)
     // and read by buildNotification/onStartCommand on the main looper; volatile
@@ -211,7 +226,11 @@ public class BackgroundAudioService extends Service {
             }
         } else if (ACTION_PAUSE.equals(action)) {
             tryRun(() -> {
-                if (exo != null && exo.isPlaying()) {
+                // Also take the pause path while SUPPRESSED (phone call):
+                // isPlaying() is false then, but playWhenReady is still true and
+                // would silently auto-resume after the call — an explicit pause
+                // must actually land (fadeOutThenPause clears playWhenReady).
+                if (exo != null && (exo.isPlaying() || suppressed)) {
                     int fadeMs = intent.getIntExtra(EXTRA_FADE_MS, DEFAULT_FADE_MS);
                     fadeOutThenPause(fadeMs);
                 }
@@ -317,6 +336,7 @@ public class BackgroundAudioService extends Service {
                 // would keep ramping volume on a paused player and leave it
                 // at the wrong level for the next resume.
                 cancelFade();
+                clearSuppression();   // a permanent loss supersedes a transient one
                 wantPlaying = false;
                 saveLastPositionNow();
                 updatePlaybackState();
@@ -324,8 +344,60 @@ public class BackgroundAudioService extends Service {
                 if (listener != null) listener.onPlayingStateChanged(false);
             }
         }
+        @Override public void onPlaybackSuppressionReasonChanged(int reason) {
+            if (reason == Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS) {
+                // Sound just went silent but the transport still intends to
+                // play (and will auto-resume). Mirror as PAUSED everywhere the
+                // user can see, and arm the hard-pause deadline. Keep the
+                // service FOREGROUND: an auto-resume inside the grace window
+                // must remain a legal foreground playback.
+                if (!wantPlaying || suppressed) return;
+                if (pendingPauseAfterFade != null) {
+                    // An EXPLICIT pause is mid-fade. It must win over the
+                    // suppression mirror: land it now instead of letting the
+                    // cancelFade below delete it (which would leave
+                    // playWhenReady=true and auto-resume against the user's
+                    // pause when the focus loss ends within the grace window).
+                    Runnable pp = pendingPauseAfterFade;
+                    cancelFade();
+                    pp.run();
+                    return;
+                }
+                Log.d(TAG, "suppressed (transient focus loss); grace=" + SUPPRESSION_GRACE_MS + "ms");
+                suppressed = true;
+                cancelFade();          // a ramp racing the silence would mis-set volume
+                saveLastPositionNow();
+                updatePlaybackState(); // lock screen → PAUSED (isCurrentlyPlaying is false now)
+                if (listener != null) listener.onPlayingStateChanged(false);
+                playerHandler.removeCallbacks(suppressionHardPause);
+                playerHandler.postDelayed(suppressionHardPause, SUPPRESSION_GRACE_MS);
+            } else if (reason == Player.PLAYBACK_SUPPRESSION_REASON_NONE) {
+                playerHandler.removeCallbacks(suppressionHardPause);
+                if (!suppressed) return;
+                suppressed = false;
+                // Focus came back within the grace window → ExoPlayer
+                // auto-resumed. Re-publish the playing state (restarts the
+                // plugin's position poll, re-pins the notification).
+                ExoPlayer p = exo;
+                boolean resumes = false;
+                try { resumes = p != null && p.getPlayWhenReady() && wantPlaying; } catch (Exception ignored) {}
+                if (resumes) {
+                    Log.d(TAG, "suppression lifted within grace — auto-resumed");
+                    // The suppression-start cancelFade may have killed a ramp
+                    // mid-flight; make sure the resume isn't stuck quiet.
+                    try { p.setVolume(1f); } catch (Exception ignored) {}
+                    updatePlaybackState();
+                    startInForeground("Playing");
+                    if (listener != null) {
+                        listener.onPlayingStateChanged(true);
+                        listener.onPositionUpdate(getPositionMs(), getDurationMs());
+                    }
+                }
+            }
+        }
         @Override public void onPlayerError(PlaybackException error) {
             Log.e(TAG, "ExoPlayer error code=" + error.errorCode + " (" + error.getErrorCodeName() + ")", error);
+            clearSuppression();
             wantPlaying = false;
             // Reset the load state so the next play() takes the FULL
             // startPlayback rebuild — the same-url fast path on an errored
@@ -335,6 +407,11 @@ public class BackgroundAudioService extends Service {
             currentUrl = null;
             if (listener != null) {
                 listener.onError("ExoPlayer error " + error.errorCode + "/" + error.getErrorCodeName());
+                // Playback is dead — tell JS explicitly. onPlayerError doesn't go
+                // through any pause path, so without this window._bgPlaying stayed
+                // stale-true and the next card tap issued a bg.seek into a dead
+                // player (silence) instead of a fresh bg.play.
+                listener.onPlayingStateChanged(false);
             }
             updatePlaybackState(); // don't leave the lock screen stuck on STATE_PLAYING
             // Demote so a playback error doesn't leave a pinned, non-dismissible
@@ -343,6 +420,66 @@ public class BackgroundAudioService extends Service {
             showPausedNotification("Stopped");
         }
     };
+
+    // Deadline armed at suppression start: still silent after the grace window
+    // (an answered call, not a ding) → convert the pending auto-resume into a
+    // REAL pause. Runs on playerHandler (main looper = the player thread).
+    private final Runnable suppressionHardPause = new Runnable() {
+        @Override public void run() {
+            if (!suppressed || !wantPlaying) return;
+            Log.d(TAG, "transient focus loss outlived grace — converting to hard pause");
+            // Order matters: drop the flag BEFORE setPlayWhenReady(false) so the
+            // resulting onPlaybackSuppressionReasonChanged(NONE) callback no-ops
+            // instead of announcing a resume.
+            suppressed = false;
+            wantPlaying = false;
+            ExoPlayer p = exo;
+            if (p != null) {
+                try { p.setPlayWhenReady(false); } catch (Exception ignored) {}
+                // The suppression-entry cancelFade may have killed a volume
+                // ramp mid-step (e.g. a fade-seek's restore); reset to full so
+                // the post-call resume isn't near-silent. Mirrors the reset
+                // every other pause path does.
+                try { p.setVolume(1f); } catch (Exception ignored) {}
+            }
+            saveLastPositionNow();
+            updatePlaybackState();
+            showPausedNotification("Paused");
+            if (listener != null) listener.onPlayingStateChanged(false);
+        }
+    };
+
+    // Forget any transient-suppression state: an explicit pause/stop/play or a
+    // player error supersedes the pending auto-resume bookkeeping.
+    private void clearSuppression() {
+        suppressed = false;
+        playerHandler.removeCallbacks(suppressionHardPause);
+    }
+
+    // Re-derive suppression from the LIVE player after a (re)start lands. A
+    // transient focus loss during the prepare/BUFFERING window (a call arriving
+    // while the moov of a big .m4b parses) fires the suppression event while
+    // wantPlaying is still false, so the listener gate drops it — without this
+    // check, onFirstReady would then announce "playing" on a silently
+    // suppressed player with no grace deadline (the original runaway, confined
+    // to the prepare window). Main looper only. Returns true when the mirror
+    // engaged (callers should announce paused instead of playing).
+    private boolean mirrorSuppressionIfActive(ExoPlayer p) {
+        try {
+            if (p != null && p.getPlaybackSuppressionReason()
+                    == Player.PLAYBACK_SUPPRESSION_REASON_TRANSIENT_AUDIO_FOCUS_LOSS) {
+                if (!suppressed) {
+                    Log.d(TAG, "suppressed at start (focus lost during prepare); grace armed");
+                    suppressed = true;
+                    saveLastPositionNow();
+                    playerHandler.removeCallbacks(suppressionHardPause);
+                    playerHandler.postDelayed(suppressionHardPause, SUPPRESSION_GRACE_MS);
+                }
+                return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
 
     private void startPlayback(String url) {
         stopPlayback();
@@ -408,10 +545,14 @@ public class BackgroundAudioService extends Service {
             try { p.setVolume(1f); } catch (Exception ignored) {}
         }
         wantPlaying = true;
-        startInForeground("Playing");
+        // A call may have arrived DURING the prepare — the suppression event
+        // fired before wantPlaying was true and was dropped. Re-derive it so
+        // we never announce "playing" on a silently suppressed player.
+        boolean sup = mirrorSuppressionIfActive(p);
+        startInForeground(sup ? "Paused" : "Playing"); // stay foreground either way: auto-resume must stay legal
         updatePlaybackState();
         if (listener != null) {
-            listener.onPlayingStateChanged(true);
+            listener.onPlayingStateChanged(!sup);
             listener.onPositionUpdate(cachedPositionMs, cachedDurationMs);
         }
     }
@@ -433,6 +574,7 @@ public class BackgroundAudioService extends Service {
         wantPlaying = false;
         currentUrl = null; // nothing loaded → next ACTION_PLAY must rebuild
         cancelFade();
+        clearSuppression();
         ExoPlayer p = exo;
         if (p != null) {
             exo = null;
@@ -464,6 +606,11 @@ public class BackgroundAudioService extends Service {
         final ExoPlayer p = exo;
         if (p == null || !prepared) { startPlayback(currentUrl); return; }
         cancelFade(); // drop any in-flight pause-after-fade / volume ramp
+        // Fresh explicit play: forget any pending suppression bookkeeping.
+        // If the player is in fact still suppressed (call ongoing), the
+        // mirrorSuppressionIfActive check at the end of this method re-reads
+        // the live reason and re-engages the mirror with a fresh deadline.
+        clearSuppression();
         applyRate(pendingRate);
         try {
             p.seekTo(Math.max(0, startMs));
@@ -484,10 +631,14 @@ public class BackgroundAudioService extends Service {
             startPlayback(currentUrl);
             return;
         }
-        startInForeground("Playing");
+        // Same prepare-window rule as onFirstReady: if focus is currently held
+        // by a call, the player is suppressed right now — mirror it instead of
+        // announcing a playing state that has no sound behind it.
+        boolean sup = mirrorSuppressionIfActive(p);
+        startInForeground(sup ? "Paused" : "Playing");
         updatePlaybackState();
         if (listener != null) {
-            listener.onPlayingStateChanged(true);
+            listener.onPlayingStateChanged(!sup);
             listener.onPositionUpdate(cachedPositionMs, getDurationMs());
         }
     }
@@ -544,6 +695,7 @@ public class BackgroundAudioService extends Service {
     private void fadeOutThenPause(int fadeMs) {
         final ExoPlayer mp = exo;
         if (mp == null) return;
+        clearSuppression();   // explicit pause supersedes any pending auto-resume
         if (fadeMs <= 0) {
             // No fade — set volume to 0 first so pause doesn't click on
             // a non-zero waveform, then pause, then restore for the
@@ -570,7 +722,11 @@ public class BackgroundAudioService extends Service {
         pendingPauseAfterFade = () -> {
             try {
                 try { mp.setVolume(0f); } catch (Exception ignored) {}
-                if (mp.isPlaying()) mp.pause();
+                // Unconditional: while focus-suppressed isPlaying() is false but
+                // playWhenReady is still true — the old isPlaying() gate skipped
+                // the pause and the player auto-resumed after the call anyway.
+                // pause() on an already-paused player is a no-op.
+                mp.pause();
                 try { mp.setVolume(1f); } catch (Exception ignored) {} // reset for next play
                 wantPlaying = false;
                 if (listener != null) listener.onPlayingStateChanged(false);
@@ -587,6 +743,17 @@ public class BackgroundAudioService extends Service {
     private void fadeInOnResume(int fadeMs) {
         final ExoPlayer mp = exo;
         if (mp == null) return;
+        if (suppressed) {
+            // Resume requested DURING a transient focus loss (call still
+            // active): sound can't start until focus returns, but the user has
+            // explicitly said "keep going" — disarm the hard-pause deadline so
+            // the auto-resume fires whenever the call ends, and let the
+            // suppression-NONE mirror announce the playing state then.
+            playerHandler.removeCallbacks(suppressionHardPause);
+            wantPlaying = true;
+            try { mp.play(); } catch (Exception ignored) {}
+            return;
+        }
         if (fadeMs <= 0) {
             // No fade — just start at full volume. (Volume was reset
             // to 1 inside the pause runnable, so we don't need to
@@ -615,7 +782,10 @@ public class BackgroundAudioService extends Service {
         // posts to the main Handler), so reading the player live is safe.
         if (l != null && prepared) {
             try {
-                l.onPlayingStateChanged(wantPlaying);
+                // isCurrentlyPlaying (not raw wantPlaying): during transient
+                // focus suppression the mirror reports paused — the catch-up
+                // replay must match it, not announce a silent "playing".
+                l.onPlayingStateChanged(isCurrentlyPlaying());
                 l.onPositionUpdate(getPositionMs(), getDurationMs());
             } catch (Exception ignored) {}
         }
@@ -623,7 +793,11 @@ public class BackgroundAudioService extends Service {
 
     public boolean isReady() { return prepared && exo != null; }
 
-    public boolean isCurrentlyPlaying() { return wantPlaying; }
+    // "Playing" as the user perceives it: transport intends to play AND sound
+    // is actually coming out. During transient focus suppression (phone call)
+    // wantPlaying stays true but we report paused — lock screen, position
+    // poll, and JS all show the truth instead of a silent "Playing".
+    public boolean isCurrentlyPlaying() { return wantPlaying && !suppressed; }
 
     // The url currently loaded — exposed via getState so JS can confirm "same
     // audio" before adopting the native playhead as truth on resume.
@@ -762,11 +936,21 @@ public class BackgroundAudioService extends Service {
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
             @Override public void onPlay() {
                 if (exo != null && prepared) {
-                    exo.play();
-                    wantPlaying = true;
-                    startInForeground("Playing");   // re-pin the notification while playing
-                    if (listener != null) listener.onPlayingStateChanged(true);
-                    updatePlaybackState();
+                    if (suppressed) {
+                        // Play pressed during a call: honor the intent (resume
+                        // when focus returns, no hard-pause deadline) but don't
+                        // claim "playing" while the sound is still suppressed —
+                        // the suppression-NONE mirror announces it then.
+                        playerHandler.removeCallbacks(suppressionHardPause);
+                        wantPlaying = true;
+                        exo.play();
+                    } else {
+                        exo.play();
+                        wantPlaying = true;
+                        startInForeground("Playing");   // re-pin the notification while playing
+                        if (listener != null) listener.onPlayingStateChanged(true);
+                        updatePlaybackState();
+                    }
                 }
                 // Tell JS this play came from the lock screen / media controls
                 // so it forces AUDIO mode (audiobook + audio timer), never
@@ -775,7 +959,11 @@ public class BackgroundAudioService extends Service {
                 if (listener != null) listener.onRemoteCommand("play");
             }
             @Override public void onPause() {
-                if (exo != null && exo.isPlaying()) {
+                // Same suppressed-pause rule as ACTION_PAUSE: a lock-screen pause
+                // during a phone call must clear playWhenReady or the player
+                // auto-resumes when the call ends despite the user's pause.
+                if (exo != null && (exo.isPlaying() || suppressed)) {
+                    clearSuppression();
                     exo.pause();
                     wantPlaying = false;
                     if (listener != null) listener.onPlayingStateChanged(false);

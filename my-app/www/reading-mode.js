@@ -2960,6 +2960,14 @@
             if (document.body.classList.contains('mode-audio')) {
               try { _abPaintTimeLabelScrub(); } catch (_) {}
             }
+            // NOTE: deliberately NO card re-sync here. A foreground return in
+            // card mode with PAUSED audio must not move the card — the cue
+            // cursor may be far BEHIND the card (silent read-ahead, paused
+            // swipes), and snapping to it would be a durable backward place
+            // jump. The flows where audio really advanced in the background
+            // land in audio mode (hide-time auto-switch + the stats.js late
+            // auto-switch) and re-sync on the audio→card restore instead;
+            // cold boot reads the anchor the hidden walker persists.
           }).catch(() => {});
         } else {
           flushAudioPositionNow();
@@ -2977,6 +2985,25 @@
     if (!bg) return;
     abListenersAttached = true;
     bg.addListener('position', (d) => {
+      // Staleness guard: events emitted while the WebView was suspended queue
+      // in the bridge and replay in a burst on foreground, each carrying an
+      // OLD playhead. Adopting them would walk abPositionRef (and the 30s
+      // durable save, the cue display, the smart-rewind clock) back through
+      // stale history before catching up. Drop them; the live ~150ms poll —
+      // plus reconcileAudioFromNative on the visibility flip — carries the
+      // truth. Events without ts (older native build) pass through.
+      const _evTs = Number(d?.ts);
+      if (Number.isFinite(_evTs) && _evTs > 0 && Date.now() - _evTs > 3000) {
+        // Still feed the smart-rewind clock from the stale stamp: the user WAS
+        // listening at _evTs (the ms advanced), just not "now". Without this a
+        // dropped backlog starves the clock and a paused post-call return
+        // could spuriously rewind 30s on resume.
+        if (Number(d.positionMs) > 0 && d.positionMs !== _abPrevEventMs) {
+          _abPrevEventMs = d.positionMs;
+          if (_evTs > _lastListenWallMs) _lastListenWallMs = _evTs;
+        }
+        return;
+      }
       // Smart-rewind clock: a position event whose ms ADVANCED means the user
       // is actually listening right now (a paused poll repeats the same ms).
       if (Number(d.positionMs) > 0 && d.positionMs !== _abPrevEventMs) {
@@ -3050,9 +3077,100 @@
       const btn = document.getElementById('audiobookPlayPause');
       if (btn) btn.textContent = 'PLAY';
     });
-    bg.addListener('error', (d) => {
-      alert('Audiobook playback error: ' + (d?.message || 'unknown'));
+    bg.addListener('error', async (d) => {
+      const msg = d?.message || 'unknown';
+      // Capture BEFORE the 'state' playing=false event (queued right behind
+      // this one) lands — it tells us whether to restart playback after the
+      // self-heal or just refresh the file for the next manual play.
+      const wasPlaying = !!window._bgPlaying;
+      // A STALE error replayed from the suspended-bridge backlog (the playback
+      // it killed died minutes ago, while backgrounded): refresh the cache
+      // file quietly so the next play works, but never auto-restart audio —
+      // abPositionRef is frozen at the suspend-time value in exactly this
+      // case — and don't alert about ancient history on foreground.
+      const _ets = Number(d?.ts);
+      const stale = Number.isFinite(_ets) && _ets > 0 && (Date.now() - _ets > 30000);
+      try { window.debugLog?.('[ab] native playback error' + (stale ? ' (stale)' : '') + ': ' + msg); } catch (_) {}
+      let recovered = false;
+      try { recovered = await abRecoverFromPlaybackError(wasPlaying && !stale); } catch (_) {}
+      if (!recovered && !stale) alert('Audiobook playback error: ' + msg);
     });
+  }
+
+  // ── Playback-error self-heal (cache eviction) ──
+  // Android may evict the materialized cache copy (deck_*.m4b) under storage
+  // pressure while the app is backgrounded; ExoPlayer keeps playing from its
+  // already-open fd until the first NEW file open (a seek / rebuild) throws
+  // FileNotFound. Every replay path re-sends the same dead cachePath, so the
+  // only in-session fix used to be an app restart (title re-open is what
+  // re-materializes). Instead: re-materialize from the attachment's stored
+  // URI — materializeToCache derives the path from the URI hash, so the SAME
+  // path is recreated and every in-memory copy (card.audiobookPath,
+  // abAudioPath, prefs) becomes valid again — then resume at the last known
+  // playhead. One-shot latched so a genuinely unplayable file alerts instead
+  // of looping. Returns true when playback was restarted (alert suppressed).
+  // Same-file check for the durable-save floor below: prefix-insensitive
+  // (cache dirs move), restricted to the content-stable deck_<urihash> naming —
+  // mirrors the _norm/_tail/_sameAudio trio openAudiobookMode uses.
+  function _abSameAudioFile(a, b) {
+    const norm = (u) => {
+      const s = String(u || '').replace(/^file:\/+/, '').replace(/^\/+/, '');
+      try { return decodeURIComponent(s); } catch (_) { return s; }
+    };
+    const tail = (u) => {
+      const s = norm(u);
+      const t = s.slice(s.lastIndexOf('/') + 1);
+      return t.startsWith('deck_') ? t : '';
+    };
+    if (!a || !b) return false;
+    if (norm(a) === norm(b)) return true;
+    const ta = tail(a), tb = tail(b);
+    return !!ta && ta === tb;
+  }
+
+  let _abLastRecoverAt = 0;
+  async function abRecoverFromPlaybackError(restart) {
+    try {
+      const now = Date.now();
+      if (now - _abLastRecoverAt < 15000) return false;
+      _abLastRecoverAt = now;
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg || !window.titleStore || !window._activeTitleId) return false;
+      const errTitleId = window._activeTitleId;
+      const t = await window.titleStore.get(errTitleId);
+      if (!t?.attachments?.audiobook?.uri) return false;   // no source URI → can't heal
+      const fresh = (typeof window.rehydrateTitleCachePaths === 'function')
+        ? (await window.rehydrateTitleCachePaths(t) || t) : t;
+      const path = fresh?.attachments?.audiobook?.cachePath;
+      if (!path) return false;
+      if (!restart) return false;      // file refreshed; nothing to restart
+      // Post-await revalidation: the re-materialize can take seconds (full
+      // native copy of a large m4b). If the user switched titles meanwhile,
+      // restarting the OLD audio would stomp the new title's playback.
+      if (window._activeTitleId !== errTitleId) return false;
+      // Ownership gate — same rule as every other cross-title position write
+      // in this file: abPositionRef must belong to the ACTIVE title's audio,
+      // or we'd pair this title's file with another book's position.
+      if (!abEngineOwnsActiveDeck()) return false;
+      const url = path.startsWith('file://') ? path : 'file://' + path;
+      let startMs = Math.max(0, Math.round(abPositionRef.ms || 0));
+      // Forward-only, url-matched floor against the service's durable save:
+      // if the error landed while the WebView was suspended, abPositionRef
+      // froze at the suspend-time value while the native 5s heartbeat kept
+      // tracking the real playhead. Resuming at the frozen value would be a
+      // backward place-jump that the heartbeat then durably commits —
+      // destroying the only correct copy. (Same pattern as the cold-boot
+      // floor in openAudiobookMode.)
+      try {
+        const ls = await bg.getLastSavedPosition?.();
+        if (ls?.hasSaved && Number(ls.positionMs) > startMs && _abSameAudioFile(ls.url, url)) {
+          startMs = Math.round(ls.positionMs);
+        }
+      } catch (_) {}
+      await bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
+      try { window.debugLog?.('[ab] re-materialized audio after error; resumed at ' + startMs + 'ms'); } catch (_) {}
+      return true;
+    } catch (_) { return false; }
   }
 
   function abAttachScrubControl() {
