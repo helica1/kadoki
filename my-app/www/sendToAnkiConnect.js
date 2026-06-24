@@ -445,13 +445,23 @@ async function sendToAnki({ expression, imageData, audioData }) {
     return;
   }
 
+  // Media with no target field mapped would be silently dropped (the card still
+  // saves, but without the audio/image) — surface it instead of failing quietly.
+  // Non-blocking: the note is still created; only the unmapped media is missing.
+  if (audioData && (!cfg.fields || !cfg.fields.audio)) {
+    try { window.showToast?.('⚠ 音声フィールド未設定（Preferences → Anki）— 音声は添付されません', 6000); } catch (_) {}
+  }
+  if (imageData && (!cfg.fields || !cfg.fields.image)) {
+    try { window.showToast?.('⚠ 画像フィールド未設定（Preferences → Anki）— 画像は添付されません', 6000); } catch (_) {}
+  }
+
   const imageFilename = `anki_${Date.now()}.jpg`;
   const audioFilename = `sentence_${Date.now()}.mp3`;
 
   const fields = {};
   fields[cfg.fields.expression] = expression || '';
-  fields[cfg.fields.image]      = '';
-  fields[cfg.fields.audio]      = '';
+  if (cfg.fields.image) fields[cfg.fields.image] = '';
+  if (cfg.fields.audio) fields[cfg.fields.audio] = '';
 
   // --- AnkiBridge path (default on Android) ---
   const ab = await viaBridge();
@@ -463,7 +473,7 @@ async function sendToAnki({ expression, imageData, audioData }) {
         fields,
         tags:      ['android'],
       };
-      if (audioData) {
+      if (audioData && cfg.fields.audio) {
         // Match the delivered extension to the real codec so iOS AnkiMobile
         // (AVFoundation) accepts it — an mp3-named-but-AAC file is rejected.
         const aMime = sniffAudioBase64(audioData);
@@ -477,7 +487,7 @@ async function sendToAnki({ expression, imageData, audioData }) {
           field:      cfg.fields.audio
         }];
       }
-      if (imageData) {
+      if (imageData && cfg.fields.image) {
         params.picture = [{
           filename:   imageFilename,
           dataBase64: imageData.split(',')[1],

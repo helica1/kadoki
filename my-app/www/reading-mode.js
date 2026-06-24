@@ -160,12 +160,14 @@
   window.getSrtPairingForDeck = async (deck) => deck ? await getSrtPairing(deck) : null;
 
   async function getAudiobookLastPosition(deckName) {
-    if (!deckName) return { ms: 0, chunkIdx: -1 };
+    if (!deckName) return { ms: 0, chunkIdx: -1, ts: 0 };
     const ms = parseInt(await getPref(KEYS.AUDIO_LAST_POS_PREFIX + deckName));
     const chunkIdx = parseInt(await getPref(KEYS.AUDIO_LAST_CHUNK_PREFIX + deckName));
+    const ts = parseInt(await getPref(KEYS.AUDIO_LAST_TS_PREFIX + deckName));   // last-listened wall clock
     return {
       ms: Number.isFinite(ms) ? ms : 0,
-      chunkIdx: Number.isFinite(chunkIdx) ? chunkIdx : -1
+      chunkIdx: Number.isFinite(chunkIdx) ? chunkIdx : -1,
+      ts: Number.isFinite(ts) ? ts : 0
     };
   }
 
@@ -1408,6 +1410,10 @@
     modal.style.display = 'flex';
     refreshTimerUI();
     refreshStatsModal();
+    // Re-render the yesterday section if it was left expanded — a rollover
+    // since the last open would otherwise show a stale snapshot.
+    const ySection = document.getElementById('statsYesterdaySection');
+    if (ySection && ySection.style.display !== 'none') renderYesterdayStats();
     if (statsRefreshTimer) clearInterval(statsRefreshTimer);
     statsRefreshTimer = setInterval(refreshStatsModal, 1000);
   };
@@ -1419,6 +1425,48 @@
       clearInterval(statsRefreshTimer);
       statsRefreshTimer = null;
     }
+  };
+
+  // "Yesterday's stats" — static render of the 3 AM-boundary snapshot
+  // (STATS_PREV_V1) saved by the stats.js daily rollover.
+  function renderYesterdayStats() {
+    const snap = window.stats?.getYesterday ? window.stats.getYesterday() : null;
+    const empty = document.getElementById('statsYesterdayEmpty');
+    const body = document.getElementById('statsYesterdayBody');
+    if (!snap) {
+      if (empty) empty.style.display = '';
+      if (body) body.style.display = 'none';
+      return;
+    }
+    if (empty) empty.style.display = 'none';
+    if (body) body.style.display = '';
+    const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+    const rate = (sec, chars) => (sec < 1 || !chars) ? '—' : Math.round(chars / (sec / 3600)).toLocaleString();
+    const c = snap.modes.card || {};
+    const r = snap.modes.read || {};
+    const a = snap.modes.audio || {};
+    setText('statsYesterdayDay', snap.day || '');
+    setText('statsYCardTime',  formatSec(c.sec || 0));
+    setText('statsYCardCount', (c.cards || 0).toLocaleString());
+    setText('statsYCardChars', (c.chars || 0).toLocaleString());
+    setText('statsYCardRate',  rate(c.sec || 0, c.chars || 0));
+    setText('statsYReadTime',  formatSec(r.sec || 0));
+    setText('statsYReadChars', (r.chars || 0).toLocaleString());
+    setText('statsYReadRate',  rate(r.sec || 0, r.chars || 0));
+    setText('statsYAudioTime',  formatSec(a.sec || 0));
+    setText('statsYAudioChars', (a.chars || 0).toLocaleString());
+    setText('statsYAudioRate',  rate(a.sec || 0, a.chars || 0));
+  }
+
+  window.toggleYesterdayStats = function () {
+    const section = document.getElementById('statsYesterdaySection');
+    if (!section) return;
+    if (section.style.display !== 'none') {
+      section.style.display = 'none';
+      return;
+    }
+    renderYesterdayStats();
+    section.style.display = '';
   };
 
   window.resetReadingTimer = async function () {
@@ -1446,6 +1494,27 @@
     if (window.stats?.resetMode) window.stats.resetMode(mode);
     refreshStatsModal();
   };
+
+  // 3 AM daily rollover (stats.js checkRollover) — the legacy read-timer
+  // counters are a parallel store to stats.js, so the rollover resets them
+  // through this hook exactly like resetReadingTimer does (minus the
+  // stats.resetAll the rollover already performed itself). stats.js loads
+  // before this file, so a boot-time rollover leaves the pending flag and
+  // we consume it on registration.
+  window._statsDayRolloverLegacyReset = function () {
+    cumulativeSec = 0;
+    cumulativeChars = 0;
+    if (timerStart !== null) timerStart = Date.now();
+    chunks.forEach(c => { delete c.dataset.counted; });
+    setPref(KEYS.TIME_SEC, 0);
+    setPref(KEYS.CHARS, 0);
+    refreshTimerUI();
+    refreshStatsModal();
+  };
+  if (window._statsLegacyDayResetPending) {
+    window._statsLegacyDayResetPending = false;
+    try { window._statsDayRolloverLegacyReset(); } catch (e) {}
+  }
 
   window.readingAnkiCount = window.readingAnkiCount || 0;
 
@@ -2423,6 +2492,10 @@
     // between cues, derive prev/next from the live position. swipe-RIGHT (dx>0)
     // → previous, swipe-LEFT (dx<0) → next.
     const navByDx = (dx) => {
+      // "Reverse horizontal swipe direction" pref: flip ONCE here so every
+      // internal branch (current-cue step + both in-gap derivations) stays
+      // consistent with the flipped mapping.
+      if (window._hSwipeReversed && window._hSwipeReversed()) dx = -dx;
       const cues = abCues;
       const bg = window.Capacitor?.Plugins?.BackgroundAudio;
       if (!cues.length || !bg) return;                    // can't resolve → stay put
@@ -2823,6 +2896,187 @@
   function abEngineOwnsActiveDeck() {
     return !!abContextLoadedForDeck && abContextLoadedForDeck === currentDeckName();
   }
+  // Exposed for Drive sync: true only when the audio engine is loaded for the
+  // currently-shown title, so sync won't capture a previous title's playhead.
+  window.abEngineOwnsActiveDeck = abEngineOwnsActiveDeck;
+
+  // ───────────────────────── Chapter Repeat (audio mode) ─────────────────────
+  // "Repeat-one" mode: while ON, when a chapter ends naturally it seeks back to
+  // its start and plays once more (a Japanese TTS announces it), then flows into
+  // the next chapter — which also repeats once (x1 per chapter, never infinite).
+  // "次の章へ" during a repeat pass jumps to the next chapter's start. Chapters
+  // come from the aiChunks map (cueStart/cueEnd cue-index ranges). Place-safe:
+  // every seek mirrors jumpToChapter (captureCurrent first; furthest is forward-
+  // only so a backward repeat seek can't lower it).
+  let abRepeatOn = false;
+  let abChapMap = null;          // array of chunks {idx,cueStart,cueEnd,label,...}
+  let _abInRepeatPass = -1;      // chapter idx native reports it is repeating (-1 = none) — drives 次の章へ
+  let _abRepeatWired = false;
+
+  function abBg() { return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundAudio) || null; }
+  // Detection + the spoken announce + the seek-back now live in the NATIVE plugin
+  // (BackgroundAudio.setChapterRepeat) so they work backgrounded / screen-off — iOS
+  // suspends the WebView, so JS can't do it. Until that native build ships, the
+  // toggle stays greyed (graceful no-op on an old build).
+  function abNativeRepeatAvailable() { const bg = abBg(); return !!(bg && typeof bg.setChapterRepeat === 'function'); }
+
+  function abHasChapters() {
+    return !!(abChapMap && abChapMap.filter((c) => c && c.cueStart >= 0 && c.cueEnd >= c.cueStart).length >= 2);
+  }
+
+  // Map the chapter chunks → the boundary list native repeats over.
+  function abBuildChapterBounds() {
+    if (!abChapMap || !abCues.length) return [];
+    const out = [];
+    for (const ch of abChapMap) {
+      if (!ch || ch.cueStart < 0 || ch.cueEnd < ch.cueStart) continue;
+      const s = abCues[ch.cueStart], e = abCues[ch.cueEnd];
+      if (!s || !e || !Number.isFinite(s.startMs) || !Number.isFinite(e.endMs)) continue;
+      // Label uses the ORIGINAL chunk number; but the wire `idx` must be CONTIGUOUS
+      // (out.length), because chunks with no cue alignment are skipped above — a gap
+      // in the original idx would make iOS's idx-field adjacency (curIdx===prev+1)
+      // silently skip the repeat across the gap (Android uses array position). Emitting
+      // contiguous idx makes both engines agree; JS only uses the event idx as >=0/-1.
+      const label = (ch.label && String(ch.label).trim()) ? String(ch.label).trim() : ('第' + ((ch.idx | 0) + 1) + '章');
+      out.push({ idx: out.length, startMs: Math.max(0, Math.round(s.startMs)), endMs: Math.max(0, Math.round(e.endMs)), announce: label + ' を繰り返します' });
+    }
+    return out;
+  }
+  // Hand the on/off flag + boundaries to native. Gated on audio mode owning the
+  // deck (native has no mode concept) — sending enabled:false on leave/read/card
+  // preserves the audio-mode-only behavior.
+  function abSendChapterRepeat() {
+    const bg = abBg();
+    if (!bg || typeof bg.setChapterRepeat !== 'function') return;
+    try {
+      if (!abEngineOwnsActiveDeck() || !document.body.classList.contains('mode-audio')) {
+        bg.setChapterRepeat({ enabled: false, chapters: [] });
+        return;
+      }
+      const chapters = abBuildChapterBounds();
+      const enabled = !!(abRepeatOn && chapters.length >= 2);
+      bg.setChapterRepeat({ enabled, chapters });
+    } catch (_) {}
+  }
+
+  async function abLoadChapMap() {
+    abChapMap = null;
+    try {
+      const tid = window._activeTitleId;
+      if (tid && window.aiChunks && typeof window.aiChunks.getMap === 'function') {
+        const m = await window.aiChunks.getMap(tid);
+        if (m && Array.isArray(m.chunks)) abChapMap = m.chunks;
+      }
+    } catch (_) { abChapMap = null; }
+    abReflectRepeatUI();
+    abSendChapterRepeat();   // re-send whenever the map (re)loads — covers late cue-alignment
+  }
+
+  function abReflectRepeatUI() {
+    const tgl = document.getElementById('abRepeatToggle');
+    const nxt = document.getElementById('abNextChapterBtn');
+    if (tgl) {
+      const has = abHasChapters() && abNativeRepeatAvailable();
+      tgl.classList.toggle('disabled', !has);
+      tgl.classList.toggle('on', has && abRepeatOn);
+      tgl.setAttribute('aria-checked', (has && abRepeatOn) ? 'true' : 'false');
+      // The label can paint with a stale tint (green) on first show until the class
+      // actually CHANGES — a manual toggle is what cleared it. Force the same style
+      // recalc + repaint once after paint so it renders the correct color from the start.
+      try {
+        requestAnimationFrame(() => {
+          try { tgl.classList.add('kai-fr'); void tgl.offsetWidth; tgl.classList.remove('kai-fr'); } catch (_) {}
+        });
+      } catch (_) {}
+    }
+    if (nxt) nxt.style.display = (_abInRepeatPass >= 0) ? 'inline-flex' : 'none';
+  }
+
+  function abToggleRepeat() {
+    if (!abHasChapters() || !abNativeRepeatAvailable()) return;
+    abRepeatOn = !abRepeatOn;
+    try { localStorage.setItem('CHAPTER_REPEAT', abRepeatOn ? '1' : '0'); } catch (_) {}
+    if (!abRepeatOn) _abInRepeatPass = -1;   // native cancels any in-flight announce + resumes via setChapterRepeat({enabled:false})
+    abSendChapterRepeat();
+    abReflectRepeatUI();
+  }
+
+  // 次の章へ — user-driven skip to the next chapter; native does the place-safe seek.
+  function abReturnToNextChapter() {
+    const bg = abBg();
+    _abInRepeatPass = -1; abReflectRepeatUI();   // hide the button immediately
+    try { window.bookmarks?.captureCurrent?.({ force: true }); } catch (_) {}   // user jump → recoverable in History
+    try { bg && bg.skipToNextChapter && bg.skipToNextChapter(); } catch (_) {}
+  }
+
+  // Native 'chapterRepeat' event drives the 次の章へ button. Cross-platform shapes:
+  //  • Android emits {idx>=0} while repeating, {idx:-1} when the pass ends/advances/skips.
+  //  • iOS emits {idx>=0, repeating:true|false} on every transition (idx is always
+  //    a real chapter; `repeating` says whether a pass is active).
+  // So: a pass is ACTIVE when repeating===true, OR (no repeating flag, Android) idx>=0.
+  function abOnChapterRepeatEvent(d) {
+    const idx = (d && Number.isFinite(Number(d.idx))) ? Number(d.idx) : -1;
+    const active = !!(d && (d.repeating === true || (d.repeating === undefined && idx >= 0)));
+    _abInRepeatPass = active ? (idx >= 0 ? idx : 0) : -1;
+    abReflectRepeatUI();
+    if (active && !document.hidden) { try { window.bookmarks?.captureCurrent?.({ force: true }); } catch (_) {} }   // foreground place snapshot
+  }
+
+  function abWireRepeatUI() {
+    const tgl = document.getElementById('abRepeatToggle');
+    const nxt = document.getElementById('abNextChapterBtn');
+    if (!tgl || !nxt) return;
+    if (!_abRepeatWired) {
+      _abRepeatWired = true;
+      const stop = (e) => { e.stopPropagation(); };   // keep button taps off the audio swipe / chrome handlers
+      ['touchstart', 'touchend'].forEach((ev) => { tgl.addEventListener(ev, stop, { passive: true }); nxt.addEventListener(ev, stop, { passive: true }); });
+      tgl.addEventListener('click', (e) => { e.stopPropagation(); abToggleRepeat(); });
+      nxt.addEventListener('click', (e) => { e.stopPropagation(); abReturnToNextChapter(); });
+    }
+    abReflectRepeatUI();
+  }
+
+  async function abInitChapterRepeat() {
+    try {
+      abRepeatOn = false;
+      try { abRepeatOn = (localStorage.getItem('CHAPTER_REPEAT') === '1'); } catch (_) {}
+      _abInRepeatPass = -1;
+      abWireRepeatUI();
+      await abLoadChapMap();   // also abSendChapterRepeat() → hands the boundaries + flag to native
+      // The chunk map / cue bounds can land seconds after audio mode opens (Haiku
+      // refine, or cue-alignment on a ~60s poll). Re-check a few times (stopping
+      // once chapters exist or audio mode closes) so the toggle un-greys on its own.
+      if (!abHasChapters()) {
+        (async () => {
+          for (let i = 0; i < 8; i++) {
+            await new Promise((r) => setTimeout(r, 2000));
+            if (!window.audiobookActive || abHasChapters()) return;
+            await abLoadChapMap().catch(() => {});
+          }
+        })();
+      }
+    } catch (_) {}
+  }
+
+  // The chapter map can change mid audio-session (章を再検出 / late cue-alignment /
+  // the part-splitting re-segment), which fires kai:ai-data. Reload + re-send the
+  // boundaries to native so repeat tracks the NEW chapters (otherwise native keeps
+  // the stale table until the next audio-mode re-open). Debounced (re-detect emits
+  // timeline + characters). Wired once.
+  let _abMapReloadTimer = null;
+  try {
+    window.addEventListener('kai:ai-data', (e) => {
+      try {
+        const d = e && e.detail;
+        if (d && d.titleId && d.titleId !== window._activeTitleId) return;
+        if (!window.audiobookActive || !document.body.classList.contains('mode-audio')) return;
+        if (typeof abEngineOwnsActiveDeck === 'function' && !abEngineOwnsActiveDeck()) return;
+        if (_abMapReloadTimer) clearTimeout(_abMapReloadTimer);
+        _abMapReloadTimer = setTimeout(() => { _abMapReloadTimer = null; abLoadChapMap().catch(() => {}); }, 600);
+      } catch (_) {}
+    });
+  } catch (_) {}
+
 
   // ── Native-truth reconcile — fix for the BACKWARDS place-jump on resume ──
   // While the WebView is suspended (iOS background) or recreated (Android LMK),
@@ -2867,7 +3121,7 @@
       }
       try {
         if (deck && window._activeTitleId && window.bookmarks?.updateFurthest) {
-          window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
+          if (!window._kaiPassageActive) window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
         }
       } catch (_) {}
     } catch (_) {}
@@ -2889,6 +3143,9 @@
       saveAudiobookLastPosition(deck, abPositionRef.ms, ci, _lastListenWallMs);
     } catch (_) {}
   }
+  // Exposed so Drive sync can flush the live playhead into the durable layer
+  // before snapshotting (ownership-gated + forward-only inside).
+  window.flushAudioPositionNow = flushAudioPositionNow;
 
   // ── Smart rewind helper ──
   // One-shot −30s before a paused→playing resume in audio mode when the user
@@ -3021,7 +3278,7 @@
         // polluted the NEW title's never-regress furthest mark.
         if (abPositionRef.ms > 0 && abEngineOwnsActiveDeck() &&
             window._activeTitleId && window.bookmarks?.updateFurthest) {
-          window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
+          if (!window._kaiPassageActive) window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
         }
       } catch (_) {}
       // Durability: persist the audio playhead every ~30s while it advances, so
@@ -3056,6 +3313,8 @@
       const _inAudioMode = !document.hidden && document.body.classList.contains('mode-audio');
       if (_inAudioMode) _abPaintTimeLabelScrub();
       abUpdateCueDisplay(abPositionRef.ms);
+      // (chapter-repeat detection now lives NATIVE in the BackgroundAudio engine so
+      // it works backgrounded/screen-off; JS only reacts to its 'chapterRepeat' event.)
       // Drive the top-left progress strip from the audiobook position events too.
       // Throttled to ~3Hz: in READ mode this scans every chunk via
       // getBoundingClientRect (forced reflow) and at the raw ~6.7Hz cadence it
@@ -3073,6 +3332,9 @@
       const btn = document.getElementById('audiobookPlayPause');
       if (btn) btn.textContent = d.playing ? 'PAUSE' : 'PLAY';
     });
+    // Native chapter-repeat: idx>=0 while a chapter is in its repeat pass (reveal
+    // 次の章へ), -1 when the pass ends/advances/skips (hide it).
+    bg.addListener('chapterRepeat', (d) => { try { abOnChapterRepeatEvent(d); } catch (_) {} });
     bg.addListener('ended', () => {
       const btn = document.getElementById('audiobookPlayPause');
       if (btn) btn.textContent = 'PLAY';
@@ -3248,6 +3510,7 @@
     abAttachScrubControl();
     installAudiobookCueTapHandler();
     installAudiobookSwipeHandler();
+    abInitChapterRepeat();   // chapter-repeat toggle: load chapter map + restore toggle state + wire buttons
     window.audiobookActive = true;
     // Capture the deck that owns this audio session — closeAudiobookMode must
     // save under THIS key even if #deckName has already flipped to a new title.
@@ -3292,7 +3555,8 @@
         if (Number.isFinite(readMs)) startMs = readMs;
       }
     }
-    let _floorRaised = false;   // true ⇒ native is already playing THIS audio ahead of the saved spot
+    let _floorRaised = false;   // true ⇒ native getState() floored us (keeps smart-rewind's existing meaning)
+    let _floored = false;       // true ⇒ ANY native floor (warm getState OR cold getLastSaved) raised startMs
     let _nativePlaying = false; // true ⇒ getState() saw this audio actively playing
     let _fromSavedPos = false;  // true ⇒ startMs came from the saved-position fallback
     if (startMs == null) {
@@ -3333,7 +3597,13 @@
         const _tail = (u) => {
           const s = _norm(u);
           const t = s.slice(s.lastIndexOf('/') + 1);
-          return t.startsWith('deck_') ? t : '';
+          // Match on the deck_<contenthash> / synced_<localId>_<kind>_<name> STEM,
+          // ignoring the extension: a build that re-materialized the cache with a
+          // different extension (deck_<hash>.apkg → .m4b) OR an iOS reinstall that
+          // rotated the container UUID (synced_ files keep their name) must still
+          // recognize the same audio. synced_<localId>_<kind> is title-unique, so no
+          // cross-title position bleed.
+          return (t.startsWith('deck_') || t.startsWith('synced_')) ? t.replace(/\.[^.\/]+$/, '') : '';
         };
         const _sameAudio = (a, b) => {
           if (!a || !b) return false;
@@ -3350,7 +3620,7 @@
             if (_s.playing) _nativePlaying = true;
             const _matches = _s.url && _sameAudio(_norm(_s.url), _mine);
             if (_s.ready) {
-              if (_matches && Number(_s.positionMs) > startMs) { startMs = _s.positionMs; _floorRaised = true; }
+              if (_matches && Number(_s.positionMs) > startMs) { startMs = _s.positionMs; _floorRaised = true; _floored = true; }
               break;                                          // ready → decision made (raise or not)
             }
             // Only WAIT when native is mid-spin-up of OUR audio (the case where a
@@ -3367,15 +3637,34 @@
         // forward-only, url-matched floor so a cold restart resumes within ~5s of
         // the true spot instead of the up-to-30s-stale JS save. Still NEVER moves
         // backward and never crosses titles.
-        if (!_floorRaised && _bg && typeof _bg.getLastSavedPosition === 'function' && _mine) {
+        if (!_floored && _bg && typeof _bg.getLastSavedPosition === 'function' && _mine) {
           try {
             const _ls = await _bg.getLastSavedPosition();
-            if (_ls && _ls.hasSaved && _ls.url && _sameAudio(_norm(_ls.url), _mine) &&
-                Number(_ls.positionMs) > startMs) {
-              startMs = _ls.positionMs;
-            }
+            const _lsMatch = !!(_ls && _ls.hasSaved && _ls.url && _sameAudio(_norm(_ls.url), _mine));
+            try { window.debugLog?.('[ab] coldFloor saved=' + (_ls && _ls.hasSaved) + ' url=' + (_ls && _ls.url || '') + ' ms=' + (_ls && _ls.positionMs) + ' mine=' + _mine + ' match=' + _lsMatch); } catch (_) {}
+            if (_lsMatch && Number(_ls.positionMs) > startMs) { startMs = _ls.positionMs; _floored = true; }   // NOT _floorRaised — keep smart-rewind's existing behavior for cold-saved positions
           } catch (_) {}
         }
+        // LAST-RESORT floor: when NO native floor was available (service dead AND
+        // its durable save missing or url-mismatched — e.g. across an app update
+        // that re-pathed the cache, the very case the user hit), fall back to the
+        // per-title "furthest listened" high-water. Two guards keep it from
+        // overriding a deliberate scrub-BACK: (1) furthest must be MEANINGFULLY
+        // ahead (>60s) — a throttle-window scrub-back leaves the resume only
+        // seconds behind the furthest, so it won't trip; (2) furthest must be more
+        // recently updated than the resume's last-listen ts — a scrub freshly
+        // re-stamps the resume. Both together fire only when the resume genuinely
+        // staled minutes behind a fresher furthest. Forward-only.
+        if (!_floored) {
+          try {
+            const _tid = window._activeTitleId;
+            const _f = (_tid && window.bookmarks && window.bookmarks.getFurthest) ? window.bookmarks.getFurthest(_tid) : null;
+            const _fOk = !!(_f && Number.isFinite(_f.ms) && _f.ms > startMs + 60000 && (_f.ts || 0) > (last.ts || 0));
+            try { window.debugLog?.('[ab] furthestFloor furthest=' + (_f && _f.ms) + '@' + (_f && _f.ts) + ' resume=' + startMs + '@' + (last.ts || 0) + ' apply=' + _fOk); } catch (_) {}
+            if (_fOk) startMs = _f.ms;
+          } catch (_) {}
+        }
+        try { window.debugLog?.('[ab] audio restore startMs=' + startMs + ' (savedJS=' + (last.ms || 0) + ' floorRaised=' + _floorRaised + ' nativePlaying=' + _nativePlaying + ')'); } catch (_) {}
       } catch (_) {}
     }
     // Smart rewind — saved-position entries only (cold boot / plain tab-in).
@@ -3521,6 +3810,11 @@
       const chunkIdx = (abCueToChunk && abCurrentCueIdx >= 0) ? abCueToChunk[abCurrentCueIdx] : -1;
       await saveAudiobookLastPosition(deck, abPositionRef.ms, chunkIdx, _lastListenWallMs);
     }
+    // Stop native chapter-repeat on leaving audio mode (even under keepPlaying, so
+    // it never repeats while the user reads with audio continuing) — re-armed on the
+    // next openAudiobookMode → abInitChapterRepeat. Native resumes if mid-announce.
+    try { if (bg && bg.setChapterRepeat) bg.setChapterRepeat({ enabled: false, chapters: [] }); } catch (_) {}
+    _abInRepeatPass = -1; try { abReflectRepeatUI(); } catch (_) {}
     // Card mode can resume normal audio playback now.
     window.audiobookActive = false;
   };
@@ -3813,13 +4107,23 @@
     if (r) r(choice);
   };
 
-  async function loadEpubFromUri(uri, name) {
+  async function loadEpubFromUri(uri, name, cachePath) {
     const content = document.getElementById('readingModeContent');
     const title = document.getElementById('readingModeTitle');
     title.textContent = `Loading ${name}…`;
     content.innerHTML = `<p style="color:#888;text-align:center;margin-top:40vh;">Loading ${name}…</p>`;
 
-    const { path } = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri });
+    // Synced read sources arrive as a cache PATH (no security-scoped uri); native
+    // imports as a uri to materialize. Prefer the uri; fall back to the cache copy.
+    let path = null;
+    if (uri) {
+      try { path = (await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri })).path; }
+      catch (e) { if (cachePath) path = cachePath; else throw e; }
+    } else if (cachePath) {
+      path = cachePath;
+    } else {
+      throw new Error('no read source');
+    }
     const response = await fetch(window.Capacitor.convertFileSrc(path));
     if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
     const blob = await response.blob();
@@ -3974,9 +4278,9 @@
       const titles = await window.titleStore.list();
       const t = titles.find(x => x.id === window._activeTitleId);
       const ep = t?.attachments?.epub;
-      if (!ep?.uri || !ep?.name) return false;
+      if (!ep?.name || !(ep.uri || ep.cachePath)) return false;   // accept a synced cache copy, not just a uri
       rlog(`Active-title fallback: loading ${ep.name}`);
-      await loadEpubFromUri(ep.uri, ep.name);
+      await loadEpubFromUri(ep.uri || null, ep.name, ep.cachePath || null);
       return true;
     } catch (e) {
       rlog(`Active-title fallback failed: ${e.message}`);

@@ -689,6 +689,19 @@ body.dimmed .card-image {
 }
 </style>
 <link rel="stylesheet" href="theme.css">
+<script src="ai-perf.js"></script><!-- must load FIRST: wraps setInterval/setTimeout for the perf probe -->
+<script src="i18n-strings.js"></script><!-- UI-chrome string table (before i18n.js) -->
+<script src="i18n-strings-prefs-html.js"></script><!-- Preferences-screen (ph.*) chrome strings -->
+<script src="i18n-strings-shell.js"></script><!-- per-area chrome string tables (each Object.assigns into I18N_STRINGS) -->
+<script src="i18n-strings-prefs-js.js"></script>
+<script src="i18n-strings-timeline.js"></script>
+<script src="i18n-strings-char-ui.js"></script>
+<script src="i18n-strings-char-screen.js"></script>
+<script src="i18n-strings-images.js"></script>
+<script src="i18n-strings-app.js"></script>
+<script src="i18n-strings-dict.js"></script>
+<script src="i18n-strings-prefs-html2.js"></script><!-- remaining prefs help paragraphs (ph2.*) + Drive UI (dr.*) -->
+<script src="i18n.js"></script><!-- UI language engine (window.i18n / window.t); default English -->
 <script src="mode-colors.js"></script>
 <script src="fonts.js"></script>
 <script src="appearance.js"></script>
@@ -745,9 +758,9 @@ body.dimmed .card-image {
        content area to hide (chrome-hidden on body). No bottom row. -->
   <div id="appHeader">
     <div class="mode-tabs" id="shellModeTabs">
-      <button class="mode-tab" data-mode="card"  data-active="1" onclick="window.setShellMode && window.setShellMode('card')">CARD</button>
-      <button class="mode-tab" data-mode="read"  onclick="window.setShellMode && window.setShellMode('read')">READ</button>
-      <button class="mode-tab" data-mode="audio" onclick="window.setShellMode && window.setShellMode('audio')">AUDIO</button>
+      <button class="mode-tab" data-mode="card"  data-active="1" data-i18n="nav.mode_card" onclick="window.setShellMode && window.setShellMode('card')">CARD</button>
+      <button class="mode-tab" data-mode="read"  data-i18n="nav.mode_read" onclick="window.setShellMode && window.setShellMode('read')">READ</button>
+      <button class="mode-tab" data-mode="audio" data-i18n="nav.mode_audio" onclick="window.setShellMode && window.setShellMode('audio')">AUDIO</button>
     </div>
     <span class="shell-spacer"></span>
     <button class="shell-text-btn" id="shellTimerLabel" onclick="window.shellToggleTimer && window.shellToggleTimer(event)">0:00</button>
@@ -768,13 +781,14 @@ body.dimmed .card-image {
   <!-- Library Page -->
   <div id="libraryPage">
     <div class="library-header">
-      <h2>Library</h2>
+      <h2 data-i18n="lib.library">Library</h2>
       <div style="display:flex;gap:8px;">
-        <button onclick="importFolder()" style="background:#2196f3;color:#fff;border:none;padding:8px 14px;border-radius:4px;font-weight:700;">📁 Import folder</button>
-        <button onclick="createNewTitle()" style="background:#00ffcc;color:#0a0a0a;border:none;padding:8px 14px;border-radius:4px;font-weight:700;">+ New title</button>
-        <button class="close-library" onclick="closeLibrary()">Close</button>
+        <button onclick="importFolder()" data-i18n="lib.import_folder" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">Import folder</button>
+        <button onclick="createNewTitle()" data-i18n="lib.new_title" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">+ New title</button>
+        <button class="close-library" onclick="closeLibrary()" style="font-size:1.3rem;letter-spacing:0;padding:4px 14px;color:#ccc;">✕</button>
       </div>
     </div>
+    <div class="library-swipe-hint" data-i18n="lib.swipe_hint" style="font-size:.72rem;color:var(--text-muted,#888);margin:0 0 12px;text-align:center;">Swipe left on a title to edit or delete it</div>
     <div id="deckList" class="deck-list">
       <!-- Title items will be populated here -->
     </div>
@@ -832,23 +846,37 @@ body.dimmed .card-image {
   <div id="preferencesModal" style="position:fixed;inset:0;background:rgba(0,0,0,0.85);display:none;justify-content:center;align-items:center;z-index:9500;padding-top:env(safe-area-inset-top,0px);">
     <div class="prefs-panel" style="background:var(--bg,#0c0c0c);border:1px solid var(--border,#2a2a2a);border-radius:12px;width:min(560px,94vw);max-height:88vh;display:flex;flex-direction:column;">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border,#2a2a2a);">
-        <h3 style="margin:0;color:var(--text,#e8e8e8);font-size:1.05rem;letter-spacing:.06em;text-transform:uppercase;font-weight:600;">Preferences</h3>
+        <h3 style="margin:0;color:var(--text,#e8e8e8);font-size:1.05rem;letter-spacing:.06em;text-transform:uppercase;font-weight:600;" data-i18n="ph.prefs_title">Preferences</h3>
         <div style="display:flex;gap:8px;">
-          <button onclick="closePreferences()" style="background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#2a2a2a);padding:6px 12px;border-radius:6px;font-size:.8rem;">Cancel</button>
-          <button onclick="savePreferences()" style="background:#fff;color:#0a0a0a;border:none;padding:6px 14px;border-radius:6px;font-size:.8rem;font-weight:700;">Save</button>
+          <button onclick="closePreferences()" style="background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#2a2a2a);padding:6px 12px;border-radius:6px;font-size:.8rem;" data-i18n="common.cancel">Cancel</button>
+          <button onclick="savePreferences()" style="background:#fff;color:#0a0a0a;border:none;padding:6px 14px;border-radius:6px;font-size:.8rem;font-weight:700;" data-i18n="common.save">Save</button>
         </div>
       </div>
-      <div id="prefsScroll" style="overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;padding:18px;">
+      <div id="prefsScroll" style="overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;padding:18px;">
+
+        <!-- ===== LANGUAGE ===== -->
+        <details open class="prefs-section">
+          <summary class="prefs-heading" data-i18n="lang.heading">Language</summary>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="uiLangSelect" style="flex:1;line-height:1.35;" data-i18n="lang.label">App language
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;" data-i18n="lang.help">Switches the interface (menus, buttons, settings). Book text, dictionary, and AI summaries stay in their original language.</span>
+            </label>
+            <select id="uiLangSelect">
+              <option value="en">English</option>
+              <option value="ja">日本語</option>
+            </select>
+          </div>
+        </details>
 
         <!-- ===== APPEARANCE ===== -->
         <details open class="prefs-section">
-          <summary class="prefs-heading">Appearance</summary>
+          <summary class="prefs-heading" data-i18n="ph.sec_appearance">Appearance</summary>
           <div id="prefsAppearance"></div>
         </details>
 
         <!-- ===== MODE COLORS ===== -->
         <details open class="prefs-section">
-          <summary class="prefs-heading">Mode accent colors</summary>
+          <summary class="prefs-heading" data-i18n="ph.sec_mode_colors">Mode accent colors</summary>
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:8px 0;">
             <label style="display:flex;flex-direction:column;align-items:center;gap:4px;font-size:.78rem;color:#aaa;">
               Card
@@ -880,30 +908,287 @@ body.dimmed .card-image {
 
 
         <details class="prefs-section">
-          <summary class="prefs-heading">Card subtitles</summary>
+          <summary class="prefs-heading" data-i18n="ph.sec_card_subs">Card subtitles</summary>
           <div class="prefs-row" style="align-items:center;">
-            <label for="combineSubsToggle" style="flex:1;line-height:1.35;">Combine short subtitles
+            <label for="combineSubsToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.combine_subs">Combine short subtitles
               <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
                 Merge short subtitle fragments into one card (sentences &amp; quotes stay together); the playing line is highlighted.
               </span>
             </label>
             <input type="checkbox" id="combineSubsToggle" />
           </div>
-          <div style="font-size:.7rem;color:#777;margin:2px 2px 0;">Cards are sized to fit your screen automatically (no scrolling unless a single subtitle is very long). Reopen the title for the on/off change to take effect.</div>
+          <div style="font-size:.7rem;color:#777;margin:2px 2px 0;" data-i18n="ph.card_autosize_note">Cards are sized to fit your screen automatically (no scrolling unless a single subtitle is very long). Reopen the title for the on/off change to take effect.</div>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="reverseHSwipeToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.reverse_hswipe">Reverse horizontal swipe
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
+                Flip prev/next for card, audio, and reader subtitle swipes.
+              </span>
+            </label>
+            <input type="checkbox" id="reverseHSwipeToggle" />
+          </div>
         </details>
 
         <details class="prefs-section">
-          <summary class="prefs-heading">Dictionaries</summary>
-          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;">
+          <summary class="prefs-heading" data-i18n="ph.sec_screen">Screen</summary>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="keepAwakeMinSelect" style="flex:1;line-height:1.35;" data-i18n-html="ph.keep_awake">Keep screen awake
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
+                Stop the display dimming or sleeping while you read. Releases after this many minutes with no interaction (each tap, scroll, or page-turn restarts the timer).
+              </span>
+            </label>
+            <select id="keepAwakeMinSelect" style="background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;">
+              <option value="0" data-i18n="ph.off">Off</option>
+              <option value="5">5 min</option>
+              <option value="10">10 min</option>
+              <option value="15">15 min</option>
+              <option value="30">30 min</option>
+              <option value="60">60 min</option>
+            </select>
+          </div>
+        </details>
+
+        <details class="prefs-section">
+          <summary class="prefs-heading" data-i18n="ph.sec_dictionaries">Dictionaries</summary>
+          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;" data-i18n="ph.dict_help">
             Toggle dictionaries on/off and drag-reorder. Order is the search priority (top first).
           </div>
           <div id="prefsDictList"></div>
         </details>
 
+        <!-- ===== AI FEATURES (BYOK Claude API) ===== -->
+        <details class="prefs-section">
+          <summary class="prefs-heading" data-i18n="ph.sec_gdrive">Google Drive sync</summary>
+          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;" data-i18n-html="ph2.gdrive_desc">
+            Sync the <b>currently open title</b> between your devices via your own
+            Google Drive: dynamic timeline, character cards (incl. images),
+            processing progress, AI settings, and your exact position. After
+            connecting here, use <b>Sync</b> in the title menu (⋯) — it&rsquo;s
+            bidirectional and always fast. The first Sync of a title asks once
+            whether to also move the files (epub/SRT/audiobook); they only
+            transfer once. <b>Browse Drive…</b> lists and deletes synced titles.
+          </div>
+          <div class="prefs-row" style="align-items:center;">
+            <label style="flex:1;line-height:1.35;" data-i18n="ph.account">Account</label>
+            <span id="gdriveStatus" style="font-size:.8rem;color:#999;">Not connected</span>
+          </div>
+          <div class="prefs-row">
+            <button id="gdriveConnectBtn" type="button">Connect Google Drive</button>
+          </div>
+        </details>
+        <details class="prefs-section">
+          <summary class="prefs-heading" data-i18n="ph.sec_ai">AI Features</summary>
+          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;">
+            Dynamic timeline, character database, summaries and book Q&amp;A
+            using your own Anthropic API key (<code>console.anthropic.com</code>).
+            AI is activated <b>per book</b> &mdash; open a title and pick Dynamic
+            Timeline or Characters, then choose to start fresh or catch up to
+            where you are. Once activated, finished chapters are processed
+            automatically. Chapter text is sent only after you finish reading it
+            (structure detection may send small excerpts to find chapter
+            boundaries &mdash; offsets only, never prose). Typical cost is
+            ~$0.10&ndash;0.15 per chapter on Balanced, billed to your key.
+          </div>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="aiEnabledToggle" style="flex:1;line-height:1.35;" data-i18n="ph.ai_enable">Enable AI features</label>
+            <input type="checkbox" id="aiEnabledToggle" />
+          </div>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="aiQualitySelect" style="flex:1;line-height:1.35;" data-i18n-html="ph.ai_quality">Processing quality
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
+                Rough cost for a full ~20-chapter book is shown per option.
+              </span>
+            </label>
+            <select id="aiQualitySelect">
+              <option value="economy">エコノミー (Haiku) — ~$0.5/book</option>
+              <option value="balanced">バランス (Sonnet) — ~$2–3/book</option>
+              <option value="high">高品質 (Opus) — ~$6–8/book</option>
+            </select>
+          </div>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="aiSplitTargetInput" style="flex:1;line-height:1.35;" data-i18n-html="ph.ai_split">Split long chapters over
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
+                A chapter longer than this many <b>thousand</b> characters is divided into roughly-even parts (1/n, 2/n…). 0 = never split. Re-detect/reset a book's AI data to apply to it.
+              </span>
+            </label>
+            <span style="display:inline-flex;align-items:center;gap:4px;">
+              <input type="number" id="aiSplitTargetInput" min="0" max="80" step="1" inputmode="numeric"
+                     style="width:64px;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:7px 8px;font-size:.85rem;text-align:right;" />
+              <span style="font-size:.72rem;color:#888;">k字</span>
+            </span>
+          </div>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="aiAutoProcessToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.ai_autoprocess">Process chapters automatically
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
+                Finished chapters are processed quietly in the background (timeline + characters). Off: only the manual &ldquo;Update Timeline&rdquo; button sends anything.
+              </span>
+            </label>
+            <input type="checkbox" id="aiAutoProcessToggle" />
+          </div>
+          <div class="prefs-row" style="flex-direction:column;align-items:stretch;gap:4px;">
+            <label for="aiApiKeyInput" style="font-size:.85rem;" data-i18n="ph.api_key">API key</label>
+            <input type="password" id="aiApiKeyInput" placeholder="sk-ant-…" autocomplete="off"
+                   style="width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:8px 10px;font-size:.85rem;" />
+          </div>
+          <div id="aiUsageLine" style="font-size:.72rem;color:#777;margin:6px 2px 0;"></div>
+          <div id="aiCostList" style="margin:8px 0 0;"></div>
+
+          <!-- ===== Image generation (local image server) — DISABLED for release; kept for re-enable =====
+               To bring it back: uncomment this block, restore the "local" option in the Image
+               backend dropdown below, and set the backend to local. The user supplies their own LAN URL. -->
+          <!--
+          <div style="border-top:1px solid #242424;margin-top:14px;padding-top:10px;">
+            <div style="font-size:.82rem;color:#cbbfee;font-weight:600;margin-bottom:4px;">Character images (local server)</div>
+            <div style="font-size:.72rem;color:#777;margin:0 0 8px;line-height:1.5;">
+              Generate character portraits on your own machine (FLUX via a local
+              image server). LAN only &mdash; the server must be running and on the
+              same Wi&#8209;Fi. Open <b>Characters</b> &rarr; sync images to render
+              portraits, then keep/crop the results.
+            </div>
+            <div class="prefs-row" style="flex-direction:column;align-items:stretch;gap:4px;">
+              <label for="aiImgServerUrl" style="font-size:.82rem;">Server URL</label>
+              <input type="text" id="aiImgServerUrl" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
+                     placeholder="http://your-computer.local:8000"
+                     style="width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:8px 10px;font-size:.82rem;" />
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiImgModel" style="flex:1;line-height:1.35;">Model</label>
+              <select id="aiImgModel">
+                <option value="klein9b">klein9b</option>
+                <option value="klein4b">klein4b</option>
+                <option value="dev">dev</option>
+              </select>
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiImgStyle" style="flex:1;line-height:1.35;">Style</label>
+              <select id="aiImgStyle">
+                <option value="photoreal">photoreal</option>
+                <option value="light_novel">light_novel</option>
+              </select>
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiImgScenes" style="flex:1;line-height:1.35;">Scenes per character</label>
+              <select id="aiImgScenes">
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+              </select>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;margin-top:8px;">
+              <button type="button" id="aiImgTest" style="background:transparent;border:1px solid #3a3450;border-radius:8px;color:#b9a9e0;font-size:.74rem;padding:6px 14px;cursor:pointer;">接続テスト</button>
+              <span id="aiImgTestStatus" style="font-size:.72rem;color:#888;"></span>
+            </div>
+          </div>
+          -->
+
+          <!-- ===== Image generation (fal.ai cloud) ===== -->
+          <div style="border-top:1px solid #242424;margin-top:14px;padding-top:10px;">
+            <div style="font-size:.82rem;color:#cbbfee;font-weight:600;margin-bottom:4px;" data-i18n="ph.falai_section_title">AI Image — fal.ai (cloud)</div>
+            <div style="font-size:.72rem;color:#777;margin:0 0 8px;line-height:1.5;" data-i18n-html="ph.falai_desc">
+              Character &amp; scene images are generated in the cloud via <b>fal.ai</b> with
+              your own API key &mdash; fast, uncensored, and no PC required. Images are made
+              <b>on demand</b>: the generate button on each character, and the scene
+              regenerate box to tweak a prompt. The image prompts are written by Claude.
+            </div>
+            <!-- Backend selector hidden for release: only fal.ai ships (local server is disabled
+                 above, ChatGPT/OpenAI removed). aiImages.backend() defaults to "fal". To offer a
+                 choice again, uncomment this and restore the relevant <option>s.
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiImgBackend" style="flex:1;line-height:1.35;">Image backend</label>
+              <select id="aiImgBackend">
+                <option value="local">Local server (FLUX/Ideogram)</option>
+                <option value="fal">fal.ai</option>
+              </select>
+            </div>
+            -->
+            <!-- fal.ai: one key, pick any fal model; no identity verification -->
+            <div class="prefs-row" style="flex-direction:column;align-items:stretch;gap:4px;">
+              <label for="aiFalKeyInput" style="font-size:.85rem;" data-i18n-html="ph.falai_key">fal.ai API key
+                <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">fal.ai/dashboard/keys のキー（本人確認は不要）。キャラクターのプロンプトはClaudeが作成します。</span>
+              </label>
+              <input type="password" id="aiFalKeyInput" placeholder="key_id:key_secret" autocomplete="off"
+                     style="width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:8px 10px;font-size:.85rem;" />
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiFalModel" style="flex:1;line-height:1.35;" data-i18n="ph.fal_model">fal モデル</label>
+              <select id="aiFalModel">
+                <option value="fal-ai/flux-2-max">FLUX.2 max（無検閲・最高品質）</option>
+                <option value="fal-ai/flux-2-pro">FLUX.2 pro（無検閲・高品質）</option>
+                <option value="fal-ai/flux-pro/v1.1-ultra">FLUX1.1 pro ultra（無検閲・高品質・速い）</option>
+                <option value="fal-ai/flux/dev">FLUX dev（無検閲・最速・安い）</option>
+                <option value="fal-ai/ideogram/v3">Ideogram v3（高品質・やや遅い）</option>
+                <option value="openai/gpt-image-2">gpt-image-2（フィルタあり・とても遅い）</option>
+                <option value="fal-ai/gpt-image-1.5">gpt-image-1.5（フィルタあり・遅い）</option>
+                <option value="custom" data-i18n="ph.fal_model_custom_opt">カスタム（下に入力）</option>
+              </select>
+            </div>
+            <div class="prefs-row" style="flex-direction:column;align-items:stretch;gap:4px;">
+              <label for="aiFalModelCustom" style="font-size:.78rem;color:#999;" data-i18n="ph.fal_custom_endpoint">カスタム endpoint id（上で「カスタム」選択時のみ）</label>
+              <input type="text" id="aiFalModelCustom" placeholder="例: fal-ai/flux/dev" autocapitalize="off" autocorrect="off" spellcheck="false"
+                     style="width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:7px 10px;font-size:.8rem;" />
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiFalFallback" style="flex:1;line-height:1.35;" data-i18n-html="ph.fal_fallback">拒否時のフォールバック
+                <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">gpt-image等が内容を拒否したら、このモデルで自動再生成（無検閲FLUX推奨）。</span>
+              </label>
+              <select id="aiFalFallback">
+                <option value="fal-ai/flux/dev">FLUX dev（無検閲・安い）</option>
+                <option value="fal-ai/flux-pro/v1.1-ultra">FLUX1.1 pro ultra（無検閲）</option>
+                <option value="fal-ai/flux-2-pro">FLUX.2 pro（無検閲）</option>
+                <option value="fal-ai/flux-2-max">FLUX.2 max（無検閲）</option>
+                <option value="fal-ai/ideogram/v3">Ideogram v3</option>
+                <option value="none" data-i18n="ph.none">なし</option>
+              </select>
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiFalAspect" style="flex:1;line-height:1.35;" data-i18n="ph.image_shape">画像の形</label>
+              <select id="aiFalAspect">
+                <option value="square" data-i18n="ph.aspect_square">正方形</option>
+                <option value="portrait" data-i18n="ph.aspect_portrait">縦長</option>
+                <option value="landscape" data-i18n="ph.aspect_landscape">横長</option>
+              </select>
+            </div>
+            <!-- ChatGPT/OpenAI image options removed for release (fal.ai only). Previously here:
+                 OpenAI API key, Image model, Quality, Aspect, and the "Auto images per day" +
+                 "Daily spend cap" daily scheduler — which was OpenAI-only (ai-daily-images.js
+                 gates on backend()==='openai'). The OpenAI JS modules remain but are unreachable. -->
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiSceneIdeasToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.scene_ideas">章ごとにシーン案を生成（AI）
+                <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">章の要約時に、挿絵にできる場面案をAIが作成（タイムラインの「シーン」に表示・どれを画像化するか選べます）。件数は下の「シーンの頻度」で決まります。出力が少し増えます。</span>
+              </label>
+              <input type="checkbox" id="aiSceneIdeasToggle" />
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiSceneCharsPer" style="flex:1;line-height:1.35;" data-i18n-html="ph.scene_freq">シーンの頻度（文字数ごとに1件）
+                <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">この文字数につき挿絵の場面案を1件の目安。章の長さに応じて件数が変わります（短い章は少なく、長い章は多く）。既定 2000。</span>
+              </label>
+              <input type="number" id="aiSceneCharsPer" min="200" step="100" inputmode="numeric"
+                     style="width:80px;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:6px 8px;font-size:.85rem;text-align:center;" />
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiSceneAutoToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.scene_auto">Auto-illustrate scenes
+                <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">読み進むと約6,000字ごとに章の場面を自動生成（ダイナミックタイムラインに表示）。</span>
+              </label>
+              <input type="checkbox" id="aiSceneAutoToggle" />
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label for="aiSceneAutoImgToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.scene_autoimg">Auto-generate scene pictures
+                <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">章の要約で場面が作られたら、その画像も自動で生成します（順番待ちで約20秒おきに生成しサーバーを過負荷にしません）。コストがかかります。</span>
+              </label>
+              <input type="checkbox" id="aiSceneAutoImgToggle" />
+            </div>
+            <div id="aiImgUsageLine" style="font-size:.72rem;color:#777;margin:6px 2px 0;"></div>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;">
+            <button onclick="window.aiExport && window.aiExport.run()" style="background:#1d1830;border:1px solid #463a6b;border-radius:8px;color:#cbbfee;font-size:.74rem;padding:6px 14px;cursor:pointer;" data-i18n="ph.export_ai">Export AI record…</button>
+            <button onclick="window.aiProcessor && window.aiProcessor.resetTitle()" style="background:transparent;border:1px solid #5a3a3a;border-radius:8px;color:#d99;font-size:.74rem;padding:6px 14px;cursor:pointer;" data-i18n="ph.reset_ai">Reset AI (this book)…</button>
+            <button onclick="window.kperf && window.kperf.show()" style="background:transparent;border:1px solid #333;border-radius:8px;color:#777;font-size:.7rem;letter-spacing:.06em;padding:6px 10px;cursor:pointer;" data-i18n="ph.perf_log">Perf log</button>
+          </div>
+        </details>
+
         <!-- ===== AUDIO ARCHIVE (iOS sideload) ===== -->
         <details class="prefs-section">
-          <summary class="prefs-heading">Audio archive</summary>
-          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;">
+          <summary class="prefs-heading" data-i18n="ph.sec_audio_archive">Audio archive</summary>
+          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;" data-i18n-html="ph2.audio_archive_desc">
             The per-word audio archive imports as one <code>.tar</code>,
             <code>.tar.gz</code>, or <code>.tar.xz</code> file (the unpacked
             form is too many individual files to transfer). Tap Import and
@@ -917,7 +1202,7 @@ body.dimmed .card-image {
             copied in are freed after success.
           </div>
           <div id="prefsAudioArchiveStatus" style="font-size:.78rem;color:#aaa;margin:8px 0;"></div>
-          <button id="prefsAudioArchiveImport"
+          <button id="prefsAudioArchiveImport" data-i18n="ph.import_audio_archive"
                   style="background:transparent;color:var(--accent-cyan,#00ffcc);
                          border:1px solid var(--accent-cyan,#00ffcc);
                          padding:10px 16px;border-radius:8px;font-weight:600;
@@ -937,51 +1222,51 @@ body.dimmed .card-image {
           </div>
         </details>
 
-        <!-- ===== ANKI: SWIPE-UP ===== -->
+        <!-- ===== ANKI: SWIPE-UP AND SCENE SAVE ===== -->
         <details class="prefs-section">
-          <summary class="prefs-heading">Anki: swipe-up save</summary>
+          <summary class="prefs-heading" data-i18n="ph.sec_anki_swipe">Anki: Swipe-Up and Scene Save</summary>
           <div class="prefs-row">
-            <label>Deck</label>
+            <label data-i18n="ph.deck">Deck</label>
             <select id="ankiSwipeDeck"></select>
           </div>
           <div class="prefs-row">
-            <label>Note type</label>
+            <label data-i18n="ph.note_type">Note type</label>
             <select id="ankiSwipeModel"></select>
           </div>
           <div class="prefs-row">
-            <label>Expression → field</label>
+            <label data-i18n="ph.field_expression">Expression → field</label>
             <select id="ankiSwipeFieldExpression"></select>
           </div>
           <div class="prefs-row">
-            <label>Image → field</label>
+            <label data-i18n="ph.field_image">Image → field</label>
             <select id="ankiSwipeFieldImage"></select>
           </div>
           <div class="prefs-row">
-            <label>Sentence audio → field</label>
+            <label data-i18n="ph.field_sentence_audio">Sentence audio → field</label>
             <select id="ankiSwipeFieldAudio"></select>
           </div>
         </details>
 
         <!-- ===== ANKI: DICTIONARY ===== -->
         <details class="prefs-section">
-          <summary class="prefs-heading">Anki: dictionary add-word</summary>
+          <summary class="prefs-heading" data-i18n="ph.sec_anki_dict">Anki: dictionary add-word</summary>
           <div class="prefs-row">
-            <label>Deck</label>
+            <label data-i18n="ph.deck">Deck</label>
             <select id="ankiDictDeck"></select>
           </div>
           <div class="prefs-row">
-            <label>Note type</label>
+            <label data-i18n="ph.note_type">Note type</label>
             <select id="ankiDictModel"></select>
           </div>
-          <div class="prefs-row"><label>Term → field</label><select id="ankiDictFieldTerm"></select></div>
-          <div class="prefs-row"><label>Reading → field</label><select id="ankiDictFieldReading"></select></div>
-          <div class="prefs-row"><label>Sentence → field</label><select id="ankiDictFieldSentence"></select></div>
-          <div class="prefs-row"><label>Meaning → field</label><select id="ankiDictFieldMeaning"></select></div>
-          <div class="prefs-row"><label>Image → field</label><select id="ankiDictFieldImage"></select></div>
-          <div class="prefs-row"><label>Sentence audio → field</label><select id="ankiDictFieldSentenceAudio"></select></div>
-          <div class="prefs-row"><label>Term audio → field</label><select id="ankiDictFieldTermAudio"></select></div>
-          <div class="prefs-row"><label>Glossary (rich, optional) → field</label><select id="ankiDictFieldGlossary"></select></div>
-          <div class="prefs-row"><label>Furigana ruby (optional) → field</label><select id="ankiDictFieldFurigana"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_term">Term → field</label><select id="ankiDictFieldTerm"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_reading">Reading → field</label><select id="ankiDictFieldReading"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_sentence">Sentence → field</label><select id="ankiDictFieldSentence"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_meaning">Meaning → field</label><select id="ankiDictFieldMeaning"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_image">Image → field</label><select id="ankiDictFieldImage"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_sentence_audio">Sentence audio → field</label><select id="ankiDictFieldSentenceAudio"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_term_audio">Term audio → field</label><select id="ankiDictFieldTermAudio"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_glossary">Glossary (rich, optional) → field</label><select id="ankiDictFieldGlossary"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_furigana">Furigana ruby (optional) → field</label><select id="ankiDictFieldFurigana"></select></div>
           <div style="font-size:.72rem;color:#777;margin:6px 2px 0;line-height:1.5;">
             Optional: map these to extra note-type fields for a richer card.
             <b>Glossary</b> saves the full multi-sense definition HTML (same as the
@@ -991,7 +1276,7 @@ body.dimmed .card-image {
         </details>
 
         <details class="prefs-section">
-          <summary class="prefs-heading">Licenses &amp; acknowledgements</summary>
+          <summary class="prefs-heading" data-i18n="ph.sec_licenses">Licenses &amp; acknowledgements</summary>
           <div style="font-size:.78rem;color:#aaa;line-height:1.6;padding:4px 2px;">
             <p style="margin:6px 0;">Furigana readings are derived from
               <b>JmdictFurigana</b> (github.com/Doublevil/JmdictFurigana),
@@ -1136,6 +1421,16 @@ body.dimmed .card-image {
          2026-05-30 — redundant with shell PLAY button, down-swipe
          play/pause, and top-left counter tap → seek modal.) -->
     <input id="audiobookScrub" type="range" min="0" max="1000" value="0" style="display:none;">
+    <!-- Chapter-repeat controls (audio mode). Sits just above the 80px live
+         waveform. Wrapper is pointer-events:none so inter-button taps still
+         reach the audio swipe/chrome handlers; each button re-enables pointer
+         events. Wired in reading-mode.js (window-scoped audio engine). -->
+    <div id="abRepeatBar">
+      <button id="abRepeatToggle" type="button" role="switch" aria-checked="false">
+        <span data-i18n="audio.repeat_chapter">章をリピート</span><span class="ab-rep-switch"><span class="ab-rep-knob"></span></span>
+      </button>
+      <button id="abNextChapterBtn" type="button" data-i18n="audio.next_chapter">次の章へ</button>
+    </div>
   </div>
 
   <!-- Audiobook → Reading Re-entry Modal -->
@@ -1168,6 +1463,12 @@ body.dimmed .card-image {
       <input id="titleEditName" type="text" placeholder="Title name"
              style="width:100%;box-sizing:border-box;background:#0c0c0c;color:#e8e8e8;border:1px solid #333;border-radius:6px;padding:10px 12px;font-size:1rem;margin-bottom:14px;">
       <div id="titleEditAttachments"></div>
+      <div style="margin-top:16px;">
+        <label for="titleEditStyle" style="display:block;font-size:.82rem;color:#9aa3cc;margin-bottom:5px;">AI illustration style (画風)</label>
+        <textarea id="titleEditStyle" rows="3" placeholder="AIが本の雰囲気から自動で決めます。手動で指定する場合は英語で（例: soft painterly anime realism, warm melancholic light, cinematic stills）。"
+                  style="width:100%;box-sizing:border-box;background:#0c0c0c;color:#e8e8e8;border:1px solid #333;border-radius:6px;padding:9px 11px;font-size:.85rem;resize:vertical;font-family:inherit;"></textarea>
+        <div style="font-size:.68rem;color:#666;margin-top:4px;">全挿絵（登場人物・場面）に適用。空欄ならAIが作品から自動生成します。</div>
+      </div>
       <div style="display:flex;justify-content:space-between;gap:12px;margin-top:18px;">
         <button onclick="confirmDeleteTitle()" style="background:transparent;color:#ff5555;border:1px solid #553333;padding:9px 14px;border-radius:6px;font-size:0.9rem;">Delete title</button>
         <button onclick="closeTitleEdit()" style="background:#00ffcc;color:#0a0a0a;border:none;padding:10px 18px;border-radius:6px;font-weight:700;font-size:0.95rem;">Done</button>
@@ -1252,6 +1553,73 @@ body.dimmed .card-image {
              Per-section Reset buttons in each block header now handle this
              intentionally. -->
 
+        <!-- YESTERDAY — 3 AM-boundary snapshot of the previous stats day,
+             rendered by renderYesterdayStats() in reading-mode.js. -->
+        <div style="border-top:1px solid var(--border,#2a2a2a);margin-top:6px;">
+          <button onclick="window.toggleYesterdayStats && window.toggleYesterdayStats()" style="background:transparent;border:none;color:var(--text-muted,#888);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;width:100%;text-align:left;padding:10px 0 8px;">Yesterday's stats…</button>
+          <div id="statsYesterdaySection" style="display:none;">
+            <div id="statsYesterdayEmpty" style="display:none;color:var(--text-muted,#888);font-size:.8rem;padding:2px 0 8px;">No previous day saved yet.</div>
+            <div id="statsYesterdayBody">
+              <div id="statsYesterdayDay" style="color:var(--text-muted,#888);font-size:.72rem;letter-spacing:.1em;font-weight:600;padding:0 0 8px;"></div>
+              <div class="stats-block" data-mode="card">
+                <div class="stats-block-header">
+                  <span class="stats-block-title">Card</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Time</span>
+                  <span id="statsYCardTime" class="stat-value">0:00</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Cards advanced</span>
+                  <span id="statsYCardCount" class="stat-value">0</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Chars read</span>
+                  <span id="statsYCardChars" class="stat-value">0</span>
+                </div>
+                <div class="stat-row stat-row-last">
+                  <span class="stat-label">Chars / hr</span>
+                  <span id="statsYCardRate" class="stat-value">—</span>
+                </div>
+              </div>
+              <div class="stats-block" data-mode="read">
+                <div class="stats-block-header">
+                  <span class="stats-block-title">Read</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Time</span>
+                  <span id="statsYReadTime" class="stat-value">0:00</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Chars read</span>
+                  <span id="statsYReadChars" class="stat-value">0</span>
+                </div>
+                <div class="stat-row stat-row-last">
+                  <span class="stat-label">Chars / hr</span>
+                  <span id="statsYReadRate" class="stat-value">—</span>
+                </div>
+              </div>
+              <div class="stats-block" data-mode="audio">
+                <div class="stats-block-header">
+                  <span class="stats-block-title">Audio</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Time playing</span>
+                  <span id="statsYAudioTime" class="stat-value">0:00</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Chars heard</span>
+                  <span id="statsYAudioChars" class="stat-value">0</span>
+                </div>
+                <div class="stat-row stat-row-last">
+                  <span class="stat-label">Chars / hr</span>
+                  <span id="statsYAudioRate" class="stat-value">—</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
   </div>
@@ -1328,10 +1696,47 @@ body.dimmed .card-image {
        of the write-amplified Capacitor Preferences store. -->
   <script src="blob-store.js"></script>
   <script src="title-store.js"></script>
+  <!-- Cross-device library sync (Google Drive). gdrive-auth = OAuth;
+       drive-api = Drive REST; drive-index = whole-library membership index;
+       drive-sync = per-title packaging/re-key/push/pull; drive-sync-ui = the
+       Sync button + Browse + cloud library entries. -->
+  <script src="gdrive-auth.js"></script>
+  <script src="drive-api.js"></script>
+  <script src="drive-index.js"></script>
+  <script src="drive-sync.js"></script>
+  <script src="drive-sync-media.js"></script>
+  <script src="drive-sync-ui.js"></script>
   <script src="folder-import.js"></script>
   <script src="cover-extract.js"></script>
   <script src="stats.js"></script>
   <script src="bookmarks.js"></script>
+  <!-- Pure-observer per-title session log (timeline/AI plan slice 1). Reads
+       positions only; nothing in the restore pipeline reads from it. -->
+  <script src="mode-coverage.js"></script>
+  <script src="event-log.js"></script>
+  <!-- AI layer (BYOK Claude API): ai.js = transport + tiers + cost ledger +
+       notify bus; ai-chunks.js = flat text + chunk map + progress observer;
+       ai-processor.js = per-chunk state machine; ai-summary.js = session
+       summaries + overlay; ai-characters[-screen/-read/-ui].js = character
+       DB + Characters screen + squiggles/popup (handlers are runtime, order
+       here is not load-bearing beyond ai.js coming first, then chunks before
+       processor). -->
+  <script src="ai.js"></script>
+  <script src="ai-chunks.js"></script>
+  <script src="ai-processor.js"></script>
+  <script src="ai-summary.js"></script>
+  <script src="ai-timeline.js"></script>
+  <script src="ai-characters.js"></script>
+  <script src="ai-characters-screen.js"></script>
+  <script src="ai-characters-read.js"></script>
+  <script src="ai-characters-ui.js"></script>
+  <script src="ai-images.js"></script>
+  <script src="ai-openai.js"></script>
+  <script src="ai-fal.js"></script>
+  <script src="ai-image-openai.js"></script>
+  <script src="ai-scenes.js"></script>
+  <script src="ai-daily-images.js"></script>
+  <script src="ai-export.js"></script>
   <!-- Yomitan deinflector port lives on disk but is NOT loaded — its
        IIFE built a 834-rule descriptor at script-load (~2 s on iOS
        JavaScriptCore) and per-tap iteration through Yomitan's rule set
@@ -1349,6 +1754,7 @@ body.dimmed .card-image {
   <script src="reading-mode.js"></script>
   <script src="reading-mode-paged.js"></script>
 
+  <script src="keep-awake.js"></script>
   <script src="shell.js"></script>
   <script src="print-reading.js"></script>
 
@@ -1535,7 +1941,8 @@ body.dimmed .card-image {
       for (const title of titles) {
         const a = title.attachments || {};
         const item = document.createElement('div');
-        item.className = 'deck-item';
+        item.className = 'deck-item' + (title.cloudOnly ? ' deck-item-cloud' : '');
+        if (title.cloudOnly) item.style.opacity = '0.82';
         const enabled = window.titleStore.enabledModes(title);
         // Cover preview: prefer the user-set cover dataUri; else letter
         // avatar tinted by which attachment kind is present first.
@@ -1565,8 +1972,9 @@ body.dimmed .card-image {
                   ${chipHtml('srt',   'SRT',   !!a.srt)}
                 </div>
                 <div class="deck-info" style="color:#888;font-size:0.85em;display:flex;gap:10px;flex-wrap:wrap;">
-                  ${a.deck ? `<span>Card ${(Number.isFinite(title.lastCardIndex) ? title.lastCardIndex : (a.deck.cardIndex || 0)) + 1}${a.deck.totalCards ? ' / ' + a.deck.totalCards : ''}</span>` : ''}
-                  ${a.epub ? bookProgressHtml(title) : ''}
+                  ${title.cloudOnly ? `<span style="color:var(--accent-cyan,#6cf);">☁ In cloud — tap to download${title.hasFilesRemote ? ' (incl. files)' : ''}</span>` : ''}
+                  ${!title.cloudOnly && a.deck ? `<span>Card ${(Number.isFinite(title.lastCardIndex) ? title.lastCardIndex : (a.deck.cardIndex || 0)) + 1}${a.deck.totalCards ? ' / ' + a.deck.totalCards : ''}</span>` : ''}
+                  ${!title.cloudOnly && a.epub ? bookProgressHtml(title) : ''}
                   <span>${new Date(title.lastOpenedAt || title.createdAt).toLocaleDateString()}</span>
                 </div>
               </div>
@@ -1577,9 +1985,12 @@ body.dimmed .card-image {
         item.querySelector('.deck-action-edit').addEventListener('click', (e) => {
           e.stopPropagation(); openTitleEdit(title.id);
         });
-        item.querySelector('.deck-action-del').addEventListener('click', (e) => {
+        item.querySelector('.deck-action-del').addEventListener('click', async (e) => {
           e.stopPropagation();
           if (window.titleStore && confirm('Remove this title from your library?')) {
+            // Deletes are local-only: dismiss the syncId FIRST (awaited) so a
+            // delete-then-immediate-Sync can't resurrect it from the cloud index.
+            try { if (title.syncId && window.driveIndex) await window.driveIndex.dismiss(title.syncId); } catch (_) {}
             window.titleStore.remove(title.id).then(populateLibrary).catch(() => {});
           }
         });
@@ -1643,8 +2054,14 @@ body.dimmed .card-image {
       // open the title, or close the actions if they're showing.
       content.addEventListener('click', () => {
         if (moved) { moved = false; return; }
-        if (opened) close();
-        else loadTitleFromLibrary(title);
+        if (opened) { close(); return; }
+        // Cloud-only entries (synced from another device, no local files yet)
+        // download on tap instead of opening.
+        if (title.cloudOnly && window.driveSyncUI && window.driveSyncUI.downloadCloudTitle) {
+          window.driveSyncUI.downloadCloudTitle(title);
+        } else {
+          loadTitleFromLibrary(title);
+        }
       });
     }
 
@@ -1674,6 +2091,22 @@ body.dimmed .card-image {
         window.titleStore.update(_editingTitleId, { name: nameInput.value });
       };
       renderAttachmentRows(title);
+      // Per-title AI illustration style (画風): the Claude-derived directive, user-editable.
+      // Stored in the SAME key the image renderer reads (AISTYLE_V1_<id>). Empty → AI auto-derives.
+      const styleTa = document.getElementById('titleEditStyle');
+      if (styleTa) {
+        let cur = '';
+        try { const v = window.blobStore ? await window.blobStore.get('AISTYLE_V1_' + id) : null; if (typeof v === 'string') cur = v; } catch (_) {}
+        styleTa.value = cur;
+        styleTa.onchange = async () => {
+          const v = (styleTa.value || '').trim();
+          try {
+            if (!window.blobStore) return;
+            if (v) await window.blobStore.set('AISTYLE_V1_' + _editingTitleId, v);
+            else if (window.blobStore.remove) await window.blobStore.remove('AISTYLE_V1_' + _editingTitleId);   // cleared → let the AI re-derive
+          } catch (_) {}
+        };
+      }
       document.getElementById('titleEditModal').style.display = 'flex';
     }
 
@@ -2031,6 +2464,12 @@ body.dimmed .card-image {
 
     window.confirmDeleteTitle = async function () {
       if (!confirm('Delete this title from your library?')) return;
+      // Deletes are local-only: dismiss the syncId so the cloud library index
+      // doesn't re-add it on the next Sync.
+      try {
+        const t = (await window.titleStore.list()).find(x => x.id === _editingTitleId);
+        if (t && t.syncId && window.driveIndex) await window.driveIndex.dismiss(t.syncId);
+      } catch (_) {}
       await window.titleStore.remove(_editingTitleId);
       window.closeTitleEdit();
       populateLibrary();
@@ -2054,15 +2493,23 @@ body.dimmed .card-image {
       let touched = false;
       for (const kind of ['audiobook', 'srt']) {
         const att = a[kind];
-        if (!att?.uri) continue;
-        try {
-          const mat = await fa.materializeToCache({ uri: att.uri });
-          if (mat?.path && mat.path !== att.cachePath) {
-            att.cachePath = mat.path;
-            touched = true;
-          }
-        } catch (e) {
-          debugLog(`⚠️ rehydrate ${kind} failed: ${e.message}`);
+        if (!att) continue;
+        if (att.uri) {
+          // NATIVE import: materialize from the security-scoped uri.
+          try {
+            const mat = await fa.materializeToCache({ uri: att.uri });
+            if (mat?.path && mat.path !== att.cachePath) { att.cachePath = mat.path; touched = true; }
+          } catch (e) { debugLog(`⚠️ rehydrate ${kind} failed: ${e.message}`); }
+        } else if (att.driveFileId && window.driveSyncMedia?.ensureLocalPath) {
+          // SYNCED (no uri): the stored absolute cachePath carries the OLD iOS
+          // container UUID after a reinstall, and its file was wiped. Re-resolve to
+          // the CURRENT container by the deterministic filename + re-download if gone.
+          // SRT is small → await (cues need it); audiobook is large → background so
+          // the title open / card render isn't blocked (kai:synced-media-ready fires).
+          try {
+            const p = await window.driveSyncMedia.ensureLocalPath(title.id, kind, att, { background: kind === 'audiobook' });
+            if (p && p !== att.cachePath) { att.cachePath = p; touched = true; }
+          } catch (e) { debugLog(`⚠️ rehydrate synced ${kind} failed: ${e.message}`); }
         }
       }
       if (touched) {
@@ -2426,6 +2873,11 @@ body.dimmed .card-image {
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
+      // Don't treat keystrokes as shortcuts while typing in a field (the regen
+      // caption box, the API-key input, etc.) — otherwise typing a word with an
+      // "L" toggled the Library open over the current window.
+      const _t = e.target;
+      if (_t && (_t.tagName === 'INPUT' || _t.tagName === 'TEXTAREA' || _t.isContentEditable)) return;
       if (e.code === 'KeyL' && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault();
         const libraryPage = document.getElementById('libraryPage');

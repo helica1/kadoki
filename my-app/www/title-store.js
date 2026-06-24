@@ -92,9 +92,36 @@
     return 't_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
   }
 
+  // Stable cross-device identity for a Title (the local `id` is device-local
+  // and changes per import). syncId is minted once, carried in cross-device
+  // sync bundles, and used as the Drive folder name so two devices recognize
+  // the same Title. UUID when available; else a long random fallback.
+  function genSyncId() {
+    try {
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) return 's_' + crypto.randomUUID();
+    } catch (_) {}
+    return 's_' + Date.now().toString(36) + '_' +
+      Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+  }
+
+  // Normalized fingerprint of a Title's identifying media, used to recognize
+  // "the same book" across devices when no syncId is bound yet. Primary media
+  // (epub for reading titles, else audiobook) name + size when known. Size is
+  // absent on lazy {uri,name} attachments (folder import), so name-only matches
+  // are possible — callers should confirm those before adopting.
+  function mediaFingerprint(title) {
+    const a = (title && title.attachments) || {};
+    const pick = a.epub || a.audiobook || a.srt || a.deck;
+    if (!pick || !pick.name) return null;
+    const name = String(pick.name).trim().toLowerCase();
+    const size = (typeof pick.size === 'number' && pick.size > 0) ? pick.size : '';
+    return name + '|' + size;
+  }
+
   /**
    * @typedef {{
    *   id: string,
+   *   syncId?: string,
    *   name: string,
    *   createdAt: number,
    *   lastOpenedAt: number,
@@ -277,6 +304,9 @@
     await load();
     const tit = {
       id: genId(),
+      // Preserve an incoming syncId (cross-device import binding the same
+      // book); otherwise mint a fresh one.
+      syncId: partial?.syncId || genSyncId(),
       name: partial?.name || 'Untitled',
       createdAt: Date.now(),
       lastOpenedAt: Date.now(),
@@ -301,6 +331,7 @@
         // suffix could (very rarely) collide. Append the batch index so every
         // id in a single createMany is guaranteed unique.
         id: genId() + (i ? '_' + i : ''),
+        syncId: partial?.syncId || genSyncId(),
         name: partial?.name || 'Untitled',
         createdAt: Date.now(),
         lastOpenedAt: Date.now(),
@@ -360,6 +391,48 @@
     return titles.find(t => t.name === name) || null;
   }
 
+  // Cross-device sync helpers ------------------------------------------------
+
+  // Guarantee a Title has a syncId (pre-sync installs predate the field).
+  // One-time mint + single persist. Returns the syncId.
+  async function ensureSyncId(id) {
+    await load();
+    const i = titles.findIndex(t => t.id === id);
+    if (i < 0) return null;
+    if (!titles[i].syncId) {
+      titles[i].syncId = genSyncId();
+      await persist();
+    }
+    return titles[i].syncId;
+  }
+
+  async function findBySyncId(syncId) {
+    if (!syncId) return null;
+    await load();
+    return titles.find(t => t.syncId === syncId) || null;
+  }
+
+  // Find a local Title whose identifying media matches `fp` (a string from
+  // mediaFingerprint). Prefers an exact name+size match; falls back to a
+  // name-only match (when either side lacks size) which the caller should
+  // confirm before adopting. Returns { title, exact } or null.
+  async function findByMediaFingerprint(fp) {
+    if (!fp) return null;
+    await load();
+    const [wantName, wantSize] = fp.split('|');
+    let nameOnly = null;
+    for (const t of titles) {
+      const tf = mediaFingerprint(t);
+      if (!tf) continue;
+      const [tName, tSize] = tf.split('|');
+      if (tName !== wantName) continue;
+      // Exact match only when both sides carry a (matching) size.
+      if (wantSize && tSize && wantSize === tSize) return { title: t, exact: true };
+      if (!nameOnly) nameOnly = t;
+    }
+    return nameOnly ? { title: nameOnly, exact: false } : null;
+  }
+
   // Fetch one Title (with full attachments, incl. cover.dataUri) by id.
   // Callers (lock-screen artwork, shell restore) were calling titleStore.get()
   // which never existed — the call threw, got swallowed, and silently yielded
@@ -417,6 +490,11 @@
     findByName,
     setCardIndex,
     setMode,
-    enabledModes
+    enabledModes,
+    // cross-device sync
+    ensureSyncId,
+    findBySyncId,
+    findByMediaFingerprint,
+    mediaFingerprint
   };
 })();

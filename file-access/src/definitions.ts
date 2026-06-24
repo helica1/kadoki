@@ -30,4 +30,11 @@ export interface FileAccessPlugin {
    * Idempotent: re-uses cache file if size matches the source.
    */
   materializeToCache(options: { uri: string }): Promise<{ path: string; size: number; cached: boolean }>;
+
+  /**
+   * Read a byte range from a real filesystem PATH (e.g. a materialized cache
+   * file) as base64. Lets JS stream large media in bounded chunks without
+   * loading the whole file into memory (OOM-safe). Used by Drive sync.
+   */
+  readChunk(options: { path: string; offset: number; length: number }): Promise<{ data: string; bytesRead: number }>;
 }

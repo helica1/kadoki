@@ -51,6 +51,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getLastSavedPosition", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setMetadata", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setSubtitleArt", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setKeepAwake", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setChapterRepeat",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "skipToNextChapter", returnType: CAPPluginReturnPromise),
     ]
 
     // MARK: - Durable position store (BookPlayer-style: the player layer owns the
@@ -102,11 +105,32 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     /// asyncAfter pause. (Android's cancelFade already handles this.)
     private var fadeGeneration = 0
 
+    // MARK: - Native chapter-repeat
+    // Detect natural chapter boundary crossings from inside the position Timer
+    // (which keeps firing backgrounded/screen-off under UIBackgroundModes:audio),
+    // pause → speak the chapter title via AVSpeechSynthesizer through the still-
+    // active session → seek back to the chapter start → resume. Repeats each
+    // chapter ONCE, then advances. All of it works while suspended/locked.
+    private struct ChapterBound { let idx: Int; let startMs: Int; let endMs: Int; let announce: String }
+    private var chapters: [ChapterBound] = []
+    private var chapterRepeatOn = false
+    private var repeatPassIdx = -1
+    private var repeatedChapters = Set<Int>()   // chapters whose ONE repeat is done — never repeat again (skip-back safe)
+    private var repeatBusy = false
+    private var lastTickMs = -1
+    private var lastChapterIdx = -1
+    private var repeatGuardUntil: TimeInterval = 0
+    private let speechSynth = AVSpeechSynthesizer()
+    private var speakGen = 0
+    private var failsafeTimer: Timer?
+    private var pendingSpeechCompletion: (() -> Void)?
+
     // MARK: - Lifecycle
 
     override public func load() {
         configureAudioSession()
         setupRemoteCommands()
+        speechSynth.delegate = self
         // Foreground/background transitions: throttle the position emit and flush
         // a durable position snapshot when we background (so a background kill
         // keeps place even though the JS saver is suspended).
@@ -163,6 +187,31 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         d.set(currentUrlStr, forKey: Self.posKeyUrl)
         d.set(ms, forKey: Self.posKeyMs)
         lastDurableSaveAt = Date().timeIntervalSince1970
+    }
+
+    /// Persist an EXPLICIT playhead ms (url + ms). A chapter repeat pauses at a
+    /// boundary (or at EOF for the final chapter) before announcing; saving the SEEK
+    /// TARGET here — not the live playhead — means a kill during the announce restores
+    /// to the chapter being repeated, never to end-of-book.
+    private func saveDurablePositionMs(_ ms: Int) {
+        guard !currentUrlStr.isEmpty else { return }
+        let d = UserDefaults.standard
+        d.set(currentUrlStr, forKey: Self.posKeyUrl)
+        d.set(max(0, ms), forKey: Self.posKeyMs)
+        lastDurableSaveAt = Date().timeIntervalSince1970
+    }
+
+    /// The natural end-of-book path: stop the timer, emit ended, release the audio
+    /// session (so a finished overnight book doesn't hold the app resident — battery
+    /// audit 2026-06-10). Extracted so the EOF delegate AND a repeat-cancel-at-EOF
+    /// both finish cleanly. Caller runs on main.
+    private func finishBookAtEof() {
+        stopPositionTimer()
+        emitState(playing: false)
+        self.notifyListeners("ended", data: [:])
+        updateNowPlaying()
+        do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        catch { NSLog("[BackgroundAudio] EOF session deactivate failed: \(error.localizedDescription)") }
     }
 
     /// The last durably-saved {url, ms} — readable even with no live player
@@ -244,6 +293,10 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             guard let event = event as? MPChangePlaybackPositionCommandEvent,
                   let p = self?.player else { return .commandFailed }
             p.currentTime = event.positionTime
+            // External seek: keep the chapter-repeat detector from reading this
+            // lock-screen scrub as a natural boundary crossing.
+            self?.repeatGuardUntil = Date().timeIntervalSince1970 + 0.6
+            self?.lastTickMs = -1; self?.lastChapterIdx = -1
             // Durable: a PAUSED lock-screen scrub had no other writer (timer
             // stopped, no JS event) — a jetsam kill discarded it entirely.
             self?.saveLastPositionNow()
@@ -406,6 +459,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func seek(_ call: CAPPluginCall) {
         guard let p = player else { call.resolve(); return }
+        // External seek: don't let the chapter-repeat detector read this jump as a
+        // natural boundary crossing. Guard for a beat and reset the tick history.
+        repeatGuardUntil = Date().timeIntervalSince1970 + 0.6; lastTickMs = -1; lastChapterIdx = -1
         let ms = call.getDouble("ms") ?? 0
         let target = max(0, min(p.duration, ms / 1000.0))
         // Opt-in CLICK-FREE seek: callers that pass `fadeMs` > 0 (subtitle
@@ -443,6 +499,103 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         player?.rate = rate
         updateNowPlaying()
         call.resolve()
+    }
+
+    /// Display-only: toggle the system idle timer so the screen won't dim/sleep
+    /// while reading (keep-awake.js owns the on/off policy + inactivity timer).
+    /// Must run on the main thread. No audio/playback/position side effects.
+    @objc func setKeepAwake(_ call: CAPPluginCall) {
+        let on = call.getBool("on") ?? false
+        DispatchQueue.main.async {
+            UIApplication.shared.isIdleTimerDisabled = on
+        }
+        call.resolve()
+    }
+
+    /// Enable/disable native chapter-repeat and (re)load the chapter table.
+    /// `chapters`: [{idx, startMs, endMs, announce}]. Turning it OFF aborts any
+    /// in-flight announcement and guarantees playback resumes.
+    @objc func setChapterRepeat(_ call: CAPPluginCall) {
+        // Capacitor calls this on a BACKGROUND queue, but the repeat machinery (the
+        // position Timer, the main-installed failsafe Timer, AVSpeechSynthesizer, and
+        // all the chapter state) runs on MAIN. Marshal onto main so we never race the
+        // timer's reads of `chapters`/lastTickMs nor touch the synth off-thread.
+        let enabled = call.getBool("enabled") ?? false
+        let raw = call.getArray("chapters")
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { call.resolve(); return }
+            let wasOn = self.chapterRepeatOn
+            let oldCount = self.chapters.count
+            self.chapterRepeatOn = enabled
+            if let raw = raw {
+                var list: [ChapterBound] = []
+                for item in raw {
+                    guard let o = item as? JSObject else { continue }
+                    let idx = (o["idx"] as? Int) ?? Int((o["idx"] as? Double) ?? -1)
+                    let s   = (o["startMs"] as? Int) ?? Int((o["startMs"] as? Double) ?? -1)
+                    let e   = (o["endMs"] as? Int) ?? Int((o["endMs"] as? Double) ?? -1)
+                    let a   = (o["announce"] as? String) ?? ""
+                    if idx >= 0, s >= 0, e >= s { list.append(ChapterBound(idx: idx, startMs: s, endMs: e, announce: a)) }
+                }
+                list.sort { $0.startMs < $1.startMs }
+                self.chapters = list
+            }
+            // Fresh arm (off→on) or a re-segment (chapter count changed) starts the
+            // "once each" budget over. A benign re-send with the SAME chapters (e.g. the
+            // kai:ai-data map refresh that fires while listening) preserves what's done.
+            if enabled && (!wasOn || self.chapters.count != oldCount) { self.repeatedChapters.removeAll() }
+            self.lastTickMs = -1; self.lastChapterIdx = -1
+            // Disable: cancel any in-flight announce, but only RESUME if WE paused for
+            // it (repeatBusy). abortSpeechAndEnsurePlaying gates the resume on that, so a
+            // user-paused book is left paused (don't spuriously un-pause).
+            if !self.chapterRepeatOn { self.repeatPassIdx = -1; self.abortSpeechAndEnsurePlaying() }
+            call.resolve()
+        }
+    }
+
+    /// Jump to the start of the next chapter (skips any pending repeat/announce).
+    /// Always ends playing.
+    @objc func skipToNextChapter(_ call: CAPPluginCall) {
+        DispatchQueue.main.async { [weak self] in   // main: shared repeat state + synth + timers live here
+            guard let self = self, let p = self.player else { call.resolve(); return }
+            let curIdx = self.chapterIndexForMs(Int(p.currentTime * 1000))
+            // We're skipping out of this chapter (whether mid-repeat or not) → mark it
+            // done so re-entering it later won't repeat it again.
+            let leaving = self.repeatPassIdx >= 0 ? self.repeatPassIdx : curIdx
+            if leaving >= 0 { self.repeatedChapters.insert(leaving) }
+            self.repeatPassIdx = -1
+            self.speakGen += 1; self.failsafeTimer?.invalidate(); self.failsafeTimer = nil; self.pendingSpeechCompletion = nil
+            if self.speechSynth.isSpeaking { self.speechSynth.stopSpeaking(at: .immediate) }
+            if let next = self.chapters.first(where: { $0.idx == curIdx + 1 }) {
+                p.currentTime = max(0, min(p.duration, TimeInterval(next.startMs) / 1000.0))
+                self.repeatGuardUntil = Date().timeIntervalSince1970 + 0.6
+                self.lastTickMs = Int(p.currentTime * 1000); self.lastChapterIdx = next.idx
+                self.saveLastPositionNow()
+                self.notifyChapter(idx: next.idx, repeating: false, reason: "skip")
+            } else { self.notifyChapter(idx: curIdx, repeating: false, reason: "skip") }
+            self.ensureSessionActive(); p.volume = 1.0; p.play()
+            self.startPositionTimer(); self.emitState(playing: true); self.updateNowPlaying()
+            self.repeatBusy = false; call.resolve()
+        }
+    }
+
+    /// Cancel any in-flight announcement/failsafe. Resume the book ONLY if WE paused
+    /// it for an announce (repeatBusy) — never un-pause a book the USER paused.
+    /// Caller runs this on the main thread (timer machinery lives there).
+    private func abortSpeechAndEnsurePlaying() {
+        speakGen += 1; failsafeTimer?.invalidate(); failsafeTimer = nil; pendingSpeechCompletion = nil
+        if speechSynth.isSpeaking { speechSynth.stopSpeaking(at: .immediate) }
+        let wasBusy = repeatBusy
+        repeatBusy = false
+        guard wasBusy, let p = player, !p.isPlaying else { return }
+        // If we paused for the FINAL chapter's EOF announce, the playhead sits at end —
+        // play() there can restart the file from 0 (place jump). End the book cleanly.
+        if p.duration > 0, p.currentTime >= p.duration - 0.05 { finishBookAtEof(); return }
+        ensureSessionActive(); p.volume = 1.0; p.play(); startPositionTimer(); emitState(playing: true); updateNowPlaying()
+    }
+
+    private func notifyChapter(idx: Int, repeating: Bool, reason: String) {
+        notifyListeners("chapterRepeat", data: ["idx": idx, "repeating": repeating, "reason": reason, "ts": Int(Date().timeIntervalSince1970 * 1000)])
     }
 
     @objc func getState(_ call: CAPPluginCall) {
@@ -610,6 +763,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             self.emitPosition(positionMs: Int(p.currentTime * 1000),
                               durationMs: Int(p.duration * 1000),
                               playing: p.isPlaying)
+            // Native chapter-repeat boundary detection (works backgrounded/locked).
+            self.maybeChapterRepeat(currentMs: Int(p.currentTime * 1000))
             // Durable place snapshot ~every 5s while playing (BookPlayer-style).
             let now = Date().timeIntervalSince1970
             if p.isPlaying && now - self.lastDurableSaveAt >= 5 { self.saveLastPositionNow() }
@@ -624,6 +779,97 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private func stopPositionTimer() {
         positionTimer?.invalidate()
         positionTimer = nil
+    }
+
+    // MARK: - Chapter-repeat detection + machinery
+
+    /// Index of the chapter whose [startMs..) contains `ms` (chapters sorted by
+    /// startMs). Returns -1 before the first chapter start.
+    private func chapterIndexForMs(_ ms: Int) -> Int {
+        var idx = -1
+        for c in chapters { if c.startMs <= ms { idx = c.idx } else { break } }
+        return idx
+    }
+
+    /// Called every position tick. Detects a NATURAL forward crossing from one
+    /// chapter into the next (small positive delta = real playback, not a scrub),
+    /// repeats the just-ended chapter once, then lets the next crossing advance.
+    private func maybeChapterRepeat(currentMs ms: Int) {
+        guard chapterRepeatOn, !repeatBusy, !chapters.isEmpty else { return }
+        let curIdx = chapterIndexForMs(ms)
+        let prevMs = lastTickMs, prevIdx = lastChapterIdx
+        lastTickMs = ms; lastChapterIdx = curIdx
+        if repeatGuardUntil > 0, Date().timeIntervalSince1970 < repeatGuardUntil { return }
+        guard prevMs >= 0, prevIdx >= 0, curIdx >= 0 else { return }
+        let delta = ms - prevMs
+        let cap = Int((uiVisible ? 0.15 : 1.0) * Double(max(1.0, currentRate)) * 1000.0) + 1500
+        guard delta > 0, delta < cap else { return }
+        guard curIdx == prevIdx + 1 else { return }
+        // The repeat pass for prevIdx just ended → mark it done so it never repeats
+        // again (e.g. if the user later scrubs back into it), then advance.
+        if repeatPassIdx == prevIdx { repeatedChapters.insert(prevIdx); repeatPassIdx = -1; notifyChapter(idx: curIdx, repeating: false, reason: "advance"); return }
+        // Already repeated once this session → don't repeat again (skip-back safe).
+        if repeatedChapters.contains(prevIdx) { return }
+        guard let ended = chapters.first(where: { $0.idx == prevIdx }) else { return }
+        repeatPassIdx = prevIdx
+        doChapterRepeat(ended)
+    }
+
+    /// Pause → announce → (on speech finish/failsafe) seek back to chapter start →
+    /// resume. ALWAYS ends playing — never strands the book paused.
+    private func doChapterRepeat(_ ch: ChapterBound, isFinal: Bool = false) {
+        guard let p = player, !repeatBusy else { return }
+        repeatBusy = true
+        let target = TimeInterval(ch.startMs) / 1000.0
+        notifyChapter(idx: ch.idx, repeating: true, reason: "repeat")
+        p.volume = 1.0; p.pause()
+        // Save the SEEK TARGET (chapter start), not the live playhead — which at a
+        // boundary is the NEXT chapter's start and at EOF is end-of-book — so a kill
+        // mid-announce restores to the chapter being repeated, never ahead of it.
+        stopPositionTimer(); saveDurablePositionMs(ch.startMs); emitState(playing: false); updateNowPlaying()
+        speakAnnounce(ch.announce) { [weak self] in self?.finishRepeat(seekTo: target, passIdx: ch.idx, isFinal: isFinal) }
+    }
+
+    private func finishRepeat(seekTo target: TimeInterval, passIdx: Int, isFinal: Bool = false) {
+        guard let p = player else { repeatBusy = false; return }
+        if chapterRepeatOn && repeatPassIdx == passIdx {
+            p.currentTime = max(0, min(p.duration, target))
+            saveLastPositionNow()
+            repeatGuardUntil = Date().timeIntervalSince1970 + 0.6
+            lastTickMs = Int(p.currentTime * 1000); lastChapterIdx = passIdx
+            // The final chapter has no next crossing to clear the pass — clear it here
+            // so a later skipToNextChapter doesn't mis-mark this idx as the one left.
+            if isFinal { repeatPassIdx = -1 }
+        }
+        ensureSessionActive(); p.volume = 1.0; p.play()
+        startPositionTimer(); emitState(playing: true); updateNowPlaying()
+        repeatBusy = false
+    }
+
+    /// Speak `text` (ja-JP) through the active session; the single-fire completion
+    /// runs on didFinish/didCancel OR a 6s failsafe Timer — whichever first — so a
+    /// dropped/blocked synth never leaves the book paused.
+    private func speakAnnounce(_ text: String, completion: @escaping () -> Void) {
+        speakGen += 1; let gen = speakGen
+        let fire: () -> Void = { [weak self] in
+            guard let self = self, self.speakGen == gen else { return }
+            self.speakGen += 1
+            self.failsafeTimer?.invalidate(); self.failsafeTimer = nil
+            self.pendingSpeechCompletion = nil
+            completion()
+        }
+        pendingSpeechCompletion = fire
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { fire(); return }
+        let u = AVSpeechUtterance(string: clean)
+        u.voice = AVSpeechSynthesisVoice(language: "ja-JP")
+        u.rate = AVSpeechUtteranceDefaultSpeechRate; u.postUtteranceDelay = 0.1
+        let t = Timer(timeInterval: 6.0, repeats: false) { _ in fire() }
+        RunLoop.main.add(t, forMode: .common); failsafeTimer = t
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.speakGen == gen else { return }
+            self.speechSynth.speak(u)
+        }
     }
 
     // ts: emit-time stamp (epoch ms, same convention as the remoteCommand
@@ -670,16 +916,27 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
 extension BackgroundAudioPlugin: AVAudioPlayerDelegate {
     public func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        stopPositionTimer()
-        emitState(playing: false)
-        self.notifyListeners("ended", data: [:])
-        updateNowPlaying()
-        // Natural end-of-file: release the audio session like stop() does —
-        // a finished overnight book otherwise kept the .playback session
-        // active, holding the app resident and unsuspendable for hours
-        // (battery audit 2026-06-10). play()/resume() re-activate lazily.
-        do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
-        catch { NSLog("[BackgroundAudio] EOF session deactivate failed: \(error.localizedDescription)") }
+        // The delegate can arrive off-main (playback was started on the plugin's
+        // background queue), but the repeat machinery — the main-RunLoop position +
+        // failsafe timers and the synth — must run on main. Marshal, then recapture
+        // all repeat state inside the hop (it may have changed e.g. via stop()).
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            // Last-chapter repeat: the final chapter has no "next" to cross INTO, so the
+            // crossing detector never fires for it. Trigger its one repeat here at EOF
+            // instead of ending. Mark it done first so the SECOND EOF ends normally.
+            // Gate on >=2 chapters (a 1-chapter "book" would replay the whole thing) and
+            // on a live player (a concurrent stop() may have nil'd it).
+            if self.chapterRepeatOn, !self.repeatBusy, self.chapters.count >= 2,
+               let last = self.chapters.last, !self.repeatedChapters.contains(last.idx),
+               let p = self.player, p.duration > 0 {
+                self.repeatedChapters.insert(last.idx)
+                self.repeatPassIdx = last.idx   // finishRepeat seeks back to last.startMs only when repeatPassIdx == passIdx
+                self.doChapterRepeat(last, isFinal: true)
+                return
+            }
+            self.finishBookAtEof()
+        }
     }
     public func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
         stopPositionTimer()
@@ -697,4 +954,16 @@ extension BackgroundAudioPlugin: AVAudioPlayerDelegate {
         emitState(playing: false)
         updateNowPlaying()
     }
+}
+
+// MARK: - AVSpeechSynthesizerDelegate
+
+extension BackgroundAudioPlugin: AVSpeechSynthesizerDelegate {
+    // AVSpeechSynthesizer delivers delegate callbacks on an undocumented (often
+    // non-main) thread. Hop to main so the completion's Timer.invalidate /
+    // RunLoop.main.add(positionTimer) / speakGen dedup all run on the install thread
+    // (this file's timer discipline) — otherwise the post-repeat position timer can
+    // silently never fire.
+    public func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) { DispatchQueue.main.async { [weak self] in self?.pendingSpeechCompletion?() } }
+    public func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) { DispatchQueue.main.async { [weak self] in self?.pendingSpeechCompletion?() } }
 }

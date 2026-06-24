@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
+    <!-- Cleartext permitted to any host: the app calls a USER-CONFIGURED local
+         image/LLM server over the LAN (http://<host>.local:<port>); the host is
+         editable so it can't be enumerated into a domain-config. The app's only
+         other network use (Anthropic API) is HTTPS regardless. Matches the
+         existing android:usesCleartextTraffic="true" intent in the manifest. -->
+    <base-config cleartextTrafficPermitted="true" />
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="true">localhost</domain>
         <domain includeSubdomains="true">127.0.0.1</domain>

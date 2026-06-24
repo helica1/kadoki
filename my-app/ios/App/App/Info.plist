@@ -28,6 +28,14 @@
 				<string>ankideckreader</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.helica1.yama.gdrive</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.806495706886-mgaafth2nul8p9p95ni58tsrdb6s40ds</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
@@ -74,5 +82,20 @@
 	<true/>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
+	<!-- Reach the user's LOCAL image/LLM server over the LAN (http://<host>.local:<port>).
+	     NSAllowsLocalNetworking permits cleartext to local hosts without disabling
+	     ATS globally; the usage-description + Bonjour service satisfy the iOS 14+
+	     Local Network privacy prompt and mDNS (.local) resolution. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Kadoki connects to your own image-generation server on this Wi-Fi network to create character portraits. No data leaves your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp</string>
+	</array>
 </dict>
 </plist>

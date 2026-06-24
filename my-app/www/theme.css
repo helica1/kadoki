@@ -90,12 +90,13 @@ html, body {
    appearance.js has a chance to apply the body class. */
 ::highlight(cue-active) {
   background: transparent;
-  /* Reserve the SAME underline geometry as cue-pending (just transparent) so a
-     cue going pending(dashed underline) → active doesn't drop the underline and
-     reflow the line — that drop was the "jiggle"/size-shift the user saw. */
-  text-decoration: underline solid transparent 2px;
-  text-underline-offset: 4px;
-  text-decoration-skip-ink: none;
+  /* COLOR ONLY — no text-decoration. The paged reader (the one in use) never
+     sets cue-pending, so a cue only ever transitions plain↔active; an underline
+     here (even the transparent reserve we used to keep) ADDED then removed that
+     geometry on every line that turned green — the ~1px "jiggle". Card mode just
+     recolors (no underline) and never jiggled; match it. The underline was
+     transparent anyway, so dropping it changes nothing visible on the active line.
+     (highlight-bg mode keeps its visible underline; cue-pending unchanged.) */
   color: color-mix(in srgb, var(--accent-read, #4caf50) 70%, white 30%);
   /* iOS-only bug: with a text-color highlight over <ruby>, WebKit applied the
      color to the furigana (rt) but NOT the kanji BASE. The glyph fill on WebKit
@@ -267,6 +268,50 @@ body.pref-card-waveform-off  #srtCardWaveform     { display: none !important; }
    fine). Removed; the pre-render makes the swap clean without it. */
 body.pref-audio-waveform-off #liveWaveform        { display: none !important; }
 body.pref-card-bgimage-off   #cardBackgroundImage { opacity: 0 !important; }
+
+/* Chapter-repeat controls (audio mode), anchored just above the 80px waveform.
+   The audio view is display:none except in audio mode, so the bar is inherently
+   audio-only. Wrapper passes gestures through; buttons capture their own taps. */
+#abRepeatBar {
+  position: absolute; left: 0; right: 0;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 86px);
+  display: flex; justify-content: center; align-items: center; gap: 10px;
+  padding: 0 16px; z-index: 6; pointer-events: none;
+}
+body.pref-audio-waveform-off #abRepeatBar { bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); }
+#abRepeatToggle {
+  pointer-events: auto; display: inline-flex; align-items: center; gap: 10px;
+  background: rgba(183, 148, 246, 0.10); color: #cfc0f5;
+  border: 1px solid rgba(183, 148, 246, 0.45); border-radius: 999px;
+  padding: 7px 12px 7px 18px; font-size: .84rem; font-weight: 600; cursor: pointer;
+  font-family: inherit; -webkit-tap-highlight-color: transparent;
+  transition: background .15s, color .15s, border-color .15s, opacity .15s;
+}
+/* explicit on/off switch so the toggle reads as a switch, not a button */
+#abRepeatToggle .ab-rep-switch {
+  position: relative; flex: none; width: 38px; height: 22px; border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16); border: 1px solid rgba(255, 255, 255, 0.22);
+  transition: background .18s, border-color .18s;
+}
+#abRepeatToggle .ab-rep-knob {
+  position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: #e8e2f7; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: transform .18s, background .18s;
+}
+#abRepeatToggle.on { background: rgba(183, 148, 246, 0.20); color: #efe8ff; border-color: var(--accent-audio, #b794f6); }
+#abRepeatToggle.on .ab-rep-switch { background: var(--accent-audio, #b794f6); border-color: var(--accent-audio, #b794f6); }
+#abRepeatToggle.on .ab-rep-knob { transform: translateX(16px); background: #fff; }
+#abRepeatToggle.disabled { opacity: .38; pointer-events: none; }
+/* Force the label color so nothing tints it (it rendered green on first paint until
+   toggled). Lavender when off, near-white when on — matches the post-toggle look. */
+#abRepeatToggle, #abRepeatToggle > span:first-child { color: #cfc0f5 !important; -webkit-text-fill-color: #cfc0f5 !important; }
+#abRepeatToggle.on, #abRepeatToggle.on > span:first-child { color: #efe8ff !important; -webkit-text-fill-color: #efe8ff !important; }
+#abNextChapterBtn {
+  pointer-events: auto; display: none; align-items: center; gap: 6px;
+  background: var(--accent-audio, #b794f6); color: #1a1226; border: none;
+  border-radius: 999px; padding: 9px 18px; font-size: .84rem; font-weight: 700;
+  cursor: pointer; font-family: inherit; -webkit-tap-highlight-color: transparent;
+}
 /* Upcoming (next) subtitle — rendered always, hidden unless its pref is on,
    then shown grayed. Plain text in a separate class so it's not dict-tappable
    and doesn't get token-wrapped like the live subtitle. */
@@ -472,6 +517,9 @@ body.chrome-hidden #appHeader {
 #appHeader .mode-tab[data-mode="read"][data-active="1"]  { background: var(--accent-read); }
 #appHeader .mode-tab[data-mode="audio"][data-active="1"] { background: var(--accent-audio); }
 #appHeader .mode-tab:disabled { opacity: 0.4; cursor: default; }
+/* Japanese mode labels (カード/読書/聴く) read slightly small + over-spaced at the
+   English size — bump them up and tighten the letter-spacing in Japanese. */
+html[lang="ja"] #appHeader .mode-tab { font-size: .86rem; letter-spacing: .04em; }
 /* Empty-mode visual hint: mode has no required attachments for current deck.
    Tappable (mode view shows its own empty-state) but visually muted. */
 #appHeader .mode-tab[data-empty="1"] { color: var(--text-faint); opacity: 0.55; }
@@ -551,6 +599,10 @@ body.mode-audio #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-a
 #appHeader #shellTimerLabel.paused { color: var(--accent-danger) !important; }
 #appHeader #shellTimerLabel.paused::before { content: "PAUSED"; }
 #appHeader #shellTimerLabel.hidden { display: none; }
+/* Japanese timer captions (i18n.js sets <html lang>, so these switch live). */
+/* Short (2 full-width chars, like 停止) so the caption can't overlap the timer digits. */
+html[lang="ja"] #appHeader #shellTimerLabel::before { content: "時間"; letter-spacing: 0.02em; }
+html[lang="ja"] #appHeader #shellTimerLabel.paused::before { content: "停止"; }
 
 /* Play button slightly emphasized — accent text + thin border. */
 #appHeader #shellPlayBtn {

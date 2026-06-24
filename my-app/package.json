@@ -19,6 +19,7 @@
   "dependencies": {
     "@capacitor/android": "^7.2.0",
     "@capacitor/app": "^7.1.2",
+    "@capacitor/browser": "^7.0.5",
     "@capacitor/core": "latest",
     "@capacitor/filesystem": "^7.1.1",
     "@capacitor/ios": "^7.6.5",

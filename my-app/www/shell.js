@@ -45,8 +45,10 @@
     const h = Math.floor(total / 3600);
     const m = Math.floor((total % 3600) / 60);
     const s = total % 60;
+    // Past an hour, drop seconds so the timer pill stays narrow (h:mm:ss
+    // pushed the hamburger off-screen on small top bars).
     return h > 0
-      ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+      ? `${h}:${String(m).padStart(2, '0')}`
       : `${m}:${String(s).padStart(2, '0')}`;
   }
 
@@ -128,7 +130,18 @@
           t.closest('#preferencesModal') ||
           t.closest('#readingSettingsModal') ||
           t.closest('#readingStatsModal') ||
-          t.closest('#audiobookReentryModal')) return;
+          t.closest('#audiobookReentryModal') ||
+          // AI overlays: a tap inside them must NOT toggle the app chrome —
+          // chrome-hidden flips a body class that relayouts the (hidden) paged
+          // reader's huge vertical-rl canvas, which is multi-hundred-ms on
+          // device. Every lookup/dismiss tap was paying that cost = the
+          // "summary reading is laggy" bug.
+          t.closest('#bookmarksOverlay') ||
+          t.closest('#kchapterView') ||
+          t.closest('#kcharsScreen') ||
+          t.closest('#aiSummaryOverlay') ||
+          t.closest('#kcharPopup') ||
+          t.closest('#kperfOverlay')) return;
       if (t.closest('.reading-chunk')) return;
       if (t.closest('.dict-frag')) return;
       // Reading mode owns its own content-area tap logic (chunks, margins,
@@ -257,15 +270,15 @@
     const tab = document.querySelector('#shellModeTabs .mode-tab[data-mode="' + mode + '"]');
     if (!tab || tab.dataset.empty !== '1') return false;
     if (mode === 'read') {
-      try { window.showToast?.('No EPUB attached to this title', 2000); } catch (_) {}
+      try { window.showToast?.(window.i18n.t('menu.no_epub_attached', 'No EPUB attached to this title'), 2000); } catch (_) {}
       return true;
     }
     if (mode === 'audio') {
-      try { window.showToast?.('No audiobook attached to this title', 2000); } catch (_) {}
+      try { window.showToast?.(window.i18n.t('menu.no_audiobook_attached', 'No audiobook attached to this title'), 2000); } catch (_) {}
       return true;
     }
     if (mode === 'card') {
-      try { window.showToast?.('No cards in this title', 2000); } catch (_) {}
+      try { window.showToast?.(window.i18n.t('menu.no_cards', 'No cards in this title'), 2000); } catch (_) {}
       return true;
     }
     return false;
@@ -328,13 +341,14 @@
     _switchGen++;
     const myGen = _switchGen;
 
-    // Bookmarks: a switch INTO audio from card/read auto-saves where the user
-    // was reading, so they can jump back after the playhead runs ahead. Capture
-    // NOW (before the view teardown below, while the reader is still laid out);
-    // skip title-opens/restores (no prior in-session reading spot).
-    if (mode === 'audio' && (currentMode === 'card' || currentMode === 'read') &&
-        !(opts && opts.titleOpen) && window.bookmarks && window.bookmarks.capture) {
-      try { window.bookmarks.capture(currentMode); } catch (_) {}
+    // History: record the spot you're LEAVING (any mode → any mode: read, card,
+    // OR audio) so you can jump back via the History menu / after the playhead
+    // runs ahead. Capture NOW (before the view teardown below, while the outgoing
+    // view is still laid out); skip title-opens/restores (no prior in-session
+    // spot). Throttled + dedup'd inside captureCurrent.
+    if (currentMode && currentMode !== mode && !(opts && opts.titleOpen) &&
+        window.bookmarks && window.bookmarks.captureCurrent) {
+      try { window.bookmarks.captureCurrent({ mode: currentMode }); } catch (_) {}
     }
 
     // Leaving READ: flush the read place NOW, while the reader is still the
@@ -661,12 +675,12 @@
       d.style.cssText = 'height:1px;background:#2a2a2a;margin:6px 8px;pointer-events:none;';
       return d;
     };
-    menu.appendChild(mkItem(running ? 'Pause Timer' : 'Start Timer', () => {
+    menu.appendChild(mkItem(running ? window.i18n.t('menu.pause_timer', 'Pause Timer') : window.i18n.t('menu.start_timer', 'Start Timer'), () => {
       if (typeof window.toggleReadingTimer === 'function') window.toggleReadingTimer();
       refreshTimerLabel();
     }));
     menu.appendChild(mkDivider());
-    menu.appendChild(mkItem('Stats…', () => {
+    menu.appendChild(mkItem(window.i18n.t('menu.stats', 'Stats…'), () => {
       if (typeof window.openReadingStats === 'function') window.openReadingStats();
     }));
 
@@ -875,24 +889,70 @@
       return d;
     };
 
-    menu.appendChild(mkItem('Library…',        () => { if (typeof openLibrary === 'function') openLibrary(); }));
+    menu.appendChild(mkItem(window.i18n.t('menu.library', 'Library…'),        () => { if (typeof openLibrary === 'function') openLibrary(); }));
     menu.appendChild(mkDivider());
-    menu.appendChild(mkItem('Bookmarks…',      () => { if (window.bookmarks?.openMenu) window.bookmarks.openMenu(); }));
+    const aiOn = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled());
+    const bmItem = mkItem(window.i18n.t('menu.timeline_scenes', 'Timeline & Scenes…'), () => { if (window.bookmarks?.openMenu) window.bookmarks.openMenu(); });
+    // AI configured → the AI surfaces glow.
+    if (aiOn) bmItem.classList.add('kai-glow-text');
+    bmItem.dataset.kaiProcRow = '1';
+    bmItem.dataset.kaiCountKey = 'timeline';
+    menu.appendChild(bmItem);
+    const chItem = mkItem(window.i18n.t('menu.characters', 'Characters…'), () => { try { window.aiCharsScreen?.open?.(); } catch (_) {} });
+    if (aiOn) chItem.classList.add('kai-glow-text');
+    chItem.dataset.kaiProcRow = '1';
+    chItem.dataset.kaiCountKey = 'characters';
+    menu.appendChild(chItem);
+    // History: the 3 most recent reading sessions (read / audio / card), each
+    // tappable to jump back to that place.
+    if (window.bookmarks && window.bookmarks.openHistory) {
+      menu.appendChild(mkItem(window.i18n.t('menu.history', 'History…'), () => { try { window.bookmarks.openHistory(); } catch (_) {} }));
+    }
+    // Glowing "(N)" badges = count of new (unseen) timeline/character updates
+    // for the active title. Computed AFTER the menu is appended (below, via
+    // updateShellAiCountBadges) so the SAME idempotent path also live-updates
+    // the badges if a new chapter is summarized while the menu is still open.
     menu.appendChild(mkDivider());
-    menu.appendChild(mkItem('Stats…',          () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); }));
+    menu.appendChild(mkItem(window.i18n.t('menu.stats', 'Stats…'),          () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); }));
     menu.appendChild(mkDivider());
-    menu.appendChild(mkItem('Playback Speed…', () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
+    menu.appendChild(mkItem(window.i18n.t('menu.playback_speed', 'Playback Speed…'), () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
     menu.appendChild(mkDivider());
-    menu.appendChild(mkItem('Print…', () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); }));
+    menu.appendChild(mkItem(window.i18n.t('menu.print', 'Print…'), () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); }));
     // "Log printed reading…" only appears once a print is pending (set by the
     // print flow, cleared after logging).
     if (typeof window.hasPendingPrintedReading === 'function' && window.hasPendingPrintedReading()) {
-      menu.appendChild(mkItem('Log printed reading…', () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); }));
+      menu.appendChild(mkItem(window.i18n.t('menu.log_printed_reading', 'Log printed reading…'), () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); }));
+    }
+    // Cross-device sync (Google Drive). Two EXPLICIT directions (no guessing):
+    // "Sync ↑" pushes the currently-open title's state up (only shown with a
+    // title open); "Sync ↓" pulls the latest synced title down and opens it
+    // (switches to it, or downloads its files if absent) — works with no title
+    // open, which is how device 2 receives the latest. "Browse Drive…" lists /
+    // downloads / force-syncs / deletes.
+    if (window.driveSyncUI) {
+      menu.appendChild(mkDivider());
+      if (window._activeTitleId && window.driveSyncUI.syncUp) {
+        menu.appendChild(mkItem(window.i18n.t('menu.sync_up', 'Sync ↑  (push this title)'), () => {
+          try { window.driveSyncUI.syncUp(); } catch (_) {}
+        }));
+      }
+      if (window.driveSyncUI.syncDown) {
+        menu.appendChild(mkItem(window.i18n.t('menu.sync_down', 'Sync ↓  (get latest)'), () => {
+          try { window.driveSyncUI.syncDown(); } catch (_) {}
+        }));
+      }
+      if (window.driveSyncUI.browseDrive) {
+        menu.appendChild(mkItem(window.i18n.t('menu.browse_drive', 'Browse Drive…'), () => {
+          try { window.driveSyncUI.browseDrive(); } catch (_) {}
+        }));
+      }
     }
     menu.appendChild(mkDivider());
-    menu.appendChild(mkItem('Preferences…',    () => { if (typeof openPreferences === 'function') openPreferences(); }));
+    menu.appendChild(mkItem(window.i18n.t('menu.preferences', 'Preferences…'),    () => { if (typeof openPreferences === 'function') openPreferences(); }));
 
     document.body.appendChild(menu);
+    updateShellProcSpinners();   // chapter processing in flight → spinner on both AI rows
+    updateShellAiCountBadges();  // unseen "(N)" badges on the Timeline / Characters rows
     const trigger = ev?.currentTarget || el('shellMoreBtn');
     const tr = trigger?.getBoundingClientRect?.();
     const rect = menu.getBoundingClientRect();
@@ -914,6 +974,177 @@
       document.addEventListener('mousedown', dismiss, true);
     }, 0);
   };
+
+  // --------- AI red dots (unseen timeline/characters data) ----------
+  // ai.js bumps AISEEN_V1 revs and fires 'kai:ai-data'; the dots show on the
+  // hamburger button (anything unseen for the ACTIVE title) and on the two
+  // menu rows. Opening a surface marks it seen, which fires the same event.
+
+  let _kaiDotStyleInjected = false;
+  function ensureKaiDotStyle() {
+    if (_kaiDotStyleInjected) return;
+    _kaiDotStyleInjected = true;
+    try {
+      const st = document.createElement('style');
+      st.textContent =
+        '.kai-reddot{display:inline-block;width:8px;height:8px;border-radius:50%;' +
+        'background:#e0524d;box-shadow:0 0 6px rgba(224,82,77,.8);' +
+        'margin-left:8px;vertical-align:middle;pointer-events:none;}' +
+        '.kai-reddot-btn{position:absolute;top:4px;right:4px;width:8px;height:8px;' +
+        'border-radius:50%;background:#e0524d;box-shadow:0 0 6px rgba(224,82,77,.8);' +
+        'pointer-events:none;z-index:2;}';
+      document.head.appendChild(st);
+    } catch (_) {}
+  }
+  function mkAiDot(cls) {
+    const d = document.createElement('span');
+    d.className = cls;
+    return d;
+  }
+  let _kaiCountStyleInjected = false;
+  function ensureKaiCountStyle() {
+    if (_kaiCountStyleInjected) return;
+    _kaiCountStyleInjected = true;
+    try {
+      const st = document.createElement('style');
+      st.textContent =
+        '@keyframes kaiCountPulse{0%,100%{opacity:.55;text-shadow:0 0 3px rgba(183,148,246,.5);}' +
+        '50%{opacity:1;text-shadow:0 0 9px rgba(183,148,246,.95);}}' +
+        '.kai-count{margin-left:7px;color:#c9b8ff;font-weight:700;font-size:.92em;' +
+        'animation:kaiCountPulse 1.5s ease-in-out infinite;pointer-events:none;}';
+      document.head.appendChild(st);
+    } catch (_) {}
+  }
+  function mkCountBadge(n) {
+    const s = document.createElement('span');
+    s.className = 'kai-count';
+    s.textContent = '(' + n + ')';
+    return s;
+  }
+  // Animated glow on the hamburger button = this book is AI-activated (new
+  // chapters will be processed). Subtle, infinite pulse.
+  let _kaiActiveGlowStyle = false;
+  function ensureActiveGlowStyle() {
+    if (_kaiActiveGlowStyle) return;
+    _kaiActiveGlowStyle = true;
+    try {
+      const st = document.createElement('style');
+      st.textContent =
+        '@keyframes kaiBtnGlow{0%,100%{box-shadow:0 0 4px rgba(160,130,255,.35),0 0 9px rgba(160,130,255,.12);}' +
+        '50%{box-shadow:0 0 9px rgba(160,130,255,.7),0 0 18px rgba(160,130,255,.32);}}' +
+        '.kai-active-btn{animation:kaiBtnGlow 2.6s ease-in-out infinite;border-radius:10px;}';
+      document.head.appendChild(st);
+    } catch (_) {}
+  }
+  function updateShellActiveGlow() {
+    try {
+      const btn = el('shellMoreBtn');
+      if (!btn) return;
+      const on = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled() &&
+                    window.ai.activatedSync && window.ai.activatedSync(window._activeTitleId));
+      if (on) { ensureActiveGlowStyle(); btn.classList.add('kai-active-btn'); }
+      else btn.classList.remove('kai-active-btn');
+    } catch (_) {}
+  }
+  async function aiUnseenForActiveTitle() {
+    try {
+      const id = window._activeTitleId;
+      if (!id || !window.ai || !window.ai.unseen ||
+          !(window.ai.isEnabled && window.ai.isEnabled())) {
+        return { timeline: false, characters: false };
+      }
+      return await window.ai.unseen(id);
+    } catch (_) { return { timeline: false, characters: false }; }
+  }
+  async function updateShellAiDot() {
+    try {
+      const btn = el('shellMoreBtn');
+      if (!btn) return;
+      const u = await aiUnseenForActiveTitle();
+      const want = !!(u.timeline || u.characters);
+      const dot = btn.querySelector('.kai-reddot-btn');
+      if (want && !dot) {
+        ensureKaiDotStyle();
+        if (!btn.style.position) btn.style.position = 'relative';
+        btn.appendChild(mkAiDot('kai-reddot-btn'));
+      } else if (!want && dot) {
+        dot.remove();
+      }
+    } catch (_) {}
+  }
+  // Live-update the per-row "(N)" unseen badges on the Timeline & Characters
+  // menu items. Same source of truth as the hamburger dot (aiUnseenForActive
+  // Title → AISEEN_V1 counts). Idempotent and in-place: it updates/adds/removes
+  // the existing .kai-count span per row instead of rebuilding the menu, so an
+  // open menu stays consistent when a new chapter is summarized. Cheap no-op
+  // when the menu is closed; never throws.
+  async function updateShellAiCountBadges() {
+    try {
+      if (!document.getElementById('shellFloatingMenu')) return;  // menu closed → skip the lookup
+      const u = await aiUnseenForActiveTitle();
+      // The await may have spanned a dismiss/reopen — re-query the live menu.
+      const menu = document.getElementById('shellFloatingMenu');
+      if (!menu) return;
+      const rows = menu.querySelectorAll('.menu-item[data-kai-count-key]');
+      if (!rows.length) return;
+      ensureKaiCountStyle();
+      rows.forEach((row) => {
+        const key = row.dataset.kaiCountKey;          // 'timeline' | 'characters'
+        const n = Number(u && u[key]) || 0;           // tolerate number, boolean false, or undefined
+        const badge = row.querySelector('.kai-count');
+        if (n > 0) {
+          if (badge) badge.textContent = '(' + n + ')';
+          else row.appendChild(mkCountBadge(n));
+        } else if (badge) {
+          badge.remove();
+        }
+      });
+    } catch (_) {}
+  }
+  try {
+    window.addEventListener('kai:ai-data', () => { updateShellAiDot(); updateShellAiCountBadges(); });
+    window.addEventListener('kai:ai-activated', () => { updateShellActiveGlow(); });
+  } catch (_) {}
+
+  // --------- AI processing spinners (menu rows) ----------
+  // ai-processor.js broadcasts 'kai:proc-status' (mirrored on
+  // window._kaiProcStatus) around each chapter call; while busy for the
+  // active title, the two AI menu rows carry a small rotating ring.
+
+  function ensureKaiSpinStyle() {
+    if (document.getElementById('kaiSpinStyle')) return;
+    try {
+      const st = document.createElement('style');
+      st.id = 'kaiSpinStyle';
+      st.textContent =
+        '@keyframes kai-spin{to{transform:rotate(360deg);}}' +
+        '.kai-spin{display:inline-block;width:.85em;height:.85em;border:2px solid #555;' +
+        'border-top-color:#b794f6;border-radius:50%;animation:kai-spin .8s linear infinite;' +
+        'vertical-align:-2px;margin-left:6px;}';
+      document.head.appendChild(st);
+    } catch (_) {}
+  }
+  function updateShellProcSpinners() {
+    try {
+      const st = window._kaiProcStatus;
+      const want = !!(st && st.busy && st.titleId && st.titleId === window._activeTitleId);
+      const rows = document.querySelectorAll('#shellFloatingMenu .menu-item[data-kai-proc-row]');
+      rows.forEach((row) => {
+        const sp = row.querySelector('.kai-spin');
+        if (want && !sp) {
+          ensureKaiSpinStyle();
+          const s = document.createElement('span');
+          s.className = 'kai-spin';
+          row.appendChild(s);
+        } else if (!want && sp) {
+          sp.remove();
+        }
+      });
+    } catch (_) {}
+  }
+  try {
+    window.addEventListener('kai:proc-status', () => { updateShellProcSpinners(); });
+  } catch (_) {}
 
   // --------- Init ----------
 
@@ -1092,11 +1323,26 @@
           setTimeout(() => window.pagedPrewarm(), 250);
         }
         paintCardBackground();
+        updateShellAiDot();
+        updateShellActiveGlow();
       }
     }
     // Initial paint + watcher tick. 500 ms is fine — title changes are
     // user-driven (library tap) so there's no race-sensitive deadline.
     paintCardBackground();
+    // Boot-time dot check. Wait for ai.js's async pref load when possible —
+    // isEnabled() reads flags that load after this init runs, so an immediate
+    // call would skip unseen data carried over from a previous session.
+    try {
+      const aiReady = window.ai && window.ai.ready;
+      if (aiReady && typeof aiReady.then === 'function') {
+        aiReady.then(() => { updateShellAiDot(); updateShellActiveGlow(); },
+                     () => { updateShellAiDot(); updateShellActiveGlow(); });
+      } else {
+        updateShellAiDot();
+        updateShellActiveGlow();
+      }
+    } catch (_) {}
     setInterval(() => {
       if (document.hidden) return;
       checkTitleChange();

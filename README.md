@@ -102,7 +102,7 @@ A full epub reader designed specifically for narrated reading.
 
 The rubber-band scrolling system lets you temporarily explore nearby lines without permanently losing your reading position. To keep the explored position visible until the next automatic page-follow, tap with another finger while scrolling.
 
-### Audio Mode（聞く）
+### Audio Mode（聴く）
 
 Listen to the audiobook while staying synchronized with the reading modes.
 
@@ -110,6 +110,7 @@ Listen to the audiobook while staying synchronized with the reading modes.
 - Continuous listening statistics
 - Sync with reading progress
 - Jump to any time — tap the top-left location indicator and enter `mm:ss`, `h:mm:ss`, hours (`1h23`), seconds, or a percentage
+- **Chapter Repeat** — toggle it on to have each chapter replay once before moving on, with a short spoken Japanese cue at the boundary, and a "next chapter" button to skip the replay. Works with the screen off — ideal for intensive listening.
 - Reliable interruptions — phone calls pause playback cleanly (short interruptions resume by themselves), and playback recovers automatically if the system clears the cached audio while backgrounded
 - Lock-screen subtitles — the current sentence shows large on the lock screen / Always-On Display while you listen (optional — turn it off in Preferences to show the book cover instead and save battery)
 - Efficient screen-off listening — overnight sessions do minimal background work
@@ -125,6 +126,61 @@ Audio keeps playing as you switch between Card, Read, and Audio, and every view 
 ## Bookmarks
 
 Each time you switch from Card or Read into **Audio**, Kadoki silently saves the spot you were on. The hamburger menu's **Bookmarks** keeps your last few spots (spaced about a minute apart) — tap one to jump straight back to that mode and exact position. A Read-mode bookmark briefly flashes the line you'd reached so it's easy to find.
+
+---
+
+## History
+
+The hamburger menu's **History** lists your most recent reading, listening, and card sessions by mode — tap any entry to jump straight back to that spot.
+
+---
+
+## AI Reading Companion *(optional · bring-your-own-key)*
+
+Kadoki can build a **spoiler-safe** companion to whatever you're reading or listening to, powered by **your own AI API keys**. Everything is generated **only up to your current position**, so it never reveals what you haven't reached yet. There are three components:
+
+<p align="center">
+  <img src="docs/screenshots/screenshot7.jpeg" width="300" alt="AI Timeline & Scenes — chapter summaries with AI-generated scene illustrations">
+</p>
+
+**1. Timeline & Scenes** *(pictured above)* — a chapter-by-chapter map of the story. Each chapter gets a concise summary, its key events, and a set of **Scenes** — the most illustration-worthy moments, picked by the AI, shown chronologically with thumbnails and linked back to the exact sentence (and, in an audiobook, the matching audio). A glowing marker tracks your live position; a second track shows sections you've re-read or re-listened. Very long chapters are split into roughly even parts.
+
+**2. Characters** — the cast is detected automatically as it appears, each with a description, role, and a running list of developments. View them two ways: tap a name in **any mode** for a quick **pop-up** (turn on the optional wavy underline to mark character names right in the text), or open the dedicated **Characters** menu for the full roster — collapsible entries, sortable by recency / prominence / first appearance, with furigana on every name.
+
+**3. AI images** — generate artwork for both **Scenes and Characters** using your choice of image models on **[fal.ai](https://fal.ai)** (e.g. FLUX) — **bring your own fal.ai API key**. Generate on demand from a character or scene, or turn on **Auto-illustrate scenes** to have them created in the background as you read. Every image's prompt is editable, so you can tweak and regenerate.
+
+Both the text companion and the images are **bring-your-own-key**: the timeline, characters, and scene ideas use **your own [Claude (Anthropic)](https://www.anthropic.com) API key**, and images use **your own fal.ai key**. Keys live only on your device, and the features stay off until you add one. A red dot on **Characters** and **Timeline & Scenes** in the menu appears when a new chapter has been analyzed.
+
+> Summaries, character notes, and captions are written in Japanese (it's a Japanese-learning app). The **interface** language is independent — see [Language](#language).
+
+### AI Setup
+
+Kadoki is **bring-your-own-key (BYOK)**: you use your own API accounts and keys are stored only on your device. The AI features stay off until you add a key.
+
+**1. Text — Claude (powers the timeline, characters, and scene ideas)**
+
+1. Create an Anthropic API key at **console.anthropic.com**.
+2. **Preferences → AI Features**, paste the key, and choose a quality tier:
+   - **Economy (Haiku)** — fastest and cheapest (≈ $0.50 / book)
+   - **Standard (Sonnet)** — balanced
+   - **Premium (Opus)** — highest quality
+3. Open a book or audiobook and read/listen — chapters are analyzed in the background as you reach them. You can also tap a chapter to (re)generate it.
+
+**2. Images — fal.ai (powers character & scene pictures)** *(optional)*
+
+1. Create a key at **fal.ai/dashboard/keys** (no identity verification required).
+2. **Preferences → AI Image**, paste the fal.ai key, and pick a model (FLUX is the default — fast and uncensored).
+3. Generate from the **Characters** screen or a scene's detail view. Turn on **Auto-illustrate scenes** to have pictures created in the background as you read (paced so it never floods the server), or generate on demand.
+
+Image prompts are written by Claude from each character/scene; edit any prompt before regenerating. Estimated text and image API usage for the month is shown in the settings.
+
+---
+
+## Google Drive Sync *(optional)*
+
+Sync a title across your devices through **your own** Google Drive — the dynamic timeline, character cards (including images), processing progress, AI settings, and your exact reading/listening position. After connecting, use **Sync** in the title menu; it's bidirectional and fast. The first sync of a title asks once whether to also move the source files (epub / SRT / audiobook); after that only the lightweight state syncs. **Manage Drive Files** (menu) lists, uploads, and deletes synced titles.
+
+Setup uses a Google OAuth client ID from your own Google Cloud project (Drive API enabled, `drive.file` scope). Enter it in **Preferences → Google Drive sync** and connect — on the consent screen, keep the Drive permission **checked**.
 
 ---
 
@@ -154,7 +210,7 @@ Tap any empty space to show or hide the toolbar.
 - **Top left** — mode switching: Card / Read / Audio
 - **Location indicator** — changes with the active mode; tap it to jump to a specific location (card number, reading position, or audio time)
 - **Timer** — tap to pause/resume timing; includes intelligent auto-timeout logic for accuracy (and a slight scroll in Read mode resumes it automatically)
-- **Top right menu** (hamburger) — Library · Stats · Bookmarks · Playback Speed · Print · Preferences
+- **Top right menu** (hamburger) — Library · Timeline & Scenes · Characters · Stats · History · Bookmarks · Playback Speed · Print · Sync · Preferences
 
 ---
 
@@ -186,11 +242,21 @@ Playback speed can be configured globally across all modes, or separately for ea
 
 ## Preferences
 
+- **Language** — switch the interface between English and 日本語 (see below)
 - **Per-mode appearance** (Card / Read / Audio): font size, **font family — including your own imported TTF/OTF fonts**, and toggles for the card background image, the waveform, an upcoming-subtitle preview, line-art inversion (Read), and the lock-screen subtitle artwork (Audio)
 - Mode color customization
+- **Keep screen awake** while reading (configurable, in minutes)
 - Dictionary import
+- Google Drive sync (see [Google Drive Sync](#google-drive-sync-optional))
+- **AI Features** (Claude key + quality tier) and **AI Image** (fal.ai key + model) — see [AI Setup](#ai-setup)
 - Audio archive import
 - Anki configuration
+
+---
+
+## Language
+
+Kadoki's interface can run in **English** or **日本語** — set it in **Preferences → Language** and it switches live. This affects the *chrome* only (menus, buttons, settings, dialogs); book text, dictionary entries, and AI summaries stay in their original language.
 
 ---
 

@@ -310,6 +310,12 @@
 
   // Periodic check: inactivity timeouts + a mode/audio reconciliation backstop.
   function tick() {
+    // Daily 3 AM rollover backstop — cheap stamp compare at most once a
+    // minute, so an app left running overnight rolls over in place.
+    if (Date.now() - _lastDayCheck >= DAY_CHECK_MS) {
+      _lastDayCheck = Date.now();
+      try { checkRollover(); } catch (e) {}
+    }
     reconcileMode(currentMode());
 
     const now = Date.now();
@@ -660,6 +666,74 @@
     persist(mode);
   }
 
+  // ---- Daily stats with a 3 AM boundary -----------------------------------
+  //
+  // A "stats day" runs 03:00 → 02:59:59 local time, so late-night reading
+  // counts toward the same day. When the stored day stamp no longer matches,
+  // the outgoing day's totals are snapshotted to STATS_PREV_V1 (labelled with
+  // the OLD stamp — the day the stats actually belong to, even across a
+  // multi-day gap) and every mode is reset through the same resetMode path
+  // the per-section Reset buttons use. resetMode('read') clears baselineSet /
+  // maxCharOffsetSeen, so the first noteReadPosition after a rollover
+  // re-anchors the char baseline without crediting — read-char counting
+  // survives the boundary intact.
+  const DAY_KEY = 'STATS_DAY_V1';
+  const PREV_KEY = 'STATS_PREV_V1';
+  const DAY_CHECK_MS = 60000;
+  let _dayStamp = null;
+  let _lastDayCheck = 0;
+  function statsDay(now) {
+    const d = new Date((Number.isFinite(now) ? now : Date.now()) - 3 * 3600 * 1000);
+    const p = (n) => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+  function checkRollover() {
+    const day = statsDay(Date.now());
+    if (_dayStamp === null) {
+      try { _dayStamp = localStorage.getItem(DAY_KEY); } catch (e) {}
+    }
+    if (!_dayStamp) {
+      // First run: existing totals become today's. No reset.
+      _dayStamp = day;
+      try { localStorage.setItem(DAY_KEY, day); } catch (e) {}
+      return;
+    }
+    if (_dayStamp === day) return;
+    // Day changed — snapshot the outgoing day FIRST (liveTotal so an
+    // in-flight running segment is credited to the old day), then reset.
+    const prev = {
+      day: _dayStamp,
+      modes: {
+        card:  { sec: Math.round(liveTotal('card')),  chars: timers.card.chars, cards: timers.card.cards },
+        read:  { sec: Math.round(liveTotal('read')),  chars: timers.read.chars },
+        audio: { sec: Math.round(liveTotal('audio')), chars: timers.audio.chars },
+      },
+    };
+    try { localStorage.setItem(PREV_KEY, JSON.stringify(prev)); } catch (e) {}
+    resetAll();
+    // Legacy read-timer counters (reading-mode.js pill + READING_TIME_SEC /
+    // READING_CHARS_TOTAL prefs) reset via the hook reading-mode registers.
+    // reading-mode.js loads after stats.js, so a boot-time rollover leaves a
+    // pending flag the hook consumes when it registers.
+    if (typeof window._statsDayRolloverLegacyReset === 'function') {
+      try { window._statsDayRolloverLegacyReset(); } catch (e) {}
+    } else {
+      window._statsLegacyDayResetPending = true;
+    }
+    _dayStamp = day;
+    try { localStorage.setItem(DAY_KEY, day); } catch (e) {}
+    console.log('[stats] daily rollover → ' + day + ' (snapshot saved for ' + prev.day + ')');
+  }
+  // Previous stats-day snapshot, or null. Shape:
+  //   { day: 'YYYY-MM-DD', modes: { card:{sec,chars,cards}, read:{sec,chars}, audio:{sec,chars} } }
+  function getYesterday() {
+    try {
+      const o = JSON.parse(localStorage.getItem(PREV_KEY));
+      return (o && typeof o === 'object' && o.modes) ? o : null;
+    } catch (e) { return null; }
+  }
+  try { checkRollover(); } catch (e) {}
+
   // Modal pause/resume — Preferences and Library open while a session is
   // active, but they're meta-config, not "active session" time. Pause the
   // running timer for the modal's lifetime, then resume the SAME mode if
@@ -697,6 +771,7 @@
     addPrintedReading,
     rebaselineRead,
     noteReadPosition,
+    getYesterday,
     touch, bumpCard, bumpRead, resetAll, resetMode, persist,
     markAnkiRoundtripActive, markAnkiRoundtripDone,
     stopAll, startMode, stopMode,

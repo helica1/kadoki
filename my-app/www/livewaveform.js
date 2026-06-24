@@ -34,6 +34,7 @@
   // Film = wide offscreen waveform image.
   let film = null;
   let filmStartMs = 0, filmEndMs = 0, filmReady = false, filmBuilding = false, filmReqId = 0;
+  let filmFailSrc = null;   // srcPath that last errored — don't re-hammer getWaveform until the src changes
   let filmAccent = '';
 
   // Animating visible window (ms range), eased toward the triplet target.
@@ -196,6 +197,7 @@
     if (!need) return;
     const AudioSlicer = window.Capacitor?.Plugins?.AudioSlicer;
     if (!AudioSlicer?.getWaveform || !currentSrcPath) return;
+    if (filmFailSrc === currentSrcPath) return;   // this src already failed → wait for it to change (re-resolve/re-download) instead of looping every frame
     let s = Math.max(0, centerMs - FILM_BACK_MS);
     let e = centerMs + FILM_FWD_MS;
     if (durationMs > 0) e = Math.min(durationMs, e);
@@ -209,8 +211,9 @@
       if (reqId !== filmReqId) return;  // superseded by a newer request
       if (!r?.samples || r.samples.length < 2) return; // nothing usable → keep ribbon
       renderFilm(s, e, r.samples, accent);
-      filmStartMs = s; filmEndMs = e; filmAccent = accent; filmReady = true;
+      filmStartMs = s; filmEndMs = e; filmAccent = accent; filmReady = true; filmFailSrc = null;
     } catch (err) {
+      filmFailSrc = currentSrcPath;   // stop re-hammering a bad/missing path every frame
       log('film build failed:', err?.message || err);
     } finally {
       if (reqId === filmReqId) filmBuilding = false;
@@ -218,7 +221,7 @@
   }
 
   function resetFilm() {
-    filmReady = false; film = null; filmBuilding = false; filmReqId++;
+    filmReady = false; film = null; filmBuilding = false; filmReqId++; filmFailSrc = null;
     viewStart = viewEnd = -1; dispInit = false;
   }
 
@@ -461,6 +464,13 @@
     setVisible(false);
     attachBg();
     watchSrc();
+    // A synced audio file just finished (re-)downloading to the SAME current-container
+    // path → clear the failure memo + rebuild so the waveform recovers without the
+    // path string having to change.
+    window.addEventListener('kai:synced-media-ready', (e) => {
+      if (e?.detail?.kind && e.detail.kind !== 'audiobook') return;
+      filmFailSrc = null; resetFilm(); scheduleDraw();
+    });
     window.addEventListener('shell:mode-change', (e) => {
       const visible = e?.detail?.mode === 'audio';
       setVisible(visible);

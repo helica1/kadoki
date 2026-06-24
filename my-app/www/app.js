@@ -36,6 +36,41 @@ window._inSystemGestureZone = function (clientY) {
   return clientY <= window.SYS_GESTURE_TOP ||
          (vh > 0 && clientY >= vh - window.SYS_GESTURE_BOTTOM);
 };
+// "Reverse horizontal swipe direction" pref. Swipe handlers (card / audio /
+// read transport) read it synchronously from localStorage; preferences.js
+// dual-writes localStorage + Capacitor Preferences on change. localStorage can
+// be wiped while Capacitor Preferences survives — restore the local copy at
+// boot so the toggle sticks (same pattern as AI_AUTO_PROCESS in ai.js).
+window._hSwipeReversed = () => { try { return localStorage.getItem('REVERSE_H_SWIPE') === '1'; } catch (_) { return false; } };
+(async () => {
+  try {
+    if (localStorage.getItem('REVERSE_H_SWIPE') === null) {
+      const p = window.Capacitor?.Plugins?.Preferences;
+      if (p) {
+        const r = await p.get({ key: 'REVERSE_H_SWIPE' });
+        if (r && r.value !== null && r.value !== undefined) {
+          localStorage.setItem('REVERSE_H_SWIPE', r.value);
+        }
+      }
+    }
+  } catch (_) {}
+})();
+// KEEP_AWAKE_MIN survives a localStorage wipe via Capacitor Preferences (same
+// pattern as REVERSE_H_SWIPE above). keep-awake.js reads localStorage.
+(async () => {
+  try {
+    if (localStorage.getItem('KEEP_AWAKE_MIN') === null) {
+      const p = window.Capacitor?.Plugins?.Preferences;
+      if (p) {
+        const r = await p.get({ key: 'KEEP_AWAKE_MIN' });
+        if (r && r.value !== null && r.value !== undefined) {
+          localStorage.setItem('KEEP_AWAKE_MIN', r.value);
+          try { window.keepAwake?.refresh(); } catch (_) {}
+        }
+      }
+    }
+  } catch (_) {}
+})();
 // Cue → audio offset (ms). Compensates for two real-world issues:
 //   (a) SRT timestamps tend to land *at* the first phoneme rather than
 //       just before it, so playback starts mid-word.
@@ -331,7 +366,7 @@ async function loadDeckFromUri(uri, fileName) {
   }
 
   debugLog(`📥 Materializing URI to cache: ${uri}`);
-  showToast(`Loading ${fileName}...`, 2000);
+  showToast(window.i18n.fmt('ap.loading_file', { name: fileName }, 'Loading {name}…'), 2000);
 
   const { path, size, cached } = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri });
   debugLog(`Cache ready: ${path} (${size} bytes, cached=${cached})`);
@@ -562,7 +597,7 @@ async function loadDeckState() {
       
       // Update UI to show last deck info
       const deckNameEl = document.getElementById('deckName');
-      deckNameEl.textContent = `${savedFileName} (Auto-restoring...)`;
+      deckNameEl.textContent = window.i18n.fmt('ap.deck_auto_restoring', { name: savedFileName }, '{name} (Auto-restoring…)');
       deckNameEl.className = 'file-name restoring';
       deckNameEl.style.cursor = 'pointer';
       
@@ -577,14 +612,14 @@ async function loadDeckState() {
       if (!restored) {
         debugLog("Auto-restore failed, setting up manual restore");
         // Set up manual restore
-        deckNameEl.textContent = `${savedFileName} (Tap to reopen)`;
+        deckNameEl.textContent = window.i18n.fmt('ap.deck_tap_reopen', { name: savedFileName }, '{name} (Tap to reopen)');
         deckNameEl.className = 'file-name restoration-failed';
         deckNameEl.onclick = async () => {
           debugLog("User clicked to manually restore file");
           openFilePicker();
         };
         
-        showToast(`💾 Last deck: ${savedFileName}. Tap filename to reopen and continue from card ${parseInt(savedCardIndex) + 1}.`, 5000);
+        showToast('💾 ' + window.i18n.fmt('ap.last_deck_toast', { name: savedFileName, n: parseInt(savedCardIndex) + 1 }, 'Last deck: {name}. Tap filename to reopen and continue from card {n}.'), 5000);
       }
       
       return restored;
@@ -678,7 +713,7 @@ async function tryAutoRestoreFile(maybeUri, savedFileName) {
 
   try {
     await loadDeckFromUri(savedUri, savedFileName);
-    showToast(`Auto-restored: ${savedFileName}`, 2000);
+    showToast(window.i18n.fmt('ap.auto_restored', { name: savedFileName }, 'Auto-restored: {name}'), 2000);
     return true;
   } catch (e) {
     debugLog(`❌ loadDeckFromUri failed: ${e.message}`);
@@ -1108,7 +1143,7 @@ function trackNoteView(index) {
 }
 
 function updateNoteCounter() {
-  document.getElementById("noteCounter").textContent = ` ${viewedNotes.size} notes`;
+  document.getElementById("noteCounter").textContent = ' ' + window.i18n.fmt('ap.notes_count', { n: viewedNotes.size }, '{n} notes');
 }
 
 function resetNoteCounter() {
@@ -1128,33 +1163,50 @@ function resetStopwatch() {
 // server (convertFileSrc → http://localhost) is reliable for any path.
 window.cacheFileToDataUri = async function (absPath, mime) {
   if (!absPath) return '';
+  // Path 1 (proven for most callers / Android): fetch(convertFileSrc) → blob → dataURL.
   try {
     const url = window.Capacitor?.convertFileSrc
       ? window.Capacitor.convertFileSrc(absPath)
       : 'file://' + absPath;
     const res = await fetch(url);
-    if (!res.ok) {
-      console.warn('[cacheFileToDataUri] fetch ' + url + ' → ' + res.status);
-      return '';
+    if (res.ok) {
+      const blob = await res.blob();
+      if (blob && blob.size > 0) {
+        const uri = await new Promise((resolve) => {
+          const fr = new FileReader();
+          fr.onload = () => {
+            let s = fr.result;
+            if (mime && typeof s === 'string') s = s.replace(/^data:[^;]+;/, 'data:' + mime + ';');   // force MIME so Anki recognizes the format
+            resolve(typeof s === 'string' ? s : '');
+          };
+          fr.onerror = () => resolve('');
+          fr.readAsDataURL(blob);
+        });
+        if (uri) return uri;
+      }
+      console.warn('[cacheFileToDataUri] fetch ' + url + ' returned empty (blob ' + ((blob && blob.size) || 0) + 'B) — trying Filesystem');
+    } else {
+      console.warn('[cacheFileToDataUri] fetch ' + url + ' → ' + res.status + ' — trying Filesystem');
     }
-    const blob = await res.blob();
-    return await new Promise((resolve) => {
-      const fr = new FileReader();
-      fr.onload = () => {
-        let s = fr.result;
-        if (mime && typeof s === 'string') {
-          // Force the supplied MIME so Anki recognizes the format.
-          s = s.replace(/^data:[^;]+;/, 'data:' + mime + ';');
-        }
-        resolve(s || '');
-      };
-      fr.onerror = () => { console.warn('[cacheFileToDataUri] read failed'); resolve(''); };
-      fr.readAsDataURL(blob);
-    });
   } catch (e) {
-    console.warn('[cacheFileToDataUri] ' + (e?.message || e));
-    return '';
+    console.warn('[cacheFileToDataUri] fetch path: ' + (e?.message || e) + ' — trying Filesystem');
   }
+  // Path 2 (fallback): Capacitor Filesystem.readFile → base64 directly. Robust on
+  // iOS for NSTemporaryDirectory slices, where the WKWebView fetch path returns an
+  // empty blob (the cause of "scene/card audio sent but the file is empty").
+  try {
+    const fs = window.Capacitor?.Plugins?.Filesystem;
+    if (fs && typeof fs.readFile === 'function') {
+      const p = String(absPath).startsWith('file://') ? absPath : ('file://' + absPath);
+      const r = await fs.readFile({ path: p });
+      const b64 = (r && typeof r.data === 'string') ? r.data : '';
+      if (b64) return 'data:' + (mime || 'application/octet-stream') + ';base64,' + b64;
+      console.warn('[cacheFileToDataUri] Filesystem.readFile returned no data for ' + p);
+    }
+  } catch (e) {
+    console.warn('[cacheFileToDataUri] Filesystem fallback: ' + (e?.message || e));
+  }
+  return '';
 };
 
 function fmtMmSs(ms) {
@@ -1180,8 +1232,8 @@ function updateProgressBar() {
     const p = window.getReadProgress();
     bar.style.width = (p.pct || 0).toFixed(2) + '%';
     label.textContent = p.total
-      ? `${p.current.toLocaleString()} / ${p.total.toLocaleString()} chars · ${p.pct.toFixed(1)}%`
-      : 'Open an EPUB';
+      ? window.i18n.fmt('ap.read_progress', { cur: p.current.toLocaleString(), total: p.total.toLocaleString(), pct: p.pct.toFixed(1) }, '{cur} / {total} chars · {pct}%')
+      : window.i18n.t('ap.open_epub_prompt', 'Open an EPUB');
     return;
   }
   if (mode === 'audio' && typeof window.getAudioProgress === 'function') {
@@ -1198,9 +1250,9 @@ function updateProgressBar() {
   const percent = total ? (current / total) * 100 : 0;
   bar.style.width = percent + "%";
   if (!isLoadingComplete && total < totalNotesExpected) {
-    label.textContent = `${current} / ${total} (Loading...)`;
+    label.textContent = window.i18n.fmt('ap.card_progress_loading', { cur: current, total: total }, '{cur} / {total} (Loading…)');
   } else {
-    label.textContent = total ? `${current} / ${total}` : 'Select a deck';
+    label.textContent = total ? `${current} / ${total}` : window.i18n.t('ap.select_deck_prompt', 'Select a deck');
   }
 }
 
@@ -1208,7 +1260,7 @@ function showLoadingProgress() {
   const progressEl = document.getElementById("progressLabel");
   if (progressEl && !isLoadingComplete) {
     const percent = totalNotesExpected > 0 ? Math.round((notesProcessed / totalNotesExpected) * 100) : 0;
-    progressEl.textContent = `Loading: ${percent}% (${notesProcessed}/${totalNotesExpected})`;
+    progressEl.textContent = window.i18n.fmt('ap.loading_progress', { pct: percent, done: notesProcessed, total: totalNotesExpected }, 'Loading: {pct}% ({done}/{total})');
   }
 }
 
@@ -1221,9 +1273,21 @@ function _refreshAutoAdvanceBtn() {
   const b = document.getElementById('autoAdvanceBtn');
   if (!b) return;
   const on = window._autoAdvanceCards !== false;
-  b.textContent = 'Auto: ' + (on ? 'ON' : 'OFF');
+  b.textContent = on ? window.i18n.t('ap.auto_on', 'Auto: ON') : window.i18n.t('ap.auto_off', 'Auto: OFF');
   b.classList.toggle('off', !on);
 }
+// The card-mode bottom bar is built once per card render with i18n.t(...), so a LIVE
+// language switch leaves its labels stale until the next card change. Re-translate the
+// visible pills in place when the language flips.
+try {
+  window.addEventListener('kai:lang', () => {
+    try {
+      const s = document.getElementById('cardCopySrtBtn'); if (s) s.textContent = window.i18n.t('ap.copy_srt', 'Copy SRT');
+      const c = document.getElementById('cardCopyCardBtn'); if (c) c.textContent = window.i18n.t('ap.copy_card', 'Copy Card');
+      _refreshAutoAdvanceBtn();
+    } catch (_) {}
+  });
+} catch (_) {}
 window.toggleAutoAdvance = function () {
   window._autoAdvanceCards = !(window._autoAdvanceCards !== false);
   const v = window._autoAdvanceCards ? '1' : '0';
@@ -1248,7 +1312,7 @@ function _copyTextWithFlash(text, btnId) {
   const restore = btn ? btn.textContent : null;
   const flash = (msg) => { if (btn) { btn.textContent = msg; setTimeout(() => { if (btn) btn.textContent = restore; }, 900); } };
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).then(() => flash('COPIED')).catch(() => flash('FAILED'));
+    navigator.clipboard.writeText(text).then(() => flash(window.i18n.t('ap.copied_flash', 'COPIED'))).catch(() => flash(window.i18n.t('ap.failed_flash', 'FAILED')));
   } else {
     try {
       const ta = document.createElement('textarea');
@@ -1258,8 +1322,8 @@ function _copyTextWithFlash(text, btnId) {
       ta.select();
       document.execCommand('copy');
       ta.remove();
-      flash('COPIED');
-    } catch (e) { flash('FAILED'); }
+      flash(window.i18n.t('ap.copied_flash', 'COPIED'));
+    } catch (e) { flash(window.i18n.t('ap.failed_flash', 'FAILED')); }
   }
 }
 // Copy the WHOLE visible card. For SRT-card titles that's the on-screen PAGE
@@ -1375,7 +1439,7 @@ function openAudioSeekDialog() {
     box-shadow:0 16px 40px rgba(0,0,0,0.6);
   `;
   panel.innerHTML = `
-    <div class="label-cap" style="text-align:center;margin-bottom:10px;color:var(--text,#e8e8e8);">Seek</div>
+    <div class="label-cap" style="text-align:center;margin-bottom:10px;color:var(--text,#e8e8e8);">${window.i18n.t('ap.seek_title', 'Seek')}</div>
     <div style="display:flex;justify-content:space-between;font-family:var(--font-mono);font-size:.95rem;color:var(--accent-audio);margin-bottom:8px;">
       <span data-role="cur">${fmtHms(a.ms)}</span>
       <span style="color:#666;">${fmtHms(a.dur)}</span>
@@ -1383,8 +1447,8 @@ function openAudioSeekDialog() {
     <input data-role="slider" type="range" min="0" max="${Math.round(a.dur)}" step="500" value="${Math.round(a.ms)}"
            style="width:100%;accent-color:var(--accent-audio);height:36px;">
     <div style="display:flex;gap:10px;margin-top:12px;justify-content:flex-end;">
-      <button data-role="cancel" class="btn">Cancel</button>
-      <button data-role="go" class="btn btn-primary">Go</button>
+      <button data-role="cancel" class="btn">${window.i18n.t('common.cancel', 'Cancel')}</button>
+      <button data-role="go" class="btn btn-primary">${window.i18n.t('ap.seek_go', 'Go')}</button>
     </div>
   `;
   overlay.appendChild(panel);
@@ -1635,7 +1699,7 @@ window.openPlaybackSpeedDialog = function () {
   body.style.cssText = `margin-bottom:16px;`;
 
   const header = document.createElement('h3');
-  header.textContent = 'Playback Speed';
+  header.textContent = window.i18n.t('ap.playback_speed', 'Playback Speed');
   header.style.cssText = `
     margin:0 0 4px 0; font-size:16px; font-weight:600;
     letter-spacing:0.02em;
@@ -1652,22 +1716,22 @@ window.openPlaybackSpeedDialog = function () {
   function renderRows() {
     rowsContainer.innerHTML = '';
     if (window._playbackPerMode) {
-      sub.textContent = 'Per-mode speed enabled. Each mode keeps its own rate.';
-      const cardRow = mkRow('CARD',  'var(--accent-card, #ff9550)',
+      sub.textContent = window.i18n.t('ap.speed_permode_on', 'Per-mode speed enabled. Each mode keeps its own rate.');
+      const cardRow = mkRow(window.i18n.t('ap.mode_card', 'CARD'),  'var(--accent-card, #ff9550)',
         () => window._playbackRates.card,
         (v) => { window._playbackRates.card = v; });
-      const readRow = mkRow('READ',  'var(--accent-read, #4caf50)',
+      const readRow = mkRow(window.i18n.t('ap.mode_read', 'READ'),  'var(--accent-read, #4caf50)',
         () => window._playbackRates.read,
         (v) => { window._playbackRates.read = v; });
-      const audioRow = mkRow('AUDIO', 'var(--accent-audio, #b794f6)',
+      const audioRow = mkRow(window.i18n.t('ap.mode_audio', 'AUDIO'), 'var(--accent-audio, #b794f6)',
         () => window._playbackRates.audio,
         (v) => { window._playbackRates.audio = v; });
       rowsContainer.appendChild(cardRow.row);
       rowsContainer.appendChild(readRow.row);
       rowsContainer.appendChild(audioRow.row);
     } else {
-      sub.textContent = 'Applies to all three modes (card, read, audio).';
-      const globalRow = mkRow('SPEED', '#00ffcc',
+      sub.textContent = window.i18n.t('ap.speed_global_sub', 'Applies to all three modes (card, read, audio).');
+      const globalRow = mkRow(window.i18n.t('ap.speed_label', 'SPEED'), '#00ffcc',
         () => window._playbackRates.global,
         (v) => {
           window._playbackRates.global = v;
@@ -1694,7 +1758,7 @@ window.openPlaybackSpeedDialog = function () {
   check.checked = !!window._playbackPerMode;
   check.style.cssText = `width:18px; height:18px; cursor:pointer;`;
   const checkLab = document.createElement('span');
-  checkLab.textContent = 'Playback speed per mode';
+  checkLab.textContent = window.i18n.t('ap.speed_permode_label', 'Playback speed per mode');
   checkRow.appendChild(check);
   checkRow.appendChild(checkLab);
   check.addEventListener('change', async () => {
@@ -1708,7 +1772,7 @@ window.openPlaybackSpeedDialog = function () {
   const closeRow = document.createElement('div');
   closeRow.style.cssText = `display:flex; justify-content:flex-end; margin-top:16px;`;
   const closeBtn = document.createElement('button');
-  closeBtn.textContent = 'Close';
+  closeBtn.textContent = window.i18n.t('common.close', 'Close');
   closeBtn.style.cssText = `
     background:#2a2a2a; color:#fff; border:1px solid #3a3a3a;
     padding:8px 16px; border-radius:8px;
@@ -2436,7 +2500,7 @@ const namesFor = (mid) => {
       // Sync the paged reader / shared cue cursor to the restored index
       // (displayCard below doesn't notify; only manual nav did).
       try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
-      showToast(`🎯 Resumed at card ${currentCardIndex + 1}`, 2000);
+      showToast('🎯 ' + window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
     } else {
       // Target card not loaded yet, will restore after background processing
       debugLog(`⏳ Target card ${window.pendingCardIndex + 1} not loaded yet, will restore after background processing`);
@@ -2487,7 +2551,7 @@ const namesFor = (mid) => {
               // reader stayed anchored at card 0 (the book start) and could
               // persist THAT over the real bookmark.
               try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
-              showToast(`🎯 Resumed at card ${currentCardIndex + 1}`, 2000);
+              showToast('🎯 ' + window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
               window.pendingCardIndex = undefined;
             }
           }
@@ -2518,7 +2582,7 @@ const namesFor = (mid) => {
           displayCard();
           updateProgressBar();
           try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
-          showToast(`🎯 Resumed at card ${currentCardIndex + 1}`, 2000);
+          showToast('🎯 ' + window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
           window.pendingCardIndex = undefined;
         }
       }
@@ -2847,7 +2911,7 @@ function getActualFieldNames(noteRows, models) {
     window.expectedDeckName = undefined;
     window.pendingCardIndex = undefined;
 
-    alert(`Error loading deck: ${error.message}\n\nCheck the debug console for more details.`);
+    alert(window.i18n.fmt('ap.error_loading_deck', { msg: error.message }, 'Error loading deck: {msg}\n\nCheck the debug console for more details.'));
 
     // Clean up on error
     cleanupMemory();
@@ -3057,12 +3121,12 @@ async function displayCard() {
         ${_nextHtmlPage}
         <div id="srtCardWaveform" style="width:100%;max-width:none;margin:auto 0 6px 0;order:2;align-self:stretch;flex:0 0 auto;"></div>
         <div id="cardBtnRow" class="card-btn-row" style="order:3;">
-          <button type="button" class="card-pill card-pill-icon" id="cardPlayBtn" aria-label="Play card from start" onclick="window.playCardFromStart && window.playCardFromStart()">
+          <button type="button" class="card-pill card-pill-icon" id="cardPlayBtn" aria-label="${window.i18n.t('ap.play_card_from_start', 'Play card from start')}" onclick="window.playCardFromStart && window.playCardFromStart()">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="4" y="5" width="2.6" height="14" rx="1"/><path d="M9 5l11 7-11 7z"/></svg>
           </button>
-          <button type="button" class="card-pill" id="cardCopySrtBtn" onclick="window.copyCurrentSrtText && window.copyCurrentSrtText('cardCopySrtBtn')">Copy SRT</button>
-          <button type="button" class="card-pill" id="cardCopyCardBtn" onclick="window.copyCurrentCardText && window.copyCurrentCardText('cardCopyCardBtn')">Copy Card</button>
-          <button type="button" class="card-pill" id="autoAdvanceBtn" onclick="window.toggleAutoAdvance && window.toggleAutoAdvance()">Auto: ON</button>
+          <button type="button" class="card-pill" id="cardCopySrtBtn" onclick="window.copyCurrentSrtText && window.copyCurrentSrtText('cardCopySrtBtn')">${window.i18n.t('ap.copy_srt', 'Copy SRT')}</button>
+          <button type="button" class="card-pill" id="cardCopyCardBtn" onclick="window.copyCurrentCardText && window.copyCurrentCardText('cardCopyCardBtn')">${window.i18n.t('ap.copy_card', 'Copy Card')}</button>
+          <button type="button" class="card-pill" id="autoAdvanceBtn" onclick="window.toggleAutoAdvance && window.toggleAutoAdvance()">${window.i18n.t('ap.auto_on', 'Auto: ON')}</button>
         </div>
       `;
       // The fixed COPY pill (index.html) is for DECK cards; hide it while an SRT
@@ -3147,6 +3211,7 @@ async function displayCard() {
           // deadline. Direction-agnostic (works for prev and next swipes).
           window._cardAdvanceTargetIdx = currentCardIndex;
           window._cardAdvanceGuardUntil = Date.now() + 1200;
+          window._cardAdvanceReached = false;   // fresh swipe → start in the pre-arrival hold phase
         } else {
           bg.play({
             url,
@@ -3309,8 +3374,12 @@ function setupSwipe() {
         // card-mode replay or send-to-Anki.
         const inModal = (target) => {
           if (document.body.classList.contains('prefs-open')) return true;
+          // `.kai-modal` is the GENERIC marker every pop-up overlay should carry
+          // so card-mode gestures (swipe→Anki/replay) never fire underneath it.
+          // Tag any new full-screen overlay with class "kai-modal" (the gesture
+          // shield in ai-images.js shieldOverlay() also adds it).
           return !!(target?.closest && target.closest(
-            '#preferencesModal, #titleEditModal, #audiobookReentryModal, #readingSettingsModal, #readingStatsModal, .shell-menu'
+            '#preferencesModal, #titleEditModal, #audiobookReentryModal, #readingSettingsModal, #readingStatsModal, .shell-menu, #aiSummaryOverlay, #kcharPopup, #bookmarksOverlay, #kchapterView, #kcharsScreen, .kai-modal'
           ));
         };
 
@@ -3383,12 +3452,15 @@ function setupSwipe() {
               if (Array.isArray(allNotes) && allNotes[idx] && allNotes[idx].isSrtCard) {
                 window._cardAdvanceTargetIdx = idx;
                 window._cardAdvanceGuardUntil = Date.now() + 1200;
+                window._cardAdvanceReached = false;   // fresh swipe → start in the pre-arrival hold phase
               }
             };
-            if (deltaX < -30 && currentCardIndex < allNotes.length - 1) {
+            // "Reverse horizontal swipe direction" pref flips prev/next.
+            const dxe = window._hSwipeReversed() ? -deltaX : deltaX;
+            if (dxe < -30 && currentCardIndex < allNotes.length - 1) {
               _armSwipeGuard(currentCardIndex + 1);
               updateCardIndex(currentCardIndex + 1);
-            } else if (deltaX > 30 && currentCardIndex > 0) {
+            } else if (dxe > 30 && currentCardIndex > 0) {
               _armSwipeGuard(currentCardIndex - 1);
               updateCardIndex(currentCardIndex - 1);
             }
@@ -3431,6 +3503,7 @@ function setupSwipe() {
                     // first position event can't flash the card backward on start.
                     window._cardAdvanceTargetIdx = currentCardIndex;
                     window._cardAdvanceGuardUntil = Date.now() + 1200;
+                    window._cardAdvanceReached = false;   // fresh swipe → start in the pre-arrival hold phase
                     window._skipNextCardAudioRestart = true;
                     if (s && (s.ready || s.positionMs > 0)) {
                       try { await bg.resume(); } catch (_) {}
@@ -3579,7 +3652,11 @@ function goToNextCard() {
 // Add keyboard navigation
 document.addEventListener('keydown', (e) => {
   if (!allNotes || allNotes.length === 0) return;
-  
+  // Ignore card/audio shortcuts while typing in a field (regen caption box, etc.)
+  // so Space/Arrows don't hijack text entry.
+  const _t = e.target;
+  if (_t && (_t.tagName === 'INPUT' || _t.tagName === 'TEXTAREA' || _t.isContentEditable)) return;
+
   switch(e.code) {
     case 'ArrowLeft':
       e.preventDefault();
@@ -3829,7 +3906,7 @@ async function init() {
     if (img && img.contains(e.target)) {
       const card = allNotes[currentCardIndex];
       navigator.clipboard.writeText(card.expression).then(() => {
-        showToast("✓ Copied to clipboard");
+        showToast('✓ ' + window.i18n.t('ap.copied_clipboard', 'Copied to clipboard'));
       }).catch(err => {
         debugLog(`Clipboard error: ${err.message}`);
       });
@@ -4166,17 +4243,27 @@ function _ensureBgListenersForSrtCards() {
         }
         return;
       }
-      // Post-swipe guard: a swipe just seeked the playhead but position events
-      // still report the OLD spot. Until the playhead-derived index reaches the
-      // swiped-to target (seek landed), don't move the card — otherwise lagging
-      // events flicker it back to the old cue. Failsafe deadline so a dropped
-      // seek can't freeze auto-advance.
+      // Post-swipe guard (relation-based, ported from read-mode _readerCueHlGuarded):
+      // a swipe seeks to target.start − AUDIO_START_OFFSET_MS, so a BACKWARD swipe
+      // lands inside the PREVIOUS (target−1 = "two-back") cue. The old exact-equality
+      // release zeroed the latch the first time idx===target, then a lagging event
+      // reporting idx=target−1 (the 150ms lead-in) leaked through and briefly painted
+      // the two-back cue. Suppress by RELATION across the whole window: before the
+      // playhead first reaches the target, hold EITHER side (a stale idx>target can't
+      // yank the card forward; the lead-in idx<target can't flash backward); AFTER
+      // arrival, keep blocking only the lead-in (idx<target) while genuine forward
+      // progress passes. Failsafe deadline so a dropped seek can't freeze advance.
       if (window._cardAdvanceGuardUntil > 0) {
-        if (idx === window._cardAdvanceTargetIdx || Date.now() > window._cardAdvanceGuardUntil) {
+        if (Date.now() > window._cardAdvanceGuardUntil) {
           window._cardAdvanceGuardUntil = 0;
-        } else {
-          return;
+          window._cardAdvanceReached = false;
+        } else if (idx === window._cardAdvanceTargetIdx) {
+          window._cardAdvanceReached = true;          // playhead reached the swiped-to cue
+          // fall through (idx === currentCardIndex here → updateCardIndex no-ops)
+        } else if (!window._cardAdvanceReached || idx < window._cardAdvanceTargetIdx) {
+          return;                                     // hold: pre-arrival (either side) or post-arrival lead-in (two-back)
         }
+        // else: reached && idx > target → genuine forward advance; fall through.
       }
       if (idx !== currentCardIndex && typeof updateCardIndex === 'function') {
         window._skipNextCardAudioRestart = true; // update the card UI, keep audio flowing
@@ -4432,6 +4519,17 @@ window._refitSrtCardsForLayout = function () {
 // Tracks which Title is currently active so we can persist lastCardIndex.
 window._activeTitleId = null;
 
+// True iff a cache file is gone/empty (OS evicted it). Conservative: only reports
+// missing when stat fails/zero on BOTH path forms (matches drive-sync-media fileSize).
+async function _cacheFileMissing(path) {
+  const fs = window.Capacitor?.Plugins?.Filesystem;
+  if (!fs || !path) return false;
+  const p = path.indexOf('file://') === 0 ? path : 'file://' + path;
+  try { const s = await fs.stat({ path: p }); if (s && s.size > 0) return false; } catch (_) {}
+  try { const s = await fs.stat({ path }); if (s && s.size > 0) return false; } catch (_) {}
+  return true;
+}
+
 window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   const ab = title?.attachments?.audiobook;
   const srtAtt = title?.attachments?.srt;
@@ -4441,12 +4539,24 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   // a silent rehydrate failure: materialize straight from the uri if needed.
   const _fa = window.Capacitor?.Plugins?.FileAccess;
   for (const att of [ab, srtAtt]) {
+    if (!att) continue;
+    // Lazy native {uri}: materialize to a cache path.
     if (!att.cachePath && att.uri && _fa?.materializeToCache) {
       try { const m = await _fa.materializeToCache({ uri: att.uri }); if (m?.path) att.cachePath = m.path; } catch (e) {}
     }
+    // SYNCED media (no uri): its CACHE file may be gone (OS eviction, or an iOS
+    // reinstall that wiped the container + rotated its UUID, leaving a stale
+    // absolute path). ensureLocalPath re-resolves to the CURRENT container by the
+    // deterministic filename + re-downloads if missing. SRT is small → await (cues
+    // need it); the audiobook is large → BACKGROUND so the card isn't blocked
+    // (kai:synced-media-ready re-arms the audio when it lands).
+    if (att.driveFileId && window.driveSyncMedia?.ensureLocalPath && title?.id) {
+      const kind = (att === ab) ? 'audiobook' : 'srt';
+      try { const p = await window.driveSyncMedia.ensureLocalPath(title.id, kind, att, { background: kind === 'audiobook' }); if (p) att.cachePath = p; } catch (e) {}
+    }
   }
   if (!ab.cachePath || !srtAtt.cachePath) {
-    alert('Could not load the audio/subtitles for this title.');
+    alert(window.i18n.t('ap.load_audio_sub_failed', 'Could not load the audio/subtitles for this title.'));
     return false;
   }
   resetCrossTitlePositionState();
@@ -4467,6 +4577,7 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
       if (!t) throw new Error('SRT empty (evicted placeholder?)');
       return t;
     } catch (e) {
+      // (1) native source → re-materialize from the original uri (iCloud/bookmark).
       if (att.uri && _fa?.materializeToCache) {
         const m = await _fa.materializeToCache({ uri: att.uri });   // re-streams / downloads from iCloud
         if (m?.path) {
@@ -4474,6 +4585,15 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
           const res2 = await fetch(_toFileUrl(att.cachePath));
           if (res2.ok) return await res2.text();
         }
+      }
+      // (2) synced source (no uri / dead uri) → re-download from Drive by its id.
+      if (att.driveFileId && att.size && window.driveSyncMedia?.downloadMedia && title?.id) {
+        try {
+          await window.driveSyncMedia.downloadMedia(title.id, { kind: 'srt', name: att.name, size: att.size, driveFileId: att.driveFileId });
+          const t2 = (await window.titleStore.list()).find(x => x.id === title.id);
+          const srt2 = t2?.attachments?.srt;
+          if (srt2?.cachePath) { att.cachePath = srt2.cachePath; const res3 = await fetch(_toFileUrl(att.cachePath)); if (res3.ok) return await res3.text(); }
+        } catch (_) {}
       }
       throw e;
     }
@@ -4483,11 +4603,11 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
     const text = await _readSrtText(srtAtt);
     cues = window.srtParser.parseSrt(text);
   } catch (e) {
-    alert('Failed to read SRT for this title: ' + (e?.message || e));
+    alert(window.i18n.t('ap.srt_read_failed', 'Failed to read SRT for this title:') + ' ' + (e?.message || e));
     return false;
   }
   if (!cues.length) {
-    alert('SRT parsed but found 0 cues. Check the file format.');
+    alert(window.i18n.t('ap.srt_zero_cues', 'SRT parsed but found 0 cues. Check the file format.'));
     return false;
   }
 
@@ -4765,7 +4885,7 @@ async function loadCounters() {
     if (notes) {
       const cnt = parseInt(notes);
       const nc = document.getElementById('noteCounter');
-      if (nc) nc.textContent = ` ${cnt} notes`;
+      if (nc) nc.textContent = ' ' + window.i18n.fmt('ap.notes_count', { n: cnt }, '{n} notes');
     }
     const tout = await getPersistent('STOPWATCH_TIMEOUT');
     if (tout) {

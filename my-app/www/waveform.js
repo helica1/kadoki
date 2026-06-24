@@ -786,7 +786,13 @@
       // events so the line glides at 60 Hz instead of stepping at 150 ms.
       const bg = window.Capacitor?.Plugins?.BackgroundAudio;
       if (bg) {
-        bg.addListener('position', (d) => {
+        // Store the listener handles synchronously (await) so a racing hide()/re-show
+        // can ALWAYS find + remove them. A fire-and-forget .then() can resolve AFTER
+        // hide() nulled `state`, orphaning the native listener — it would then fire
+        // forever (battery/CPU). If `state` changed during the await (a newer show()
+        // ran), remove the just-attached handle instead of binding it to the new one.
+        const _myState = state;
+        const _posH = await bg.addListener('position', (d) => {
           if (!state) return;
           // Card-mode waveform that's currently OFF-SCREEN (user is in audio or
           // read mode — #cardContainer is never display:none, so without this the
@@ -867,12 +873,13 @@
             if (!d.playing) { stopPlayheadAnim(); render(); }
             else render();
           }
-        }).then(h => { if (state) state.playheadHandle = h; }).catch(() => {});
+        }).catch(() => null);
+        if (_posH) { if (state === _myState) state.playheadHandle = _posH; else { try { _posH.remove(); } catch (_) {} } }
         // Also listen for state changes — pause should freeze the playhead
         // immediately rather than waiting for the next stale position event.
         // A fresh play (e.g. tapping Preview again) resets the warmup gate
         // so the next prepare cycle doesn't visibly jitter.
-        bg.addListener('state', (d) => {
+        const _stH = await bg.addListener('state', (d) => {
           if (!state) return;
           state.playheadPlaying = !!d.playing;
           if (!d.playing) {
@@ -886,13 +893,25 @@
             state.playheadLastTs = performance.now();
             render();  // redraw without the bounds — they only show when stopped
           }
-        }).then(h => { if (state) state.stateHandle = h; }).catch(() => {});
+        }).catch(() => null);
+        if (_stH) { if (state === _myState) state.stateHandle = _stH; else { try { _stH.remove(); } catch (_) {} } }
       }
     },
 
     // Re-paint on demand (app.js calls this from its persistent bg 'state'
     // listener so the bounds reliably appear/vanish on pause/play in card mode).
     renderNow() { if (state) { try { render(); } catch (_) {} } },
+    // Drive the playhead cursor from an EXTERNAL clock (the scene card plays its
+    // clip through a separate <audio> element, not the bg engine, so it sets the
+    // absolute source-ms here each frame). Cheap repaint: restore the cached
+    // static layer + draw the cursor.
+    setPlayheadMs(ms) {
+      if (!state || !Number.isFinite(ms)) return;
+      state.playheadMs = ms;
+      state.playheadInterpMs = ms;
+      state.playheadDispMs = ms;
+      try { paintFromSnapshot(); } catch (_) { try { render(); } catch (_) {} }
+    },
     // Synchronously freeze / resume the playhead cursor — so a swipe-down PAUSE
     // stops the cursor INSTANTLY instead of free-running until the native 'state'
     // event round-trips back to us.

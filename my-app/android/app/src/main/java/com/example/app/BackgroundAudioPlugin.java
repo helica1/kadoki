@@ -4,6 +4,7 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.WindowManager;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -80,6 +81,12 @@ public class BackgroundAudioPlugin extends Plugin {
                 d.put("action", action);
                 d.put("ts", System.currentTimeMillis());
                 notifyListeners("remoteCommand", d);
+            }
+            @Override public void onChapterRepeat(int idx) {
+                JSObject d = new JSObject();
+                d.put("idx", idx);
+                d.put("ts", System.currentTimeMillis());
+                notifyListeners("chapterRepeat", d);
             }
         };
 
@@ -257,6 +264,65 @@ public class BackgroundAudioPlugin extends Plugin {
         Float rate = call.getFloat("rate", 1.0f);
         BackgroundAudioService s = BackgroundAudioService.getInstance();
         if (s != null) s.setRate(rate);
+        call.resolve();
+    }
+
+    // Display-only: keep the screen on while reading (keep-awake.js owns the
+    // on/off policy + inactivity timer). Window flag auto-clears when the
+    // activity isn't foreground, so the device sleeps normally afterward.
+    // No audio/playback/position side effects.
+    @PluginMethod
+    public void setKeepAwake(PluginCall call) {
+        final boolean on = call.getBoolean("on", false);
+        if (getActivity() == null) { call.resolve(); return; }
+        getActivity().runOnUiThread(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (on) {
+                        getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    } else {
+                        getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    }
+                } catch (Exception ignored) {}
+            }
+        });
+        call.resolve();
+    }
+
+    // Native chapter-repeat: pause + TTS announce + rewind at each chapter
+    // boundary, running inside the foreground audio service so it works while
+    // backgrounded / screen-off. chapters = [{idx, startMs, endMs, announce}].
+    @PluginMethod
+    public void setChapterRepeat(PluginCall call) {
+        boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
+        com.getcapacitor.JSArray arr = call.getArray("chapters");
+        java.util.List<BackgroundAudioService.Chapter> list = new java.util.ArrayList<>();
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                try {
+                    org.json.JSONObject o = arr.getJSONObject(i);
+                    int idx = o.optInt("idx", i);
+                    long s = (long) o.optDouble("startMs", -1);
+                    long e = (long) o.optDouble("endMs", -1);
+                    String announce = o.optString("announce", "");
+                    if (s >= 0 && e >= s) list.add(new BackgroundAudioService.Chapter(idx, s, e, announce));
+                } catch (Exception ignored) {}
+            }
+        }
+        BackgroundAudioService.Chapter[] chs = list.toArray(new BackgroundAudioService.Chapter[0]);
+        BackgroundAudioService svc = BackgroundAudioService.getInstance();
+        if (svc != null) svc.setChapterRepeat(enabled, chs);
+        // Make sure the service's state listener is attached so 'chapterRepeat'
+        // events are delivered to JS (mirrors play()'s retry-attach).
+        scheduleEnsureListener();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void skipToNextChapter(PluginCall call) {
+        BackgroundAudioService svc = BackgroundAudioService.getInstance();
+        if (svc != null) svc.skipToNextChapter();
+        scheduleEnsureListener();
         call.resolve();
     }
 

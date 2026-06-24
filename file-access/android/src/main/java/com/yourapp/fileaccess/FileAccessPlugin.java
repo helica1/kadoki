@@ -108,6 +108,43 @@ public class FileAccessPlugin extends Plugin {
         }
     }
 
+    // Read a byte range from a real filesystem PATH (a materialized cache file)
+    // as base64. Lets JS stream large media (audiobooks) to Drive in bounded
+    // chunks without loading the whole file (OOM-safe). Used by drive-sync.
+    @PluginMethod
+    public void readChunk(PluginCall call) {
+        String path = call.getString("path");
+        Integer offsetI = call.getInt("offset", 0);
+        Integer lengthI = call.getInt("length", 0);
+        if (path == null) { call.reject("path is required"); return; }
+        long offset = offsetI == null ? 0 : offsetI.longValue();
+        int length = lengthI == null ? 0 : lengthI.intValue();
+        if (length <= 0) { call.reject("length must be > 0"); return; }
+        java.io.RandomAccessFile raf = null;
+        try {
+            raf = new java.io.RandomAccessFile(new File(path), "r");
+            raf.seek(offset);
+            byte[] buf = new byte[length];
+            int total = 0;
+            while (total < length) {
+                int n = raf.read(buf, total, length - total);
+                if (n < 0) break;          // EOF
+                total += n;
+            }
+            String base64Data = (total == length)
+                ? Base64.encodeToString(buf, Base64.NO_WRAP)
+                : Base64.encodeToString(java.util.Arrays.copyOf(buf, total), Base64.NO_WRAP);
+            JSObject result = new JSObject();
+            result.put("data", base64Data);
+            result.put("bytesRead", total);
+            call.resolve(result);
+        } catch (Exception e) {
+            call.reject("readChunk failed: " + e.getMessage());
+        } finally {
+            if (raf != null) { try { raf.close(); } catch (Exception ignored) {} }
+        }
+    }
+
     @PluginMethod
     public void checkUriPermission(PluginCall call) {
         String uriString = call.getString("uri");

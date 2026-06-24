@@ -1262,9 +1262,10 @@
   // viewport and NEVER white text with nothing colored — there must always
   // be a green line near the right edge with 2-3 lines of prior context.
   //
-  // Intended "current" cue priority: explicit reentry jump → synced
-  // _lastAudioCueIdx (audio playhead) → last-read cue → active card's cue →
-  // first cue. We then snap to the nearest MATCHED cue (so the exact text
+  // Intended "current" cue priority: explicit reentry jump → post-sync canonical
+  // cue (one-shot _syncAlignCue, set by Drive sync) → _lastAudioCueIdx (audio
+  // playhead) → last-read cue → active card's cue → first cue. We then snap to
+  // the nearest MATCHED cue (so the exact text
   // paints green even if the intended cue happens to be alignment-unmatched)
   // and scroll it near-right-with-context. Falls back to a book-wide text
   // resolve if the alignment map is empty (legacy matcher), so SOMETHING
@@ -1281,6 +1282,19 @@
       if (!cues.length || !chunks.length) return false;
       // 1. choose the intended current cue
       let want = (Number.isFinite(preferredCueIdx) && preferredCueIdx >= 0) ? preferredCueIdx : -1;
+      // Post-SYNC alignment: a just-completed Drive sync set a canonical cue (the
+      // card cue, which all modes keep fresh) for THIS title — prefer it over the
+      // separately-synced read bookmark (lastReadCueIdx), which is stale if the
+      // source device wasn't in read mode. One-shot + 15s fresh window +
+      // title-scoped (mirrors _pendingAudioStartMs); cleared on use. An explicit
+      // preferredCueIdx still wins (set above). Forward-only landing is preserved
+      // by the backward-snap-to-matched-cue below; the no-cue-0 guard still holds.
+      if (want < 0 && Number.isFinite(window._syncAlignCue) && window._syncAlignCue >= 0 &&
+          window._syncAlignTitleId === window._activeTitleId &&
+          Number.isFinite(window._syncAlignAt) && (Date.now() - window._syncAlignAt) < 15000) {
+        want = window._syncAlignCue;
+        window._syncAlignCue = null; window._syncAlignTitleId = null; window._syncAlignAt = null;
+      }
       if (want < 0 && Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) {
         want = window._lastAudioCueIdx;
       }
@@ -1560,21 +1574,45 @@
     if (Math.abs(delta) < 0.5) { if (onDone) onDone(); return; }
     const t0 = performance.now();
     const ease = (p) => 1 - Math.pow(1 - p, 3); // ease-out cubic
-    let lastWritten = null; // actual post-write value (read back, so clamping at scroll bounds isn't mistaken for an external write)
+    let lastWritten = null; // value WE last set (read back, so bound-clamping isn't mistaken for an external write)
+    let prevWritten = from; // value we set the frame BEFORE (sizes the per-frame tolerance)
     const step = (now) => {
-      // ABORT if someone else moved the scroll between frames (a restore,
-      // the 600ms re-force verifier, a cue jump): this loop writes ABSOLUTE
-      // positions from a `from` captured at start, so reasserting its stale
-      // trajectory would silently erase the other writer's position — the
-      // place-keeping bug class. The new owner's flow is responsible for
-      // its own completion work, so onDone is intentionally skipped.
-      if (lastWritten !== null && Math.abs(scrollEl.scrollLeft - lastWritten) > 2) {
-        _physAnim = null;
-        return;
+      // ABORT only if a DIFFERENT writer moved the scroll between frames (a
+      // restore, the 600ms re-force verifier, a cue jump): this loop writes
+      // ABSOLUTE positions from a `from` captured at start, so reasserting its
+      // stale trajectory would erase the other writer's position — the
+      // place-keeping bug class. onDone is intentionally skipped (the new owner
+      // finishes its own work).
+      //
+      // The tolerance SCALES with our own last per-frame motion. iOS composites
+      // scrolling on a separate thread, so during a fast page-turn animation
+      // scrollLeft reads back up to ~one frame of motion BEHIND what we just
+      // wrote (AI-loop main-thread jank widens the lag). The old flat 2px guard
+      // mistook that lag for an external write and aborted ~1 column in — the
+      // "swipe only turns 1-2 lines" bug, even though the turn computed 8
+      // columns. A genuine external write lands FAR off our smooth trajectory,
+      // well past 2× a frame step, so it's still caught.
+      if (lastWritten !== null) {
+        const ownStep = Math.abs(lastWritten - prevWritten);
+        // Floor of 30px (well under one column, W≈50, so a real external jump —
+        // restore / cue-jump, always ≥1 column — is still caught): on the START
+        // and END frames our own motion is ~0, so the per-step term collapses
+        // and only the floor matters. There the iOS compositor is still settling
+        // the rubber-band drag from the finger lift and reads back ~9-15px off
+        // (measured) — a flat 8px floor mistook that for an external write and
+        // aborted ~1 column in (the residual "swipe goes 1-2 columns").
+        const tol = Math.max(30, ownStep * 2 + 8);
+        const dev = Math.abs(scrollEl.scrollLeft - lastWritten);
+        if (dev > tol) {
+          try { if (window.kperf) window.kperf.mark('physAbort dev=' + Math.round(dev) + ' tol=' + Math.round(tol) + ' step=' + Math.round(ownStep), 1); } catch (_) {}
+          _physAnim = null;
+          return;
+        }
       }
       const p = Math.min(1, (now - t0) / ms);
       lastProgrammaticScrollTime = Date.now();
       scrollEl.scrollLeft = from + delta * ease(p); // browser clamps to scroll bounds
+      prevWritten = (lastWritten === null) ? from : lastWritten;
       lastWritten = scrollEl.scrollLeft;
       if (p < 1) _physAnim = requestAnimationFrame(step);
       else { _physAnim = null; if (onDone) onDone(); }
@@ -2006,6 +2044,9 @@
   // cursor if the playhead is unknown. dir: +1 next subtitle, -1 previous.
   function readerCueSwipe(dir) {
     try {
+      // "Reverse horizontal swipe direction" pref: flip here (single entry) so
+      // every call site gets the flipped mapping. Page-turn physics untouched.
+      if (window._hSwipeReversed && window._hSwipeReversed()) dir = -dir;
       const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
       if (!cues.length) return;
       let cur = window._lastAudioCueIdx;
@@ -2058,7 +2099,9 @@
     let sx = 0, sy = 0, anchor = 0;
     let committed = false;
     let cueMode = false, cueDx = 0;   // top-2/3 horizontal swipe = subtitle nav (enriched titles)
-    let lastX = 0, lastT = 0, vel = 0;
+    let lastX = 0, lastT = 0, vel = 0, peakVel = 0;
+    let samples = [];        // recent {x,t} for a windowed release-velocity estimate
+    let commitYFrac = -1;    // fractional Y of the gesture in the reader (diagnostic: <0.67 = cueMode zone)
     let anchorMaskTotal = 0; // mask widths at the page we're turning FROM (for the page step)
     scrollEl.addEventListener('touchstart', (e) => {
       const t = e.touches?.[0]; if (!t) return;
@@ -2068,7 +2111,8 @@
       // Captured NOW (page settled at the anchor) — during the drag the masks
       // update to the peeked position, which would skew the page step.
       anchorMaskTotal = (_maskLW || 0) + (_maskRW || 0);
-      lastX = t.clientX; lastT = Date.now(); vel = 0;
+      lastX = t.clientX; lastT = Date.now(); vel = 0; peakVel = 0;
+      samples = [{ x: t.clientX, t: lastT }];
     }, { passive: true });
     scrollEl.addEventListener('touchmove', (e) => {
       const t = e.touches?.[0]; if (!t) return;
@@ -2084,6 +2128,7 @@
           // The bottom 1/3 always turns the page.
           const _rect = scrollEl.getBoundingClientRect();
           const _localY = sy - _rect.top;
+          commitYFrac = _rect.height > 0 ? (_localY / _rect.height) : -1;
           cueMode = (_localY >= 0 && _localY < _rect.height * (2 / 3)) && _readerCueSwipeAvailable();
           // A committed horizontal PAGE drag is the user actively reading — start
           // (or keep alive) the read timer even for a slight jiggle that springs
@@ -2106,7 +2151,16 @@
       if (e.cancelable) e.preventDefault();
       const now = Date.now();
       vel = (t.clientX - lastX) / Math.max(1, now - lastT);
+      if (Math.abs(vel) > Math.abs(peakVel)) peakVel = vel;   // diagnostic only — NOT the fling gate
       lastX = t.clientX; lastT = now;
+      // Sample history for a WINDOWED release-velocity estimate at lift-off (see
+      // onEnd). Per-sample PEAK velocity is too noisy to gate the fling: when
+      // two touch events land <1ms apart the dt clamp manufactures a huge spike
+      // (logs showed pv=26+), so even a slow drag tripped it and turned a page.
+      // Averaging displacement over the last ~70ms cancels that noise and still
+      // reads a decelerating flick as fast.
+      samples.push({ x: t.clientX, t: now });
+      if (samples.length > 24) samples.shift();
       const dim = scrollEl.clientWidth || cw || 360;
       // Rubber-band the drag (resistance grows with distance); a slow drag is
       // always a "peek" — release snaps back to the column-aligned page.
@@ -2121,7 +2175,12 @@
         // Discrete subtitle swipe: navigate one cue by direction (swipe-left =
         // forward = next subtitle, matching the page-turn + card mode). A small
         // committed jiggle below the gesture threshold is a no-op.
-        if (Math.abs(cueDx) > 30) readerCueSwipe(cueDx < 0 ? 1 : -1);
+        const _cueFired = Math.abs(cueDx) > 30;
+        if (_cueFired) readerCueSwipe(cueDx < 0 ? 1 : -1);
+        // Diagnostic (Perf log): a swipe that the user expected to turn a page but
+        // landed in the top-2/3 subtitle zone shows up here (yf < 0.67) instead of
+        // as a 'pageturn' — pinpoints the "1-2 line" cases without guessing.
+        try { if (window.kperf) window.kperf.mark('cueSwipe ' + (_cueFired ? 'NAV' : 'noop') + ' yf=' + commitYFrac.toFixed(2) + ' dx=' + Math.round(cueDx), 1); } catch (_) {}
         cueMode = false; cueDx = 0;
         setTimeout(() => { physDragging = false; }, 60);
         return;
@@ -2134,10 +2193,44 @@
       // EATS the blacked-out line (manual reading / EPUB-only, where there's no
       // autoscroll to re-justify it). dim − anchorMaskTotal == N_visible × W, so
       // round() recovers the exact visible-column count. Masks off → plain fit.
-      const cols = anchorMaskTotal > 0.5
+      const nominalCols = Math.max(1, Math.floor(dim / W));
+      let cols = anchorMaskTotal > 0.5
         ? Math.max(1, Math.round((dim - anchorMaskTotal) / W))
-        : Math.max(1, Math.floor(dim / W));
-      if (Math.abs(vel) > PHYS.FLING_V) {
+        : nominalCols;
+      // Safety: a stale/oversized edge-mask total (e.g. captured before a prior
+      // rapid swipe settled) can collapse cols to ~1 → a "page turn" of one
+      // line. A real page is never less than ~70% of the screen's columns.
+      if (cols < nominalCols * 0.7) cols = nominalCols;
+      // WINDOWED release velocity: displacement over the last ~70ms of the
+      // gesture (noise-robust, unlike the per-sample peak). A genuine flick —
+      // even one that decelerates before lift — stays fast over the window; a
+      // slow drag, or a drag that pauses before lifting, reads slow → springs
+      // back (the "slow drag scrolls then snaps back" behaviour).
+      let releaseVel = 0;
+      const _ns = samples.length;
+      if (_ns >= 2) {
+        const _new = samples[_ns - 1];
+        let _old = samples[0];
+        for (let i = _ns - 2; i >= 0; i--) {
+          _old = samples[i];
+          if (_new.t - samples[i].t >= 70) break;
+        }
+        const _dtw = _new.t - _old.t;
+        if (_dtw > 0) releaseVel = (_new.x - _old.x) / _dtw;
+      }
+      // Diagnostic (Perf log): the page-step decision values, so a remaining
+      // short-turn or mis-gated drag can be pinpointed without guessing.
+      try {
+        if (window.kperf) window.kperf.mark(
+          'pageturn ' + (Math.abs(releaseVel) > PHYS.FLING_V ? 'TURN' : 'spring') +
+          ' cols=' + cols + '/' + nominalCols + ' rv=' + releaseVel.toFixed(2) + ' pv=' + peakVel.toFixed(2) +
+          ' yf=' + commitYFrac.toFixed(2) +
+          ' mask=' + Math.round(anchorMaskTotal) + ' W=' + Math.round(W) + ' dim=' + Math.round(dim), 1);
+      } catch (_) {}
+      // Gate the page-turn on the windowed RELEASE velocity: a genuine swipe
+      // turns the page, a slow drag (low release velocity) springs back. The
+      // landing math below is unchanged (furigana guard intact).
+      if (Math.abs(releaseVel) > PHYS.FLING_V) {
         // Quick swipe → advance one page of WHOLE columns. The landing spot
         // is PRE-COMPUTED: column-phase correction (inline images shift the
         // grid) and the landing line's furigana overhang are folded into the
@@ -2145,7 +2238,7 @@
         // old shape — animate, then _snapToColumn's instant scrollBy, then
         // possibly the furigana nudge — was the "jerky movement after the
         // page swipe".
-        const sign = vel < 0 ? -1 : 1;
+        const sign = releaseVel < 0 ? -1 : 1;
         const baseTarget = anchor - PHYS.DIR * sign * cols * W;
         let landing = baseTarget;
         try { landing = _predictLandingTarget(baseTarget); } catch (_) {}
@@ -2310,6 +2403,32 @@
     const jpOff = ch ? (parseInt(ch.dataset.jpOff) || 0) : 0;
     return { chunkIdx: lastHighlightedChunkIdx, jpOff, bookName: currentName };
   };
+  // The deepest VISIBLE read frontier (jp char offset) — advances as the user
+  // reads silently, unlike pagedGetReadLocation (which is the audio playhead).
+  // Used by the AI chunk-completion poll + timeline marker so reading without
+  // read-along audio still marks chapters read. Only trustworthy in read mode
+  // (the reader stays display:flex when hidden, so gate on the active class).
+  window.pagedGetReadFrontier = function () {
+    try {
+      if (!document.body.classList.contains('mode-read')) return null;
+      const a = _visibleReadAnchors();
+      return (a && Number.isFinite(a.frontierOff)) ? a.frontierOff : null;
+    } catch (_) { return null; }
+  };
+  // The CURRENT silent-reading line (chunk index), read LIVE from the viewport.
+  // Unlike pagedGetReadLocation (the audio-cue chunk, null without audio), this
+  // works for a no-audio EPUB being read silently. Drive sync uses it to snapshot
+  // the exact read position synchronously, avoiding the async PAGED_BOOKMARK
+  // write race. Null unless read mode is the live, laid-out view.
+  window.pagedGetReadChunkLive = function () {
+    try {
+      if (suppressScrollSave) return null;
+      if (!document.body.classList.contains('mode-read')) return null;
+      const a = _visibleReadAnchors();
+      if (!a || a.edgeIdx < 0 || !Number.isFinite(a.readingIdx) || a.readingIdx < 0) return null;
+      return { chunkIdx: a.readingIdx, jpOff: (Number.isFinite(a.frontierOff) ? a.frontierOff : 0), bookName: currentName };
+    } catch (_) { return null; }
+  };
   // Seed the per-book bookmark pref so a (re)open of that book lands here
   // (used before opening a DIFFERENT title from the Bookmarks list).
   window.pagedSeedBookmark = async function (loc) {
@@ -2321,7 +2440,9 @@
     if (!loc) return;
     try {
       await window.pagedSeedBookmark(loc);
-      if (loc.bookName !== currentName || !chunks?.length) return;
+      // bookName omitted = jump within the CURRENT book (timeline chapter jump);
+      // only reject when a DIFFERENT book is named.
+      if ((loc.bookName && loc.bookName !== currentName) || !chunks?.length) return;
       let idx = loc.chunkIdx;
       if (!(idx >= 0 && idx < chunks.length)) idx = _findChunkForJpOff(loc.jpOff);
       if (!(idx >= 0 && idx < chunks.length)) return;
@@ -3677,7 +3798,7 @@
     }, { passive: true });
   }
 
-  async function loadEpubFromUri(uri, name) {
+  async function loadEpubFromUri(uri, name, cachePath) {
     try {
       ensureView();
       // Snapshot the OUTGOING book's freshest line FIRST — before any reset or
@@ -3703,16 +3824,36 @@
       _revokeEpubImages();
       innerEl.innerHTML = `<p style="color:#888;text-align:center;margin-top:30vh;">Loading ${name}…</p>`;
 
-      const { path } = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri });
+      // Resolve a real cache file path. A NATIVE import gives a security-scoped
+      // `uri` we must materialize; a SYNCED (Drive-downloaded) read source gives a
+      // cache PATH directly (no uri). Prefer the uri; fall back to the cache copy if
+      // the uri is dead. This is the lone read-loader that wasn't cachePath-aware,
+      // which is why synced txt/epub titles rendered stale or stuck on "Loading…".
+      let path = null;
+      if (uri) {
+        try { path = (await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri })).path; }
+        catch (e) { if (cachePath) path = cachePath; else throw e; }
+      } else if (cachePath) {
+        path = cachePath;
+      } else {
+        throw new Error('no read source');
+      }
       const response = await fetch(window.Capacitor.convertFileSrc(path));
       if (!response.ok) throw new Error(`fetch ${response.status}`);
       // A plain-text book (.txt) is read directly into paragraphs; EPUBs are
-      // unzipped + spine-walked. Detect by the attachment name / uri extension.
-      const _isTxt = /\.txt$/i.test(name || '') || /\.txt$/i.test(String(uri || ''));
+      // unzipped + spine-walked. Detect by the attachment name / source extension.
+      const _isTxt = /\.txt$/i.test(name || '') || /\.txt$/i.test(String(uri || cachePath || ''));
       let sectionCount = 0;
+      const _aiSectionLabels = [];   // ai-chunks.js: per data-kadoki-section idx
       if (_isTxt) {
         innerEl.innerHTML = _txtToReaderHtml(await response.text());
         sectionCount = 1;
+        // ai-chunks.js section marker (attribute only — no layout/offset effect)
+        try {
+          const b = innerEl.querySelector('p, div, h1, h2, h3, h4, h5, h6');
+          if (b) b.setAttribute('data-kadoki-section', '0');
+          _aiSectionLabels.push(null);
+        } catch (_) {}
       } else {
         const blob = await response.blob();
         const zip = await JSZip.loadAsync(blob);
@@ -3803,7 +3944,23 @@
               host.replaceWith(im);
             } else host.remove();
           }
-          if (doc.body) sections.push(doc.body.innerHTML);
+          if (doc.body) {
+            // ai-chunks.js: mark the spine-section start + capture a
+            // best-effort label (attribute only — rendering untouched).
+            try {
+              const blk = doc.body.querySelector('p, div, h1, h2, h3, h4, h5, h6');
+              if (blk) blk.setAttribute('data-kadoki-section', String(sections.length));
+              let lbl = null;
+              const h = doc.body.querySelector('h1, h2, h3, h4, h5, h6');
+              if (h) {
+                const hc = h.cloneNode(true);
+                hc.querySelectorAll('rt, rp').forEach(r => r.remove());
+                lbl = (hc.textContent || '').trim().slice(0, 40) || null;
+              }
+              _aiSectionLabels[sections.length] = lbl;
+            } catch (_) {}
+            sections.push(doc.body.innerHTML);
+          }
         }
 
         innerEl.innerHTML = sections.join('\n');
@@ -3871,11 +4028,47 @@
       // Tag block-level descendants as .reading-chunk for dict / scroll-snap.
       // Also accumulate per-chunk char offsets for the bottom progress
       // indicator (treat ruby <rt>/<rp> as zero-cost — count base text only).
+      // ADDITIONALLY: detect chapter-marker paragraphs (a standalone number, or
+      // 第N章/第N話) for ai-chunks' optional chapter re-detect. Single-char
+      // numbers are length<2 (skipped as chunks) but recorded as markers; the
+      // boundary is the next real chunk. This never changes the chunk offsets.
+      const _chapterMarkers = [];
+      let _pendingMarker = null;
+      const _markerLabel = (raw) => {
+        if (!raw) return null;
+        const trimmed = raw.trim();
+        const t = trimmed.replace(/[\s　]+/g, '');
+        if (!t) return null;
+        if (/^[0-9０-９]{1,4}$/.test(t)) {
+          const n = t.replace(/[０-９]/g, d => String('０１２３４５６７８９'.indexOf(d)));
+          const v = parseInt(n, 10);
+          // Only a PLAUSIBLE chapter/section number. A bare 1-4 digit run also
+          // matches years (a colophon "2007" → "第2007章"), page numbers, and
+          // other stray numerics — which became bogus chapters AND, as the first
+          // boundary, shoved the spacing guard early enough to drop the real
+          // 第1章/第2章. Real numbered sections are small and sequential.
+          if (v >= 1 && v <= 199) return '第' + n + '章';
+          return null;
+        }
+        if (/^(序章|序|プロローグ|序幕|終章|エピローグ|終幕|後日談)$/.test(t)) return t;  // prologue / epilogue
+        if (/^[一二三四五六七八九十]{1,4}$/.test(t)) return '第' + t + '章';
+        // Chapter heading: starts with 第N章/話/節…, optionally followed (after a
+        // SPACE) by a title. Short paragraphs only, so body text that merely
+        // begins with 第一章では… (no space) isn't matched. Many books title
+        // their chapters, so requiring a bare heading missed most boundaries.
+        if (trimmed.length <= 30) {
+          const m = trimmed.match(/^(第[0-9０-９一二三四五六七八九十百千]{1,6}[章話節幕回部])(?:[\s　]+(.{1,24}))?$/);
+          if (m) return m[2] ? (m[1] + '　' + m[2].trim()) : m[1];
+        }
+        return null;
+      };
       let chunkCount = 0;
       let charAcc = 0;
       let jpAcc = 0;
       innerEl.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6').forEach(el => {
-        if (el.textContent.trim().length < 2) return;
+        const trimmed = el.textContent.trim();
+        const mlbl = _markerLabel(trimmed);
+        if (trimmed.length < 2) { if (mlbl) _pendingMarker = mlbl; return; }
         const onlyBlockKids = Array.from(el.children).every(c =>
           ['P', 'DIV', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(c.tagName));
         if (onlyBlockKids && el.children.length > 0) return;
@@ -3891,12 +4084,34 @@
         el.dataset.charLen = String(len);
         el.dataset.jpOff = String(jpAcc);
         el.dataset.jpLen = String(jpLen);
+        // chapter boundary: this chunk IS a 第N章 heading (possibly titled), or a
+        // preceding numeric marker makes this chunk the chapter start.
+        if (mlbl && trimmed.length <= 30) {
+          _chapterMarkers.push({ jpOff: jpAcc, charOff: charAcc, label: mlbl });
+        } else if (_pendingMarker) {
+          _chapterMarkers.push({ jpOff: jpAcc, charOff: charAcc, label: _pendingMarker });
+        }
+        _pendingMarker = null;
         charAcc += len;
         jpAcc += jpLen;
         chunkCount++;
       });
       totalChars = charAcc;       // raw coordinate space (cue alignment / highlight)
       totalJpChars = jpAcc;       // displayed total — matches ttu / desktop reader
+
+      // ai-chunks.js hook — fire-and-forget. Nothing here awaits it or reads
+      // back from it (never-lose-place + open-perf invariants).
+      try {
+        if (window.aiChunks && window.aiChunks._onBookLoaded) {
+          window.aiChunks._onBookLoaded({
+            titleId: window._activeTitleId,
+            bookName: name,
+            chunks: Array.from(innerEl.querySelectorAll('.reading-chunk')),
+            sectionLabels: _aiSectionLabels,
+            chapterMarkers: _chapterMarkers,
+          });
+        }
+      } catch (_) {}
 
       const isFreshBookLoad = currentName !== name;
       currentName = name;
@@ -4052,6 +4267,18 @@
     window._pagedAudioPath = audio.path; // the visible reader's CURRENT-title audiobook
 
     try {
+      // Synced SRT (no uri) whose CACHE file was OS-evicted → re-download from Drive
+      // (durability, mirrors the EPUB #18 self-heal) so cue display doesn't go dark.
+      const srtAtt = activeTitle?.attachments?.srt;
+      if (srtAtt && !srtAtt.uri && srtAtt.driveFileId && srtAtt.size && window.driveSyncMedia?.downloadMedia &&
+          window._activeTitleId && await _fileMissing(srt.path)) {
+        try {
+          log('synced SRT cache missing → re-downloading from Drive');
+          await window.driveSyncMedia.downloadMedia(window._activeTitleId, { kind: 'srt', name: srtAtt.name, size: srtAtt.size, driveFileId: srtAtt.driveFileId });
+          const t2 = (await window.titleStore.list()).find(x => x.id === window._activeTitleId);
+          const s2 = t2?.attachments?.srt; if (s2 && s2.cachePath) srt.path = s2.cachePath;
+        } catch (_) {}
+      }
       const url = window.Capacitor?.convertFileSrc
         ? window.Capacitor.convertFileSrc(srt.path) : 'file://' + srt.path;
       const res = await fetch(url);
@@ -4418,6 +4645,20 @@
   let currentTitleId = null;
   let _epubLoadPromise = null;   // in-flight load, to coalesce concurrent callers
   let _epubLoadTitleId = null;
+  // True iff a cache file is gone/empty (OS evicted it). Conservative: only
+  // reports missing when stat fails/zero on BOTH path forms.
+  async function _fileMissing(path) {
+    const fs = window.Capacitor?.Plugins?.Filesystem;
+    if (!fs || !path) return false;
+    const p = path.indexOf('file://') === 0 ? path : 'file://' + path;
+    try { const s = await fs.stat({ path: p }); if (s && s.size > 0) return false; } catch (_) {}
+    try { const s = await fs.stat({ path }); if (s && s.size > 0) return false; } catch (_) {}
+    return true;
+  }
+  // Force the next tryLoadFromActiveTitle to reload this title even if it's the
+  // one already rendered — used after Sync↓ re-downloads a title's read source in
+  // place (same id, new content) so the reader doesn't keep the stale book.
+  window.pagedInvalidateLoadedTitle = function (tid) { if (!tid || tid === currentTitleId) currentTitleId = null; };
   async function tryLoadFromActiveTitle() {
     if (!window.titleStore || !window._activeTitleId) return false;
     // Don't reload the same book we already have.
@@ -4437,10 +4678,24 @@
         const titles = await window.titleStore.list();
         const t = titles.find(x => x.id === titleId);
         const ep = t?.attachments?.epub;
-        if (!ep?.uri || !ep?.name) return false;
+        if (!ep?.name || !(ep.uri || ep.cachePath)) return false;   // accept a synced cache copy, not just a uri
         currentTitleId = titleId;
+        // DURABILITY: a synced read source is a CACHE file (no uri); the OS can evict
+        // CACHE. If it's gone but we know its Drive id, re-download it before loading.
+        if (!ep.uri && ep.cachePath && ep.driveFileId && ep.size &&
+            window.driveSyncMedia?.downloadMedia && await _fileMissing(ep.cachePath)) {
+          try {
+            log('synced epub cache missing → re-downloading from Drive');
+            // Distinct paint so the (rare) re-download doesn't look like the old
+            // indefinite "Loading…" stuck-bug. loadEpubFromUri repaints right after.
+            try { ensureView(); innerEl.innerHTML = '<p style="color:#888;text-align:center;margin-top:30vh;">本を再ダウンロード中…</p>'; } catch (_) {}
+            await window.driveSyncMedia.downloadMedia(titleId, { kind: 'epub', name: ep.name, size: ep.size, driveFileId: ep.driveFileId });
+            const t2 = (await window.titleStore.list()).find(x => x.id === titleId);
+            const ep2 = t2?.attachments?.epub; if (ep2 && ep2.cachePath) ep.cachePath = ep2.cachePath;
+          } catch (e) { log('epub re-download failed: ' + (e?.message || e)); }
+        }
         log(`Auto-load from active title: ${ep.name}`);
-        await loadEpubFromUri(ep.uri, ep.name);
+        await loadEpubFromUri(ep.uri || null, ep.name, ep.cachePath || null);
         return true;
       } catch (e) {
         log('tryLoadFromActiveTitle error: ' + (e?.message || e));

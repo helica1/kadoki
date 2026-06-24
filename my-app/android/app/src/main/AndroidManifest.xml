@@ -21,6 +21,15 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Google OAuth redirect (reversed client id scheme). Lets the
+                 Custom Tab redirect deep-link back so @capacitor/app fires
+                 appUrlOpen for gdrive-auth.js. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.googleusercontent.apps.806495706886-16ji081b8cp9dh9sdokedicc19sv17e6" />
+            </intent-filter>
         </activity>
 
         <provider
@@ -62,5 +71,10 @@
     <queries>
         <package android:name="com.ichi2.anki" />
         <provider android:authorities="com.ichi2.anki.flashcards" />
+        <!-- TTS engine package visibility (API 30+) for native chapter-repeat
+             announcements via TextToSpeech. No new permission required. -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 </manifest>

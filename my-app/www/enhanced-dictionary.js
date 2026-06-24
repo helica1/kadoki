@@ -18,6 +18,20 @@
     let lastHovered = [];
     let touchTimer = null;
 
+    // ---- i18n chrome helpers (UI text only — NEVER dictionary content) ----
+    // Fall back to the literal English/Japanese text when the engine or the
+    // dict string table isn't present, so behavior is byte-identical to before.
+    function dT(key, fallback) {
+        try { return (window.i18n && window.i18n.t) ? window.i18n.t(key, fallback) : fallback; }
+        catch (_) { return fallback; }
+    }
+    function dF(key, vars, fallback) {
+        try { if (window.i18n && window.i18n.fmt) return window.i18n.fmt(key, vars, fallback); } catch (_) {}
+        let s = (fallback != null) ? fallback : key;
+        if (vars) for (const k in vars) { if (Object.prototype.hasOwnProperty.call(vars, k)) s = s.split('{' + k + '}').join(String(vars[k])); }
+        return s;
+    }
+
     // ==================== DICTIONARY SCANNING ====================
     
     async function scanDictionaryFiles() {
@@ -127,8 +141,8 @@
             <div style="display:flex; align-items:center; gap:10px; flex:1;">
                 <div style="font-size:.7rem;letter-spacing:.12em;font-weight:600;color:#888;">DICT</div>
                 <div>
-                    <div id="startupStatus" style="font-weight:600; margin-bottom:1px; font-size:13px;">Loading dictionaries...</div>
-                    <div id="startupDetails" style="color:#ccc; font-size:11px;">Initializing...</div>
+                    <div id="startupStatus" style="font-weight:600; margin-bottom:1px; font-size:13px;">${dT('dc.loading_dictionaries', 'Loading dictionaries...')}</div>
+                    <div id="startupDetails" style="color:#ccc; font-size:11px;">${dT('dc.initializing', 'Initializing...')}</div>
                 </div>
             </div>
             <div style="flex:1; max-width:150px; margin:0 12px;">
@@ -190,19 +204,19 @@
         try {
             // Show startup progress
             showStartupProgress();
-            updateStartupProgress('Scanning for dictionaries...', 5);
+            updateStartupProgress(dT('dc.scanning_dicts', 'Scanning for dictionaries...'), 5);
 
             // Scan for dictionary zip files
             const dictionaryFiles = await scanDictionaryFiles();
-            
+
             if (dictionaryFiles.length === 0) {
                 console.log('⚠️ No Yomitan dictionaries found, will use JMDict only');
-                updateStartupProgress('No Yomitan dictionaries found', 100, 'Using JMDict only');
+                updateStartupProgress(dT('dc.no_yomitan_found', 'No Yomitan dictionaries found'), 100, dT('dc.using_jmdict_only', 'Using JMDict only'));
                 setTimeout(hideStartupProgress, 1000);
                 return;
             }
-            
-            updateStartupProgress(`Found ${dictionaryFiles.length} dictionaries`, 10, 'Beginning dictionary loading...');
+
+            updateStartupProgress(dF('dc.found_n_dicts', { n: dictionaryFiles.length }, `Found ${dictionaryFiles.length} dictionaries`), 10, dT('dc.beginning_load', 'Beginning dictionary loading...'));
             
             // Load each dictionary with progress updates
             for (let i = 0; i < dictionaryFiles.length; i++) {
@@ -211,25 +225,25 @@
                 const progressEnd = 10 + ((i + 1) / dictionaryFiles.length) * 80;
                 
                 try {
-                    updateStartupProgress(`Loading ${filename}...`, progressStart, `Dictionary ${i + 1} of ${dictionaryFiles.length}`);
+                    updateStartupProgress(dF('dc.loading_named', { name: filename }, `Loading ${filename}...`), progressStart, dF('dc.dict_n_of_m', { i: i + 1, total: dictionaryFiles.length }, `Dictionary ${i + 1} of ${dictionaryFiles.length}`));
                     await loadSingleDictionary(filename, (bankProgress) => {
                         // Update progress within this dictionary
                         const currentProgress = progressStart + (bankProgress / 100) * (progressEnd - progressStart);
-                        updateStartupProgress(`Loading ${filename}...`, currentProgress, `Processing term banks...`);
+                        updateStartupProgress(dF('dc.loading_named', { name: filename }, `Loading ${filename}...`), currentProgress, dT('dc.processing_banks', 'Processing term banks...'));
                     });
                 } catch (error) {
                     console.error(`❌ Failed to load dictionary ${filename}:`, error);
-                    updateStartupProgress(`Failed to load ${filename}`, progressStart, `Continuing with other dictionaries...`);
+                    updateStartupProgress(dF('dc.failed_load_named', { name: filename }, `Failed to load ${filename}`), progressStart, dT('dc.continuing_others', 'Continuing with other dictionaries...'));
                     await new Promise(resolve => setTimeout(resolve, 1000)); // Brief pause to show error
                 }
             }
-            
-            updateStartupProgress('Finalizing dictionaries...', 95, 'Almost ready!');
+
+            updateStartupProgress(dT('dc.finalizing', 'Finalizing dictionaries...'), 95, dT('dc.almost_ready', 'Almost ready!'));
             console.log(`✅ Loaded ${dictionaries.size} Yomitan dictionaries`);
             
         } catch (error) {
             console.error('❌ Yomitan dictionary loading failed:', error);
-            updateStartupProgress('Dictionary loading failed', 100, 'Will use JMDict only');
+            updateStartupProgress(dT('dc.dict_load_failed', 'Dictionary loading failed'), 100, dT('dc.will_use_jmdict_only', 'Will use JMDict only'));
             setTimeout(hideStartupProgress, 2000);
         }
     }
@@ -773,7 +787,7 @@
         console.log('📚 Loading dictionaries...');
         
         try {
-            updateStartupProgress('Loading dictionaries...', 0);
+            updateStartupProgress(dT('dc.loading_dictionaries', 'Loading dictionaries...'), 0);
             await loadYomitanDictionaries();
             // User-imported Yomitan dictionaries (persisted in IDB).
             await loadImportedDictionariesFromCache();
@@ -781,7 +795,7 @@
             purgeStaleJMDictCache();
 
             
-            updateStartupProgress('Dictionaries ready!', 100, 'All dictionaries loaded successfully');
+            updateStartupProgress(dT('dc.dicts_ready', 'Dictionaries ready!'), 100, dT('dc.all_loaded', 'All dictionaries loaded successfully'));
             
             // Hide progress after brief delay
             setTimeout(() => {
@@ -808,7 +822,7 @@
             }
             if (dictionaries.size === 0 && _storeCount === 0) {
                 if (typeof window.showToast === 'function') {
-                    window.showToast('No dictionary loaded — import one in Preferences → Dictionaries', 4000);
+                    window.showToast(dT('dc.no_dict_import', 'No dictionary loaded — import one in Preferences → Dictionaries'), 4000);
                 } else {
                     console.warn('[dict] No dictionaries loaded — import one in Preferences → Dictionaries');
                 }
@@ -1184,7 +1198,7 @@
                 <div class="dict-popup-playhead-section">
                     <button id="setPlayheadBtn" type="button" class="dict-popup-playhead-btn">
                         <span class="dict-popup-playhead-icon"><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="4" y="5" width="2.6" height="14" rx="1"/><path d="M9 5l11 7-11 7z"/></svg></span>
-                        <span class="dict-popup-playhead-label">Set playhead</span>
+                        <span class="dict-popup-playhead-label">${dT('dc.set_playhead', 'Set playhead')}</span>
                         <span class="dict-popup-playhead-time">${mmss}</span>
                     </button>
                 </div>
@@ -1192,8 +1206,8 @@
         }
 
         if (!results || results.length === 0) {
-            return playheadSection + `<div class="dict-popup-empty">No dictionary entries found
-                <div class="dict-popup-hint">Tap anywhere to close</div></div>`;
+            return playheadSection + `<div class="dict-popup-empty">${dT('dc.no_entries_found', 'No dictionary entries found')}
+                <div class="dict-popup-hint">${dT('dc.tap_to_close', 'Tap anywhere to close')}</div></div>`;
         }
         const result = results[currentIndex];
         const isJmdict = result.type === 'jmdict';
@@ -1221,19 +1235,19 @@
                 <div class="dict-popup-header-icons">
                     <div class="dict-popup-audio-group" style="display:flex;flex-direction:column;align-items:center;gap:2px;">
                         <div class="dict-popup-audio-row" style="display:flex;align-items:center;gap:2px;">
-                            <button id="audioPrev" type="button" title="Previous audio source" class="dict-popup-icon-btn dict-popup-audio-nav" aria-label="Previous audio" style="display:none;">
+                            <button id="audioPrev" type="button" title="${dT('dc.audio_prev', 'Previous audio source')}" class="dict-popup-icon-btn dict-popup-audio-nav" aria-label="${dT('dc.audio_prev', 'Previous audio source')}" style="display:none;">
                               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                 <polyline points="15 18 9 12 15 6"/>
                               </svg>
                             </button>
-                            <button id="audioBtn" type="button" title="Play audio" class="dict-popup-icon-btn" aria-label="Play audio">
+                            <button id="audioBtn" type="button" title="${dT('dc.audio_play', 'Play audio')}" class="dict-popup-icon-btn" aria-label="${dT('dc.audio_play', 'Play audio')}">
                               <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
                                 <path d="M11 5L6 9H3v6h3l5 4V5z"/>
                                 <path d="M15.5 8.5a5 5 0 0 1 0 7"/>
                                 <path d="M18.5 5.5a9 9 0 0 1 0 13"/>
                               </svg>
                             </button>
-                            <button id="audioNext" type="button" title="Next audio source" class="dict-popup-icon-btn dict-popup-audio-nav" aria-label="Next audio" style="display:none;">
+                            <button id="audioNext" type="button" title="${dT('dc.audio_next', 'Next audio source')}" class="dict-popup-icon-btn dict-popup-audio-nav" aria-label="${dT('dc.audio_next', 'Next audio source')}" style="display:none;">
                               <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                 <polyline points="9 18 15 12 9 6"/>
                               </svg>
@@ -1244,16 +1258,16 @@
                     <button id="ankiBtn" class="dict-popup-anki-btn"
                             data-dictionary="${result.dictionary}"
                             data-term="${result.term}"
-                            data-type="${result.type}">+ Anki</button>
+                            data-type="${result.type}">${dT('dc.anki_short', '+ Anki')}</button>
                 </div>
             </div>
         `;
         if (results.length > 1) {
             content += `
                 <div class="dict-popup-nav">
-                    <button id="prevResult" class="dict-popup-nav-btn" ${currentIndex === 0 ? 'disabled' : ''}>← Prev</button>
+                    <button id="prevResult" class="dict-popup-nav-btn" ${currentIndex === 0 ? 'disabled' : ''}>← ${dT('dc.prev', 'Prev')}</button>
                     <span class="dict-popup-nav-count">${currentIndex + 1} / ${results.length}</span>
-                    <button id="nextResult" class="dict-popup-nav-btn" ${currentIndex === results.length - 1 ? 'disabled' : ''}>Next →</button>
+                    <button id="nextResult" class="dict-popup-nav-btn" ${currentIndex === results.length - 1 ? 'disabled' : ''}>${dT('dc.next', 'Next')} →</button>
                 </div>
             `;
         }
@@ -1262,7 +1276,7 @@
         // (buildGlossaryHtml) so the card and the popup stay byte-identical.
         content += buildGlossaryHtml(result);
 
-        content += `<div class="dict-popup-hint">Tap anywhere to close</div>`;
+        content += `<div class="dict-popup-hint">${dT('dc.tap_to_close', 'Tap anywhere to close')}</div>`;
         return content;
     }
 
@@ -1272,6 +1286,88 @@
         if (!popup) return;
         const vw = window.innerWidth, vh = window.innerHeight;
         const margin = 12;
+
+        // AI overlays (character popup, chapter view, Characters screen,
+        // summary overlay): pin top-right below the overlay's header, with
+        // VERTICAL avoidance of the looked-up word (below it, or above a low
+        // word) so the word's line is never covered. Topmost-first order;
+        // missing head elements fall back to the 56px default.
+        const aiOverlayPick = (() => {
+            const pairs = [
+                ['kcharPopup', null],
+                ['kchapterView', 'kchapterViewHead'],
+                ['kcharsScreen', 'kcharsScreenHead'],
+                ['aiSummaryOverlay', 'aiSummaryHead'],
+                ['bookmarksOverlay', null],
+            ];
+            for (const p of pairs) {
+                try {
+                    const el = document.getElementById(p[0]);
+                    if (_aiOverlayVisible(el)) {
+                        return { el, head: p[1] ? document.getElementById(p[1]) : null };
+                    }
+                } catch (_) {}
+            }
+            return null;
+        })();
+        if (aiOverlayPick) {
+            const head = aiOverlayPick.head;
+            const headRect = head ? head.getBoundingClientRect() : null;
+            const topMin = Math.max(margin, (headRect ? headRect.bottom : 56) + 8);
+            const gap = 10;
+            // Full width (minus margins): vertical avoidance already keeps the
+            // looked-up word clear, and a narrow popup wrapped long headwords
+            // onto two lines.
+            const w = Math.min(vw - margin * 2, 560);
+            const left = vw - w - margin;                 // right-pinned (≈ full width)
+            const maxH0 = Math.min(vh * 0.55, 460, Math.max(160, vh - topMin - margin));
+            popup.style.width     = `${w}px`;
+            popup.style.height    = 'auto';
+            popup.style.maxHeight = `${maxH0}px`;
+            popup.style.left      = `${left}px`;
+            // Union rect of the highlighted word spans.
+            let wt = NaN, wb = NaN, wl = NaN, wr = NaN;
+            try {
+                if (lastHovered && lastHovered.length) {
+                    let t = Infinity, b = -Infinity, l = Infinity, r = -Infinity;
+                    for (const el of lastHovered) {
+                        const rc = el.getBoundingClientRect();
+                        if (rc && rc.width && rc.height) {
+                            t = Math.min(t, rc.top); b = Math.max(b, rc.bottom);
+                            l = Math.min(l, rc.left); r = Math.max(r, rc.right);
+                        }
+                    }
+                    if (b > t) { wt = t; wb = b; wl = l; wr = r; }
+                }
+            } catch (_) {}
+            // Default corner spot, then vertical avoidance: the popup spans
+            // most of a phone's width, so left/right flipping can't clear a
+            // word in the top band — instead drop WHOLLY BELOW the word (or
+            // sit wholly above a low word). The looked-up word is never
+            // covered, whatever its position.
+            const ph = Math.min(popup.offsetHeight || maxH0, maxH0);
+            let top = topMin;
+            if (Number.isFinite(wt)) {
+                const horizClear = wr < left - 6;                 // word fully left of box
+                const vertClear  = wt > topMin + ph + 6;          // word fully below box
+                if (!horizClear && !vertClear) {
+                    const spaceBelow = vh - margin - (wb + gap);
+                    const spaceAbove = (wt - gap) - topMin;
+                    if (spaceBelow >= spaceAbove || spaceBelow >= Math.min(ph, 260)) {
+                        const maxH = Math.max(140, Math.min(maxH0, spaceBelow));
+                        popup.style.maxHeight = `${maxH}px`;
+                        top = wb + gap;
+                    } else {
+                        const maxH = Math.max(140, Math.min(maxH0, spaceAbove));
+                        popup.style.maxHeight = `${maxH}px`;
+                        const ph2 = Math.min(popup.offsetHeight || maxH, maxH);
+                        top = Math.max(topMin, (wt - gap) - ph2);
+                    }
+                }
+            }
+            popup.style.top = `${top}px`;
+            return;
+        }
 
         // Audiobook mode: anchor BELOW the cue text and keep popup small.
         // The audiobook view's subtitle takes the center band of the screen
@@ -1662,6 +1758,39 @@
     // (and cleared) in hidePopup.
     let _lookupPausedPlayback = false;
 
+    // AI content overlays that host dict-tappable text above the normal views
+    // (chapter view, Characters screen, character popup, AI summary, timeline).
+    // Same lesson as #waveformEditorOverlay: the document-level outside-tap
+    // dismiss fires under ANY overlay, and hidePopup → maybeResumeAfterLookup
+    // can resume audio underneath (racing e.g. key-passage playback). Gestures
+    // inside a VISIBLE overlay belong to it; taps on dict text still dismiss
+    // via the dict-frag handlers. New modals need the same exclusion.
+    const AI_OVERLAY_IDS = ['kchapterView', 'kcharsScreen', 'kcharPopup', 'aiSummaryOverlay', 'bookmarksOverlay'];
+    function _aiOverlayVisible(el) {
+        if (!el || !el.getClientRects().length) return false;
+        try {
+            const cs = getComputedStyle(el);
+            if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+        } catch (_) {}
+        return true;
+    }
+    function visibleAiOverlays() {
+        const out = [];
+        for (const id of AI_OVERLAY_IDS) {
+            try {
+                const el = document.getElementById(id);
+                if (_aiOverlayVisible(el)) out.push(el);
+            } catch (_) {}
+        }
+        return out;
+    }
+    function inAiOverlay(target) {
+        try {
+            for (const el of visibleAiOverlays()) if (el.contains(target)) return true;
+        } catch (_) {}
+        return false;
+    }
+
     function isLookupModeAutoPause() {
         const body = document.body;
         // Pause narration on lookup in read, audio, AND card mode (card was
@@ -1697,6 +1826,14 @@
         // happens at the real popup dismissal after the editor flow ends.
         if (document.getElementById('waveformEditorOverlay')) {
             console.log('[dict-resume] skipped: waveform editor open');
+            return;
+        }
+        // AI overlays open (chapter view / Characters screen / …): they can
+        // drive their own audio (key-passage playback) — never auto-resume
+        // underneath them. Flag stays SET, same as the editor: resume happens
+        // at the first dismissal after they close.
+        if (visibleAiOverlays().length) {
+            console.log('[dict-resume] skipped: AI overlay open');
             return;
         }
         if (!_lookupPausedPlayback) return;
@@ -1736,9 +1873,25 @@
         maybeResumeAfterLookup();
     }
 
+    // Lazy-path highlight wrappers (span.dict-hl) created around a tapped run in
+    // AI text; unwrap them on clear so the container returns to plain text.
+    let lazyHighlightSpans = [];
+    function clearLazyHighlight() {
+        for (const sp of lazyHighlightSpans) {
+            try {
+                const parent = sp.parentNode;
+                if (!parent) continue;
+                while (sp.firstChild) parent.insertBefore(sp.firstChild, sp);
+                parent.removeChild(sp);
+                parent.normalize();
+            } catch (_) {}
+        }
+        lazyHighlightSpans = [];
+    }
     function clearHighlight() {
-        lastHovered.forEach(s => s.classList.remove('highlight'));
+        lastHovered.forEach(s => { try { s.classList.remove('highlight'); } catch (_) {} });
         lastHovered = [];
+        if (lazyHighlightSpans.length) clearLazyHighlight();
     }
 
     function highlightSpans(spans, startIndex, length) {
@@ -1768,6 +1921,17 @@
     // first, and within a surface the longest BASE form. Changing this brought
     // back known regressions (説明した clobbered by 説き明かし; 積もらない by 積).
     async function greedyDeinflect(text, start, maxLength = 12) {
+        // perf-probe: total wall time of the deinflect+existsBulk phase
+        const _kpa = performance.now();
+        try { return await _greedyDeinflectInner(text, start, maxLength); }
+        finally {
+            try {
+                const _d = performance.now() - _kpa;
+                if (_d > 100 && window.kperf) window.kperf.mark('dict deinflect (total)', _d);
+            } catch (_) {}
+        }
+    }
+    async function _greedyDeinflectInner(text, start, maxLength = 12) {
         const fallback = { match: text[start], base: text[start], length: 1 };
         const searchLimit = Math.min(maxLength, text.length - start);
         if (searchLimit < 1) return fallback;
@@ -1816,7 +1980,22 @@
 
     // ==================== MAIN LOOKUP FUNCTION ====================
     
-    async function performLookup(spans, index) {
+    // `lazy` (optional) = { text, charIndex, applyHighlight(length) } — the
+    // span-less AI-text path (see dictEnableLookupIn). When present, spans/index
+    // are ignored for text derivation + highlighting; the card/audio per-char
+    // span path passes only (spans, index) and is unchanged.
+    async function performLookup(spans, index, lazy) {
+        // perf-probe: total wall time tap → popup rendered
+        const _kpa = performance.now();
+        try { return await _performLookupInner(spans, index, lazy); }
+        finally {
+            try {
+                const _d = performance.now() - _kpa;
+                if (_d > 100 && window.kperf) window.kperf.mark('dict lookup (total)', _d);
+            } catch (_) {}
+        }
+    }
+    async function _performLookupInner(spans, index, lazy) {
         const _t0 = performance.now();
         const lap = (label) => console.log(`⏱ ${label}: +${Math.round(performance.now() - _t0)}ms`);
         console.log(`🚀 Performing multi-dictionary lookup for span ${index}...`);
@@ -1853,18 +2032,18 @@
             if (dictsReady) {
                 earlyPopup.innerHTML = `
                     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 0;">
-                        <div style="color:#4caf50;font-size:.9em;">Looking up…</div>
+                        <div style="color:#4caf50;font-size:.9em;">${dT('dc.looking_up', 'Looking up…')}</div>
                     </div>`;
             } else {
                 earlyPopup.innerHTML = `
                     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 12px;">
                         <div style="color:#4caf50;font-size:1em;font-weight:600;margin-bottom:10px;">
-                            Initializing Dictionaries…
+                            ${dT('dc.initializing_dicts', 'Initializing Dictionaries…')}
                         </div>
                         <div style="width:200px;height:4px;background:#333;border-radius:2px;overflow:hidden;margin-bottom:10px;">
                             <div id="earlyLookupBar" style="width:0%;height:100%;background:#4caf50;transition:width .4s ease;"></div>
                         </div>
-                        <div style="color:#666;font-size:.72em;">First lookup loads the term index — please wait.</div>
+                        <div style="color:#666;font-size:.72em;">${dT('dc.first_lookup_hint', 'First lookup loads the term index — please wait.')}</div>
                     </div>`;
             }
             positionDictPopup(earlyPopup);
@@ -1897,13 +2076,14 @@
             const finishBar = document.getElementById('earlyLookupBar');
             if (finishBar) finishBar.style.width = '100%';
 
-            const text = spans.map(s => s.textContent).join('');
-            const charIndex = spans.slice(0, index)
+            const text = lazy ? lazy.text : spans.map(s => s.textContent).join('');
+            const charIndex = lazy ? lazy.charIndex : spans.slice(0, index)
                 .reduce((sum, s) => sum + s.textContent.length, 0);
             const best = await greedyDeinflect(text, charIndex);
             lap(`greedyDeinflect → "${best.base}" (${best.length}ch)`);
 
-            highlightSpans(spans, index, best.length);
+            if (lazy) lazy.applyHighlight(best.length);
+            else highlightSpans(spans, index, best.length);
             lap('highlightSpans');
             
             // Check if this is the first lookup and dictionaries aren't loaded yet
@@ -1914,12 +2094,12 @@
                 const popup = getOrCreatePopup();
                 popup.innerHTML = `
                     <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:200px;">
-                        <div style="font-size:1.2em;font-weight:700;margin-bottom:16px;">Looking up: ${best.base}</div>
-                        <div style="color:#4caf50;margin-bottom:16px;">Loading dictionaries…</div>
+                        <div style="font-size:1.2em;font-weight:700;margin-bottom:16px;">${dF('dc.looking_up_word', { word: best.base }, `Looking up: ${best.base}`)}</div>
+                        <div style="color:#4caf50;margin-bottom:16px;">${dT('dc.loading_dictionaries', 'Loading dictionaries…')}</div>
                         <div style="width:200px;height:4px;background:#333;border-radius:2px;overflow:hidden;">
                             <div id="loadingBar" style="width:0%;height:100%;background:#4caf50;transition:width 0.3s ease;"></div>
                         </div>
-                        <div style="color:#666;font-size:0.8em;margin-top:12px;">This may take 1-2 minutes for the first lookup...</div>
+                        <div style="color:#666;font-size:0.8em;margin-top:12px;">${dT('dc.first_lookup_slow', 'This may take 1-2 minutes for the first lookup...')}</div>
                     </div>
                 `;
                 // Position BEFORE making visible so the popup never paints at
@@ -1959,8 +2139,8 @@
                 if (popup) {
                     popup.innerHTML = `
                         <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:200px;">
-                            <div style="font-size:1.2em;font-weight:700;margin-bottom:16px;color:#4caf50;letter-spacing:.06em;">Dictionaries loaded</div>
-                            <div style="color:#ccc;margin-bottom:16px;">Showing definitions for: ${best.base}</div>
+                            <div style="font-size:1.2em;font-weight:700;margin-bottom:16px;color:#4caf50;letter-spacing:.06em;">${dT('dc.dictionaries_loaded', 'Dictionaries loaded')}</div>
+                            <div style="color:#ccc;margin-bottom:16px;">${dF('dc.showing_defs_for', { word: best.base }, `Showing definitions for: ${best.base}`)}</div>
                             <div style="width:200px;height:4px;background:#333;border-radius:2px;overflow:hidden;">
                                 <div style="width:100%;height:100%;background:#4caf50;"></div>
                             </div>
@@ -2008,9 +2188,9 @@
             if (popup) {
                 popup.innerHTML = `
                     <div style="text-align:center;padding:20px;">
-                        <div style="font-size:1.1em;font-weight:700;color:#f44336;margin-bottom:8px;letter-spacing:.06em;">Lookup failed</div>
-                        <div style="color:#ccc;margin-bottom:12px;">Could not load dictionary definitions</div>
-                        <div style="color:#666;font-size:0.8em;">Tap anywhere to close</div>
+                        <div style="font-size:1.1em;font-weight:700;color:#f44336;margin-bottom:8px;letter-spacing:.06em;">${dT('dc.lookup_failed', 'Lookup failed')}</div>
+                        <div style="color:#ccc;margin-bottom:12px;">${dT('dc.could_not_load_defs', 'Could not load dictionary definitions')}</div>
+                        <div style="color:#666;font-size:0.8em;">${dT('dc.tap_to_close', 'Tap anywhere to close')}</div>
                     </div>
                 `;
             }
@@ -2083,7 +2263,7 @@
                 // Dismiss the popup so the reader is visible.
                 try { window.hideDictPopup?.(); } catch (_) {}
             } catch (err) {
-                try { window.showToast?.('Play error: ' + (err?.message || err), 2200); } catch (_) {}
+                try { window.showToast?.(dF('dc.play_error', { msg: (err?.message || err) }, 'Play error: ' + (err?.message || err)), 2200); } catch (_) {}
             } finally {
                 setTimeout(() => { firing = false; }, 400);
             }
@@ -2158,7 +2338,7 @@
             btn.style.opacity = '0.35';
             btn.style.cursor = 'default';
             btn.disabled = true;
-            btn.title = 'No local audio for this word';
+            btn.title = dT('dc.no_local_audio', 'No local audio for this word');
             if (prevBtn) prevBtn.style.display = 'none';
             if (nextBtn) nextBtn.style.display = 'none';
             if (countEl) countEl.style.display = 'none';
@@ -2270,7 +2450,7 @@
                 
                 try {
                     ankiBtn.disabled = true;
-                    ankiBtn.textContent = '⏳ Adding...';
+                    ankiBtn.textContent = '⏳ ' + dT('dc.adding', 'Adding...');
                     
                     // Extract meaning and reading from current result
                     const meaning = extractMeaningFromResult(result);
@@ -2476,7 +2656,7 @@
                         window.readingAnkiCount = (window.readingAnkiCount || 0) + 1;
                     }
                     
-                    ankiBtn.textContent = 'Added';
+                    ankiBtn.textContent = dT('dc.added', 'Added');
                     ankiBtn.style.background = '#2196f3';
                     
                     setTimeout(() => {
@@ -2485,12 +2665,12 @@
                     
                 } catch (error) {
                     console.error('❌ Failed to add word to Anki:', error);
-                    ankiBtn.textContent = 'Failed';
+                    ankiBtn.textContent = dT('dc.failed', 'Failed');
                     ankiBtn.style.background = '#f44336';
-                    
+
                     setTimeout(() => {
                         ankiBtn.disabled = false;
-                        ankiBtn.textContent = 'Add to Anki';
+                        ankiBtn.textContent = dT('dc.add_to_anki', 'Add to Anki');
                         ankiBtn.style.background = '#4caf50';
                     }, 2000);
                 }
@@ -2632,12 +2812,12 @@
 
         // No deck/note type chosen yet → guide the user instead of failing.
         if (!cfg.deck || !cfg.model) {
-            alert('Choose a deck and note type in Preferences → Anki (dictionary) first.');
+            alert(dT('dc.choose_deck_first', 'Choose a deck and note type in Preferences → Anki (dictionary) first.'));
             return;
         }
         // No field mapping → don't write into an empty field name (silent blank card).
         if (!cfg.fields || !cfg.fields.term) {
-            alert('Map your note type’s fields in Preferences → Anki (dictionary) first.');
+            alert(dT('dc.map_fields_first', 'Map your note type’s fields in Preferences → Anki (dictionary) first.'));
             return;
         }
 
@@ -2712,7 +2892,7 @@
                 if (iosUnplayableAudio && window.Capacitor?.getPlatform?.() === 'ios') {
                     console.warn(`[anki-send] audio codec ${iosUnplayableAudio} is not decodable by iOS AVFoundation — AnkiMobile won't play it (Android will).`);
                     setTimeout(() => {
-                        try { window.showToast?.(`⚠ Audio is ${iosUnplayableAudio}; AnkiMobile (iOS) can't play this codec — it will play on Android. Use an MP3 audio source for both.`, 7000); } catch (_) {}
+                        try { window.showToast?.(dF('dc.codec_warning', { codec: iosUnplayableAudio }, `⚠ Audio is ${iosUnplayableAudio}; AnkiMobile (iOS) can't play this codec — it will play on Android. Use an MP3 audio source for both.`), 7000); } catch (_) {}
                     }, 1600);
                 }
                 const params = {
@@ -2755,27 +2935,27 @@
                 if (isAndroid) {
                     // Non-throwing addNote = AnkiDroid created the note.
                     if (typeof window.showToast === 'function') {
-                        window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+                        window.showToast(dF('dc.added_to_deck', { deck: cfg.deck }, `✓ Added to ${cfg.deck}`), 2200);
                     }
                     return r;
                 }
                 if (typeof window.showToast === 'function') {
-                    window.showToast(`Sending to ${cfg.deck}…`, 1400);
+                    window.showToast(dF('dc.sending_to_deck', { deck: cfg.deck }, `Sending to ${cfg.deck}…`), 1400);
                 }
                 const cbResult = await cbPromise;
                 console.log('AnkiBridge x-callback result:', cbResult);
                 if (typeof window.showToast === 'function') {
                     if (cbResult === 'success') {
-                        window.showToast(`✓ Added to ${cfg.deck}`, 2200);
+                        window.showToast(dF('dc.added_to_deck', { deck: cfg.deck }, `✓ Added to ${cfg.deck}`), 2200);
                     } else if (cbResult === 'error') {
                         const real = window.describeAnkiError?.();
                         window.showToast(real
-                            ? `✗ AnkiMobile: ${real}`
-                            : `✗ AnkiMobile rejected the note. Check that model "${cfg.model}" and its fields exist.`, 6000);
+                            ? dF('dc.ankimobile_error', { msg: real }, `✗ AnkiMobile: ${real}`)
+                            : dF('dc.ankimobile_rejected', { model: cfg.model }, `✗ AnkiMobile rejected the note. Check that model "${cfg.model}" and its fields exist.`), 6000);
                     } else if (cbResult === 'timeout') {
-                        window.showToast(`? No reply from AnkiMobile. Sent model="${cfg.model}". Verify it exists in AnkiMobile → Manage note types.`, 6500);
+                        window.showToast(dF('dc.ankimobile_no_reply', { model: cfg.model }, `? No reply from AnkiMobile. Sent model="${cfg.model}". Verify it exists in AnkiMobile → Manage note types.`), 6500);
                     } else {
-                        window.showToast(`✓ Sent to ${cfg.deck}`, 2200);
+                        window.showToast(dF('dc.sent_to_deck', { deck: cfg.deck }, `✓ Sent to ${cfg.deck}`), 2200);
                     }
                 }
                 return r;
@@ -2790,8 +2970,8 @@
                 const msg = err?.message || String(err);
                 const isServerDown = /media server is unreachable/i.test(msg);
                 const display = isServerDown
-                    ? '✗ Anki media server stuck — restart the app to recover'
-                    : `✗ Anki: ${msg}`;
+                    ? dT('dc.media_server_stuck', '✗ Anki media server stuck — restart the app to recover')
+                    : dF('dc.anki_error', { msg: msg }, `✗ Anki: ${msg}`);
                 if (typeof window.showToast === 'function') {
                     window.showToast(display, 4000);
                 }
@@ -2925,6 +3105,9 @@
             // the audio bounds. The editor sits above the popup; leave the
             // popup alone until the editor flow finishes.
             if (document.getElementById('waveformEditorOverlay')) return;
+            // Taps inside a visible AI overlay (chapter view, Characters
+            // screen, …) belong to that overlay — don't dismiss under it.
+            if (inAiOverlay(e.target)) return;
             const pagedView = document.getElementById('readingPagedView');
             if (pagedView && pagedView.style.display !== 'none' &&
                 pagedView.style.visibility !== 'hidden' && pagedView.contains(e.target)) return;
@@ -2953,6 +3136,11 @@
             // drag/tap gestures inside the editor — capture-phase runs
             // before the editor overlay can stop propagation.
             if (document.getElementById('waveformEditorOverlay')) return;
+            // Same exclusion as the click path: gestures inside a visible AI
+            // overlay must not dismiss (and via maybeResumeAfterLookup,
+            // un-pause audio under) the popup, nor stamp the dismissed-ts
+            // that would eat the overlay's own gesture.
+            if (inAiOverlay(e.target)) return;
             const pagedView = document.getElementById('readingPagedView');
             if (pagedView && pagedView.style.display !== 'none' &&
                 pagedView.style.visibility !== 'hidden' && pagedView.contains(e.target)) return;
@@ -3086,6 +3274,243 @@
         console.log('✅ Click handlers attached to all spans');
     }
 
+    // ---- Generic lookup enabling for dynamic containers (AI overlay etc.) ----
+    // SPAN-LESS LAZY PATH (default). The old per-char approach wrapped EVERY
+    // character of AI prose in a span.dict-frag with four touch listeners each —
+    // a chapter summary = ~8-10k spans / ~40k listeners in one scroll container,
+    // which on iOS produced multi-second taps + scroll jank + text jitter (the
+    // confirmed lag bug). Instead we leave the text nodes intact, attach ONE
+    // delegated listener set on the container, and resolve the tapped character
+    // at tap time via caretRangeFromPoint. greedyDeinflect/performLookup/popup
+    // are shared with the card path; only highlighting differs (a temporary
+    // span.dict-hl is wrapped around the matched run, unwrapped on dismiss).
+    // The card/audio subtitle path (dictEnableLookupInSpans) is unchanged.
+
+    // Flat text of a container's text nodes in document order, skipping rt/rp
+    // (furigana). segments map each text node to its [start,start+len) range.
+    function buildLazyFlatMap(container) {
+        const segments = [];
+        let flat = '';
+        const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+            acceptNode(n) {
+                let p = n.parentNode;
+                while (p && p !== container) {
+                    const tag = p.tagName;
+                    if (tag === 'RT' || tag === 'RP') return NodeFilter.FILTER_REJECT;
+                    p = p.parentNode;
+                }
+                return n.nodeValue ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+            },
+        });
+        let n;
+        while ((n = walker.nextNode())) {
+            segments.push({ node: n, start: flat.length, len: n.nodeValue.length });
+            flat += n.nodeValue;
+        }
+        return { flatText: flat, segments };
+    }
+
+    // Resolve a tap point to { flatText, charIndex, segments } or null when the
+    // tap landed off text / on furigana / outside the container.
+    function resolveLazyHit(container, x, y) {
+        try {
+            if (typeof document.caretRangeFromPoint !== 'function') return null;
+            const range = document.caretRangeFromPoint(x, y);
+            if (!range) return null;
+            const node = range.startContainer;
+            if (!node || node.nodeType !== 3 || !container.contains(node)) return null;
+            let p = node.parentNode;
+            while (p && p !== container) {
+                if (p.tagName === 'RT' || p.tagName === 'RP') return null;
+                p = p.parentNode;
+            }
+            // Boundary-snap correction (parallels refineCharOffset in
+            // reading-mode-paged.js:3272 and the inline block in reading-mode.js:787).
+            // caretRangeFromPoint returns the nearest caret BOUNDARY, so a tap past a
+            // glyph's midpoint snaps to the NEXT char — one too far in the reading
+            // direction (in horizontal text the user had to tap LEFT of the first
+            // char to select it). If the tap isn't inside the char at the caret but IS
+            // inside the previous char's box, step back. The geometry check tests BOTH
+            // axes, so it's writing-mode-agnostic and only ever corrects toward the
+            // glyph under the finger — it never regresses an already-correct tap.
+            let off = range.startOffset | 0;
+            try {
+                const _len = node.nodeValue ? node.nodeValue.length : 0;
+                const _inBox = (s, e) => {
+                    if (s < 0 || e > _len || s >= e) return false;
+                    const r = document.createRange();
+                    r.setStart(node, s); r.setEnd(node, e);
+                    const rects = r.getClientRects();
+                    for (let i = 0; i < rects.length; i++) {
+                        const rc = rects[i];
+                        if (x >= rc.left - 0.5 && x <= rc.right + 0.5 &&
+                            y >= rc.top - 0.5 && y <= rc.bottom + 0.5) return true;
+                    }
+                    return false;
+                };
+                if (!_inBox(off, off + 1) && _inBox(off - 1, off)) off = off - 1;
+            } catch (_) {}
+            const map = buildLazyFlatMap(container);
+            const seg = map.segments.find(s => s.node === node);
+            if (!seg) return null;
+            const charIndex = seg.start + Math.min(off, seg.len);
+            if (charIndex >= map.flatText.length) return null;
+            return { flatText: map.flatText, charIndex, segments: map.segments };
+        } catch (_) { return null; }
+    }
+
+    // Wrap [charIndex, charIndex+length) in span.dict-hl.highlight, per text-node
+    // segment (a run may cross squiggle/ruby boundaries). Pushes wrappers into
+    // lastHovered (popup positioning reads their rects) and lazyHighlightSpans
+    // (clearHighlight unwraps them). Caller has already cleared prior highlight.
+    function applyLazyHighlight(segments, charIndex, length) {
+        try {
+            const end = charIndex + Math.max(1, length || 1);
+            for (const seg of segments) {
+                const from = Math.max(charIndex, seg.start);
+                const to = Math.min(end, seg.start + seg.len);
+                if (from >= to) continue;
+                let node = seg.node;
+                if (!node || !node.isConnected || node.nodeType !== 3) continue;
+                const localStart = from - seg.start;
+                const localEnd = to - seg.start;
+                let target = node;
+                if (localStart > 0) target = target.splitText(localStart);
+                if (localEnd - localStart < target.nodeValue.length) {
+                    target.splitText(localEnd - localStart);
+                }
+                const parent = target.parentNode;
+                if (!parent) continue;
+                const wrap = document.createElement('span');
+                wrap.className = 'dict-hl highlight';
+                parent.insertBefore(wrap, target);
+                wrap.appendChild(target);
+                lazyHighlightSpans.push(wrap);
+                lastHovered.push(wrap);
+            }
+        } catch (_) {}
+    }
+
+    function dictEnableLookupInLazy(container) {
+        if (container.dataset.dictLazyWired === '1') {
+            container.dataset.dictLazy = '1';
+            return;
+        }
+        container.dataset.dictLazyWired = '1';
+        container.dataset.dictLazy = '1';   // squiggle marker reads this flag
+
+        let tsX = 0, tsY = 0, moved = false;
+        container.addEventListener('touchstart', (e) => {
+            const t = e.touches && e.touches[0];
+            tsX = t ? t.clientX : 0;
+            tsY = t ? t.clientY : 0;
+            moved = false;
+        }, { passive: true });
+        container.addEventListener('touchmove', (e) => {
+            if (moved) return;
+            const t = e.touches && e.touches[0];
+            if (!t) return;
+            if (Math.abs(t.clientX - tsX) > 8 || Math.abs(t.clientY - tsY) > 8) moved = true;
+        }, { passive: true });
+        container.addEventListener('touchend', (e) => {
+            try {
+                if (moved) return;   // scrolled, not a tap
+                const _pop = document.getElementById('dictPopup');
+                if (_pop && _pop.style.display !== 'none') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    try { window.hideDictPopup?.(); } catch (_) {}
+                    window._dictPopupDismissedTs = Date.now();
+                    return;
+                }
+                const t = e.changedTouches && e.changedTouches[0];
+                if (!t) return;
+                const hit = resolveLazyHit(container, t.clientX, t.clientY);
+                if (!hit) return;    // off-text tap — let it fall through (no popup)
+                e.preventDefault();
+                e.stopPropagation();
+                clearHighlight();    // unwrap any prior highlight BEFORE we measure
+                window.lookupContext = null;
+                performLookup(null, 0, {
+                    text: hit.flatText,
+                    charIndex: hit.charIndex,
+                    applyHighlight: (length) => applyLazyHighlight(hit.segments, hit.charIndex, length),
+                });
+            } catch (_) {}
+        });
+        container.addEventListener('touchcancel', () => { clearHighlight(); });
+    }
+
+    window.dictEnableLookupIn = function (container) {
+        try {
+            if (!container || !container.textContent || !container.textContent.trim()) return;
+            // Lazy path requires caretRangeFromPoint (WebKit/Blink have it; iOS
+            // included). Fall back to the per-char spans only if it's missing.
+            if (typeof document.caretRangeFromPoint === 'function') {
+                return dictEnableLookupInLazy(container);
+            }
+            return dictEnableLookupInSpans(container);
+        } catch (e) { console.log('[dict] enableLookupIn failed: ' + (e && e.message)); }
+    };
+
+    // Legacy per-char span path — fallback only (engines without
+    // caretRangeFromPoint). Identical to the original dictEnableLookupIn.
+    function dictEnableLookupInSpans(container) {
+        try {
+            if (!container || !container.textContent || !container.textContent.trim()) return;
+            const text = container.textContent;
+            container.innerHTML = '';
+            const fragment = document.createDocumentFragment();
+            for (const char of text) {
+                const span = document.createElement('span');
+                span.className = 'dict-frag';
+                span.textContent = char;
+                fragment.appendChild(span);
+            }
+            container.appendChild(fragment);
+
+            const spans = Array.from(container.querySelectorAll('.dict-frag'));
+            spans.forEach((span, index) => {
+                let tsX = 0, tsY = 0, moved = false;
+                span.addEventListener('touchstart', (e) => {
+                    const t = e.touches[0];
+                    tsX = t ? t.clientX : 0;
+                    tsY = t ? t.clientY : 0;
+                    moved = false;
+                    if (touchTimer) { clearTimeout(touchTimer); touchTimer = null; }
+                }, { passive: true });
+                span.addEventListener('touchmove', (e) => {
+                    if (moved) return;
+                    const t = e.touches[0];
+                    if (!t) return;
+                    if (Math.abs(t.clientX - tsX) > 8 || Math.abs(t.clientY - tsY) > 8) moved = true;
+                }, { passive: true });
+                span.addEventListener('touchend', async (e) => {
+                    if (moved) return; // scrolled, not a tap
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const _pop = document.getElementById('dictPopup');
+                    if (_pop && _pop.style.display !== 'none') {
+                        try { window.hideDictPopup?.(); } catch (_) {}
+                        window._dictPopupDismissedTs = Date.now();
+                        return;
+                    }
+                    window.lookupContext = null;
+                    const text = spans.map(s => s.textContent).join('');
+                    const charIndex = spans.slice(0, index)
+                        .reduce((sum, s) => sum + s.textContent.length, 0);
+                    const best = await greedyDeinflect(text, charIndex);
+                    highlightSpans(spans, index, best.length);
+                    performLookup(spans, index);
+                });
+                span.addEventListener('touchcancel', () => {
+                    if (touchTimer) { clearTimeout(touchTimer); touchTimer = null; }
+                    clearHighlight();
+                });
+            });
+        } catch (e) { console.log('[dict] enableLookupIn failed: ' + (e && e.message)); }
+    };
+
     // Global dictionary loading promise - only load once
     let dictionaryLoadingPromise = null;
     let dictionaryLoadingStarted = false;
@@ -3193,7 +3618,7 @@
             const earlyPopup = getOrCreatePopup();
             earlyPopup.innerHTML = `
                 <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 0;">
-                    <div style="color:#4caf50;font-size:.9em;">Looking up…</div>
+                    <div style="color:#4caf50;font-size:.9em;">${dT('dc.looking_up', 'Looking up…')}</div>
                 </div>`;
             positionDictPopup(earlyPopup);
             earlyPopup.style.display = 'block';
@@ -3240,13 +3665,13 @@
                 }
                 if (token !== currentLookupToken) return; // a newer tap superseded us during the async check
                 const emptyMsg = noDicts
-                    ? 'No dictionaries loaded — add one in Preferences.'
-                    : 'No definition found.';
+                    ? dT('dc.no_dicts_loaded', 'No dictionaries loaded — add one in Preferences.')
+                    : dT('dc.no_definition', 'No definition found.');
                 popup.innerHTML = `
                     <div style="padding:20px;text-align:center;">
                         <div style="font-size:1.1em;font-weight:700;margin-bottom:8px;">${best.base}</div>
                         <div style="color:#888;font-size:.85em;">${emptyMsg}</div>
-                        <div style="color:#666;font-size:.7em;margin-top:12px;">Tap anywhere to close</div>
+                        <div style="color:#666;font-size:.7em;margin-top:12px;">${dT('dc.tap_to_close', 'Tap anywhere to close')}</div>
                     </div>`;
                 // CRITICAL: explicit display='block'. The results branch
                 // below sets it; the empty branch was missing it, so when
@@ -3360,6 +3785,12 @@
            keeps the pick clearly visible without any metric change. */
         .dict-frag.highlight {
             background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 40%, transparent) !important;
+            border-radius: 3px;
+        }
+        /* Span-less AI overlays (char popup / Characters screen / chapter view):
+           the looked-up run is wrapped in .dict-hl, not .dict-frag. Same lift. */
+        .dict-hl {
+            background: color-mix(in srgb, var(--accent-audio, #b794f6) 42%, transparent) !important;
             border-radius: 3px;
         }
         body.mode-card  .dict-frag.highlight {

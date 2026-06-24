@@ -88,6 +88,10 @@ public class BackgroundAudioService extends Service {
         // AUDIO mode (so lock-screen play always starts the audiobook + audio
         // timer, never card/reader), and nextCue/prevCue to jump by subtitle.
         void onRemoteCommand(String action);
+        // Native chapter-repeat: idx >= 0 means we just paused at the end of
+        // chapter idx to announce + rewind; idx == -1 means the announce/rewind
+        // cycle is over (resumed) so JS can clear any "repeating chapter N" UI.
+        void onChapterRepeat(int idx);
     }
 
     private static BackgroundAudioService instance;
@@ -131,6 +135,33 @@ public class BackgroundAudioService extends Service {
     // user's back. Volatile: read by isCurrentlyPlaying() off-thread.
     private static final long SUPPRESSION_GRACE_MS = 60_000;
     private volatile boolean suppressed = false;
+
+    // ----- Native chapter-repeat -----
+    //
+    // Implemented entirely in the service so it works while backgrounded /
+    // screen-off (the foreground mediaPlayback service keeps the main looper
+    // alive — proven by durableSaveTick). On each forward crossing into a new
+    // chapter we pause, speak the chapter's announcement via TTS, rewind to the
+    // chapter start, and resume. A failsafe ALWAYS resumes so the book can
+    // never be left paused (see doChapterRepeat / finishRepeat).
+    public static final class Chapter {
+        public final int idx; public final long startMs; public final long endMs; public final String announce;
+        public Chapter(int idx, long startMs, long endMs, String announce) { this.idx=idx; this.startMs=startMs; this.endMs=endMs; this.announce=announce; }
+    }
+    private volatile boolean repeatEnabled = false;
+    private volatile Chapter[] chapters = null;
+    private int repeatLastPosMs = -1;
+    private int repeatLastChapIdx = -1;
+    private int repeatInPass = -1;
+    private final java.util.HashSet<Integer> repeatedChapters = new java.util.HashSet<>();   // array positions whose ONE repeat is done — never repeat again (skip-back safe)
+    private boolean repeatBusy = false;
+    private long repeatSeekGuardUntil = 0;
+    private long repeatUtterToken = 0;
+    private int repeatPendingTarget = -1;
+    private static final int REPEAT_TICK_MS = 700;
+    private static final long ANNOUNCE_FAILSAFE_MS = 4500;
+    private android.speech.tts.TextToSpeech tts = null;
+    private volatile boolean ttsReady = false;
 
     private MediaSessionCompat mediaSession;
     // Metadata fields: written via setMetadata (marshalled to the main looper)
@@ -314,11 +345,25 @@ public class BackgroundAudioService extends Service {
             if (state == Player.STATE_READY) {
                 if (!prepared) onFirstReady();
             } else if (state == Player.STATE_ENDED) {
+                // Last-chapter repeat: the final chapter has no "next" to cross INTO, so
+                // detectChapterCrossing never fires for it — trigger its one repeat here
+                // at EOF. Mark it done first so the SECOND end finishes normally.
+                // (ExoPlayer callbacks arrive on the main looper == playerHandler thread,
+                // so calling doChapterRepeat directly honors the single-thread invariant.)
+                // Gate on >=2 chapters (matches the crossing detector + TTS arm; a
+                // 1-chapter "book" would replay the whole thing silently).
+                Chapter[] chs = chapters;
+                if (repeatEnabled && !repeatBusy && chs != null && chs.length >= 2) {
+                    int lastPos = chs.length - 1;
+                    if (chs[lastPos] != null && !repeatedChapters.contains(lastPos)) {
+                        repeatedChapters.add(lastPos);
+                        emitChapterRepeat(lastPos);
+                        doChapterRepeat(chs[lastPos]);
+                        return;
+                    }
+                }
                 Log.d(TAG, "completion");
-                wantPlaying = false;
-                if (listener != null) listener.onEnded();
-                updatePlaybackState();
-                showPausedNotification("Finished");   // book ended → notification becomes dismissible
+                endOfBook();
             }
         }
         @Override public void onPlayWhenReadyChanged(boolean playWhenReady, int reason) {
@@ -843,7 +888,12 @@ public class BackgroundAudioService extends Service {
     // may then be dropped, but consecutive swipes recompute the target so the end
     // position is still right, and whatever cancelled it restores the volume.
     public void seekToMs(int ms, int fadeMs) {
-        runOnPlayer(() -> tryRun(() -> {
+        runOnPlayer(() -> {
+        // An external seek invalidates the chapter-crossing baseline; arm a
+        // brief guard so the detection tick re-baselines instead of mistaking
+        // the jump for a natural forward crossing.
+        repeatSeekGuardUntil = android.os.SystemClock.uptimeMillis() + 1000; repeatLastPosMs = -1; repeatLastChapIdx = -1;
+        tryRun(() -> {
             final ExoPlayer mp = exo;
             if (mp == null || !prepared) return;
             boolean playing = false;
@@ -872,7 +922,8 @@ public class BackgroundAudioService extends Service {
                 mp.seekTo(ms);
                 cachedPositionMs = ms;
             }
-        }));
+        });
+        });
     }
 
     public void setRate(float rate) {
@@ -927,6 +978,198 @@ public class BackgroundAudioService extends Service {
             return null; // keep whatever art we had
         }
     }
+
+    // ----- Native chapter-repeat implementation -----
+
+    // Self-reposting detection tick (runs on the player/main looper while
+    // enabled, like durableSaveTick — alive screen-off under the FGS).
+    private final Runnable repeatTick = new Runnable() {
+        @Override public void run() {
+            try { detectChapterCrossing(); } catch (Exception e) { Log.e(TAG, "repeatTick", e); }
+            if (repeatEnabled) playerHandler.postDelayed(this, REPEAT_TICK_MS);
+        }
+    };
+
+    private void detectChapterCrossing() {
+        if (!repeatEnabled || repeatBusy) return;
+        Chapter[] chs = chapters;
+        if (chs == null || chs.length < 2) return;
+        ExoPlayer p = exo;
+        if (p == null || !prepared || !wantPlaying || suppressed) return;
+        int pos = getPositionMs();
+        int curIdx = chapterIndexForMs(pos, chs);
+        int prevMs = repeatLastPosMs, prevIdx = repeatLastChapIdx;
+        repeatLastPosMs = pos; repeatLastChapIdx = curIdx;
+        if (android.os.SystemClock.uptimeMillis() < repeatSeekGuardUntil) return;
+        if (prevMs < 0 || prevIdx < 0 || curIdx < 0) return;
+        int delta = pos - prevMs;
+        if (!(delta > 0 && delta < 3000)) return;
+        if (curIdx != prevIdx + 1) return;
+        // The repeat pass for prevIdx just ended -> mark it done so it never repeats
+        // again (e.g. if the user later scrubs back into it), then advance.
+        if (repeatInPass == prevIdx) { repeatedChapters.add(prevIdx); repeatInPass = -1; emitChapterRepeat(-1); return; }
+        // Already repeated once this session -> don't repeat again (skip-back safe).
+        if (repeatedChapters.contains(prevIdx)) return;
+        Chapter ended = chs[prevIdx];
+        if (ended != null) { repeatInPass = prevIdx; emitChapterRepeat(prevIdx); doChapterRepeat(ended); }
+    }
+
+    private int chapterIndexForMs(int ms, Chapter[] chs) {
+        int best = -1;
+        for (int i = 0; i < chs.length; i++) { Chapter c = chs[i]; if (c == null) continue; if (ms >= c.startMs && ms <= c.endMs) return i; if (c.startMs <= ms) best = i; }
+        return best;
+    }
+
+    // Pause -> speak -> (later) seek -> resume. Pause EXPLICITLY (a USER_REQUEST
+    // pause, not the focus-suppression mirror) so onPlayWhenReadyChanged's
+    // focus/noisy gate ignores it. NEVER leaves the book paused: a failsafe
+    // postDelayed funnels to finishRepeat, as do onDone/onError.
+    private void doChapterRepeat(Chapter ch) {
+        if (repeatBusy) return;
+        repeatBusy = true;
+        final long token = ++repeatUtterToken;
+        repeatPendingTarget = (int) Math.max(0, ch.startMs);
+        final String announce = ch.announce;
+        cancelFade();
+        ExoPlayer p = exo;
+        if (p != null) { try { p.setVolume(1f); p.pause(); } catch (Exception ignored) {} }
+        playerHandler.postDelayed(() -> finishRepeat(token), ANNOUNCE_FAILSAFE_MS);
+        if (ttsReady && tts != null && announce != null && !announce.isEmpty()) {
+            try {
+                android.os.Bundle b = new android.os.Bundle();
+                b.putFloat(android.speech.tts.TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f);
+                int r = tts.speak(announce, android.speech.tts.TextToSpeech.QUEUE_FLUSH, b, "kadoki-cr-" + token);
+                if (r != android.speech.tts.TextToSpeech.SUCCESS) playerHandler.postDelayed(() -> finishRepeat(token), 250);
+            } catch (Exception e) { playerHandler.postDelayed(() -> finishRepeat(token), 250); }
+        } else {
+            playerHandler.postDelayed(() -> finishRepeat(token), 250);
+        }
+    }
+
+    private void finishRepeat(long token) {
+        if (token != repeatUtterToken || !repeatBusy) return;
+        repeatBusy = false;
+        int target = repeatPendingTarget; repeatPendingTarget = -1;
+        ExoPlayer p = exo;
+        if (p == null || !prepared) return;
+        try {
+            if (repeatEnabled && target >= 0) {
+                p.seekTo(target); cachedPositionMs = target;
+                repeatSeekGuardUntil = android.os.SystemClock.uptimeMillis() + 1200;
+                repeatLastPosMs = -1; repeatLastChapIdx = -1;
+            }
+            resumeInPlace();
+        } catch (Exception e) { Log.e(TAG, "finishRepeat", e); try { p.play(); wantPlaying = true; } catch (Exception ignored) {} }
+    }
+
+    // Natural end-of-book: emit ended + make the notification dismissible. Extracted
+    // so both STATE_ENDED and a repeat-cancel-at-EOF finish the book cleanly (a bare
+    // play()/resumeInPlace() at STATE_ENDED is a no-op that strands wantPlaying=true).
+    private void endOfBook() {
+        wantPlaying = false;
+        if (listener != null) listener.onEnded();
+        updatePlaybackState();
+        showPausedNotification("Finished");
+    }
+
+    private void resumeInPlace() {
+        ExoPlayer p = exo;
+        if (p == null || !prepared) return;
+        try { p.setVolume(1f); p.play(); } catch (Exception ignored) {}
+        wantPlaying = true;
+        saveLastPositionNow();
+        updatePlaybackState();
+        startInForeground("Playing");
+        if (listener != null) { listener.onPlayingStateChanged(true); listener.onPositionUpdate(getPositionMs(), getDurationMs()); }
+    }
+
+    // Lazy TTS init (ja voice). UtteranceProgressListener marshals to playerHandler.
+    // NOTE: android.media.AudioAttributes is FULLY QUALIFIED — the service imports
+    // androidx.media3.common.AudioAttributes, so a bare AudioAttributes is the wrong type.
+    private void ensureTts() {
+        if (tts != null) return;
+        try {
+            tts = new android.speech.tts.TextToSpeech(getApplicationContext(), status -> {
+                if (status == android.speech.tts.TextToSpeech.SUCCESS && tts != null) {
+                    try {
+                        tts.setAudioAttributes(new android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build());
+                        int lr = tts.setLanguage(java.util.Locale.JAPANESE);
+                        ttsReady = !(lr == android.speech.tts.TextToSpeech.LANG_MISSING_DATA || lr == android.speech.tts.TextToSpeech.LANG_NOT_SUPPORTED);
+                    } catch (Exception e) { ttsReady = false; }
+                } else { ttsReady = false; }
+            });
+            tts.setOnUtteranceProgressListener(new android.speech.tts.UtteranceProgressListener() {
+                @Override public void onStart(String id) {}
+                @Override public void onDone(String id) { onAnnounceFinished(id); }
+                @Override public void onError(String id) { onAnnounceFinished(id); }
+                @Override public void onError(String id, int code) { onAnnounceFinished(id); }
+            });
+        } catch (Exception e) { Log.e(TAG, "ensureTts", e); tts = null; ttsReady = false; }
+    }
+
+    private void onAnnounceFinished(String utteranceId) {
+        long token = -1;
+        try { if (utteranceId != null && utteranceId.startsWith("kadoki-cr-")) token = Long.parseLong(utteranceId.substring(10)); } catch (Exception ignored) {}
+        final long t = token;
+        playerHandler.post(() -> finishRepeat(t));
+    }
+
+    // ----- Public chapter-repeat API (called from BackgroundAudioPlugin) -----
+
+    public void setChapterRepeat(boolean enabled, Chapter[] chs) {
+        runOnPlayer(() -> {
+            boolean wasOn = repeatEnabled;
+            int oldCount = (chapters != null) ? chapters.length : 0;
+            repeatEnabled = enabled; chapters = chs;
+            repeatLastPosMs = -1; repeatLastChapIdx = -1;
+            // Fresh arm (off->on) or a re-segment (chapter count changed) restarts the
+            // "once each" budget. A benign re-send with the SAME chapters (e.g. the
+            // kai:ai-data map refresh that fires while listening) preserves what's done.
+            int newCount = (chs != null) ? chs.length : 0;
+            if (enabled && (!wasOn || newCount != oldCount)) repeatedChapters.clear();
+            if (enabled && chs != null && chs.length >= 2) {
+                ensureTts();
+                playerHandler.removeCallbacks(repeatTick); playerHandler.postDelayed(repeatTick, REPEAT_TICK_MS);
+            } else {
+                playerHandler.removeCallbacks(repeatTick);
+                if (repeatBusy) {
+                    ++repeatUtterToken; repeatBusy = false;
+                    try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
+                    // If we paused for the final chapter's EOF announce, the player is at
+                    // STATE_ENDED — resumeInPlace() would be a no-op that strands it
+                    // "playing". End the book cleanly instead.
+                    ExoPlayer pp = exo;
+                    if (pp != null && pp.getPlaybackState() == Player.STATE_ENDED) endOfBook();
+                    else resumeInPlace();
+                }
+                repeatInPass = -1; emitChapterRepeat(-1);
+            }
+        });
+    }
+
+    public void skipToNextChapter() {
+        runOnPlayer(() -> {
+            Chapter[] chs = chapters; int from = repeatInPass;
+            ++repeatUtterToken; repeatBusy = false; repeatInPass = -1;
+            try { if (tts != null) tts.stop(); } catch (Exception ignored) {}
+            emitChapterRepeat(-1);
+            ExoPlayer p = exo;
+            if (p == null || !prepared) return;
+            if (from < 0) from = chapterIndexForMs(getPositionMs(), chs);   // robust if no active pass
+            // We're leaving this chapter (mid-repeat or not) -> mark it done so
+            // re-entering it later won't repeat it again.
+            if (from >= 0) repeatedChapters.add(from);
+            if (chs != null && from >= 0 && (from + 1) < chs.length && chs[from + 1] != null) {
+                int target = (int) Math.max(0, chs[from + 1].startMs);
+                try { p.seekTo(target); cachedPositionMs = target; repeatSeekGuardUntil = android.os.SystemClock.uptimeMillis() + 1200; repeatLastPosMs = -1; repeatLastChapIdx = -1; } catch (Exception ignored) {}
+            }
+            resumeInPlace();
+        });
+    }
+
+    private void emitChapterRepeat(int idx) { if (listener != null) listener.onChapterRepeat(idx); }
 
     // ----- MediaSession + lock screen -----
 
@@ -1137,6 +1380,8 @@ public class BackgroundAudioService extends Service {
     public void onDestroy() {
         saveLastPositionNow();                       // final durable snapshot
         playerHandler.removeCallbacks(durableSaveTick);
+        playerHandler.removeCallbacks(repeatTick);
+        if (tts != null) { try { tts.stop(); } catch (Exception ignored) {} try { tts.shutdown(); } catch (Exception ignored) {} tts = null; }
         stopPlayback();
         // Remove the notification on teardown — a service destroyed while DEMOTED
         // (paused) won't auto-clear its detached notification, which would leave it

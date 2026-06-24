@@ -123,7 +123,7 @@
             const info = await window.fonts.importFile(file);
             if (onDone) onDone(info);
           } catch (e) {
-            alert('Font import failed: ' + (e && e.message || e));
+            alert(window.i18n.fmt('pj.font_import_failed', { err: (e && e.message || e) }));
           }
         })();
         return;
@@ -142,7 +142,7 @@
         const f = input.files && input.files[0];
         if (!f || !window.fonts) return;
         try { const info = await window.fonts.importFile(f); if (onDone) onDone(info); }
-        catch (e) { alert('Font import failed: ' + (e && e.message || e)); }
+        catch (e) { alert(window.i18n.fmt('pj.font_import_failed', { err: (e && e.message || e) })); }
       };
       input.click();
     }
@@ -155,7 +155,7 @@
     function fontControl(mode, getCurrent, baseOptions) {
       const sel = document.createElement('select');
       const cur = getCurrent();
-      (baseOptions || [['Serif', 'serif'], ['Sans-serif', 'sans']]).forEach(([label, val]) => {
+      (baseOptions || [[window.i18n.t('pj.font_serif', 'Serif'), 'serif'], [window.i18n.t('pj.font_sans', 'Sans-serif'), 'sans']]).forEach(([label, val]) => {
         const o = document.createElement('option'); o.value = val; o.textContent = label;
         if (cur === val) o.selected = true; sel.appendChild(o);
       });
@@ -165,7 +165,7 @@
         if (cur === 'custom:' + f.id) o.selected = true; sel.appendChild(o);
       });
       const imp = document.createElement('option');
-      imp.value = '__import__'; imp.textContent = '➕ Import TTF…';
+      imp.value = '__import__'; imp.textContent = window.i18n.t('pj.import_ttf', '➕ Import TTF…');
       sel.appendChild(imp);
       sel.addEventListener('change', () => {
         if (sel.value === '__import__') {
@@ -348,7 +348,7 @@
       const lbl = document.createElement('div');
       lbl.className = 'mode-label';
       lbl.dataset.mode = mode;
-      lbl.textContent = mode;
+      lbl.textContent = window.i18n.t('pj.mode_' + mode, mode);
       block.appendChild(lbl);
 
       const get = () => window.appearance?.get?.(mode) || window.appearance?.defaults?.()[mode];
@@ -356,26 +356,26 @@
       // Font family — Serif / Sans-serif, any imported custom (TTF) fonts, and
       // an "Import TTF…" action. Shown for ALL modes so fonts can be set per
       // mode (read included).
-      block.appendChild(row('Font family', fontControl(mode, () => get().fontFamily)));
+      block.appendChild(row(window.i18n.t('pj.font_family', 'Font family'), fontControl(mode, () => get().fontFamily)));
 
-      block.appendChild(row('Font size', fontSizeRange(mode, () => get().fontSize)));
+      block.appendChild(row(window.i18n.t('pj.font_size', 'Font size'), fontSizeRange(mode, () => get().fontSize)));
 
       // Display toggles.
       if (mode === 'card') {
-        block.appendChild(row('Text alignment', (() => {
+        block.appendChild(row(window.i18n.t('pj.text_alignment', 'Text alignment'), (() => {
           const sel = document.createElement('select');
           sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
-          [['center', 'Center'], ['left', 'Left']].forEach(([v, t]) => {
+          [['center', window.i18n.t('pj.align_center', 'Center')], ['left', window.i18n.t('pj.align_left', 'Left')]].forEach(([v, t]) => {
             const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
           });
           sel.value = (get().align === 'left') ? 'left' : 'center';
           sel.addEventListener('change', () => apply('card', { align: sel.value }));
           return sel;
         })()));
-        block.appendChild(row('Picture position', (() => {
+        block.appendChild(row(window.i18n.t('pj.picture_position', 'Picture position'), (() => {
           const sel = document.createElement('select');
           sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
-          [['flex-start', 'Top'], ['center', 'Centered'], ['flex-end', 'Bottom']].forEach(([v, t]) => {
+          [['flex-start', window.i18n.t('pj.pos_top', 'Top')], ['center', window.i18n.t('pj.pos_centered', 'Centered')], ['flex-end', window.i18n.t('pj.pos_bottom', 'Bottom')]].forEach(([v, t]) => {
             const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
           });
           const cur = get().imageAlign;
@@ -383,15 +383,15 @@
           sel.addEventListener('change', () => apply('card', { imageAlign: sel.value }));
           return sel;
         })()));
-        block.appendChild(row('Show background image', toggle(
+        block.appendChild(row(window.i18n.t('pj.show_bg_image', 'Show background image'), toggle(
           () => get().showBgImage !== false,
           (on) => apply('card', { showBgImage: on })
         )));
-        block.appendChild(row('Show waveform', toggle(
+        block.appendChild(row(window.i18n.t('pj.show_waveform', 'Show waveform'), toggle(
           () => get().showWaveform !== false,
           (on) => apply('card', { showWaveform: on })
         )));
-        block.appendChild(row('Show upcoming subtitle', toggle(
+        block.appendChild(row(window.i18n.t('pj.show_upcoming_subtitle', 'Show upcoming subtitle'), toggle(
           () => get().showNextSub === true,
           (on) => apply('card', { showNextSub: on })
         )));
@@ -402,17 +402,17 @@
         // at load time — grayscale photos/shaded art and color artwork never
         // auto-invert (they'd look like film negatives); the image viewer's
         // ◑ Invert button covers those by hand.
-        block.appendChild(row('Invert line art (dark mode)', toggle(
+        block.appendChild(row(window.i18n.t('pj.invert_line_art', 'Invert line art (dark mode)'), toggle(
           () => get().invertBwImages === true,
           (on) => apply('read', { invertBwImages: on })
         )));
       }
       if (mode === 'audio') {
-        block.appendChild(row('Show waveform', toggle(
+        block.appendChild(row(window.i18n.t('pj.show_waveform', 'Show waveform'), toggle(
           () => get().showWaveform !== false,
           (on) => apply('audio', { showWaveform: on })
         )));
-        block.appendChild(row('Show upcoming subtitle', toggle(
+        block.appendChild(row(window.i18n.t('pj.show_upcoming_subtitle', 'Show upcoming subtitle'), toggle(
           () => get().showNextSub === true,
           (on) => apply('audio', { showNextSub: on })
         )));
@@ -423,7 +423,7 @@
         // bridge as base64 and re-issues the media notification). OFF = the
         // title's cover art is pushed once and stays. Stored in the
         // localStorage key reading-mode.js already gates on.
-        block.appendChild(row('Lock screen: subtitle as cover art', toggle(
+        block.appendChild(row(window.i18n.t('pj.lockscreen_subtitle_art', 'Lock screen: subtitle as cover art'), toggle(
           () => { try { return localStorage.getItem('LOCKSCREEN_SUBTITLE_ART') !== '0'; } catch (_) { return true; } },
           (on) => {
             try { localStorage.setItem('LOCKSCREEN_SUBTITLE_ART', on ? '1' : '0'); } catch (_) {}
@@ -434,8 +434,8 @@
 
       // Card-only extras (moved from the deleted Card mode prefs section).
       if (mode === 'card') {
-        block.appendChild(row('Subtitle vertical offset', subtitleOffsetRow()));
-        block.appendChild(row('Stopwatch inactivity timeout (s)', stopwatchTimeoutRow()));
+        block.appendChild(row(window.i18n.t('pj.subtitle_vertical_offset', 'Subtitle vertical offset'), subtitleOffsetRow()));
+        block.appendChild(row(window.i18n.t('pj.stopwatch_timeout', 'Stopwatch inactivity timeout (s)'), stopwatchTimeoutRow()));
       }
       return block;
     };
@@ -453,12 +453,12 @@
       dblock.className = 'appearance-mode';
       const dlbl = document.createElement('div');
       dlbl.className = 'mode-label';
-      dlbl.textContent = 'Dictionary popup';
+      dlbl.textContent = window.i18n.t('pj.dictionary_popup', 'Dictionary popup');
       dblock.appendChild(dlbl);
       const getDict = () => window.appearance?.get?.('dict') ||
         (window.appearance?.defaults?.() || {}).dict || { fontFamily: 'system' };
-      dblock.appendChild(row('Font family', fontControl('dict', () => getDict().fontFamily,
-        [['System', 'system'], ['Serif', 'serif'], ['Sans-serif', 'sans']])));
+      dblock.appendChild(row(window.i18n.t('pj.font_family', 'Font family'), fontControl('dict', () => getDict().fontFamily,
+        [[window.i18n.t('pj.font_system', 'System'), 'system'], [window.i18n.t('pj.font_serif', 'Serif'), 'serif'], [window.i18n.t('pj.font_sans', 'Sans-serif'), 'sans']])));
       host.appendChild(dblock);
     })();
 
@@ -469,7 +469,7 @@
       mgr.className = 'appearance-mode';
       const lbl = document.createElement('div');
       lbl.className = 'mode-label';
-      lbl.textContent = 'Imported fonts';
+      lbl.textContent = window.i18n.t('pj.imported_fonts', 'Imported fonts');
       mgr.appendChild(lbl);
       imported.forEach(f => {
         const r = document.createElement('div');
@@ -479,7 +479,7 @@
         nm.style.fontFamily = '"' + f.family + '", serif';
         const del = document.createElement('button');
         del.type = 'button';
-        del.textContent = 'Delete';
+        del.textContent = window.i18n.t('common.delete', 'Delete');
         del.style.cssText = 'background:#2a1414;color:#e88;border:1px solid #5a2a2a;border-radius:6px;padding:5px 12px;font-size:.8rem;cursor:pointer;';
         del.addEventListener('click', async () => {
           try { await window.fonts.remove(f.id); } catch (_) {}
@@ -497,8 +497,8 @@
   // instead of showing a confusing AnkiConnect message.
   function ankiEmptyListLabel() {
     return (window.Capacitor?.getPlatform?.() === 'ios')
-      ? '(tap "Fetch from Anki")'
-      : '(AnkiConnect unreachable)';
+      ? window.i18n.t('pj.anki_empty_ios', '(tap "Fetch from Anki")')
+      : window.i18n.t('pj.anki_empty_android', '(AnkiConnect unreachable)');
   }
 
   function populateDeckSelect(select, decks, value) {
@@ -518,7 +518,7 @@
     if (value && !decks.includes(value)) {
       // Preserve the saved value even if AnkiConnect couldn't list it now.
       const opt = document.createElement('option');
-      opt.value = value; opt.textContent = value + ' (saved)';
+      opt.value = value; opt.textContent = window.i18n.fmt('pj.saved_suffix', { value });
       select.appendChild(opt);
     }
     select.value = value || '';
@@ -556,32 +556,33 @@
 
   function injectIOSAnkiFetchButton() {
     document.querySelectorAll('.prefs-section').forEach((s) => {
-      const isAnki = s.textContent.includes('Anki: swipe-up') ||
-                     s.textContent.includes('Anki: dictionary add-word');
+      // Case-insensitive so heading relabels (e.g. "Swipe-Up and Scene Save") don't break detection.
+      const txt = (s.textContent || '').toLowerCase();
+      const isAnki = txt.includes('anki: swipe-up') ||
+                     txt.includes('anki: dictionary add-word');
       if (!isAnki || s.querySelector('[data-role="anki-fetch"]')) return; // dedupe
       const row = document.createElement('div');
       row.style.cssText = 'margin:10px 0;';
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.dataset.role = 'anki-fetch';
-      btn.textContent = '⤓ Fetch decks, note types & fields from Anki';
+      btn.textContent = window.i18n.t('pj.anki_fetch_btn', '⤓ Fetch decks, note types & fields from Anki');
       btn.style.cssText = 'background:#1a1a1a;color:var(--text,#e8e8e8);border:1px solid #333;' +
         'border-radius:8px;padding:8px 14px;font-size:.85rem;cursor:pointer;-webkit-tap-highlight-color:transparent;';
       const note = document.createElement('div');
       note.style.cssText = 'font-size:.72rem;color:#888;margin-top:4px;';
-      note.textContent = 'Opens AnkiMobile and returns here. Run once — and again after you add decks/note types in Anki.';
+      note.textContent = window.i18n.t('pj.anki_fetch_note', 'Opens AnkiMobile and returns here. Run once — and again after you add decks/note types in Anki.');
       btn.addEventListener('click', async () => {
-        if (typeof window.fetchAnkiInfoIOS !== 'function') { alert('AnkiMobile bridge unavailable.'); return; }
-        const label = btn.textContent; btn.disabled = true; btn.textContent = 'Opening AnkiMobile…';
+        if (typeof window.fetchAnkiInfoIOS !== 'function') { alert(window.i18n.t('pj.anki_bridge_unavailable', 'AnkiMobile bridge unavailable.')); return; }
+        const label = btn.textContent; btn.disabled = true; btn.textContent = window.i18n.t('pj.opening_ankimobile', 'Opening AnkiMobile…');
         try {
           const info = await window.fetchAnkiInfoIOS();
           if (typeof wireAnkiSection === 'function') await wireAnkiSection(); // repopulate all dropdowns from the cache
           const nd = (info.decks || []).length, nt = (info.notetypes || []).length;
-          btn.textContent = `✓ ${nd} decks, ${nt} note types`;
+          btn.textContent = '✓ ' + window.i18n.fmt('pj.anki_fetch_result', { nd, nt });
           setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 2500);
         } catch (e) {
-          alert('Could not fetch from AnkiMobile: ' + ((e && e.message) || e) +
-                '\n\nMake sure AnkiMobile is installed and up to date, then try again.');
+          alert(window.i18n.fmt('pj.anki_fetch_failed', { err: ((e && e.message) || e) }));
           btn.textContent = label; btn.disabled = false;
         }
       });
@@ -598,7 +599,7 @@
     const sections = document.querySelectorAll('.prefs-section');
     let target = null;
     sections.forEach(s => {
-      if (s.textContent.includes('Anki: dictionary add-word')) target = s;
+      if ((s.textContent || '').toLowerCase().includes('anki: dictionary add-word')) target = s;
     });
     if (!target) return;
     if (target.querySelector('[data-role="anki-media-link"]')) return; // dedupe
@@ -608,17 +609,17 @@
     row.setAttribute('data-role', 'anki-media-link');
     row.style.alignItems = 'flex-start';
     row.innerHTML = `
-      <label style="flex:0 0 45%;line-height:1.35;">Media folder
+      <label style="flex:0 0 45%;line-height:1.35;">${window.i18n.t('pj.media_folder', 'Media folder')}
         <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
-          Optional fallback. Primary delivery uses the in-app HTTP server — no linking required.
+          ${window.i18n.t('pj.media_folder_help', 'Optional fallback. Primary delivery uses the in-app HTTP server — no linking required.')}
         </span>
       </label>
       <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:6px;">
-        <div data-role="status" style="font-size:.78rem;color:var(--text-muted,#888);">Checking…</div>
+        <div data-role="status" style="font-size:.78rem;color:var(--text-muted,#888);">${window.i18n.t('pj.checking', 'Checking…')}</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button data-role="link" class="btn" style="flex:1;background:transparent;color:var(--accent-cyan,#00ffcc);border:1px solid var(--accent-cyan,#00ffcc);padding:6px 10px;border-radius:6px;font-size:.78rem;">Link folder</button>
-          <button data-role="unlink" class="btn" style="background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#2a2a2a);padding:6px 10px;border-radius:6px;font-size:.78rem;display:none;">Unlink</button>
-          <button data-role="test-anki" class="btn" style="flex:1;background:transparent;color:var(--accent-warn,#ffd54a);border:1px solid var(--accent-warn,#ffd54a);padding:6px 10px;border-radius:6px;font-size:.78rem;">Send test card</button>
+          <button data-role="link" class="btn" style="flex:1;background:transparent;color:var(--accent-cyan,#00ffcc);border:1px solid var(--accent-cyan,#00ffcc);padding:6px 10px;border-radius:6px;font-size:.78rem;">${window.i18n.t('pj.link_folder', 'Link folder')}</button>
+          <button data-role="unlink" class="btn" style="background:transparent;color:var(--text-muted,#888);border:1px solid var(--border,#2a2a2a);padding:6px 10px;border-radius:6px;font-size:.78rem;display:none;">${window.i18n.t('pj.unlink', 'Unlink')}</button>
+          <button data-role="test-anki" class="btn" style="flex:1;background:transparent;color:var(--accent-warn,#ffd54a);border:1px solid var(--accent-warn,#ffd54a);padding:6px 10px;border-radius:6px;font-size:.78rem;">${window.i18n.t('pj.send_test_card', 'Send test card')}</button>
         </div>
       </div>
     `;
@@ -633,18 +634,18 @@
       try {
         const r = await ab.getMediaFolderStatus();
         if (r?.linked) {
-          status.textContent = '✓ Linked: ' + (r.name || 'collection.media');
+          status.textContent = '✓ ' + window.i18n.fmt('pj.media_linked', { name: (r.name || 'collection.media') });
           status.style.color = 'var(--accent-read,#4caf50)';
-          linkBtn.textContent = 'Re-link';
+          linkBtn.textContent = window.i18n.t('pj.relink', 'Re-link');
           unlinkBtn.style.display = 'inline-block';
         } else {
-          status.textContent = 'Not linked (fallback only — not required)';
+          status.textContent = window.i18n.t('pj.not_linked', 'Not linked (fallback only — not required)');
           status.style.color = 'var(--text-muted,#888)';
-          linkBtn.textContent = 'Link folder';
+          linkBtn.textContent = window.i18n.t('pj.link_folder', 'Link folder');
           unlinkBtn.style.display = 'none';
         }
       } catch (e) {
-        status.textContent = 'Status check failed';
+        status.textContent = window.i18n.t('pj.status_check_failed', 'Status check failed');
       }
     }
     refresh();
@@ -653,7 +654,7 @@
       try {
         await ab.linkMediaFolder();
       } catch (e) {
-        alert('Could not link folder: ' + (e?.message || e));
+        alert(window.i18n.fmt('pj.link_folder_failed', { err: (e?.message || e) }));
       }
       refresh();
     });
@@ -673,7 +674,7 @@
         const cfg = (typeof window.getAnkiSettings === 'function')
           ? await window.getAnkiSettings('dict')
           : null;
-        if (!cfg) { alert('Anki settings unavailable'); return; }
+        if (!cfg) { alert(window.i18n.t('pj.anki_settings_unavailable', 'Anki settings unavailable')); return; }
         const fields = {};
         fields[cfg.fields.term] = `anki-bridge-test-${Date.now()}`;
         const cbPromise = (typeof window.waitForAnkiCallback === 'function')
@@ -697,16 +698,16 @@
         // card, the URL itself (model/deck/profile) is wrong. If Safari
         // succeeds but our plugin fails, it's a UIApplication.open issue.
         const verdict = (cbResult === 'success')
-          ? `✓ TEST OK — model/deck names work. If real sends fail, the issue is media-related.`
+          ? window.i18n.t('pj.test_ok', '✓ TEST OK — model/deck names work. If real sends fail, the issue is media-related.')
           : (cbResult === 'error')
-          ? `✗ TEST REJECTED by AnkiMobile (model "${cfg.model}" invalid). Tap OK to copy the URL.`
-          : `? TEST: no reply from AnkiMobile.\n\nSent: model="${cfg.model}" deck="${cfg.deck}"\nLast callback URL seen: ${window._lastAnkiCallbackUrl || '(none)'}\n\nTap OK to copy the URL for manual Safari testing.`;
-        const confirmed = window.confirm(verdict + '\n\n— URL —\n' + constructedUrl);
+          ? window.i18n.fmt('pj.test_rejected', { model: cfg.model })
+          : window.i18n.fmt('pj.test_no_reply', { model: cfg.model, deck: cfg.deck, url: (window._lastAnkiCallbackUrl || window.i18n.t('pj.none', '(none)')) });
+        const confirmed = window.confirm(verdict + '\n\n' + window.i18n.t('pj.url_header', '— URL —') + '\n' + constructedUrl);
         if (confirmed && constructedUrl !== '(unknown)') {
           try {
             await navigator.clipboard.writeText(constructedUrl);
             if (typeof window.showToast === 'function') {
-              window.showToast('URL copied. Paste in Safari to test AnkiMobile directly.', 5000);
+              window.showToast(window.i18n.t('pj.url_copied', 'URL copied. Paste in Safari to test AnkiMobile directly.'), 5000);
             }
           } catch (clipErr) {
             // Fallback: textarea hack
@@ -717,14 +718,14 @@
             try { document.execCommand('copy'); } catch (_) {}
             document.body.removeChild(ta);
             if (typeof window.showToast === 'function') {
-              window.showToast('URL copied (fallback). Paste in Safari to test.', 5000);
+              window.showToast(window.i18n.t('pj.url_copied_fallback', 'URL copied (fallback). Paste in Safari to test.'), 5000);
             }
           }
         }
       } catch (e) {
         console.error('[anki-test] failed:', e);
         if (typeof window.showToast === 'function') {
-          window.showToast(`✗ Test failed: ${e?.message || e}`, 5000);
+          window.showToast('✗ ' + window.i18n.fmt('pj.test_failed', { err: (e?.message || e) }), 5000);
         }
       }
     });
@@ -747,6 +748,233 @@
     }
   }
 
+  // "Reverse horizontal swipe" toggle. Stored as REVERSE_H_SWIPE ('1'/'0',
+  // default off). The swipe handlers read it synchronously from localStorage
+  // (window._hSwipeReversed in app.js), so persist dual-writes localStorage +
+  // Capacitor Preferences; app.js mirrors Preferences→localStorage at boot.
+  async function setupReverseHSwipePref() {
+    const cb = document.getElementById('reverseHSwipeToggle');
+    if (!cb) return;
+    try { cb.checked = localStorage.getItem('REVERSE_H_SWIPE') === '1'; } catch (_) { cb.checked = false; }
+    if (!cb.dataset.wired) {
+      cb.dataset.wired = '1';
+      cb.addEventListener('change', () => {
+        const v = cb.checked ? '1' : '0';
+        try { localStorage.setItem('REVERSE_H_SWIPE', v); } catch (_) {}
+        try { window.Capacitor?.Plugins?.Preferences?.set({ key: 'REVERSE_H_SWIPE', value: v }); } catch (_) {}
+      });
+    }
+  }
+
+  // "Keep screen awake (minutes)". Stored as KEEP_AWAKE_MIN ('0' = off). Persists
+  // on change (dual-write localStorage + Capacitor Preferences); keep-awake.js
+  // reads localStorage. Template: setupReverseHSwipePref.
+  async function setupKeepAwakePref() {
+    const sel = document.getElementById('keepAwakeMinSelect');
+    if (!sel) return;
+    try { sel.value = String(parseInt(localStorage.getItem('KEEP_AWAKE_MIN'), 10) || 0); }
+    catch (_) { sel.value = '0'; }
+    if (!Array.from(sel.options).some((o) => o.value === sel.value)) sel.value = '0';
+    if (!sel.dataset.wired) {
+      sel.dataset.wired = '1';
+      sel.addEventListener('change', () => {
+        const v = sel.value;
+        try { localStorage.setItem('KEEP_AWAKE_MIN', v); } catch (_) {}
+        try { window.Capacitor?.Plugins?.Preferences?.set({ key: 'KEEP_AWAKE_MIN', value: v }); } catch (_) {}
+        try { window.keepAwake?.refresh(); } catch (_) {}
+      });
+    }
+  }
+
+  // AI assistant (BYOK). Key + enable toggle persist on change (not on Save)
+  // so closing the modal without "Save" never silently drops a pasted key.
+  async function setupAiPrefs() {
+    const cb = document.getElementById('aiEnabledToggle');
+    const keyInput = document.getElementById('aiApiKeyInput');
+    const usage = document.getElementById('aiUsageLine');
+    if (!cb || !keyInput || !window.ai) return;
+    try { await window.ai.ready; } catch (_) {}
+    cb.checked = window.ai.enabledFlag();
+    keyInput.value = window.ai.getKey() || '';
+    const quality = document.getElementById('aiQualitySelect');
+    if (quality) {
+      try { quality.value = window.ai.getQuality ? window.ai.getQuality() : 'balanced'; } catch (_) {}
+      if (!quality.dataset.wired) {
+        quality.dataset.wired = '1';
+        quality.addEventListener('change', () => {
+          try { window.ai.setQuality?.(quality.value); } catch (_) {}
+        });
+      }
+    }
+    const auto = document.getElementById('aiAutoProcessToggle');
+    if (auto) {
+      const av = localStorage.getItem('AI_AUTO_PROCESS');
+      auto.checked = (av === null || av === '1');
+      if (!auto.dataset.wired) {
+        auto.dataset.wired = '1';
+        auto.addEventListener('change', () => {
+          const v = auto.checked ? '1' : '0';
+          try { localStorage.setItem('AI_AUTO_PROCESS', v); } catch (_) {}
+          // Dual-write: localStorage can be wiped while Capacitor Preferences
+          // survives; ai.js mirrors this back into localStorage at boot.
+          try {
+            window.Capacitor?.Plugins?.Preferences?.set({ key: 'AI_AUTO_PROCESS', value: v });
+          } catch (_) {}
+        });
+      }
+    }
+    // Chapter split threshold (×1000 chars; 0 = off). ai-chunks.js reads AICHUNK_SPLIT_K.
+    const split = document.getElementById('aiSplitTargetInput');
+    if (split) {
+      try { const v = localStorage.getItem('AICHUNK_SPLIT_K'); split.value = (v === null || v === '') ? '22' : String(parseInt(v, 10) || 0); } catch (_) { split.value = '22'; }
+      if (!split.dataset.wired) {
+        split.dataset.wired = '1';
+        split.addEventListener('change', () => {
+          let n = parseInt(split.value, 10);
+          if (!Number.isFinite(n) || n < 0) n = 22;
+          if (n > 0 && n < 8) n = 8;      // floor so it can't over-split absurdly (0 stays = off)
+          if (n > 80) n = 80;
+          split.value = String(n);
+          try { localStorage.setItem('AICHUNK_SPLIT_K', String(n)); } catch (_) {}
+          try { window.Capacitor?.Plugins?.Preferences?.set({ key: 'AICHUNK_SPLIT_K', value: String(n) }); } catch (_) {}
+        });
+      }
+    }
+    // Auto-generate scene pictures when scene ideas are created (ai-processor.js reads AISCENE_AUTO_IMG; default off — it costs).
+    const sceneImg = document.getElementById('aiSceneAutoImgToggle');
+    if (sceneImg) {
+      try { sceneImg.checked = (localStorage.getItem('AISCENE_AUTO_IMG') === '1'); } catch (_) { sceneImg.checked = false; }
+      if (!sceneImg.dataset.wired) {
+        sceneImg.dataset.wired = '1';
+        sceneImg.addEventListener('change', () => {
+          const v = sceneImg.checked ? '1' : '0';
+          try { localStorage.setItem('AISCENE_AUTO_IMG', v); } catch (_) {}
+          try { window.Capacitor?.Plugins?.Preferences?.set({ key: 'AISCENE_AUTO_IMG', value: v }); } catch (_) {}
+        });
+      }
+    }
+    if (!cb.dataset.wired) {
+      cb.dataset.wired = '1';
+      cb.addEventListener('change', () => { window.ai.setEnabled(cb.checked); });
+      keyInput.addEventListener('change', () => { window.ai.setKey(keyInput.value); });
+    }
+    if (usage) {
+      usage.textContent = '';
+      try {
+        const c = await window.ai.monthSpendUsd();
+        usage.textContent = window.i18n.fmt('pj.api_usage_month', { usd: c.toFixed(2) });
+      } catch (_) {}
+    }
+    await renderAiCostList();
+  }
+
+  // OpenAI (ChatGPT) image backend: BYOK key + a "spend this month" line. The
+  // model/quality/size/budget selects are wired by aiImages.wireSettings(); only
+  // the key (persist on change, mirroring the Anthropic key) + usage live here.
+  async function setupOpenAiPrefs() {
+    if (!window.aiOpenai) return;
+    try { await window.aiOpenai.ready; } catch (_) {}
+    const keyInput = document.getElementById('aiOpenAiKeyInput');
+    if (keyInput) {
+      keyInput.value = window.aiOpenai.getKey() || '';
+      if (!keyInput.dataset.wired) {
+        keyInput.dataset.wired = '1';
+        keyInput.addEventListener('change', () => { try { window.aiOpenai.setKey(keyInput.value); } catch (_) {} });
+      }
+    }
+    const usage = document.getElementById('aiImgUsageLine');
+    if (usage) {
+      usage.textContent = '';
+      try {
+        let parts = [];
+        // ChatGPT/OpenAI removed from the product — show fal.ai usage only.
+        if (window.aiFal) { const f = await window.aiFal.monthSpendUsd(); if (f > 0) parts.push('fal.ai ~$' + f.toFixed(2)); }
+        if (parts.length) usage.textContent = window.i18n.t('pj.cloud_img_usage_month', 'Cloud image usage this month: ') + parts.join(' · ');
+      } catch (_) {}
+    }
+  }
+
+  // fal.ai image backend: BYOK key (no identity verification). The model/fallback
+  // selects are wired by aiImages.wireSettings(); only the key (persist on change)
+  // lives here, mirroring the Anthropic/OpenAI key rows.
+  async function setupFalPrefs() {
+    if (!window.aiFal) return;
+    try { await window.aiFal.ready; } catch (_) {}
+    const keyInput = document.getElementById('aiFalKeyInput');
+    if (keyInput) {
+      keyInput.value = window.aiFal.getKey() || '';
+      if (!keyInput.dataset.wired) {
+        keyInput.dataset.wired = '1';
+        keyInput.addEventListener('change', () => { try { window.aiFal.setKey(keyInput.value); } catch (_) {} });
+      }
+    }
+  }
+
+  // Per-title cumulative AI cost + running total (AICOST_V1 via ai.costByTitle).
+  async function renderAiCostList() {
+    const host = document.getElementById('aiCostList');
+    if (!host) return;
+    host.innerHTML = '';
+    try {
+      if (!window.ai || typeof window.ai.costByTitle !== 'function') return;
+      const data = window.ai.costByTitle();
+      if (!data || !data.titles || (!data.titles.length && !data.total)) return;
+      // resolve title names (best-effort)
+      let nameById = {};
+      try {
+        if (window.titleStore && window.titleStore.list) {
+          const ts = await window.titleStore.list();
+          (ts || []).forEach(t => { if (t && t.id) nameById[t.id] = t.name || t.title || t.id; });
+        }
+      } catch (_) {}
+      const active = window._activeTitleId || null;
+      const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+      const head = document.createElement('div');
+      head.style.cssText = 'font-size:.72rem;color:#888;font-weight:700;margin:2px 0 4px;letter-spacing:.04em;';
+      head.textContent = window.i18n.t('pj.ai_cost_by_book', 'AI cost by book (cumulative)');
+      host.appendChild(head);
+      const row = (label, usd, hot) => {
+        const r = document.createElement('div');
+        r.style.cssText = 'display:flex;justify-content:space-between;gap:10px;font-size:.74rem;' +
+          'padding:2px 0;color:' + (hot ? '#cbbfee' : '#aaa') + (hot ? ';font-weight:700;' : ';');
+        const l = document.createElement('span');
+        l.style.cssText = 'min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        l.innerHTML = (hot ? '▸ ' : '') + esc(label);
+        const v = document.createElement('span');
+        v.style.cssText = 'flex:none;color:' + (hot ? '#cbbfee' : '#bbb') + ';';
+        v.textContent = '~$' + (usd || 0).toFixed(2);
+        r.appendChild(l); r.appendChild(v);
+        return r;
+      };
+      for (const t of data.titles.slice(0, 12)) {
+        host.appendChild(row(nameById[t.titleId] || t.titleId, t.usd, t.titleId === active));
+      }
+      // active title with zero recorded cost still gets a line so the user sees it
+      if (active && !data.titles.some(t => t.titleId === active)) {
+        host.appendChild(row(nameById[active] || active, 0, true));
+      }
+      const total = document.createElement('div');
+      total.style.cssText = 'display:flex;justify-content:space-between;gap:10px;font-size:.78rem;' +
+        'font-weight:700;color:#ddd;border-top:1px solid #2a2a2a;margin-top:5px;padding-top:5px;';
+      const tl = document.createElement('span'); tl.textContent = window.i18n.t('pj.total', 'Total');
+      const tv = document.createElement('span'); tv.textContent = '~$' + (data.total || 0).toFixed(2);
+      total.appendChild(tl); total.appendChild(tv);
+      host.appendChild(total);
+    } catch (_) {}
+  }
+
+  // UI language selector (English / 日本語). Applies LIVE on change (persists + re-renders
+  // immediately via i18n.set) — independent of the Save/Cancel buttons, like a system setting.
+  async function setupLangPref() {
+    const sel = document.getElementById('uiLangSelect');
+    if (!sel || !window.i18n) return;
+    sel.value = window.i18n.get();
+    if (!sel.dataset.wired) {
+      sel.dataset.wired = '1';
+      sel.addEventListener('change', async () => { try { await window.i18n.set(sel.value); } catch (_) {} });
+    }
+  }
+
   window.openPreferences = async function() {
     const modal = document.getElementById('preferencesModal');
     if (!modal) return;
@@ -755,10 +983,21 @@
     if (window.stats?.pauseForModal) window.stats.pauseForModal();
     modal.style.display = 'flex';
     document.body.classList.add('prefs-open');
+    try { window.i18n && window.i18n.applyStatic(modal); } catch (_) {}   // reflect current language in the static labels
+    await setupLangPref();
 
     buildAppearanceSection();
     buildDictionarySection();
     await setupCombineSubsPref();
+    await setupReverseHSwipePref();
+    await setupKeepAwakePref();
+    await setupAiPrefs();
+    // Image-backend config is independent of the text-AI (Anthropic) module and its
+    // DOM — wire it unconditionally so OpenAI/local image prefs still work even if the
+    // text-AI section is absent or its element ids change. Both self-guard internally.
+    try { window.aiImages?.wireSettings?.(); } catch (_) {}   // image backend selects (local + OpenAI + fal)
+    try { await setupOpenAiPrefs(); } catch (_) {}            // OpenAI key (persist on change) + image usage line
+    try { await setupFalPrefs(); } catch (_) {}               // fal.ai key (persist on change)
     await wireAnkiSection();
     setupIOSAnkiPickers();
 
@@ -801,6 +1040,24 @@
     document.body.classList.remove('prefs-open');
     if (window.stats?.resumeFromModal) window.stats.resumeFromModal();
   };
+
+  // When the UI language changes WHILE Preferences is open, re-render the dynamically-
+  // built sections. applyStatic() only re-translates static [data-i18n] markup;
+  // buildAppearanceSection is build-once (dataset.built guard) and the cost list is
+  // generated, so without this they'd stay in the previously-active language.
+  window.addEventListener('kai:lang', async () => {
+    try {
+      const modal = document.getElementById('preferencesModal');
+      if (!modal || modal.style.display === 'none') return;
+      const ap = document.getElementById('prefsAppearance');
+      if (ap) { ap.dataset.built = ''; ap.innerHTML = ''; buildAppearanceSection(); }   // rebuild per-mode appearance controls in the new language
+      try { await buildDictionarySection(); } catch (_) {}                               // idempotent (sets innerHTML)
+      try { await renderAiCostList(); } catch (_) {}                                      // clears its host, rebuilds labels
+      try { await setupOpenAiPrefs(); } catch (_) {}                                      // image usage line
+      try { window.i18n && window.i18n.applyStatic(modal); } catch (_) {}                 // re-translate all static labels/help
+      try { if (typeof window.syncModeColorPickers === 'function') window.syncModeColorPickers(); } catch (_) {}
+    } catch (_) {}
+  });
 
   window.savePreferences = async function() {
     // Anki swipe-up
@@ -851,7 +1108,7 @@
       localStorage.setItem('DICT_PAUSE_ON_LOOKUP', pauseToggle.checked ? 'true' : 'false');
     }
     window.closePreferences();
-    if (typeof showToast === 'function') showToast('Preferences saved', 2000);
+    if (typeof showToast === 'function') showToast(window.i18n.t('pj.preferences_saved', 'Preferences saved'), 2000);
   };
 
   // ---- Dictionary manager (enable + reorder + import) ----
@@ -899,7 +1156,7 @@
 
     let html = `
       <div style="display:flex;gap:8px;margin-bottom:6px;align-items:center;">
-        <button id="dictImportBtn" class="btn" style="font-size:.78rem;">＋ Import Yomitan zip…</button>
+        <button id="dictImportBtn" class="btn" style="font-size:.78rem;">${window.i18n.t('pj.import_yomitan_zip', '＋ Import Yomitan zip…')}</button>
         <span id="dictImportStatus" style="font-size:.75rem;color:#888;align-self:center;"></span>
       </div>
       <div id="dictImportBarWrap" style="display:none;height:6px;background:#222;border-radius:3px;overflow:hidden;margin:0 0 10px;">
@@ -907,16 +1164,16 @@
       </div>
     `;
     if (!ordered.length) {
-      html += '<div style="color:#666;font-size:.8rem;padding:8px 0;">No dictionaries loaded yet. Open Preferences again once startup loading completes.</div>';
+      html += '<div style="color:#666;font-size:.8rem;padding:8px 0;">' + window.i18n.t('pj.no_dicts_loaded', 'No dictionaries loaded yet. Open Preferences again once startup loading completes.') + '</div>';
     } else {
       html += ordered.map(name => {
         const cnt = countByName.get(name);
         const isOrphan = !storeNameSet.has(name) && entryNameSet.has(name);
         const tag = isOrphan
-          ? ' <span style="color:#f80;font-size:.7rem;">(orphaned relic)</span>'
-          : importedSet.has(name) ? ' <span style="color:#888;font-size:.7rem;">(imported)</span>' : '';
+          ? ' <span style="color:#f80;font-size:.7rem;">' + window.i18n.t('pj.orphaned_relic', '(orphaned relic)') + '</span>'
+          : importedSet.has(name) ? ' <span style="color:#888;font-size:.7rem;">' + window.i18n.t('pj.imported_tag', '(imported)') + '</span>' : '';
         const cntTxt = (typeof cnt === 'number')
-          ? ` <span style="color:#666;font-size:.7rem;">· ${cnt.toLocaleString()} entries</span>` : '';
+          ? ` <span style="color:#666;font-size:.7rem;">· ${cnt.toLocaleString()} ${window.i18n.t('pj.entries', 'entries')}</span>` : '';
         const removable = storeNameSet.has(name) || entryNameSet.has(name) || importedSet.has(name);
         return `
         <div data-dict="${encodeURIComponent(name)}" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #1f1f1f;">
@@ -928,7 +1185,7 @@
           </label>
           <button data-role="up"   class="btn" style="padding:4px 8px;font-size:.85rem;min-width:32px;">▲</button>
           <button data-role="down" class="btn" style="padding:4px 8px;font-size:.85rem;min-width:32px;">▼</button>
-          ${removable ? '<button data-role="remove" class="btn" style="padding:4px 8px;font-size:.85rem;color:#f44;" title="Remove dictionary">✕</button>' : ''}
+          ${removable ? '<button data-role="remove" class="btn" style="padding:4px 8px;font-size:.85rem;color:#f44;" title="' + window.i18n.t('pj.remove_dictionary', 'Remove dictionary') + '">✕</button>' : ''}
         </div>`;
       }).join('');
     }
@@ -952,7 +1209,7 @@
         buildDictionarySection();
       });
       row.querySelector('[data-role="remove"]')?.addEventListener('click', async () => {
-        if (!confirm(`Remove dictionary "${name}"? Its data will be cleared from device storage.`)) return;
+        if (!confirm(window.i18n.fmt('pj.remove_dict_confirm', { name }))) return;
         // Re-query each tick so the bar/text survive any re-render during the
         // (potentially many-second) batched delete of a large dictionary.
         const setStatus = (m) => { const s = document.getElementById('dictImportStatus'); if (s) s.textContent = m; };
@@ -962,12 +1219,12 @@
           if (w) w.style.display = 'block';
           if (b) b.style.width = Math.max(0, Math.min(100, pct)) + '%';
         };
-        setStatus(`Removing "${name}"…`);
+        setStatus(window.i18n.fmt('pj.removing_dict', { name }));
         setBar(3);
         if (typeof window.removeImportedDictionary === 'function') {
           await window.removeImportedDictionary(name, (p) => {
             const pct = Math.floor((p.pct || 0) * 100);
-            setStatus(`Removing "${name}"… ${pct}%`);
+            setStatus(window.i18n.fmt('pj.removing_dict_pct', { name, pct }));
             setBar((p.pct || 0) * 100);
           });
         }
@@ -1003,8 +1260,11 @@
       };
       const hideBar = () => { if (barWrap) barWrap.style.display = 'none'; if (bar) bar.style.width = '0%'; };
       const phaseLabel = {
-        unzip: 'Unzipping…', parse: 'Parsing entries…', cache: 'Saving…',
-        index: 'Indexing…', done: 'Imported'
+        unzip: window.i18n.t('pj.phase_unzip', 'Unzipping…'),
+        parse: window.i18n.t('pj.phase_parse', 'Parsing entries…'),
+        cache: window.i18n.t('pj.phase_cache', 'Saving…'),
+        index: window.i18n.t('pj.phase_index', 'Indexing…'),
+        done:  window.i18n.t('pj.phase_done', 'Imported')
       };
       // Collapse each phase's local pct onto ONE monotonic 0–100 bar, so a big
       // dictionary's long parse + index phases visibly advance instead of the
@@ -1020,7 +1280,7 @@
           default:      return x * 100;
         }
       };
-      setStatus('Reading ' + f.name + '…');
+      setStatus(window.i18n.fmt('pj.reading_file', { name: f.name }));
       setBar(1);
       try {
         const buf = await f.arrayBuffer();
@@ -1034,13 +1294,13 @@
             setBar(overall(p));
           }
         });
-        setStatus(`Imported "${name}". Lookups ready.`);
+        setStatus(window.i18n.fmt('pj.import_done', { name }));
         setBar(100);
         buildDictionarySection();
         setTimeout(hideBar, 1500);
       } catch (e) {
         console.error('Dict import failed:', e);
-        setStatus('Failed: ' + (e?.message || e));
+        setStatus(window.i18n.fmt('pj.import_failed', { err: (e?.message || e) }));
         hideBar();
       }
     };
@@ -1076,7 +1336,7 @@
     });
     if (savedValue && !seen.has(savedValue)) {
       const opt = document.createElement('option');
-      opt.value = savedValue; opt.textContent = savedValue + ' (saved)';
+      opt.value = savedValue; opt.textContent = window.i18n.fmt('pj.saved_suffix', { value: savedValue });
       sel.appendChild(opt);
     }
     sel.value = savedValue || (values?.[0] || '');
@@ -1087,7 +1347,7 @@
   function fillFieldSelect(sel, fields, saved) {
     sel.innerHTML = '';
     const none = document.createElement('option');
-    none.value = ''; none.textContent = '(none)';
+    none.value = ''; none.textContent = window.i18n.t('pj.none', '(none)');
     sel.appendChild(none);
     const seen = new Set();
     (fields || []).forEach(f => {
@@ -1098,7 +1358,7 @@
     });
     if (saved && !seen.has(saved) && saved !== '') {
       const opt = document.createElement('option');
-      opt.value = saved; opt.textContent = saved + ' (saved)';
+      opt.value = saved; opt.textContent = window.i18n.fmt('pj.saved_suffix', { value: saved });
       sel.appendChild(opt);
     }
     sel.value = saved || '';

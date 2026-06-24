@@ -35,6 +35,7 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "pickFolderTree",            returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "materializeToCache",        returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getPersistedUriPermissions", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "readChunk",                 returnType: CAPPluginReturnPromise),
     ]
 
     private static let bookmarksKey = "FileAccess.bookmarks.v1"
@@ -50,6 +51,32 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
 
     public override func load() {
         NSLog("[FileAccess] plugin loaded — jsName=\(jsName) methods=\(pluginMethods.count)")
+    }
+
+    // MARK: - readChunk
+    // Read a byte range from a real filesystem PATH (a materialized cache file)
+    // as base64, so JS can stream large media (audiobooks) to Drive in bounded
+    // chunks without loading the whole file. Used by drive-sync.
+    @objc func readChunk(_ call: CAPPluginCall) {
+        guard let path = call.getString("path") else { call.reject("path is required"); return }
+        let offset = call.getInt("offset") ?? 0
+        let length = call.getInt("length") ?? 0
+        if length <= 0 { call.reject("length must be > 0"); return }
+        DispatchQueue.global(qos: .utility).async {
+            let url = URL(fileURLWithPath: path)
+            do {
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                try handle.seek(toOffset: UInt64(max(0, offset)))
+                let data = handle.readData(ofLength: length)
+                call.resolve([
+                    "data": data.base64EncodedString(),
+                    "bytesRead": data.count
+                ])
+            } catch {
+                call.reject("readChunk failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - pickFileWithUri
