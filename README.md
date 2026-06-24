@@ -172,7 +172,16 @@ Kadoki is **bring-your-own-key (BYOK)**: you use your own API accounts and keys 
 2. **Preferences → AI Image**, paste the fal.ai key, and pick a model (FLUX is the default — fast and uncensored).
 3. Generate from the **Characters** screen or a scene's detail view. Turn on **Auto-illustrate scenes** to have pictures created in the background as you read (paced so it never floods the server), or generate on demand.
 
-Image prompts are written by Claude from each character/scene; edit any prompt before regenerating. Estimated text and image API usage for the month is shown in the settings.
+**3. Alternative backend — OpenRouter** *(optional · one key, hundreds of models)*
+
+Prefer a single key with access to many models — often far cheaper? Kadoki also supports **[OpenRouter](https://openrouter.ai)** for both text and images.
+
+- **Text:** **Preferences → AI Features → Backend: OpenRouter**, paste your OpenRouter key, then tap **Choose model…** for a live, searchable list showing each model's per-token cost. Budget models such as **DeepSeek V3.2** analyze a whole chapter for a fraction of a cent.
+- **Images:** **Preferences → AI Image → Backend: OpenRouter** to choose from its image models (FLUX, Gemini, and more). Models that bill per image (like FLUX) are labelled as such. *After switching, re-select your image model once so its settings are saved.*
+
+The model used is shown in small text **under each generated image** and **at the end of each summary**.
+
+Image prompts are written by your text model (Claude by default) from each character/scene; edit any prompt before regenerating. Estimated text and image API usage for the month is shown in the settings.
 
 ---
 
@@ -248,7 +257,7 @@ Playback speed can be configured globally across all modes, or separately for ea
 - **Keep screen awake** while reading (configurable, in minutes)
 - Dictionary import
 - Google Drive sync (see [Google Drive Sync](#google-drive-sync-optional))
-- **AI Features** (Claude key + quality tier) and **AI Image** (fal.ai key + model) — see [AI Setup](#ai-setup)
+- **AI Features** (Claude *or* OpenRouter key + model/quality) and **AI Image** (fal.ai *or* OpenRouter key + model) — see [AI Setup](#ai-setup)
 - Audio archive import
 - Anki configuration
 

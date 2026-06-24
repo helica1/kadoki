@@ -110,13 +110,36 @@
     // (Squiggles were A/B-disabled while hunting the iOS summary jitter; proven
     // NOT the cause — the trigger was border/radius on scrolled text. Re-enabled.
     // They render as a GPU-composited background-image SVG, iOS-safe.)
+    //
+    // Cheap pre-gate (iOS scroll-jank fix): the 1.5s poll re-ran the O(text)
+    // collectLazySegments()+hash32() below on EVERY tick even when nothing changed.
+    // textContent.length + querySelectorAll are native (no per-char JS alloc, no
+    // hash), so skip the full walk when neither the matcher bucket, the visible
+    // text length, nor our wrapper count moved since the last successful mark.
+    // Wrapping a name run does NOT change textContent.length, so this stays
+    // self-consistent; any real change still falls through to the exact path
+    // (which re-validates with the flat-hash sig).
+    const recCheap = () => {
+      try {
+        container.dataset.kcharLazyBucket = m.bucket;
+        container.dataset.kcharLazyLen = String((container.textContent || '').length);
+        container.dataset.kcharLazyWrap = String(container.querySelectorAll('.kchar-name').length);
+      } catch (_) {}
+    };
+    if (container.dataset.kcharSig &&
+        container.dataset.kcharLazyBucket === m.bucket &&
+        container.dataset.kcharLazyLen === String((container.textContent || '').length) &&
+        container.dataset.kcharLazyWrap === String(container.querySelectorAll('.kchar-name').length)) {
+      container.dataset.kcharSigB = m.bucket;
+      return;
+    }
     const { flat, segments } = collectLazySegments(container);
     if (!flat) return;
     // Include the live wrapper count: a DOM rebuild that re-rendered the same
     // text but DROPPED our .kchar-name wrappers (caption/carousel reload, etc.)
     // changes this even when bucket+flat are identical → forces a re-mark.
     const sig = m.bucket + '|' + flat.length + '|' + container.querySelectorAll('.kchar-name').length + '|' + hash32(flat);
-    if (container.dataset.kcharSig === sig) { container.dataset.kcharSigB = m.bucket; return; }
+    if (container.dataset.kcharSig === sig) { container.dataset.kcharSigB = m.bucket; recCheap(); return; }
 
     unwrapLazyNames(container);     // remove our prior wrappers before re-walking
     // Re-flatten after unwrap (node references changed); recompute on the now
@@ -124,7 +147,7 @@
     const fresh = collectLazySegments(container);
     container.dataset.kcharSig = sig;
     container.dataset.kcharSigB = m.bucket;
-    if (!m.map.size) return;
+    if (!m.map.size) { recCheap(); return; }
 
     const text = fresh.flat;
     const taken = new Array(text.length).fill(false);
@@ -142,11 +165,12 @@
         runs.push({ at, len: alias.length, alias, rec });
       }
     }
-    if (!runs.length) return;
+    if (!runs.length) { recCheap(); return; }
     // Wrap right-to-left so earlier splits don't invalidate later offsets within
     // a shared text node.
     runs.sort((a, b) => b.at - a.at);
     for (const run of runs) wrapLazyNameRun(fresh.segments, run);
+    recCheap();
   }
 
   function wrapLazyNameRun(segments, run) {
@@ -704,8 +728,7 @@
     const card = document.createElement('div');
     card.style.cssText =
       'background:#15151c;border:1px solid #34344a;border-radius:14px;' +
-      'width:min(90vw,420px);max-height:72vh;overflow-y:auto;padding:16px 18px;' +
-      '-webkit-overflow-scrolling:touch;';
+      'width:min(90vw,420px);max-height:72vh;overflow-y:auto;padding:16px 18px;';   // no -webkit-overflow-scrolling:touch (iOS legacy re-rastering scroll layer)
     card.innerHTML =
       '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">' +
         '<div style="font-size:1.5rem;color:#eee;font-family:var(--font-family-card);">' + name + '</div>' +

@@ -62,10 +62,90 @@
   const DAILY_USD_KEY = 'AIIMG_DAILY_USD';    // $ safety cap/day for the scheduler
   const OAI_DEFAULTS = { imgModel: 'auto', model: 'gpt-4.1', quality: 'medium', size: '1024x1536', dailyBudget: 0, dailyUsd: 1 };
   const FAL_DEFAULTS = { model: 'fal-ai/flux-pro/v1.1-ultra', fallback: 'fal-ai/flux/dev', aspect: 'square' };   // FLUX default: fast + uncensored (gpt-image-2 was slow + filtered)
+  // ----- OpenRouter image backend -----
+  // Renders synchronously through the cloud path (renderEntry → cloudContext('openrouter')),
+  // POSTing to OpenRouter's /chat/completions with modalities:['image','text']. Auth REUSES
+  // the existing text key (window.ai.openrouterKey()); the image MODEL is chosen separately
+  // (AIIMG_OR_MODEL — only models whose architecture.output_modalities includes 'image').
+  const OR_IMGMODEL_KEY = 'AIIMG_OR_MODEL';             // selected image model: JSON { id,name,inUsd,outUsd,ctx }
+  const OR_IMG_MODELS_CACHE_KEY = 'AIIMG_OR_MODELS_V1'; // best-effort offline catalog (image-output models)
+  const OR_MODELS_URL = 'https://openrouter.ai/api/v1/models';
+  const OR_CHAT_URL = 'https://openrouter.ai/api/v1/chat/completions';
   // Release: ChatGPT/OpenAI backend is removed and the local server is shipped-disabled,
-  // so fal.ai is the default. A saved 'local' is still honored (the code path is kept for
-  // re-enabling); anything else (incl. a stale 'openai') resolves to 'fal'.
-  function backend() { const b = lsGet(BACKEND_KEY, 'fal'); return (b === 'local' || b === 'fal') ? b : 'fal'; }
+  // so fal.ai is the default. A saved 'local' or 'openrouter' is honored (local is shipped-
+  // hidden); anything else (incl. a stale 'openai') resolves to 'fal'.
+  function backend() { const b = lsGet(BACKEND_KEY, 'fal'); return (b === 'local' || b === 'fal' || b === 'openrouter') ? b : 'fal'; }
+  // Persist the image backend (dual-write localStorage + Capacitor Preferences, like lsSet).
+  async function setImageBackend(b) {
+    b = (b === 'local' || b === 'fal' || b === 'openrouter') ? b : 'fal';
+    try { localStorage.setItem(BACKEND_KEY, b); } catch (_) {}
+    try { await window.Capacitor?.Plugins?.Preferences?.set({ key: BACKEND_KEY, value: b }); } catch (_) {}
+  }
+  // Selected OpenRouter image model ({ id, name, inUsd, outUsd, ctx } | null). inUsd/outUsd
+  // are USD per 1,000,000 tokens (same convention as ai.js's text model).
+  function openrouterImageModel() {
+    try { const raw = lsGet(OR_IMGMODEL_KEY, ''); if (!raw) return null; const m = JSON.parse(raw); return (m && m.id) ? m : null; } catch (_) { return null; }
+  }
+  async function setOpenrouterImageModel(meta) {
+    const m = (meta && meta.id) ? {
+      id: String(meta.id), name: meta.name || meta.id,
+      inUsd: Number(meta.inUsd) || 0, outUsd: Number(meta.outUsd) || 0, ctx: Number(meta.ctx) || 0,
+      // Default to the legacy ['image','text'] so a meta saved before this change
+      // (or one lacking the field) keeps working for text-capable models like Gemini.
+      outMods: (Array.isArray(meta.outMods) && meta.outMods.length) ? meta.outMods.map(String) : ['image', 'text'],
+    } : null;
+    const val = m ? JSON.stringify(m) : '';
+    try { localStorage.setItem(OR_IMGMODEL_KEY, val); } catch (_) {}
+    try { await window.Capacitor?.Plugins?.Preferences?.set({ key: OR_IMGMODEL_KEY, value: val }); } catch (_) {}
+  }
+  // GET the public OpenRouter model catalog (no auth) and KEEP ONLY image-generation-capable
+  // models (architecture.output_modalities includes 'image'). Maps pricing.prompt/completion
+  // to $/MTok, sorts by name, caches in memory + best-effort blobStore. opts.force re-fetches.
+  let _orImgModelsCache = null;
+  async function fetchOpenRouterImageModels(opts) {
+    const force = !!(opts && opts.force);
+    if (!force && Array.isArray(_orImgModelsCache) && _orImgModelsCache.length) return _orImgModelsCache;
+    let parsed = null;
+    try {
+      // Server-side filter: the UNFILTERED /models list tags only a handful with
+      // output_modalities:['image'], but ?output_modalities=image returns the full
+      // image catalogue (FLUX, Recraft, Seedream, Grok, Gemini-image, gpt-image…).
+      const res = await fetch(OR_MODELS_URL + '?output_modalities=image', { method: 'GET' });
+      if (res && res.ok) {
+        const j = await res.json();
+        const arr = (j && Array.isArray(j.data)) ? j.data : [];
+        parsed = arr.filter(m => {
+          const om = (m && m.architecture && m.architecture.output_modalities) || [];
+          return Array.isArray(om) && om.indexOf('image') >= 0;   // image-generation capable only
+        }).map(m => {
+          const pr = (m && m.pricing) || {};
+          const om = (m && m.architecture && m.architecture.output_modalities) || [];
+          return {
+            id: m && m.id,
+            name: (m && m.name) || (m && m.id) || '',
+            inUsd: Number(pr.prompt || 0) * 1e6,
+            outUsd: Number(pr.completion || 0) * 1e6,
+            ctx: (m && m.context_length) || 0,
+            // Carry the model's real output modalities: image-ONLY models (FLUX,
+            // Recraft, gpt-image, grok-imagine) reject a request that also asks for
+            // 'text', so the render builder must send exactly what the model emits.
+            outMods: (Array.isArray(om) ? om.slice() : []),
+            desc: String((m && m.description) || '').slice(0, 140),
+          };
+        }).filter(m => m.id);
+        parsed.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      }
+    } catch (_) { parsed = null; }
+    if (parsed && parsed.length) {
+      _orImgModelsCache = parsed;
+      try { if (window.blobStore) window.blobStore.set(OR_IMG_MODELS_CACHE_KEY, JSON.stringify(parsed)).catch(() => {}); } catch (_) {}
+      return parsed;
+    }
+    // Network failed → fall back to any cached copy (memory, then persisted).
+    if (Array.isArray(_orImgModelsCache) && _orImgModelsCache.length) return _orImgModelsCache;
+    try { const raw = window.blobStore ? await window.blobStore.get(OR_IMG_MODELS_CACHE_KEY) : null; const p = raw ? JSON.parse(raw) : null; if (Array.isArray(p) && p.length) { _orImgModelsCache = p; return p; } } catch (_) {}
+    return [];
+  }
   function oaImgModel() { return lsGet(OAI_IMGMODEL_KEY, OAI_DEFAULTS.imgModel) || OAI_DEFAULTS.imgModel; }
   function oaModel() { return lsGet(OAI_MODEL_KEY, OAI_DEFAULTS.model) || OAI_DEFAULTS.model; }
   function oaQuality() { return lsGet(OAI_QUALITY_KEY, OAI_DEFAULTS.quality) || OAI_DEFAULTS.quality; }
@@ -84,12 +164,24 @@
     const cfg = { style: defStyle() };
     let client;
     if (kind === 'fal') {
-      cfg.modelLabel = falModel();
+      cfg.modelLabel = falModel();   // recorded on the image via renderEntry's job.request.model
       client = {
         chat: (o) => (window.ai && window.ai.request)
           ? window.ai.request({ system: o.system, messages: [{ role: 'user', content: o.user }], maxTokens: o.maxTokens, feature: o.feature || 'img-prompt', titleId: o.titleId }).then(r => (r && r.text) || '')
           : Promise.reject(new Error(window.i18n.t('im.err_claude_prompt_key', 'Claude API key required (image prompt generation)'))),
         render: (o) => window.aiFal.generate({ model: falModel(), fallbackModel: falFallback(), aspect: falAspect(), prompt: o.prompt, titleId: o.titleId, feature: o.feature }),
+      };
+    } else if (kind === 'openrouter') {
+      // Art-director prompt via the configured text AI (window.ai, like fal); render the
+      // English prompt through OpenRouter's /chat/completions image modality. modelLabel =
+      // the chosen image model id → stored on the image (job.request.model → ingestJob).
+      const orm = openrouterImageModel();
+      cfg.modelLabel = (orm && orm.id) || 'openrouter';
+      client = {
+        chat: (o) => (window.ai && window.ai.request)
+          ? window.ai.request({ system: o.system, messages: [{ role: 'user', content: o.user }], maxTokens: o.maxTokens, feature: o.feature || 'img-prompt', titleId: o.titleId }).then(r => (r && r.text) || '')
+          : Promise.reject(new Error(window.i18n.t('im.err_claude_prompt_key', 'Claude API key required (image prompt generation)'))),
+        render: (o) => openrouterRenderImage(o),
       };
     } else {   // 'openai'
       cfg.modelLabel = (oaImgModel() === 'auto') ? oaModel() : oaImgModel();
@@ -99,6 +191,96 @@
       };
     }
     return { client, cfg, kind };
+  }
+
+  // Render ONE finished prompt through OpenRouter (the client.render() for kind
+  // 'openrouter'). POSTs to /chat/completions asking for the image modality and pulls
+  // the data-URI out of choices[0].message.images[0].image_url.url. Returns the cloud
+  // render shape renderEntry/ingestJob expect ({ b64 } — a data: URI is kept as-is,
+  // mime preserved; raw base64 is png-wrapped downstream). Typed errors mirror fal:
+  // ._status, ._refused (content policy), ._terminal (bad request / no model).
+  async function openrouterRenderImage(o) {
+    const orm = openrouterImageModel();
+    if (!orm || !orm.id) { const e = new Error('No OpenRouter image model selected (Preferences → AI Image)'); e._terminal = true; throw e; }
+    const key = (window.ai && window.ai.openrouterKey && window.ai.openrouterKey()) || '';
+    if (!key) { const e = new Error('No OpenRouter key — add one in Preferences → AI Features'); e._status = 401; throw e; }
+    try { if (window._kaiImgProgress) window._kaiImgProgress('OpenRouterに送信中…'); } catch (_) {}
+    // A FLUX/Recraft/gpt-image model selected BEFORE this field existed has no
+    // outMods — heal it synchronously from the in-memory catalog if it's loaded
+    // (no fetch/await on the render path). Falls back to ['image','text'] otherwise.
+    if (!(Array.isArray(orm.outMods) && orm.outMods.length) && Array.isArray(_orImgModelsCache)) {
+      const hit = _orImgModelsCache.find(x => x.id === orm.id);
+      if (hit && Array.isArray(hit.outMods) && hit.outMods.length) orm.outMods = hit.outMods;
+    }
+    // Send exactly the modalities the model emits: image-only models reject 'text'.
+    const mods = (Array.isArray(orm.outMods) && orm.outMods.length) ? orm.outMods : ['image', 'text'];
+    const body = { model: orm.id, messages: [{ role: 'user', content: String(o.prompt || '') }], modalities: mods };
+    const headers = {
+      'content-type': 'application/json',
+      'Authorization': 'Bearer ' + key,
+      'HTTP-Referer': 'https://github.com/helica1/kadoki',
+      'X-Title': 'Kadoki',
+    };
+    const H = capHttp();   // native first (no CORS / mixed-content), fetch fallback for dev — same as the other cloud renderers
+    let status, data;
+    try {
+      if (H) {
+        const resp = await H.request({ url: OR_CHAT_URL, method: 'POST', headers, data: body, connectTimeout: 30000, readTimeout: 180000 });
+        status = resp.status;
+        data = (typeof resp.data === 'string') ? (() => { try { return JSON.parse(resp.data); } catch (_) { return null; } })() : resp.data;
+      } else {
+        const res = await fetch(OR_CHAT_URL, { method: 'POST', headers, body: JSON.stringify(body) });
+        status = res.status;
+        try { data = await res.json(); } catch (_) { data = null; }
+      }
+    } catch (e) { throw new Error('Network error — check your connection'); }
+    if (status < 200 || status >= 300 || !data || data.error) {
+      const em = data && data.error && (data.error.message || data.error);
+      let msg = (typeof em === 'string') ? em : ((em && em.message) || ('OpenRouter error ' + status));
+      const err = new Error('OpenRouter: ' + msg);
+      err._status = status;
+      const lc = String(msg).toLowerCase();
+      if (status === 401 || status === 403) err.message = 'OpenRouter: invalid key or no access (Preferences → AI Features)';
+      else if (/moderation|content[_ ]?policy|safety|not allowed|violat|blocked|nsfw|prohibited|flagged/.test(lc)) err._refused = true;
+      else if (status === 400 || status === 422) err._terminal = true;   // bad params for this model
+      throw err;
+    }
+    let url = '';
+    try {
+      const msg = data.choices && data.choices[0] && data.choices[0].message;
+      const imgs = msg && msg.images;
+      url = (imgs && imgs[0] && imgs[0].image_url && imgs[0].image_url.url) || '';
+    } catch (_) { url = ''; }
+    if (!url) { const e = new Error('OpenRouter returned no image (content filter, or the model does not output images)'); e._refused = true; throw e; }
+    if (String(url).startsWith('data:')) {
+      const payload = String(url).split(',')[1] || '';
+      if (!payload || payload.length < 64) { const e = new Error('OpenRouter image was empty'); throw e; }
+      return { b64: url, modelUsed: orm.id, respId: null };   // data: URI kept whole (mime preserved)
+    }
+    if (/^https?:/i.test(url)) {
+      // Some providers return a HOSTED url, not a data: URI — download the bytes and
+      // convert, so ingestJob doesn't wrap a URL into a broken 'data:...;base64,https://…'.
+      const dataUri = await orFetchImageAsDataUri(url);
+      if (!dataUri) { const e = new Error('Could not download the OpenRouter image'); throw e; }
+      return { b64: dataUri, modelUsed: orm.id, respId: null };
+    }
+    const e = new Error('OpenRouter image was empty'); throw e;
+  }
+
+  // Download a hosted image URL → data: URI (native CapacitorHttp returns base64 for
+  // a blob responseType; the browser-dev fallback uses fetch + FileReader).
+  async function orFetchImageAsDataUri(url) {
+    try {
+      const H = capHttp();
+      if (H) {
+        const r = await H.request({ url, method: 'GET', responseType: 'blob', connectTimeout: 30000, readTimeout: 120000 });
+        const b64 = (typeof r.data === 'string') ? r.data : '';
+        if (b64) { const ct = (r.headers && (r.headers['content-type'] || r.headers['Content-Type'])) || 'image/png'; return 'data:' + ct + ';base64,' + b64; }
+      }
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      return await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => res(null); fr.readAsDataURL(blob); });
+    } catch (_) { return null; }
   }
 
   // gated diagnostics (set localStorage KADOKI_DEBUG=1 to see them) — silent otherwise
@@ -154,6 +336,8 @@
     be = be || backend();
     if (be === 'openai') { try { return !!(window.aiOpenai && window.aiOpenai.hasKey()); } catch (_) { return false; } }
     if (be === 'fal') { try { return !!(window.aiFal && window.aiFal.hasKey()); } catch (_) { return false; } }
+    // openrouter REUSES the text key + needs an image model picked.
+    if (be === 'openrouter') { try { return !!(window.ai && window.ai.openrouterKey && window.ai.openrouterKey() && openrouterImageModel()); } catch (_) { return false; } }
     const h = await health(); return !!(h && h.ok);
   }
   function postJobs(jobs) { return http('POST', '/jobs', { body: { jobs }, timeout: 20000 }); }
@@ -523,6 +707,7 @@
       const be = opts.backend || backend();
       if (be === 'openai') return await syncCloud(titleId, 'openai');   // cloud path: synchronous render-and-ingest
       if (be === 'fal') return await syncCloud(titleId, 'fal');
+      if (be === 'openrouter') return await syncCloud(titleId, 'openrouter');
       slog('sync start', titleId);
       if (!(await reachable('local'))) { slog('sync: server UNREACHABLE', serverUrl()); return { ok: false, reason: 'unreachable' }; }
       // 0. recover STALE 'submitted' entries. A job submitted longer ago than STALE_MS
@@ -928,7 +1113,7 @@
     const list = bucketImages(idx.chars[charId]);
     if (!list.length) return [];
     const out = [];
-    for (const m of list) { const d = await getImageBytes(tid, m.imgId); if (d) out.push({ imgId: m.imgId, dataUri: d, prompt: m.prompt || '', caption: m.caption || '', charSig: m.charSig || '', respId: m.respId || null, backend: m.backend || '', unseen: !!m.unseen, cropped: !!m.cropped }); }
+    for (const m of list) { const d = await getImageBytes(tid, m.imgId); if (d) out.push({ imgId: m.imgId, dataUri: d, prompt: m.prompt || '', caption: m.caption || '', charSig: m.charSig || '', respId: m.respId || null, backend: m.backend || '', model: m.model || '', unseen: !!m.unseen, cropped: !!m.cropped }); }
     return out;
   }
   // Persist a caption on an image, and generate one with Claude (grounded ONLY
@@ -1470,6 +1655,8 @@
         frame.appendChild(el('div', 'position:absolute;top:7px;right:9px;background:rgba(0,0,0,.5);color:#fff;font-size:.64rem;padding:1px 7px;border-radius:8px;', (i + 1) + ' / ' + imgs.length));
       }
       wrap.appendChild(frame);
+      // Small dim line: which model made THIS image (empty on old/local images → nothing).
+      if (cur.model) wrap.appendChild(el('div', 'font-size:.62rem;color:#667;margin-top:3px;word-break:break-all;line-height:1.3;', cur.model));
       // Controls RIGHT under the image (regenerate + delete). No crop.
       if (opts.interactive) {
         const cur2 = imgs[i];
@@ -1749,7 +1936,10 @@
     // config
     serverUrl, health, reachable,
     // backend selection + cloud helpers
-    backend, dailyBudget, dailyUsd, oaQuality, retryLocal, editImageEntry,
+    backend, imageBackend: backend, setImageBackend,
+    // OpenRouter image backend (reuses the text key window.ai.openrouterKey())
+    openrouterImageModel, setOpenrouterImageModel, fetchOpenRouterImageModels,
+    dailyBudget, dailyUsd, oaQuality, retryLocal, editImageEntry,
     // queue + sync + regenerate
     queueCharacter, queueAllMissing, sync, pollPending, regenerate,
     // scenes (illustrate a chapter → images under pseudo-charId scene_<idx>)

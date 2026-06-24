@@ -353,6 +353,11 @@
   const DRAW_MIN_MS = 33;
   function frame() {
     if (!running) { rafHandle = null; return; }
+    // Canvas hidden behind an overlay (chapter view / timeline list / scene card set
+    // display:none): stop the loop. display:none halts COMPOSITING but not this rAF,
+    // so we'd otherwise burn ~30fps drawing an invisible canvas while audio plays.
+    // Self-recovers: re-showing it + the next audio position tick calls scheduleDraw().
+    if (canvas && canvas.style.display === 'none') { running = false; rafHandle = null; return; }
     const inAudio = document.body.classList.contains('mode-audio') && waveformPrefOn();
     if (inAudio) {
       const _t = performance.now();

@@ -701,6 +701,7 @@ body.dimmed .card-image {
 <script src="i18n-strings-app.js"></script>
 <script src="i18n-strings-dict.js"></script>
 <script src="i18n-strings-prefs-html2.js"></script><!-- remaining prefs help paragraphs (ph2.*) + Drive UI (dr.*) -->
+<script src="i18n-strings-openrouter.js"></script><!-- OpenRouter text-AI backend + model picker (or.*) -->
 <script src="i18n.js"></script><!-- UI language engine (window.i18n / window.t); default English -->
 <script src="mode-colors.js"></script>
 <script src="fonts.js"></script>
@@ -993,6 +994,13 @@ body.dimmed .card-image {
             <input type="checkbox" id="aiEnabledToggle" />
           </div>
           <div class="prefs-row" style="align-items:center;">
+            <label for="aiBackendSelect" style="flex:1;line-height:1.35;" data-i18n="or.backend_label">Text AI backend</label>
+            <select id="aiBackendSelect">
+              <option value="anthropic" data-i18n="or.backend_anthropic">Anthropic (Claude)</option>
+              <option value="openrouter" data-i18n="or.backend_openrouter">OpenRouter</option>
+            </select>
+          </div>
+          <div class="prefs-row ai-anthropic-only" style="align-items:center;">
             <label for="aiQualitySelect" style="flex:1;line-height:1.35;" data-i18n-html="ph.ai_quality">Processing quality
               <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
                 Rough cost for a full ~20-chapter book is shown per option.
@@ -1024,10 +1032,25 @@ body.dimmed .card-image {
             </label>
             <input type="checkbox" id="aiAutoProcessToggle" />
           </div>
-          <div class="prefs-row" style="flex-direction:column;align-items:stretch;gap:4px;">
+          <div class="prefs-row ai-anthropic-only" style="flex-direction:column;align-items:stretch;gap:4px;">
             <label for="aiApiKeyInput" style="font-size:.85rem;" data-i18n="ph.api_key">API key</label>
             <input type="password" id="aiApiKeyInput" placeholder="sk-ant-…" autocomplete="off"
                    style="width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:8px 10px;font-size:.85rem;" />
+          </div>
+          <!-- OpenRouter backend sub-fields (key + live model picker); shown only when AI_BACKEND==='openrouter' -->
+          <div id="aiOpenrouterFields" style="display:none;">
+            <div class="prefs-row" style="flex-direction:column;align-items:stretch;gap:4px;">
+              <label for="aiOpenrouterKeyInput" style="font-size:.85rem;" data-i18n="or.key_label">OpenRouter API key</label>
+              <input type="password" id="aiOpenrouterKeyInput" placeholder="sk-or-…" autocomplete="off"
+                     style="width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:8px 10px;font-size:.85rem;" />
+              <span style="font-size:.7em;color:var(--text-muted,#888);margin-top:2px;" data-i18n="or.key_help">Get a key at openrouter.ai/keys</span>
+            </div>
+            <div class="prefs-row" style="align-items:center;">
+              <label style="flex:1;line-height:1.35;" data-i18n="or.model_label">Model</label>
+              <button type="button" id="aiOpenrouterChooseBtn" data-i18n="or.choose_model"
+                      style="background:transparent;border:1px solid #3a3450;border-radius:8px;color:#b9a9e0;font-size:.78rem;padding:6px 14px;cursor:pointer;">Choose model…</button>
+            </div>
+            <div id="aiOpenrouterModelLine" style="font-size:.78rem;color:#cbbfee;margin:2px 2px 0;line-height:1.4;"></div>
           </div>
           <div id="aiUsageLine" style="font-size:.72rem;color:#777;margin:6px 2px 0;"></div>
           <div id="aiCostList" style="margin:8px 0 0;"></div>
@@ -1089,18 +1112,30 @@ body.dimmed .card-image {
               <b>on demand</b>: the generate button on each character, and the scene
               regenerate box to tweak a prompt. The image prompts are written by Claude.
             </div>
-            <!-- Backend selector hidden for release: only fal.ai ships (local server is disabled
-                 above, ChatGPT/OpenAI removed). aiImages.backend() defaults to "fal". To offer a
-                 choice again, uncomment this and restore the relevant <option>s.
+            <!-- Image backend: fal.ai (default) or OpenRouter. The 'local' server option stays
+                 commented (disabled for release; see the local block above). aiImages.imageBackend()
+                 defaults to "fal". Wired in preferences.js (setupImageBackendPrefs). -->
             <div class="prefs-row" style="align-items:center;">
-              <label for="aiImgBackend" style="flex:1;line-height:1.35;">Image backend</label>
+              <label for="aiImgBackend" style="flex:1;line-height:1.35;" data-i18n="or.image_backend">Image backend</label>
               <select id="aiImgBackend">
-                <option value="local">Local server (FLUX/Ideogram)</option>
-                <option value="fal">fal.ai</option>
+                <!-- <option value="local">Local server (FLUX/Ideogram)</option> -->
+                <option value="fal" data-i18n="or.backend_fal">fal.ai</option>
+                <option value="openrouter" data-i18n="or.backend_openrouter">OpenRouter</option>
               </select>
             </div>
-            -->
-            <!-- fal.ai: one key, pick any fal model; no identity verification -->
+            <!-- OpenRouter image fields (shown only when image backend === 'openrouter'). The key is
+                 the one entered in the Text-AI section above (reused — see window.ai.openrouterKey). -->
+            <div id="aiImgOrFields" style="display:none;">
+              <div style="font-size:.72rem;color:#777;margin:0 0 8px;line-height:1.5;" data-i18n="or.key_reused">Uses the OpenRouter API key from the Text AI section above.</div>
+              <div class="prefs-row" style="align-items:center;">
+                <label style="flex:1;line-height:1.35;" data-i18n="or.img_model_label">Image model</label>
+                <button type="button" id="aiImgOrChooseBtn" data-i18n="or.choose_img_model"
+                        style="background:transparent;border:1px solid #3a3450;border-radius:8px;color:#b9a9e0;font-size:.78rem;padding:6px 14px;cursor:pointer;">Choose image model…</button>
+              </div>
+              <div id="aiImgOrModelLine" style="font-size:.78rem;color:#cbbfee;margin:2px 2px 0;line-height:1.4;"></div>
+            </div>
+            <!-- fal.ai fields (shown only when image backend === 'fal'): one key, pick any fal model; no identity verification -->
+            <div id="aiImgFalFields">
             <div class="prefs-row" style="flex-direction:column;align-items:stretch;gap:4px;">
               <label for="aiFalKeyInput" style="font-size:.85rem;" data-i18n-html="ph.falai_key">fal.ai API key
                 <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">fal.ai/dashboard/keys のキー（本人確認は不要）。キャラクターのプロンプトはClaudeが作成します。</span>
@@ -1147,6 +1182,7 @@ body.dimmed .card-image {
                 <option value="landscape" data-i18n="ph.aspect_landscape">横長</option>
               </select>
             </div>
+            </div><!-- /#aiImgFalFields -->
             <!-- ChatGPT/OpenAI image options removed for release (fal.ai only). Previously here:
                  OpenAI API key, Image model, Quality, Aspect, and the "Auto images per day" +
                  "Daily spend cap" daily scheduler — which was OpenAI-only (ai-daily-images.js

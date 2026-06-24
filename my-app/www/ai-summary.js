@@ -245,7 +245,7 @@
     content.style.cssText =
       'flex:1;overflow-y:auto;padding:16px 18px;color:#ddd;' +
       'font-family:var(--font-family-card);font-size:var(--font-size-card);' +
-      'line-height:1.7;white-space:pre-wrap;-webkit-overflow-scrolling:touch;';
+      'line-height:1.7;white-space:pre-wrap;';   // no -webkit-overflow-scrolling:touch (iOS legacy re-rastering scroll layer = lag)
     // Animated waiting dots (replaced by the first streamed token).
     content.innerHTML =
       '<span class="kai-dots" style="color:#8a7fb8;"><span>·</span><span>·</span><span>·</span></span>';

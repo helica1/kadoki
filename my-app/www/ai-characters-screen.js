@@ -469,7 +469,7 @@
 
       const listEl = document.createElement('div');
       listEl.style.cssText =
-        'flex:1;overflow-y:auto;padding:14px 14px 20px;-webkit-overflow-scrolling:touch;';
+        'flex:1;overflow-y:auto;padding:14px 14px 20px;';   // no -webkit-overflow-scrolling:touch (iOS legacy re-rastering scroll layer = lag)
       listEl.innerHTML =
         '<div style="text-align:center;padding:40px 0;">' +
         '<span class="kai-dots" style="color:#8a7fb8;"><span>·</span><span>·</span><span>·</span></span></div>';

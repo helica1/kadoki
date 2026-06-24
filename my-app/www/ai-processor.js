@@ -364,8 +364,22 @@
     return Math.max(0, Math.min(n, INPUT_CAP));
   }
   function estimateChunks(model, chunks) {
+    // When the OpenRouter backend is active, price with the SELECTED OpenRouter
+    // model (its inUsd/outUsd are per-1M-token, same as ai.js text models) — NOT
+    // the Claude chapter model. Otherwise a fraction-of-a-cent DeepSeek run showed
+    // a Claude-priced "~$0.11" estimate (the reported relic).
+    let or = null;
+    try {
+      if (window.ai && window.ai.backend && window.ai.backend() === 'openrouter' && window.ai.openrouterModel) {
+        or = window.ai.openrouterModel();
+      }
+    } catch (_) {}
     let usd = 0;
-    for (const c of chunks) usd += estCostUsd(model, chunkChars(c) + OVERHEAD_CHARS, OUT_TOKENS);
+    for (const c of chunks) {
+      const inChars = chunkChars(c) + OVERHEAD_CHARS;
+      if (or) usd += (inChars * 1.2 * (Number(or.inUsd) || 0) + OUT_TOKENS * (Number(or.outUsd) || 0)) / 1e6;
+      else usd += estCostUsd(model, inChars, OUT_TOKENS);
+    }
     return usd;
   }
   // Complete-but-unready chunks, idx ascending. Chunk 0 is exempt from the
@@ -974,7 +988,15 @@
       feature: 'chapter',
       titleId,
       model: chapterModel(),
-      system: wantScenes ? (SYSTEM_PROMPT + sceneRules(sceneTargetN)) : SYSTEM_PROMPT,
+      // Prompt caching: SYSTEM_PROMPT is byte-identical on every chapter, so mark it
+      // ephemeral — chapters processed within Anthropic's ~5-min cache window read it
+      // back at ~10% input cost instead of re-billing the full system prompt each time.
+      // sceneRules carries the per-chapter scene count (varies), so it stays a separate,
+      // uncached block AFTER the cached one.
+      system: wantScenes
+        ? [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
+           { type: 'text', text: sceneRules(sceneTargetN) }]
+        : [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
       maxTokens: MAX_TOKENS,
       retryable: true,
       outputSchema: wantScenes ? withScenes(CHAPTER_SCHEMA) : CHAPTER_SCHEMA,

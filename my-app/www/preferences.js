@@ -868,6 +868,299 @@
     await renderAiCostList();
   }
 
+  // ---- OpenRouter text-AI backend (BYOK + live searchable model picker) ----
+  // ai.js owns the prefs (AI_BACKEND / AI_OPENROUTER_KEY / AI_OPENROUTER_MODEL) and
+  // the public-models fetch; this just drives the Preferences UI. Everything is
+  // guarded — window.ai may be absent (older boot / partial load).
+
+  // Pretty USD per-1M price. Returns null for free/zero so the caller can show "free".
+  function orFmtPrice(v) {
+    v = Number(v);
+    if (!Number.isFinite(v) || v <= 0) return null;
+    let s;
+    if (v < 0.1) s = v.toFixed(3);
+    else if (v < 1) s = v.toFixed(2);
+    else if (v < 100) s = (Math.round(v * 100) / 100).toString();
+    else s = String(Math.round(v));
+    if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    return '$' + s;
+  }
+  function orT(k, f) { try { return window.i18n ? window.i18n.t(k, f) : f; } catch (_) { return f; } }
+  function orFmt(k, vars, f) { try { return window.i18n ? window.i18n.fmt(k, vars, f) : f; } catch (_) { return f; } }
+  // "in $5/M · out $30/M" (or localized) — "free" when both prices are zero.
+  function orCostStr(inUsd, outUsd, kind) {
+    const i = orFmtPrice(inUsd), o = orFmtPrice(outUsd);
+    // Image models (FLUX etc.) report $0 token pricing because they bill per image,
+    // not per token — don't mislabel them "free".
+    if (i === null && o === null) return (kind === 'image') ? orT('or.per_image', 'per-image pricing') : orT('or.free', 'free');
+    return orFmt('or.cost_inout', { in: (i || '$0'), out: (o || '$0') }, 'in ' + (i || '$0') + '/M · out ' + (o || '$0') + '/M');
+  }
+  function orCtxStr(ctx) {
+    ctx = Number(ctx);
+    if (!Number.isFinite(ctx) || ctx <= 0) return '';
+    return orFmt('or.ctx', { n: Math.round(ctx / 1000) }, Math.round(ctx / 1000) + 'K ctx');
+  }
+  // The selected-model summary line, e.g. 'GPT-5.5 — $5 / $30 per 1M'.
+  function orModelLabel(meta, kind) {
+    if (!meta || !meta.id) return orT('or.no_model', 'No model selected — tap "Choose model…"');
+    const nm = meta.name || meta.id;
+    const i = orFmtPrice(meta.inUsd), o = orFmtPrice(meta.outUsd);
+    if (i === null && o === null) return (kind === 'image')
+      ? orFmt('or.model_per_image', { name: nm }, nm + ' — per-image pricing')
+      : orFmt('or.model_free', { name: nm }, nm + ' — free');
+    return orFmt('or.model_cost', { name: nm, in: (i || '$0'), out: (o || '$0') }, nm + ' — ' + (i || '$0') + ' / ' + (o || '$0') + ' per 1M');
+  }
+
+  // The model picker overlay: search + Refresh + a scrollable list. Self-contained
+  // .kai-modal (gesture-shielded, dismissible by ✕ / outside-tap). Generalized over a
+  // backend: fetchFn(opts)->[{id,name,inUsd,outUsd,ctx}], currentMetaFn()->selected meta
+  // (used only to highlight the active row), setFn(meta)->persist the pick. onPicked() is
+  // called after a successful selection so the caller can refresh its label. Used by BOTH
+  // the text-AI backend (window.ai.*) and the image backend (window.aiImages.*).
+  function openOpenRouterModelPicker(fetchFn, currentMetaFn, setFn, onPicked, opts) {
+    if (typeof fetchFn !== 'function') return;
+    const kind = (opts && opts.kind) || '';   // 'image' → per-image price labels, not "free"
+    let curId = '';
+    try { const cm = (typeof currentMetaFn === 'function') ? currentMetaFn() : null; curId = (cm && cm.id) ? cm.id : ''; } catch (_) {}
+
+    const overlay = document.createElement('div');
+    overlay.id = 'orModelPicker';
+    overlay.className = 'kai-modal';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100002;display:flex;align-items:center;justify-content:center;touch-action:none;';
+    const close = () => { try { overlay.remove(); } catch (_) {} };
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+
+    const card = document.createElement('div');
+    card.style.cssText = 'background:#161616;border:1px solid #2a2a2a;border-radius:12px;width:min(94vw,520px);max-height:82vh;display:flex;flex-direction:column;overflow:hidden;';
+
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:12px 14px 8px;border-bottom:1px solid #242424;';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:600;font-size:1rem;color:#eee;flex:1;min-width:0;';
+    title.textContent = orT('or.picker_title', 'Choose an OpenRouter model');
+    const xBtn = document.createElement('button');
+    xBtn.type = 'button';
+    xBtn.textContent = '✕';
+    xBtn.setAttribute('aria-label', orT('or.close', 'Close'));
+    xBtn.style.cssText = 'flex:none;background:transparent;border:none;color:#aaa;font-size:1.2rem;line-height:1;cursor:pointer;padding:2px 8px;';
+    xBtn.addEventListener('click', close);
+    head.appendChild(title); head.appendChild(xBtn);
+
+    const toolbar = document.createElement('div');
+    toolbar.style.cssText = 'display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid #242424;';
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.placeholder = orT('or.search_ph', 'Search models…');
+    search.autocomplete = 'off'; search.autocapitalize = 'off'; search.spellcheck = false;
+    search.style.cssText = 'flex:1;min-width:0;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:8px 10px;font-size:.85rem;';
+    const refreshBtn = document.createElement('button');
+    refreshBtn.type = 'button';
+    refreshBtn.textContent = orT('or.refresh', 'Refresh');
+    refreshBtn.style.cssText = 'flex:none;background:transparent;border:1px solid #3a3450;border-radius:8px;color:#b9a9e0;font-size:.78rem;padding:6px 12px;cursor:pointer;';
+    toolbar.appendChild(search); toolbar.appendChild(refreshBtn);
+
+    const list = document.createElement('div');
+    list.style.cssText = 'overflow:auto;padding:8px 10px 12px;flex:1;-webkit-overflow-scrolling:touch;';
+
+    card.appendChild(head); card.appendChild(toolbar); card.appendChild(list);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    try { window.aiImages?.shieldOverlay?.(overlay); } catch (_) {}
+
+    let allModels = [];
+
+    function setStatus(msg) {
+      list.innerHTML = '';
+      const d = document.createElement('div');
+      d.style.cssText = 'color:#888;font-size:.85rem;text-align:center;padding:26px 12px;line-height:1.5;';
+      d.textContent = msg;
+      list.appendChild(d);
+    }
+
+    function buildRow(m) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      const isCur = !!(curId && m.id === curId);
+      row.style.cssText = 'display:block;width:100%;text-align:left;background:#1d1d1d;border:1px solid ' + (isCur ? '#5a4f8a' : '#2a2a2a') + ';border-radius:8px;padding:9px 11px;margin-bottom:7px;cursor:pointer;';
+      const name = document.createElement('div');
+      name.style.cssText = 'font-size:.9rem;color:#eee;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      name.textContent = m.name || m.id || '';
+      const idEl = document.createElement('div');
+      idEl.style.cssText = 'font-size:.68rem;color:#777;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      idEl.textContent = m.id || '';
+      const meta = document.createElement('div');
+      meta.style.cssText = 'font-size:.72rem;color:#9a93b8;margin-top:4px;display:flex;gap:10px;flex-wrap:wrap;';
+      const costSpan = document.createElement('span');
+      costSpan.textContent = orCostStr(m.inUsd, m.outUsd, kind);
+      meta.appendChild(costSpan);
+      const cs = orCtxStr(m.ctx);
+      if (cs) { const c = document.createElement('span'); c.textContent = cs; meta.appendChild(c); }
+      row.appendChild(name); row.appendChild(idEl); row.appendChild(meta);
+      row.addEventListener('click', async () => {
+        try {
+          if (typeof setFn === 'function') {
+            await setFn({ id: m.id, name: m.name || m.id, inUsd: m.inUsd, outUsd: m.outUsd, ctx: m.ctx, outMods: m.outMods });
+          }
+        } catch (_) {}
+        try { onPicked && onPicked(); } catch (_) {}
+        close();
+      });
+      return row;
+    }
+
+    function renderList() {
+      const q = (search.value || '').trim().toLowerCase();
+      const items = q
+        ? allModels.filter(m => (((m.id || '') + ' ' + (m.name || '')).toLowerCase().indexOf(q) >= 0))
+        : allModels;
+      list.innerHTML = '';
+      if (!items.length) { setStatus(orT('or.no_results', 'No models match your search.')); return; }
+      const frag = document.createDocumentFragment();
+      items.forEach(m => frag.appendChild(buildRow(m)));
+      list.appendChild(frag);
+    }
+
+    async function load(force) {
+      setStatus(orT('or.loading', 'Loading models…'));
+      try {
+        const res = await fetchFn(force ? { force: true } : {});
+        allModels = Array.isArray(res) ? res : [];
+        renderList();
+      } catch (_) {
+        setStatus(orT('or.error', "Couldn't load models. Check your connection and tap Refresh."));
+      }
+    }
+
+    search.addEventListener('input', renderList);
+    refreshBtn.addEventListener('click', () => load(true));
+    load(false);
+  }
+
+  // Backend selector + OpenRouter key/model rows. Reflects the saved backend on open
+  // and persists every change immediately (like the Anthropic key — never on Save).
+  async function setupOpenRouterPrefs() {
+    if (!window.ai) return;
+    try { await window.ai.ready; } catch (_) {}
+    const sel = document.getElementById('aiBackendSelect');
+    const orFields = document.getElementById('aiOpenrouterFields');
+    const keyInput = document.getElementById('aiOpenrouterKeyInput');
+    const chooseBtn = document.getElementById('aiOpenrouterChooseBtn');
+    const modelLine = document.getElementById('aiOpenrouterModelLine');
+
+    function applyBackend(b) {
+      const isOr = (b === 'openrouter');
+      try { document.querySelectorAll('.ai-anthropic-only').forEach(el => { el.style.display = isOr ? 'none' : ''; }); } catch (_) {}
+      if (orFields) orFields.style.display = isOr ? '' : 'none';
+    }
+    function refreshModelLine() {
+      if (!modelLine) return;
+      let meta = null;
+      try { meta = window.ai.openrouterModel ? window.ai.openrouterModel() : null; } catch (_) {}
+      modelLine.textContent = orModelLabel(meta);
+    }
+
+    // Reflect current state.
+    let cur = 'anthropic';
+    try { cur = (window.ai.backend ? window.ai.backend() : 'anthropic') || 'anthropic'; } catch (_) {}
+    if (sel) sel.value = cur;
+    applyBackend(cur);
+    if (keyInput) {
+      try { keyInput.value = window.ai.openrouterKey ? (window.ai.openrouterKey() || '') : ''; } catch (_) { keyInput.value = ''; }
+    }
+    refreshModelLine();
+
+    if (sel && !sel.dataset.wired) {
+      sel.dataset.wired = '1';
+      sel.addEventListener('change', async () => {
+        const v = sel.value;
+        try { if (window.ai.setBackend) await window.ai.setBackend(v); } catch (_) {}
+        applyBackend(v);
+        // Newly-revealed rows may carry data-i18n that hasn't been applied yet.
+        try { window.i18n && window.i18n.applyStatic(document.getElementById('preferencesModal')); } catch (_) {}
+        if (v === 'openrouter') refreshModelLine();
+      });
+    }
+    if (keyInput && !keyInput.dataset.wired) {
+      keyInput.dataset.wired = '1';
+      keyInput.addEventListener('change', async () => {
+        try { if (window.ai.setOpenrouterKey) await window.ai.setOpenrouterKey(keyInput.value); } catch (_) {}
+      });
+    }
+    if (chooseBtn && !chooseBtn.dataset.wired) {
+      chooseBtn.dataset.wired = '1';
+      chooseBtn.addEventListener('click', () => {
+        if (!window.ai || typeof window.ai.fetchOpenRouterModels !== 'function') return;
+        openOpenRouterModelPicker(
+          (opts) => window.ai.fetchOpenRouterModels(opts),
+          () => { try { return window.ai.openrouterModel ? window.ai.openrouterModel() : null; } catch (_) { return null; } },
+          (meta) => { try { return window.ai.setOpenrouterModel ? window.ai.setOpenrouterModel(meta) : null; } catch (_) {} },
+          refreshModelLine
+        );
+      });
+    }
+  }
+
+  // Image-generation backend selector (fal.ai / OpenRouter). Mirrors the Text-AI backend
+  // row: reflects window.aiImages.imageBackend() on open and persists every change via the
+  // contract setImageBackend() (dual-write). The OpenRouter image MODEL uses the same live
+  // searchable picker as text (generalized openOpenRouterModelPicker) and reuses the
+  // OpenRouter key from the Text-AI section (window.ai.openrouterKey). All aiImages calls
+  // are guarded. NOTE: a distinct dataset marker (imgBkWired) is used so this handler is
+  // attached even though aiImages.wireSettings() also touches #aiImgBackend (dataset.wired).
+  async function setupImageBackendPrefs() {
+    const sel = document.getElementById('aiImgBackend');
+    if (!sel) return;
+    const falFields = document.getElementById('aiImgFalFields');
+    const orFields = document.getElementById('aiImgOrFields');
+    const chooseBtn = document.getElementById('aiImgOrChooseBtn');
+    const modelLine = document.getElementById('aiImgOrModelLine');
+
+    function applyImgBackend(b) {
+      const isOr = (b === 'openrouter');
+      if (falFields) falFields.style.display = isOr ? 'none' : '';
+      if (orFields) orFields.style.display = isOr ? '' : 'none';
+    }
+    function refreshImgModelLine() {
+      if (!modelLine) return;
+      let meta = null;
+      try { meta = (window.aiImages && window.aiImages.openrouterImageModel) ? window.aiImages.openrouterImageModel() : null; } catch (_) {}
+      modelLine.textContent = orModelLabel(meta, 'image');
+    }
+
+    // Reflect current state (default 'fal'; ignore a stored value the <select> can't show).
+    let cur = 'fal';
+    try { cur = (window.aiImages && window.aiImages.imageBackend) ? (window.aiImages.imageBackend() || 'fal') : 'fal'; } catch (_) {}
+    if (!Array.prototype.some.call(sel.options, (o) => o.value === cur)) cur = 'fal';
+    sel.value = cur;
+    applyImgBackend(cur);
+    refreshImgModelLine();
+
+    if (!sel.dataset.imgBkWired) {
+      sel.dataset.imgBkWired = '1';
+      sel.addEventListener('change', async () => {
+        const v = sel.value;
+        try { if (window.aiImages && window.aiImages.setImageBackend) await window.aiImages.setImageBackend(v); } catch (_) {}
+        applyImgBackend(v);
+        // Newly-revealed rows may carry data-i18n that hasn't been applied yet.
+        try { window.i18n && window.i18n.applyStatic(document.getElementById('preferencesModal')); } catch (_) {}
+        if (v === 'openrouter') refreshImgModelLine();
+      });
+    }
+    if (chooseBtn && !chooseBtn.dataset.wired) {
+      chooseBtn.dataset.wired = '1';
+      chooseBtn.addEventListener('click', () => {
+        if (!window.aiImages || typeof window.aiImages.fetchOpenRouterImageModels !== 'function') return;
+        openOpenRouterModelPicker(
+          (opts) => window.aiImages.fetchOpenRouterImageModels(opts),
+          () => { try { return window.aiImages.openrouterImageModel ? window.aiImages.openrouterImageModel() : null; } catch (_) { return null; } },
+          (meta) => { try { return window.aiImages.setOpenrouterImageModel ? window.aiImages.setOpenrouterImageModel(meta) : null; } catch (_) {} },
+          refreshImgModelLine,
+          { kind: 'image' }
+        );
+      });
+    }
+  }
+
   // OpenAI (ChatGPT) image backend: BYOK key + a "spend this month" line. The
   // model/quality/size/budget selects are wired by aiImages.wireSettings(); only
   // the key (persist on change, mirroring the Anthropic key) + usage live here.
@@ -992,12 +1285,14 @@
     await setupReverseHSwipePref();
     await setupKeepAwakePref();
     await setupAiPrefs();
+    try { await setupOpenRouterPrefs(); } catch (_) {}   // text-AI backend selector + OpenRouter key/model picker
     // Image-backend config is independent of the text-AI (Anthropic) module and its
     // DOM — wire it unconditionally so OpenAI/local image prefs still work even if the
     // text-AI section is absent or its element ids change. Both self-guard internally.
     try { window.aiImages?.wireSettings?.(); } catch (_) {}   // image backend selects (local + OpenAI + fal)
     try { await setupOpenAiPrefs(); } catch (_) {}            // OpenAI key (persist on change) + image usage line
     try { await setupFalPrefs(); } catch (_) {}               // fal.ai key (persist on change)
+    try { await setupImageBackendPrefs(); } catch (_) {}      // image backend selector (fal/OpenRouter) + OpenRouter image-model picker
     await wireAnkiSection();
     setupIOSAnkiPickers();
 

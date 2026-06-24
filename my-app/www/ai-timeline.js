@@ -84,9 +84,13 @@
       const st = document.createElement('style');
       st.id = 'kaiAxisMarkStyle';
       st.textContent =
-        '@keyframes kaiNowGlow{0%,100%{box-shadow:0 0 5px 1px rgba(255,255,255,.55),0 0 10px 2px rgba(255,255,255,.18);}' +
-        '50%{box-shadow:0 0 9px 3px rgba(255,255,255,.9),0 0 18px 5px rgba(255,255,255,.4);}}' +
-        '.kai-now-mark{animation:kaiNowGlow 1.8s ease-in-out infinite;}';
+        // Pulse via opacity+transform (both GPU-composited) on a glow layer whose
+        // box-shadow is rasterized ONCE — animating box-shadow itself forced a
+        // per-frame main-thread repaint that made the whole timeline scroll janky.
+        '@keyframes kaiNowGlow{0%,100%{opacity:.5;transform:translate(-50%,-50%) scale(.82);}' +
+        '50%{opacity:1;transform:translate(-50%,-50%) scale(1);}}' +
+        '.kai-now-glow{box-shadow:0 0 9px 3px rgba(255,255,255,.9),0 0 18px 5px rgba(255,255,255,.4);' +
+        'animation:kaiNowGlow 1.8s ease-in-out infinite;will-change:opacity,transform;}';
       document.head.appendChild(st);
     } catch (_) {}
   }
@@ -831,7 +835,7 @@
       // Opaque background so the momentum-scroll tiles are solid (iOS caches
       // opaque tiles; a transparent scroll layer over content is costlier).
       content.style.cssText =
-        'flex:1;overflow-y:auto;padding:16px 18px;background:#141414;-webkit-overflow-scrolling:touch;';
+        'flex:1;overflow-y:auto;padding:16px 18px;background:#141414;';   // no -webkit-overflow-scrolling:touch (deprecated; forces iOS legacy re-rastering scroll layer = summary lag)
 
       // Dict enablement leaves text nodes intact on iOS (lazy caretRangeFromPoint
       // path); the squiggle marker may wrap matched name runs only. So it
@@ -879,6 +883,14 @@
           content.appendChild(fullEl);
         } else {
           content.appendChild(prose(longText));
+        }
+        // Model attribution: a small dim line at the END of the summary text showing
+        // which model produced it (claude-* or an OpenRouter id). Hidden when empty.
+        if (art && art.model) {
+          const mb = document.createElement('div');
+          mb.style.cssText = 'margin-top:8px;font-size:.62rem;color:#667;';
+          mb.textContent = window.i18n.fmt('or.model_by', { id: art.model }, 'model: ' + art.model);
+          content.appendChild(mb);
         }
       }
 
@@ -988,8 +1000,7 @@
       meta.style.cssText =
         'padding:8px 14px;border-top:1px solid #242424;color:#666;font-size:.7rem;min-height:1em;';
       try {
-        const bits = [];
-        if (art.model) bits.push(art.model);
+        const bits = [];   // model id is shown inline at the end of the summary, not here
         if (Number.isFinite(art.costUsd)) bits.push('~$' + art.costUsd.toFixed(3));
         if (art.ts) bits.push(new Date(art.ts).toLocaleString());
         meta.textContent = bits.join(' · ');
@@ -1170,7 +1181,7 @@
       head.appendChild(xb);
 
       const content = document.createElement('div');
-      content.style.cssText = 'flex:1;overflow-y:auto;padding:16px 18px;background:#141414;-webkit-overflow-scrolling:touch;';
+      content.style.cssText = 'flex:1;overflow-y:auto;padding:16px 18px;background:#141414;';   // no -webkit-overflow-scrolling:touch (see chapter-view note)
 
       const dictTargets = [];
       const prose = (text, extra) => {
@@ -1492,6 +1503,7 @@
         try { window.removeEventListener('kai:scenes-changed', onData); } catch (_) {}
         try { window.removeEventListener('kai:img-data', refreshSceneHave); } catch (_) {}
         try { window.removeEventListener('kai:proc-status', onProc); } catch (_) {}
+        try { const wf = document.getElementById('liveWaveform'); if (wf && overlay._kaiWfHidden) wf.style.display = overlay._kaiWfPrev || ''; } catch (_) {}
         try { overlay.remove(); } catch (_) {}
       }
 
@@ -1534,7 +1546,12 @@
       const main = document.createElement('div');
       main.style.cssText =
         'flex:1;min-width:0;position:relative;overflow-y:auto;overflow-x:hidden;' +
-        '-webkit-overflow-scrolling:touch;touch-action:pan-y;overscroll-behavior:contain;';
+        'touch-action:pan-y;overscroll-behavior:contain;';   // dropped -webkit-overflow-scrolling:touch (iOS legacy re-rastering scroll layer)
+      // Stamp scroll activity: the live-marker timer (and the img-data re-render)
+      // must not force a synchronous layout read while the finger is moving — on
+      // iOS that stalls the separate momentum-scroll thread = a hitch every tick.
+      let _lastScrollTs = 0;
+      main.addEventListener('scroll', () => { _lastScrollTs = Date.now(); }, { passive: true });
       const inner = document.createElement('div');
       inner.style.cssText = 'position:relative;width:100%;';
       main.appendChild(inner);
@@ -1549,6 +1566,15 @@
       overlay.appendChild(panel);
       overlay.addEventListener('click', (e) => { if (e.target === overlay) destroy(); });   // tap outside the card closes (like Characters)
       document.body.appendChild(overlay);
+
+      // Idle the live audio waveform canvas while this list is open — SAME iOS jank
+      // fix the chapter view and scene card already use: it keeps redrawing behind
+      // the translucent overlay, forcing iOS to recomposite the momentum-scroll list
+      // every frame. Occluded anyway; audio playback/playhead untouched. Restored in destroy().
+      try {
+        const wf = document.getElementById('liveWaveform');
+        if (wf) { overlay._kaiWfPrev = wf.style.display; overlay._kaiWfHidden = true; wf.style.display = 'none'; }
+      } catch (_) {}
 
       function offerProcess() {
         try {
@@ -1959,9 +1985,10 @@
           // 6px column because axisWrap is unclipped. Repositioned live by _posTimer.
           if (curP !== null && Number.isFinite(curP)) {
             const wrap = document.createElement('div');
-            wrap.className = 'kai-axis-marker kai-now-mark';
+            wrap.className = 'kai-axis-marker';
             wrap.style.cssText = 'position:absolute;left:-4px;right:-4px;top:calc(' + pcv(curP).toFixed(2) + '% - 1.5px);height:3px;border-radius:2px;background:#fff;z-index:5;pointer-events:none;';
             const ball = document.createElement('div');
+            ball.className = 'kai-now-glow';   // box-shadow glow + composited opacity/scale pulse
             ball.style.cssText = 'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:9px;height:9px;border-radius:50%;background:#fff;';
             wrap.appendChild(ball);
             axisWrap.appendChild(wrap);
@@ -2289,6 +2316,9 @@
           refreshTimer = null;
           try {
             if (!document.body.contains(overlay)) return;
+            // A full inner.innerHTML rebuild mid-scroll is a big layout/paint spike
+            // (and can jump the scroll offset) — wait until the finger lifts.
+            if (Date.now() - _lastScrollTs < 400) { scheduleRefresh(400); return; }
             const m2 = await getMapSafe(titleId);
             if (m2) {
               map = m2;
@@ -2383,6 +2413,7 @@
         try {
           if (!document.body.contains(overlay)) { clearInterval(_posTimer); _posTimer = null; return; }
           if (document.hidden || !_nowMarkerEl) return;
+          if (Date.now() - _lastScrollTs < 350) return;   // mid-scroll: skip the layout read (currentAxisPos can force a full reflow in read mode)
           const total = (axis && axis.total) || 0;
           if (!total) return;
           const p = currentAxisPos(axis);
