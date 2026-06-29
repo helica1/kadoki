@@ -3379,7 +3379,7 @@ function setupSwipe() {
           // Tag any new full-screen overlay with class "kai-modal" (the gesture
           // shield in ai-images.js shieldOverlay() also adds it).
           return !!(target?.closest && target.closest(
-            '#preferencesModal, #titleEditModal, #audiobookReentryModal, #readingSettingsModal, #readingStatsModal, .shell-menu, #aiSummaryOverlay, #kcharPopup, #bookmarksOverlay, #kchapterView, #kcharsScreen, .kai-modal'
+            '#preferencesModal, #titleEditModal, #audiobookReentryModal, #readingSettingsModal, #readingStatsModal, .shell-menu, #aiSummaryOverlay, #kcharPopup, #bookmarksOverlay, #kchapterView, #kcharsScreen, #waveformEditorOverlay, .kai-modal'
           ));
         };
 
@@ -4028,7 +4028,7 @@ window.lockScreenCueJump = async function (dir) {
       cur = lo;
     }
   } catch (_) {}
-  if (cur < 0 && Number.isFinite(window._lastAudioCueIdx)) cur = window._lastAudioCueIdx;
+  if (cur < 0 && Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueTitleId === window._activeTitleId) cur = window._lastAudioCueIdx;
   // Playhead unknown → STAY PUT. Never coerce to 0 and seek the book start:
   // the lock-screen ⏮⏭ used to jump to the very beginning when the cursor was
   // -1/NaN. prev/next only navigates relative to a real, known playhead.
@@ -4036,7 +4036,7 @@ window.lockScreenCueJump = async function (dir) {
   const target = Math.max(0, Math.min(cues.length - 1, cur + dir));
   const cue = cues[target];
   if (!cue || !Number.isFinite(cue.startMs)) return;
-  window._lastAudioCueIdx = target;
+  window._lastAudioCueIdx = target; window._lastAudioCueTitleId = window._activeTitleId;
   const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
   try { bg.seek({ ms, fadeMs: 40 }); } catch (_) {}   // brief fade so the jump doesn't click
 };
@@ -4051,6 +4051,7 @@ window.lockScreenCueJump = async function (dir) {
 // so the read char counter re-anchors per book instead of jumping.
 function resetCrossTitlePositionState() {
   window._lastAudioCueIdx = -1;
+  window._lastAudioCueTitleId = null;
   window._lastAudioCueIdxForStats = -1;
   // Audio-stats continuity baseline (playhead vs wall-clock). Clearing these
   // forces the first cue advance of the new title to re-anchor without

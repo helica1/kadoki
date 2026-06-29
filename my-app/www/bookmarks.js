@@ -144,6 +144,7 @@
   function capture(mode) {
     try {
       if (mode !== 'card' && mode !== 'read') return;   // audio is excluded
+      if (window._titleSwitchInFlight) return;   // mid-switch: titleId↔location can disagree
       const titleId = window._activeTitleId || null;
       if (!titleId) return;
       // Throttle: keep the list uncrowded — bookmarks stay ~1 minute apart.
@@ -211,6 +212,7 @@
     try {
       const mode = (opts && opts.mode) || currentMode();
       if (!mode) return;
+      if (window._titleSwitchInFlight) return;   // mid-switch: outgoing location, incoming titleId — don't record a mismatched bookmark
       const titleId = window._activeTitleId || null;
       if (!titleId) return;
       if (!(opts && opts.force)) {

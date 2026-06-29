@@ -724,20 +724,55 @@
     } catch (_) { return a; }
   }
 
-  function sanitizeScenes(a, max) {
+  // Non-stripped char offset of a quote within the chapter text (the SAME space
+  // cueRangeForQuote matches in). MONOTONIC: prefers the first occurrence at/after
+  // `fromOff` — because scenes are chronological, a phrase that repeats in the
+  // chapter resolves to ITS in-order occurrence instead of always the first one.
+  // That (not a static first-occurrence offset) is what fixes "scene audio bounds
+  // far off though the subtitles are accurate" — the anchor was matching an earlier
+  // identical/similar passage, so it mapped to the wrong (but correctly-timed) cue.
+  function quoteOffsetIn(text, quote, fromOff) {
+    try {
+      const q = String(quote || '');
+      if (!text || !q) return undefined;
+      const start = (Number.isFinite(fromOff) && fromOff > 0) ? fromOff : 0;
+      let off = text.indexOf(q, start);                 // exact, at/after the previous scene
+      if (off < 0 && start > 0) off = text.indexOf(q);  // else exact anywhere
+      if (off >= 0) return off;
+      // paraphrase fallback: whitespace-insensitive (recover the real offset)
+      const qS = q.replace(/\s+/g, '');
+      if (!qS) return undefined;
+      const idxMap = []; let flat = '';
+      for (let k = 0; k < text.length; k++) { if (!/\s/.test(text[k])) { flat += text[k]; idxMap.push(k); } }
+      const j = flat.indexOf(qS);
+      return j >= 0 ? idxMap[j] : undefined;
+    } catch (_) { return undefined; }
+  }
+
+  function sanitizeScenes(a, max, text, requireAudio) {
     const cap = Math.max(1, Math.min(12, max || 12));   // char-based count drives this; cap guards runaway
     const out = [];
+    let prevOff = 0;   // monotonic cursor: each scene's anchor is resolved at/after the previous
     if (Array.isArray(a)) {
       for (let i = 0; i < a.length; i++) {
         const sc = a[i];
         if (!sc || typeof sc.prompt !== 'string' || !sc.prompt.trim()) continue;
+        const aq = s(sc.anchorQuote, 120);
+        const off = quoteOffsetIn(text, aq, prevOff);
+        // REQUIRE audio (audiobook+SRT titles): a scene whose verbatim anchor can't
+        // be located in the chapter text can't be tied to a cue, so it would have
+        // wrong/no audio — drop it rather than ship a broken scene. Text-only titles
+        // (no cues) keep all scenes (no audio is expected there).
+        if (requireAudio && !Number.isFinite(off)) continue;
+        if (Number.isFinite(off)) prevOff = off + 1;
         out.push({
           id: 's' + out.length,                         // contiguous id = output slot (matches scene_<idx>_<slot>)
           title: s(sc.title, 40),
           prompt: s(sc.prompt, 1200).trim(),
           style: (SCENE_STYLES.indexOf(sc.style) >= 0) ? sc.style : 'photoreal',
           caption: s(sc.caption, 300),
-          anchorQuote: s(sc.anchorQuote, 120),
+          anchorQuote: aq,
+          ...(Number.isFinite(off) ? { anchorOff: off } : {}),   // monotonic offset → read-time picks the right cue window
         });
         if (out.length >= cap) break;
       }
@@ -1037,7 +1072,7 @@
     // 1) artifact (object keyed by idx — read-modify-write, we are sole writer).
     // fp stamps the boundary generation: a later map rebuild must not render
     // old-boundary summaries on new chapters.
-    const sceneList = sanitizeScenes(sortScenesByAnchor(parsed.scenes, text), sceneTargetN);   // chronological; empty if off / none / the no-scenes overflow retry ran
+    const sceneList = sanitizeScenes(sortScenesByAnchor(parsed.scenes, text), sceneTargetN, text, (map && map.space === 'cue'));   // chronological; require a locatable anchor on audiobook+SRT titles
     const art = await readArtifact(titleId);
     art[idx] = {
       label, shortSummary, longSummary, events, keyPassages, relatedCharIds,
@@ -1468,7 +1503,7 @@
       });
       const parsed = JSON.parse(r.text);
       try { await setStyleDirectiveIfEmpty(titleId, parsed && parsed.styleDirective); } catch (_) {}
-      const scenes = sanitizeScenes(sortScenesByAnchor(parsed && parsed.scenes, text), sceneTargetN);   // chronological
+      const scenes = sanitizeScenes(sortScenesByAnchor(parsed && parsed.scenes, text), sceneTargetN, text, (map && map.space === 'cue'));   // chronological; require a locatable anchor on audiobook+SRT titles
       if (!scenes.length) return { ok: false, reason: 'none' };
       const art = await readArtifact(titleId);
       if (!art[idx] || typeof art[idx] !== 'object') art[idx] = { fp: (map.fingerprint || null), ts: Date.now() };

@@ -316,6 +316,13 @@
     return {};
   }
 
+  // Sync accessor for render-time callers (character-name furigana): returns the
+  // already-cached author-ruby glossary { base: reading } or null. Does NOT load —
+  // callers fall back and can warm it via the async rubyGlossary().
+  function rubyGlossarySync(titleId) {
+    try { const t = _texts.get(titleId); return (t && t.ruby) ? t.ruby : null; } catch (_) { return null; }
+  }
+
   async function getMap(titleId) {
     try {
       if (!titleId) return null;
@@ -1249,7 +1256,7 @@
   // title has an aligned audiobook) resolve the matching audio ms range. Returns
   // { expression, startMs?, endMs? } or null. Audio only when titleId is the active
   // title (window._srtCues/alignment describe THIS title) and a quote is located.
-  async function cueRangeForQuote(titleId, chapterIdx, quote) {
+  async function cueRangeForQuote(titleId, chapterIdx, quote, opts) {
     try {
       const q = String(quote || '').trim();
       if (!q) return null;
@@ -1258,15 +1265,30 @@
       const chunk = map.chunks[chapterIdx];
       const chTxt = await chunkText(titleId, chapterIdx);
       if (!chTxt) return null;
-      // locate the quote: exact, then whitespace-insensitive with an index map back
-      let i = chTxt.indexOf(q), qlen = q.length;
-      if (i < 0) {
+      // Locate ALL occurrences (exact, else whitespace-insensitive with an index map
+      // back), then pick the one NEAREST the persisted anchorOff hint. A chapter with
+      // a duplicate/similar passage otherwise resolved to the wrong (usually first)
+      // occurrence → audio bounds far off even though the cues are accurate.
+      const anchorOff = (opts && Number.isFinite(opts.anchorOff)) ? opts.anchorOff : null;
+      const qS0 = q.replace(/\s+/g, '');
+      const hits = [];
+      { let from = 0, k; while ((k = chTxt.indexOf(q, from)) >= 0) { hits.push({ i: k, qlen: q.length }); from = k + 1; } }
+      if (!hits.length && qS0) {
         const stripped = [], idxMap = [];
         for (let k = 0; k < chTxt.length; k++) { if (!/\s/.test(chTxt[k])) { stripped.push(chTxt[k]); idxMap.push(k); } }
-        const qS = q.replace(/\s+/g, ''), j = qS ? stripped.join('').indexOf(qS) : -1;
-        if (j >= 0) { i = idxMap[j]; qlen = (idxMap[j + qS.length - 1] - i) + 1; }
+        const flatS = stripped.join('');
+        let from = 0, j;
+        while ((j = flatS.indexOf(qS0, from)) >= 0) { const ci = idxMap[j]; hits.push({ i: ci, qlen: (idxMap[j + qS0.length - 1] - ci) + 1 }); from = j + 1; }
       }
-      if (i < 0) return null;   // not found → caller falls back to caption, no audio
+      if (!hits.length) return null;   // not found → caller falls back to caption, no audio
+      let best = hits[0];
+      if (anchorOff != null && hits.length > 1) best = hits.reduce((a, b) => Math.abs(b.i - anchorOff) < Math.abs(a.i - anchorOff) ? b : a, hits[0]);
+      const i = best.i, qlen = best.qlen;
+      // Ambiguous → DON'T trust the audio window (a wrong clip is worse than none —
+      // the expression text still shows). Omit bounds when there are multiple matches
+      // AND either the quote is too short to be distinctive or there's no anchorOff
+      // hint to disambiguate. A single match keeps full behavior.
+      const audioAmbiguous = (hits.length > 1) && (anchorOff == null || qS0.length < 8);
       // expand to the containing sentence (cap ~180 chars so it stays card-sized)
       const TERM = '。！？!?\n';
       let sStart = i;
@@ -1275,6 +1297,7 @@
       while (sEnd < chTxt.length && TERM.indexOf(chTxt[sEnd - 1]) < 0 && (sEnd - i) < 180) sEnd++;
       if (sEnd < chTxt.length && TERM.indexOf(chTxt[sEnd]) >= 0) sEnd++;   // include the terminator
       const out = { expression: chTxt.slice(sStart, sEnd).trim() };
+      if (audioAmbiguous) return out;   // expression only — ambiguous anchor, no reliable audio window
       // ---- audio ms (best-effort; skipped gracefully) ----
       if (titleId !== window._activeTitleId) return out;   // globals describe the active read title only
       const cues = window._srtCues;
@@ -1332,6 +1355,7 @@
     mutate,
     chunkText,
     rubyGlossary,
+    rubyGlossarySync,
     isComplete,
     refreshCueBounds,
     markerCount,

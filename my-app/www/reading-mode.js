@@ -2515,7 +2515,7 @@
       if (!Number.isFinite(target) || target < 0 || target > cues.length - 1) return; // edge → no wrap, no clamp-to-0
       const cue = cues[target];
       if (!cue || !Number.isFinite(cue.startMs)) return;
-      window._lastAudioCueIdx = target;
+      window._lastAudioCueIdx = target; window._lastAudioCueTitleId = window._activeTitleId;
       const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
       try { bg.seek({ ms, fadeMs: 40 }); } catch (_) {}   // brief fade so the jump doesn't click
       // Show the target subtitle immediately (works even while paused), then HOLD
@@ -3515,10 +3515,13 @@
     // Capture the deck that owns this audio session — closeAudiobookMode must
     // save under THIS key even if #deckName has already flipped to a new title.
     abOpenedDeckName = abContextLoadedForDeck || currentDeckName();
-    // Fresh audio-chars baseline for this listening session, so re-entering at
-    // an earlier position credits cleanly (and the first cue is never dumped).
-    window._lastAudioCueIdxForStats = -1;
-    window._audioStatsLastWallMs = 0;   // continuity baseline (see __onPagedCueUpdate)
+    // Continuity baseline for TIME crediting (playhead vs wall-clock), reset per
+    // session so time isn't credited across the gap. The CHAR high-water
+    // (_lastAudioCueIdxForStats) is deliberately NOT reset here — resetting it made
+    // re-entering audio mode re-credit the whole already-heard span (~2x char
+    // over-count). It stays monotonic per title; reset only on title switch
+    // (resetCrossTitlePositionState).
+    window._audioStatsLastWallMs = 0;
     window._audioStatsLastPosMs = -1;
     if (typeof window.stopCardAudio === 'function') window.stopCardAudio();
     const cueEl = document.getElementById('audiobookCueText');

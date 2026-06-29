@@ -1040,10 +1040,10 @@
     try {
       const btn = el('shellMoreBtn');
       if (!btn) return;
-      const on = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled() &&
-                    window.ai.activatedSync && window.ai.activatedSync(window._activeTitleId));
-      if (on) { ensureActiveGlowStyle(); btn.classList.add('kai-active-btn'); }
-      else btn.classList.remove('kai-active-btn');
+      // Glow removed (user request): the kaiBtnGlow box-shadow on the far-right
+      // hamburger was clipped by the right screen edge. The red-dot "new AI data"
+      // indicator (updateShellAiDot / .kai-reddot-btn) still signals activity.
+      btn.classList.remove('kai-active-btn');
     } catch (_) {}
   }
   async function aiUnseenForActiveTitle() {

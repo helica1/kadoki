@@ -1489,7 +1489,7 @@
   function buildImageStrip(titleId, charId, opts) {
     opts = opts || {};
     const wrap = el('div', 'margin:2px 0 4px;');
-    let imgs = [], i = 0, regenOpen = false, regenText = '', lastSwipe = 0;
+    let imgs = [], i = 0, regenOpen = false, regenText = '', lastSwipe = 0, pendingReload = false;
     let scenePromptText = (typeof opts.editablePrompt === 'string') ? opts.editablePrompt : '';   // editable scene prompt (scenes only)
     const TOOL = 'flex:1;background:#1b1b26;border:1px solid #34344a;border-radius:8px;color:#bcd;font-size:.74rem;padding:7px 0;cursor:pointer;';
     const seen = () => { if (opts.interactive) { try { markCharSeen(titleId, charId); } catch (_) {} } };
@@ -1540,7 +1540,8 @@
     const buildScenePromptBox = () => {
       const box = el('div', 'margin-top:8px;background:#14101e;border:1px solid #34344a;border-radius:10px;padding:10px;');
       box.appendChild(el('div', 'font-size:.68rem;color:#9a8cc4;margin-bottom:6px;', window.i18n.t('im.edit_prompt_regen', 'Edit prompt & regenerate')));
-      const ta = el('textarea', 'width:100%;box-sizing:border-box;background:#1c1c28;border:1px solid #3a3450;border-radius:8px;color:#ddd;font-size:.8rem;padding:8px;resize:vertical;min-height:88px;font-family:inherit;');
+      const ta = el('textarea', 'width:100%;box-sizing:border-box;background:#1c1c28;border:1px solid #3a3450;border-radius:8px;color:#ddd;font-size:.85rem;line-height:1.5;padding:10px;resize:vertical;min-height:160px;font-family:inherit;');
+      ta.setAttribute('rows', '6');
       ta.value = scenePromptText;
       ta.addEventListener('input', () => { scenePromptText = ta.value; });
       ta.addEventListener('click', (e) => e.stopPropagation());
@@ -1561,6 +1562,8 @@
       cancel.addEventListener('click', (e) => { e.stopPropagation(); regenOpen = false; render(); });
       row.appendChild(send); row.appendChild(cancel); row.appendChild(st);
       box.appendChild(row);
+      // Lift above the on-screen keyboard + focus so the field is actually usable.
+      try { requestAnimationFrame(() => { try { ta.focus(); ta.scrollIntoView({ block: 'center' }); } catch (_) {} }); } catch (_) {}
       return box;
     };
     const render = () => {
@@ -1709,8 +1712,17 @@
           wrap.appendChild(capRow);
         }
       }
+      // A poll/data reload that arrived while the prompt editor was open was
+      // deferred (see reload()); flush it now that the editor is closed.
+      if (!regenOpen && pendingReload) { pendingReload = false; reload(); }
     };
-    const reload = async () => { try { imgs = await getImages(titleId, charId); if (i >= imgs.length) i = Math.max(0, imgs.length - 1); render(); } catch (_) {} };
+    const reload = async () => {
+      // Don't rebuild the strip while the prompt editor is open — render() does
+      // wrap.innerHTML='' which destroys the textarea (kills focus + the keyboard,
+      // the "suddenly closes" bug). Defer; render() flushes it on close.
+      if (regenOpen) { pendingReload = true; return; }
+      try { imgs = await getImages(titleId, charId); if (i >= imgs.length) i = Math.max(0, imgs.length - 1); render(); } catch (_) {}
+    };
     reload();
     wrap._reload = reload;
     return wrap;

@@ -616,6 +616,17 @@
     }
   }
 
+  // Editor preview is a play/PAUSE toggle (like scene mode): the ▶/❚❚ button plays
+  // the selection and flips to ❚❚; tapping again — or reaching the selection end /
+  // the safety timeout — pauses and flips back to ▶.
+  let _ppBtn = null, _previewing = false;
+  function _setPlayIcon(p) { _previewing = !!p; if (_ppBtn) { try { _ppBtn.textContent = p ? '❚❚' : '▶'; } catch (_) {} } }
+  function stopPreview() {
+    try { const bg = window.Capacitor?.Plugins?.BackgroundAudio; if (bg) bg.pause(); } catch (_) {}
+    cancelPreview();
+    _setPlayIcon(false);
+  }
+
   // Off-screen pre-render: the previous show() decodes the NEXT card's window
   // into here so this show() can paint it instantly (no decode delay / flash).
   let _preCache = null;
@@ -664,8 +675,7 @@
         <canvas data-role="canvas" style="width:100%;height:96px;display:block;background:#0c0c0c;border:1px solid #1f1f1f;border-radius:8px;touch-action:none;"></canvas>
         ${cardMode ? '' : `
         <div style="display:flex;gap:8px;margin-top:8px;justify-content:center;">
-          <button data-role="preview" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid #333;padding:6px 16px;border-radius:999px;font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;">Preview</button>
-          <button data-role="reset" style="background:transparent;color:#666;border:1px solid #2a2a2a;padding:6px 14px;border-radius:999px;font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;">Reset</button>
+          <button data-role="playpause" aria-label="Play / pause preview" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid #333;width:46px;height:46px;border-radius:999px;font-size:1.15rem;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;">▶</button>
         </div>`}
       `;
       // Robust playhead seed: start from the CURRENT audio position and free-run
@@ -742,15 +752,29 @@
       };
       // Preview/Reset only exist in the editor (cardMode omits them — the card UI
       // has its own "Play card" pill). Guard the lookups.
-      const _pvBtn = container.querySelector('[data-role="preview"]');
-      if (_pvBtn) _pvBtn.addEventListener('click', () => this.preview());
-      const _rsBtn = container.querySelector('[data-role="reset"]');
-      if (_rsBtn) _rsBtn.addEventListener('click', () => {
-        state.startMs = state.origStartMs;
-        state.endMs = state.origEndMs;
-        render();
-        if (state.onChange) state.onChange({ startMs: state.startMs, endMs: state.endMs });
-      });
+      // iOS drops the FIRST synthesized click on a freshly-shown overlay button →
+      // forward touchend to the click (preventDefault stops a duplicate click) so
+      // the first tap registers. Same first-tap fix as the dict popup.
+      const _firstTap = (btn) => { if (btn) btn.addEventListener('touchend', (e) => { try { if (e.cancelable) e.preventDefault(); } catch (_) {} btn.click(); }, { passive: false }); };
+      // Play/pause toggle (replaces Preview + Reset; matches scene mode's clip button):
+      // tap to play the selection (▶→❚❚), tap again to pause (❚❚→▶). Wire BOTH click
+      // and touchend to the SAME handler with a firing guard (the proven first-tap
+      // pattern) so the action runs directly on touchend — no btn.click() re-dispatch.
+      const _ppBtn0 = container.querySelector('[data-role="playpause"]');
+      if (_ppBtn0) {
+        _ppBtn = _ppBtn0;
+        _setPlayIcon(false);   // ▶ at rest
+        let _ppFiring = false;
+        const _ppGo = (e) => {
+          if (_ppFiring) return; _ppFiring = true;
+          try { e.stopPropagation(); } catch (_) {}
+          try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+          try { if (_previewing) stopPreview(); else this.preview(); } catch (_) {}
+          setTimeout(() => { _ppFiring = false; }, 350);
+        };
+        _ppBtn0.addEventListener('click', _ppGo);
+        _ppBtn0.addEventListener('touchend', _ppGo, { passive: false });
+      }
       attachInteractions();
       // Render SYNCHRONOUSLY now (not via rAF): forces layout so the freshly
       // created canvas is sized (clientWidth is 0 until laid out) and paints the
@@ -952,20 +976,26 @@
         console.warn('preview play:', e);
         return;
       }
-      // Attach a position listener tied to THIS preview, then remove it as
-      // soon as the segment ends (or after a safety timeout).
+      _setPlayIcon(true);   // playing → show ❚❚
+      // Attach a position listener tied to THIS preview, then stop (pause + reset
+      // the ▶/❚❚ icon) as soon as the segment ends (or after a safety timeout).
+      // ARM guard: the FIRST position event after bg.play can still report the
+      // STALE pre-seek position (the book's paused spot), which — if it's past
+      // this clip's end — would fire stopPreview immediately and kill the preview
+      // before it audibly starts (the "press twice" bug). Only allow the end-stop
+      // once the playhead has actually been seen inside the clip (seek landed).
+      let _armed = false;
       try {
         previewHandle = await bg.addListener('position', (d) => {
-          if ((d.positionMs || 0) >= targetEnd - 30) {
-            try { bg.pause(); } catch (_) {}
-            cancelPreview();
-          }
+          const p = d.positionMs || 0;
+          if (p < targetEnd - 100) _armed = true;
+          if (_armed && p >= targetEnd - 30) stopPreview();
         });
       } catch (e) {
         console.warn('preview addListener:', e);
       }
       // Safety: cap the preview at the segment duration + 2 s.
-      previewTimer = setTimeout(cancelPreview, Math.max(1000, (targetEnd - startMs) + 2000));
+      previewTimer = setTimeout(stopPreview, Math.max(1000, (targetEnd - startMs) + 2000));
     },
 
     current() {
@@ -1267,8 +1297,14 @@
           resolve(result);
         };
 
-        panel.querySelector('[data-role="cancel"]').addEventListener('click', () => close(null));
-        panel.querySelector('[data-role="send"]').addEventListener('click', () => {
+        // First-tap fix (iOS drops the first synthesized click on a freshly-shown
+        // overlay button): forward touchend → click, preventDefault stops a dup.
+        const _ft = (btn) => { if (btn) btn.addEventListener('touchend', (e) => { try { if (e.cancelable) e.preventDefault(); } catch (_) {} btn.click(); }, { passive: false }); };
+        const _cancelBtn = panel.querySelector('[data-role="cancel"]');
+        _cancelBtn.addEventListener('click', () => close(null));
+        _ft(_cancelBtn);
+        const _sendBtn = panel.querySelector('[data-role="send"]');
+        _sendBtn.addEventListener('click', () => {
           const cur = this.current();
           if (!cur) return close(null);
           let text = null;
@@ -1281,6 +1317,7 @@
           }
           close({ startMs: cur.startMs, endMs: cur.endMs, text });
         });
+        _ft(_sendBtn);
       });
     }
   };

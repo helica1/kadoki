@@ -1488,22 +1488,29 @@
             try {
                 const r = window._dictLookupRange;
                 if (r) {
-                    let rc = r.getBoundingClientRect();
-                    if (!rc || !rc.width || !rc.height) {
-                        // gBCR returns zero on iOS vertical-rl sometimes;
-                        // getClientRects() returns one rect per line box
-                        // and the first is usually non-empty.
-                        try {
-                            const list = r.getClientRects();
-                            if (list && list.length) {
-                                for (let i = 0; i < list.length; i++) {
-                                    const c = list[i];
-                                    if (c && c.width && c.height) { rc = c; break; }
-                                }
+                    let rc = null;
+                    // A word crossing a COLUMN break in vertical-rl makes gBCR return
+                    // the multi-column UNION rect (~full text height, ~2 columns wide),
+                    // which collapses roomAbove/roomBelow → the popup is forced to its
+                    // ~140px floor and the definition is clipped below the fold.
+                    // getClientRects() gives one rect per line box; prefer the FIRST
+                    // non-empty (the column where the word starts = where the user
+                    // tapped). Single-column lookups yield one rect == the old gBCR,
+                    // so their placement is unchanged.
+                    try {
+                        const list = r.getClientRects();
+                        if (list && list.length) {
+                            for (let i = 0; i < list.length; i++) {
+                                const c = list[i];
+                                if (c && c.width && c.height) { rc = c; break; }
                             }
-                        } catch (_) {}
+                        }
+                    } catch (_) {}
+                    if (!rc) {
+                        const g = r.getBoundingClientRect();
+                        if (g && g.width && g.height) rc = g;
                     }
-                    if (rc && rc.width && rc.height) { hlRect = rc; hlSrc = 'range-gBCR'; }
+                    if (rc && rc.width && rc.height) { hlRect = rc; hlSrc = 'range-rects'; }
                 }
             } catch (_) {}
             if (!hlRect) {
@@ -2413,30 +2420,36 @@
             if (!btn.querySelector('svg')) btn.innerHTML = originalIconHTML;
         };
 
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
+        // Bind click AND touchend (firing-guarded) so the FIRST tap works — these
+        // were click-only and needed two taps on iOS (the synthesized click was
+        // dropped on the first touch). preventDefault stops touchend from also
+        // producing a click; the firing flag prevents a double-fire.
+        const bindTap = (b, fn) => {
+            if (!b) return;
+            let firing = false;
+            const go = (e) => {
+                if (firing) return; firing = true;
+                try { e.stopPropagation(); } catch (_) {}
+                try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+                try { fn(); } finally { setTimeout(() => { firing = false; }, 400); }
+            };
+            b.addEventListener('click', go);
+            b.addEventListener('touchend', go, { passive: false });
+        };
+        bindTap(btn, () => { playCurrent(); });
+        bindTap(prevBtn, () => {
+            if (prevBtn.disabled) return;
+            window._currentAudioRefIndex = Math.max(0, (window._currentAudioRefIndex || 0) - 1);
+            updateCycler();
             playCurrent();
         });
-
-        if (prevBtn) {
-            prevBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (prevBtn.disabled) return;
-                window._currentAudioRefIndex = Math.max(0, (window._currentAudioRefIndex || 0) - 1);
-                updateCycler();
-                playCurrent();
-            });
-        }
-        if (nextBtn) {
-            nextBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (nextBtn.disabled) return;
-                const refs = window._currentAudioRefs || [];
-                window._currentAudioRefIndex = Math.min(refs.length - 1, (window._currentAudioRefIndex || 0) + 1);
-                updateCycler();
-                playCurrent();
-            });
-        }
+        bindTap(nextBtn, () => {
+            if (nextBtn.disabled) return;
+            const refs = window._currentAudioRefs || [];
+            window._currentAudioRefIndex = Math.min(refs.length - 1, (window._currentAudioRefIndex || 0) + 1);
+            updateCycler();
+            playCurrent();
+        });
     }
 
     function setupAnkiHandler(results) {
@@ -2675,9 +2688,18 @@
                     }, 2000);
                 }
             });
+            // First-tap fix: forward touchend → click. The synthesized click was
+            // dropped on the first touch in this popup (two-tap bug). preventDefault
+            // stops a duplicate synthesized click; the handler sets ankiBtn.disabled
+            // synchronously, and the !disabled guard here, so this can never double-add.
+            ankiBtn.addEventListener('touchend', (e) => {
+                try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+                try { e.stopPropagation(); } catch (_) {}
+                if (!ankiBtn.disabled) ankiBtn.click();
+            }, { passive: false });
         }
     }
-    
+
     function extractMeaningFromResult(result) {
         if (result.type === 'jmdict') {
             return (result.entry.sense || [])

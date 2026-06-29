@@ -30,6 +30,10 @@
     '.kchar-name{background-image:' + WAVE('0.6') + ';background-repeat:repeat-x;' +
     'background-position:0 100%;background-size:8px 4px;padding-bottom:2px;}' +
     '.kchar-name.kchar-stub{background-image:' + WAVE('0.34') + ';}' +
+    // Character-name furigana (popup + Characters screen): per-kanji ruby colored
+    // orange like the dict popup, tied to each kanji.
+    '.kai-name-ruby ruby{ruby-position:over;ruby-align:center;}' +
+    '.kai-name-ruby rt{color:#ffa726;font-size:.5em;font-weight:500;line-height:1.05;letter-spacing:.02em;}' +
     // squiggle on/off switch (popup + Characters screen): a track+knob slider with
     // a live preview of the name showing the ACTUAL wavy underline when ON.
     '.ksq-row{display:flex;align-items:center;gap:10px;margin-top:10px;}' +
@@ -350,6 +354,12 @@
   document.addEventListener('touchend', (e) => {
     try {
       if (moved) return;
+      // Taps inside the send-to-Anki waveform editor (which opens OVER the dict
+      // popup) belong to the editor. This capture-phase handler fires before the
+      // editor's own listeners, so without this guard the FIRST tap dismisses the
+      // dict popup behind it and is swallowed (only the 2nd tap reaches the editor).
+      // Mirrors enhanced-dictionary.js's #waveformEditorOverlay exclusions (2026-06-09).
+      if (e.target && e.target.closest && e.target.closest('#waveformEditorOverlay')) return;
       // Dict popup open AND the tap is OUTSIDE it → this tap is a DISMISS. Close
       // it and do nothing else (no new lookup, no character popup). Taps INSIDE
       // the popup (Send to Anki, nav, audio buttons) must pass through to the
@@ -388,6 +398,61 @@
   // ---- popup --------------------------------------------------------------------
   function esc(s) {
     return String(s || '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+  const KANJI_RE_NAME = /[㐀-鿿豈-﫿々〆ヶ]/;
+  // GROUND TRUTH: the author's own ruby, harvested from the book text into a
+  // {base:reading} glossary (window.aiChunks.rubyGlossary). Greedily longest-match
+  // the surface against it → per-segment ruby at the EPUB's granularity (per-
+  // individual-kanji when the author wrote per-kanji ruby). Returns null unless
+  // EVERY kanji got a reading, so a partly-covered name uses the fallback instead
+  // of showing some kanji furigana'd and some bare.
+  function rubyFromGlossary(surface, gloss) {
+    try {
+      if (!surface || !gloss) return null;
+      let html = '', i = 0, anyMatch = false;
+      while (i < surface.length) {
+        let best = null;
+        for (let len = Math.min(surface.length - i, 12); len >= 1; len--) {
+          const sub = surface.substr(i, len);
+          if (gloss[sub]) { best = { sub, reading: gloss[sub], len }; break; }
+        }
+        if (best) { html += '<ruby>' + esc(best.sub) + '<rt>' + esc(best.reading) + '</rt></ruby>'; i += best.len; anyMatch = true; }
+        else { const ch = surface[i]; if (KANJI_RE_NAME.test(ch)) return null; html += esc(ch); i += 1; }
+      }
+      return anyMatch ? html : null;
+    } catch (_) { return null; }
+  }
+  // Per-kanji furigana ruby for a character name — tied to each kanji like the dict
+  // popup (window.buildFuriganaRuby → JmdictFurigana with a distribution fallback),
+  // colored orange via the `.kai-name-ruby rt` rule. The AI reading usually omits a
+  // trailing kana honorific (成瀬くん → なるせ), which breaks alignment and spreads the
+  // reading over the whole name; append the surface's trailing kana run so the
+  // reading sits over the kanji only and くん/さん stay bare.
+  function nameRubyHtml(rec) {
+    try {
+      const surface = (rec && rec.surface) || '';
+      if (!surface) return '';
+      // 1) Author's text ruby (ground truth for THIS book): the harvested glossary,
+      //    at the EPUB's granularity. Best for names not in JmdictFurigana + 名乗り
+      //    (non-standard) readings. Falls through if the glossary doesn't cover it.
+      try {
+        const gloss = (window.aiChunks && window.aiChunks.rubyGlossarySync) ? window.aiChunks.rubyGlossarySync(window._activeTitleId) : null;
+        if (gloss) { const g = rubyFromGlossary(surface, gloss); if (g) return g; }
+        else if (window.aiChunks && window.aiChunks.rubyGlossary && window._activeTitleId) {
+          try { window.aiChunks.rubyGlossary(window._activeTitleId); } catch (_) {}   // warm the cache for the next render
+        }
+      } catch (_) {}
+      // 2) JmdictFurigana / okurigana-distribution fallback, using the AI reading.
+      const clean = (window.aiCharacters && window.aiCharacters.cleanReading) || ((x) => x || '');
+      let reading = clean(rec.rubyReading) || clean(rec.standardReading) || '';
+      if (reading.length > surface.length * 4 + 4) reading = '';   // giant-ruby guard (model dumped a phrase)
+      const hasKanji = /[㐀-鿿豈-﫿々〆ヶ]/.test(surface);
+      if (!reading || !hasKanji || reading === surface || typeof window.buildFuriganaRuby !== 'function') return esc(surface);
+      const m = surface.match(/[぀-ヿｦ-ﾝ]+$/);   // trailing kana honorific (くん/さん/…)
+      if (m && !reading.endsWith(m[0])) reading += m[0];
+      const ruby = window.buildFuriganaRuby(surface, reading);   // → { html, hasRuby }
+      return (ruby && ruby.html) ? ruby.html : esc(surface);
+    } catch (_) { return esc((rec && rec.surface) || ''); }
   }
   // Body text matches CARD mode typography (user-chosen font incl. custom).
   // pre-wrap: descriptions now arrive with per-sentence line breaks.
@@ -705,14 +770,7 @@
       if (e.target === overlay) { e.preventDefault(); e.stopPropagation(); closePopup(overlay); }
     });
 
-    // Furigana on every kanji name: author-given ruby first, standard reading
-    // as the fallback. All-kana names need none (already readable).
-    const clean = (window.aiCharacters && window.aiCharacters.cleanReading) || ((x) => x || '');
-    const reading = clean(rec.rubyReading) || clean(rec.standardReading) || '';
-    const hasKanji = /[㐀-鿿豈-﫿々〆ヶ]/.test(rec.surface || '');
-    const name = (reading && hasKanji && reading !== rec.surface)
-      ? '<ruby>' + esc(rec.surface) + '<rt style="font-size:.5em;color:#aab;">' + esc(reading) + '</rt></ruby>'
-      : esc(rec.surface);
+    const name = nameRubyHtml(rec);   // per-kanji ruby (orange, tied per kanji), like the dict popup
     const others = (rec.aliases || []).filter(a => a !== rec.surface);
     // Plain text with \n (not <br>): the body is rendered pre-wrap and later
     // re-wrapped into per-char dict spans, which only preserves TEXT newlines.
@@ -731,9 +789,9 @@
       'width:min(90vw,420px);max-height:72vh;overflow-y:auto;padding:16px 18px;';   // no -webkit-overflow-scrolling:touch (iOS legacy re-rastering scroll layer)
     card.innerHTML =
       '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">' +
-        '<div style="font-size:1.5rem;color:#eee;font-family:var(--font-family-card);">' + name + '</div>' +
-        '<button id="kcharClose" style="background:none;border:1px solid #333;border-radius:8px;' +
-        'color:#aaa;padding:2px 10px;font-size:1rem;cursor:pointer;flex:0 0 auto;">✕</button>' +
+        '<div class="kai-name-ruby" style="font-size:1.5rem;color:#eee;font-family:var(--font-family-card);">' + name + '</div>' +
+        '<button id="kcharClose" aria-label="Close" style="background:none;border:none;' +
+        'color:#ccc;padding:4px 8px;font-size:1.6rem;line-height:1;cursor:pointer;flex:0 0 auto;">✕</button>' +
       '</div>' +
       (others.length
         ? '<div style="color:#777;font-size:.72rem;margin-top:4px;">' + esc(others.join('・')) + '</div>' : '') +
@@ -812,5 +870,5 @@
       return true;
     } catch (_) { return false; }
   }
-  window.aiCharsUi = { openPopupFor, wireDeepDive, markContainer, markNow, remark: remarkSoon, buildCharImages, buildSquiggleToggle };
+  window.aiCharsUi = { openPopupFor, wireDeepDive, markContainer, markNow, remark: remarkSoon, buildCharImages, buildSquiggleToggle, nameRubyHtml };
 })();

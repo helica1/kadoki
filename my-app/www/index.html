@@ -2614,8 +2614,13 @@ body.dimmed .card-image {
     // the (many-exit) inner function without re-indenting its whole body.
     async function loadTitleFromLibrary(title) {
       showTitleOpenOverlay(title && title.name);
+      // Suppress History/bookmark capture while a switch is in flight: mid-switch
+      // the outgoing book is still loaded (its location) but _activeTitleId is
+      // already the incoming title, so a background/mode-switch capture would mint
+      // a record whose titleId disagrees with its location (History corruption).
+      window._titleSwitchInFlight = true;
       try { return await _loadTitleFromLibraryInner(title); }
-      finally { hideTitleOpenOverlay(); }
+      finally { window._titleSwitchInFlight = false; hideTitleOpenOverlay(); }
     }
     async function _loadTitleFromLibraryInner(title) {
       debugLog('📚 Loading title: ' + title.name);

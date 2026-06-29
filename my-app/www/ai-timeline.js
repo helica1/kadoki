@@ -1303,13 +1303,13 @@
             onChange: (nb) => { try { if (nb && Number.isFinite(nb.startMs) && Number.isFinite(nb.endMs) && nb.endMs > nb.startMs) sceneTrimSet(titleId, sCharId, nb.startMs, nb.endMs); } catch (_) {} },
           });
           _wfShown = true;
-          try { const pv = wfHost.querySelector('[data-role="preview"]'); if (pv) pv.style.display = 'none'; const rs = wfHost.querySelector('[data-role="reset"]'); if (rs) rs.style.display = 'none'; } catch (_) {}
+          try { const pp = wfHost.querySelector('[data-role="playpause"]'); if (pp) pp.style.display = 'none'; } catch (_) {}   // scene card has its own ▶/❚❚ clip player
         } catch (_) {}
       }
 
       (async () => {
         try {
-          if (sc.anchorQuote && window.aiChunks && window.aiChunks.cueRangeForQuote) loc = await window.aiChunks.cueRangeForQuote(titleId, ch.idx, sc.anchorQuote);
+          if (sc.anchorQuote && window.aiChunks && window.aiChunks.cueRangeForQuote) loc = await window.aiChunks.cueRangeForQuote(titleId, ch.idx, sc.anchorQuote, { anchorOff: sc.anchorOff });
         } catch (_) {}
         if (closed || overlay._dead) return;
         let t = null; try { t = await window.titleStore.get(titleId); } catch (_) {}

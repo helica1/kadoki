@@ -17,7 +17,7 @@
   // character popup / AI summary bodies.
   const BODY_STYLE =
     'color:#ddd;font-family:var(--font-family-card);font-size:var(--font-size-card,1rem);' +
-    'line-height:1.6;white-space:pre-wrap;';
+    'line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0;';
   const LABEL_STYLE =
     'font-size:.68rem;color:#8a93c4;letter-spacing:.08em;margin:10px 0 2px;';
 
@@ -164,13 +164,20 @@
     // Furigana on EVERY kanji name: author's ruby (rubyReading) preferred, else
     // the standard reading. All-kana names need none (already readable).
     const clean = (window.aiCharacters && window.aiCharacters.cleanReading) || ((x) => x || '');
-    const reading = clean(rec.rubyReading) || clean(rec.standardReading) || '';
+    let reading = clean(rec.rubyReading) || clean(rec.standardReading) || '';
+    // A real furigana reading is short; a malformed/over-long one (some models put
+    // a phrase — or the whole bio — in the reading field) made a giant <ruby><rt>
+    // that pushed the name row past the viewport: the collapse caret got shoved
+    // off-screen and the list scrolled horizontally. Drop an implausibly long one.
+    if (reading.length > (rec.surface || '').length * 4 + 4) reading = '';
     const hasKanji = /[㐀-鿿豈-﫿々〆ヶ]/.test(rec.surface || '');
     const name = document.createElement('div');
-    name.style.cssText = 'flex:1;min-width:0;font-size:1.35rem;color:#eee;font-family:var(--font-family-card);';
-    name.innerHTML = (reading && hasKanji && reading !== rec.surface)
-      ? '<ruby>' + esc(rec.surface) + '<rt style="font-size:.5em;color:#aab;">' + esc(reading) + '</rt></ruby>'
-      : esc(rec.surface);
+    name.className = 'kai-name-ruby';   // orange per-kanji furigana via .kai-name-ruby rt
+    name.style.cssText = 'flex:1;min-width:0;overflow:hidden;font-size:1.35rem;color:#eee;font-family:var(--font-family-card);';
+    // nameRubyHtml ties the reading to each kanji (dict-popup furigana) and carries
+    // the giant-ruby guard; falls back to the plain surface if it's unavailable.
+    name.innerHTML = (window.aiCharsUi && window.aiCharsUi.nameRubyHtml)
+      ? window.aiCharsUi.nameRubyHtml(rec) : esc(rec.surface);
     head.appendChild(name);
     const cp = document.createElement('button');
     cp.textContent = '⧉';
@@ -469,7 +476,7 @@
 
       const listEl = document.createElement('div');
       listEl.style.cssText =
-        'flex:1;overflow-y:auto;padding:14px 14px 20px;';   // no -webkit-overflow-scrolling:touch (iOS legacy re-rastering scroll layer = lag)
+        'flex:1;overflow-y:auto;overflow-x:hidden;padding:14px 14px 20px;';   // overflow-x:hidden: overflow-y:auto alone makes overflow-x compute to auto → a too-wide child scrolled the list sideways. no -webkit-overflow-scrolling:touch (iOS legacy re-rastering layer = lag)
       listEl.innerHTML =
         '<div style="text-align:center;padding:40px 0;">' +
         '<span class="kai-dots" style="color:#8a7fb8;"><span>·</span><span>·</span><span>·</span></span></div>';

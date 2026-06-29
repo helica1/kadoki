@@ -344,6 +344,10 @@ public class AnkiBridgePlugin: CAPPlugin, CAPBridgedPlugin {
         if !tagStrings.isEmpty {
             items.append(URLQueryItem(name: "tags", value: tagStrings.joined(separator: " ")))
         }
+        // Always permit duplicates: without this AnkiMobile rejects the note with
+        // "A note with the same first field already exists." The user wants adds to
+        // always go through even if the word is already in the collection.
+        items.append(URLQueryItem(name: "dupes", value: "1"))
         // x-callback-url success/error: AnkiMobile opens these after
         // creating the note (or failing). Pointing at our own URL
         // scheme produces the "flash to Anki, flash back" UX —

@@ -21,6 +21,21 @@ Unlike browser-script workflows, Kadoki is **fully integrated**. No plugins, bro
 
 ---
 
+## What's new in 1.6.2
+
+Fixes and refinements since 1.6.1:
+
+- **Position safety:** switching titles no longer lets a new title inherit the previous one's reading position.
+- **Listening stats:** audio mode no longer over-counts characters read (was roughly double).
+- **Character furigana:** name readings are now orange and tied to each kanji — using the book's own ruby as the source of truth — like the dictionary popup.
+- **Anki — add duplicates (iOS):** you can now send a card for a word that's already in your collection (AnkiMobile no longer rejects it).
+- **Dictionary popup:** the +Anki and audio buttons respond on the first tap, and the definition no longer goes missing when a looked-up word crosses a column.
+- **Scenes:** scene audio clips anchor to the correct passage far more reliably; the clip editor responds on the first tap; and its controls are now a single ▶ / ❚❚ play-pause toggle (matching scene playback).
+- **Scene prompt editing:** the regenerate prompt box is larger and no longer closes while you're typing.
+- **Polish:** larger, cleaner close (✕) on the character popup; removed a glow that could clip off the edge of the menu button.
+
+---
+
 ## Main Features
 
 Kadoki supports two primary workflows.

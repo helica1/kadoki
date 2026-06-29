@@ -1295,7 +1295,12 @@
         want = window._syncAlignCue;
         window._syncAlignCue = null; window._syncAlignTitleId = null; window._syncAlignAt = null;
       }
-      if (want < 0 && Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) {
+      // Title-scope the shared cursor (mirror the _syncAlignCue guard above): a
+      // stale cue from a DIFFERENT title must never be adopted as this title's
+      // restore point. On mismatch we fall through to this title's own lastReadCueIdx
+      // / paged bookmark — never 0, never the other title's spot.
+      if (want < 0 && Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0 &&
+          window._lastAudioCueTitleId === window._activeTitleId) {
         want = window._lastAudioCueIdx;
       }
       if (want < 0 && Number.isFinite(lastReadCueIdx) && lastReadCueIdx >= 0) {
@@ -1353,7 +1358,7 @@
       }
       if (!r) { log('ensureGreenOnEnter: paint failed want=' + want); return false; }
       lastHighlightedCue = -1;             // let the next live audio-follow paint fire
-      window._lastAudioCueIdx = want;      // keep the shared cursor at the intended cue
+      window._lastAudioCueIdx = want; window._lastAudioCueTitleId = window._activeTitleId;      // keep the shared cursor at the intended cue (title-stamped)
       lastProgrammaticScrollTime = Date.now();
       try { scrollChunkNearRightWithContext(chunk, 3, { allowFarJump: true }); } catch (_) {}
       log('[scroll-trace] ensureGreenOnEnter want=' + want + ' matchCue=' + matchCue + ' painted=' + !!r);
@@ -2060,7 +2065,7 @@
         const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
         try { bg.seek({ ms, fadeMs: 70 }); } catch (_) {}   // brief fade, like the other modes
       }
-      window._lastAudioCueIdx = target;
+      window._lastAudioCueIdx = target; window._lastAudioCueTitleId = window._activeTitleId;
       // Advance the module read cursor too: the programmatic follow-scroll
       // below schedules the 400ms debounced save, which persists
       // lastReadCueIdx — leaving it at the pre-swipe value silently REVERTED
@@ -2309,7 +2314,7 @@
         const ci = chunks.indexOf(edgeChunk);
         if (ci >= 0 && ci < pagedChunkToCue.length && pagedChunkToCue[ci] >= 0) {
           lastReadCueIdx = pagedChunkToCue[ci];
-          window._lastAudioCueIdx = lastReadCueIdx;
+          window._lastAudioCueIdx = lastReadCueIdx; window._lastAudioCueTitleId = window._activeTitleId;
         }
       }
       // NOTE: char crediting deliberately does NOT happen here anymore — it would
@@ -4921,7 +4926,7 @@
         const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
         if (Number.isFinite(idx) && idx >= 0 && idx < cues.length &&
             cues[idx]?.text && window.allNotes?.[idx]?.expression === cues[idx].text) {
-          window._lastAudioCueIdx = idx;
+          window._lastAudioCueIdx = idx; window._lastAudioCueTitleId = window._activeTitleId;
         }
       } catch (e) {}
       if (!_readerHidden()) {
