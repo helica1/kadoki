@@ -276,6 +276,12 @@ async function saveDeckState() {
       debugLog('Not saving deck state - no valid file name');
       return;
     }
+    // Mid-switch: the live card index may still be the OUTGOING title's while the
+    // deck name has flipped to the incoming one — don't cross-write per-deck state.
+    if (window._positionSaveBlocked && window._positionSaveBlocked()) {
+      debugLog('Not saving deck state - title switch in flight');
+      return;
+    }
 
     // DIRTY CHECK: skip the whole multi-key write burst when nothing
     // meaningful changed since the last successful save — the 30s interval
@@ -1088,7 +1094,8 @@ function updateCardIndex(newIndex) {
     if (!_isAutoAdvance || !window._lastCardPersistAt || (_nowP - window._lastCardPersistAt) >= 1200) {
       window._lastCardPersistAt = _nowP;
       saveDeckState();
-      if (window._activeTitleId && window.titleStore?.setCardIndex) {
+      if (window._activeTitleId && window.titleStore?.setCardIndex &&
+          !(window._positionSaveBlocked && window._positionSaveBlocked())) {
         window.titleStore.setCardIndex(window._activeTitleId, window._srtCardToCueAnchor(newIndex)).catch(() => {});
       }
     }
@@ -3004,6 +3011,7 @@ async function displayCard() {
   // render (e.g. an EPUB title opened straight into READ mode) can't leave the previous
   // book's card on screen — see the "flush cards on title change" fix.
   window._cardRenderedTitleId = window._activeTitleId;
+  window._loadedContentTitleId = window._activeTitleId;   // content is now live for this title
 
   // Capture which card we're rendering at function entry. If currentCardIndex
   // changes during the async media-load awaits (e.g., pendingCardIndex
@@ -3987,6 +3995,7 @@ window.stopCardAudio = function () {
 // applies to SRT-cards titles; deck/epub titles use the per-book scrollLeft.
 window.persistReadCue = function (cueIdx) {
   if (!Number.isFinite(cueIdx) || cueIdx < 0) return;
+  if (window._positionSaveBlocked && window._positionSaveBlocked()) return;   // never write the prior title's cue mid-switch
   if (!(allNotes && allNotes.length && allNotes[0]?.isSrtCard)) return;
   // cueIdx is a CUE index. With combined cards one card holds many cues
   // (window._srtCueToCard), so the bound is the CUE count (NOT allNotes.length,
@@ -4049,6 +4058,31 @@ window.lockScreenCueJump = async function (dir) {
 // so the new book restores its OWN saved position instead of inheriting the
 // previous book's playhead (e.g. opening book B and jumping to book A's 2%) and
 // so the read char counter re-anchors per book instead of jumping.
+// ── Title-switch contamination guard ───────────────────────────────────────
+// _activeTitleId flips to the INCOMING title at the very start of a title switch
+// (index.html loadTitleFromLibrary), but the incoming book's content (allNotes /
+// paged chunks / loaded audio) only goes live a few seconds later, after it's
+// parsed/indexed. In that window the live position globals still belong to the
+// OUTGOING title while _activeTitleId already names the incoming one — so any
+// per-title position SAVE fired then writes the old book's spot under the new
+// book's id (and the reverse on the way back). That is the cross-title place
+// contamination.
+//
+// _loadedContentTitleId names the title whose content is ACTUALLY live right now.
+// It is stamped ONLY where content goes live (displayCard, the SRT-cards load,
+// the paged reader, the audio cue cursor). _positionSaveBlocked() reports whether
+// it's unsafe to write a per-title position: blocked when a switch is in flight,
+// or when we KNOW the live content belongs to a different title than
+// _activeTitleId. Fail-OPEN when unknown (null = cold boot) so first-ever saves
+// still land. Works for existing titles too — the guard is at save time and
+// depends on nothing stored.
+if (typeof window._loadedContentTitleId === 'undefined') window._loadedContentTitleId = null;
+window._positionSaveBlocked = function () {
+  if (window._titleSwitchInFlight) return true;
+  const c = window._loadedContentTitleId;
+  return c != null && c !== window._activeTitleId;
+};
+
 function resetCrossTitlePositionState() {
   window._lastAudioCueIdx = -1;
   window._lastAudioCueTitleId = null;
@@ -4237,7 +4271,8 @@ function _ensureBgListenersForSrtCards() {
           const _nowP = Date.now();
           if (!window._lastCardPersistAt || (_nowP - window._lastCardPersistAt) >= 1200) {
             window._lastCardPersistAt = _nowP;
-            if (window._activeTitleId && window.titleStore?.setCardIndex) {
+            if (window._activeTitleId && window.titleStore?.setCardIndex &&
+                !(window._positionSaveBlocked && window._positionSaveBlocked())) {
               window.titleStore.setCardIndex(window._activeTitleId, window._srtCardToCueAnchor(idx)).catch(() => {});
             }
           }
@@ -4599,13 +4634,35 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
       throw e;
     }
   }
+  // ── Cue-index cache ──────────────────────────────────────────────────────
+  // Skip the file read + full SRT parse (the per-open "re-index" the user sees)
+  // when this exact subtitle file was parsed before. Keyed by titleId + a file
+  // signature (name|size) so a changed/replaced file re-parses. The screen-
+  // dependent steps below (card build, page layout) still run on the cached
+  // cues — those are fast in-memory passes; the read+parse was the slow part.
   let cues = [];
-  try {
-    const text = await _readSrtText(srtAtt);
-    cues = window.srtParser.parseSrt(text);
-  } catch (e) {
-    alert(window.i18n.t('ap.srt_read_failed', 'Failed to read SRT for this title:') + ' ' + (e?.message || e));
-    return false;
+  let _cuesFromCache = false;
+  const _srtSig = (srtAtt.name || '') + '|' + (srtAtt.size || 0);
+  if (srtAtt.size && title?.id && window.blobStore?.get) {
+    try {
+      const raw = await window.blobStore.get('SRT_CUES_V1_' + title.id);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        if (obj && obj.sig === _srtSig && Array.isArray(obj.cues) && obj.cues.length) {
+          cues = obj.cues;
+          _cuesFromCache = true;
+        }
+      }
+    } catch (_) {}
+  }
+  if (!_cuesFromCache) {
+    try {
+      const text = await _readSrtText(srtAtt);
+      cues = window.srtParser.parseSrt(text);
+    } catch (e) {
+      alert(window.i18n.t('ap.srt_read_failed', 'Failed to read SRT for this title:') + ' ' + (e?.message || e));
+      return false;
+    }
   }
   if (!cues.length) {
     alert(window.i18n.t('ap.srt_zero_cues', 'SRT parsed but found 0 cues. Check the file format.'));
@@ -4615,6 +4672,11 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   // Normalize cue indices to array position so they line up with
   // srtParser.findCueAtTime (which returns an array index) and the cue→card map.
   cues.forEach((c, i) => { c.index = i; });
+
+  // Persist the parsed cues for an instant reopen (only when freshly parsed).
+  if (!_cuesFromCache && srtAtt.size && title?.id && window.blobStore?.set) {
+    try { window.blobStore.set('SRT_CUES_V1_' + title.id, JSON.stringify({ sig: _srtSig, cues })); } catch (_) {}
+  }
 
   // Read the "Combine short subtitles" preference (default ON). The per-card
   // size is no longer a manual char value — it's derived from the SCREEN
@@ -4670,6 +4732,7 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   currentCardIndex = restoreIdx;
   window.currentCardIndex = restoreIdx;
   window._activeTitleId = title.id;
+  window._loadedContentTitleId = title.id;   // SRT-cards content is now live for this title
   // Title swap invalidates the audiobook pre-warm cache + reader warm flag.
   if (typeof window.invalidateAbContext === 'function') window.invalidateAbContext();
   window.dispatchEvent(new CustomEvent('shell:title-change'));

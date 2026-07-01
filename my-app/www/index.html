@@ -1585,6 +1585,18 @@ body.dimmed .card-image {
             <span id="statsAudioRate" class="stat-value">—</span>
           </div>
         </div>
+        <!-- AI MATERIAL — time spent on the Characters / Timeline / Scenes pages -->
+        <div id="statsAi" class="stats-block" data-mode="ai">
+          <div class="stats-block-header">
+            <span class="stats-block-title">AI material</span>
+            <button onclick="window.resetReadingTimerFor && window.resetReadingTimerFor('ai')" title="Reset AI material stats" style="background:transparent;border:none;color:var(--text-muted,#666);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:2px 6px;">Reset</button>
+            <span class="stats-block-status">●</span>
+          </div>
+          <div class="stat-row stat-row-last">
+            <span class="stat-label">Time</span>
+            <span id="statsAiTime" class="stat-value">0:00</span>
+          </div>
+        </div>
         <!-- "Reset All Stats" button removed — too easy to hit by accident.
              Per-section Reset buttons in each block header now handle this
              intentionally. -->
@@ -1650,6 +1662,15 @@ body.dimmed .card-image {
                 <div class="stat-row stat-row-last">
                   <span class="stat-label">Chars / hr</span>
                   <span id="statsYAudioRate" class="stat-value">—</span>
+                </div>
+              </div>
+              <div class="stats-block" data-mode="ai">
+                <div class="stats-block-header">
+                  <span class="stats-block-title">AI material</span>
+                </div>
+                <div class="stat-row stat-row-last">
+                  <span class="stat-label">Time</span>
+                  <span id="statsYAiTime" class="stat-value">0:00</span>
                 </div>
               </div>
             </div>

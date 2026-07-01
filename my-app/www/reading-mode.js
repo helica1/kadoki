@@ -1235,6 +1235,11 @@
       setText('statsAudioRate', Math.round(audioChars / (audioSec / 3600)).toLocaleString());
     }
     setRunning('statsAudio', s.isRunning('audio'));
+
+    // AI material (Characters / Timeline / Scenes pages) — time only.
+    const aiSec = (typeof s.getAiSec === 'function') ? s.getAiSec() : 0;
+    setText('statsAiTime', formatSec(aiSec));
+    setRunning('statsAi', s.isRunning('ai'));
   }
 
   let statsRefreshTimer = null;
@@ -1445,6 +1450,7 @@
     const c = snap.modes.card || {};
     const r = snap.modes.read || {};
     const a = snap.modes.audio || {};
+    const ai = snap.modes.ai || {};
     setText('statsYesterdayDay', snap.day || '');
     setText('statsYCardTime',  formatSec(c.sec || 0));
     setText('statsYCardCount', (c.cards || 0).toLocaleString());
@@ -1456,6 +1462,7 @@
     setText('statsYAudioTime',  formatSec(a.sec || 0));
     setText('statsYAudioChars', (a.chars || 0).toLocaleString());
     setText('statsYAudioRate',  rate(a.sec || 0, a.chars || 0));
+    setText('statsYAiTime',     formatSec(ai.sec || 0));
   }
 
   window.toggleYesterdayStats = function () {
@@ -3121,7 +3128,8 @@
       }
       try {
         if (deck && window._activeTitleId && window.bookmarks?.updateFurthest) {
-          if (!window._kaiPassageActive) window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
+          if (!window._kaiPassageActive && !(window._positionSaveBlocked && window._positionSaveBlocked()))
+            window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
         }
       } catch (_) {}
     } catch (_) {}
@@ -3278,7 +3286,8 @@
         // polluted the NEW title's never-regress furthest mark.
         if (abPositionRef.ms > 0 && abEngineOwnsActiveDeck() &&
             window._activeTitleId && window.bookmarks?.updateFurthest) {
-          if (!window._kaiPassageActive) window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
+          if (!window._kaiPassageActive && !(window._positionSaveBlocked && window._positionSaveBlocked()))
+            window.bookmarks.updateFurthest(window._activeTitleId, abPositionRef.ms);
         }
       } catch (_) {}
       // Durability: persist the audio playhead every ~30s while it advances, so

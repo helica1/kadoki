@@ -3861,6 +3861,32 @@
         } catch (_) {}
       } else {
         const blob = await response.blob();
+        // ── Reader-HTML cache ────────────────────────────────────────────────
+        // Skip the unzip + spine-walk + per-section parse (the slow EPUB
+        // "re-index" the user sees on every open) when this exact book was
+        // rendered before. Keyed by titleId + blob size. ONLY image-free books
+        // are cached: EPUB images are inlined as session-scoped blob: URLs that
+        // die on reload, so a cached image book would show broken images — a
+        // text-only JP novel (the common case) gets the full speedup, an
+        // illustrated book just falls back to the normal parse. ──
+        const _epubSig = 'epub|' + blob.size;
+        const _readCacheKey = window._activeTitleId ? ('READ_HTML_V1_' + window._activeTitleId) : null;
+        let _fromReadCache = false;
+        if (_readCacheKey && window.blobStore?.get) {
+          try {
+            const raw = await window.blobStore.get(_readCacheKey);
+            if (raw) {
+              const obj = JSON.parse(raw);
+              if (obj && obj.sig === _epubSig && typeof obj.html === 'string' && obj.html) {
+                innerEl.innerHTML = obj.html;
+                sectionCount = obj.sectionCount || 1;
+                if (Array.isArray(obj.aiLabels)) { _aiSectionLabels.length = 0; obj.aiLabels.forEach(l => _aiSectionLabels.push(l)); }
+                _fromReadCache = true;
+              }
+            }
+          } catch (_) {}
+        }
+        if (!_fromReadCache) {
         const zip = await JSZip.loadAsync(blob);
 
         const containerXml = await zip.file('META-INF/container.xml')?.async('string');
@@ -4026,9 +4052,20 @@
             }
           }
         } catch (_) {}
+        // Persist the rendered HTML for an instant reopen — image-free books only
+        // (a cached <img> would carry a dead blob: URL). Stored in IndexedDB.
+        if (_readCacheKey && window.blobStore?.set && !innerEl.querySelector('img')) {
+          try { window.blobStore.set(_readCacheKey, JSON.stringify({ sig: _epubSig, html: innerEl.innerHTML, sectionCount, aiLabels: _aiSectionLabels })); } catch (_) {}
+        }
+        } // end if (!_fromReadCache)
       }
 
       _wireImageLightbox();
+      // Read content (EPUB/txt) is now live for the active title — stamp the
+      // contamination guard so this title's History/bookmark captures aren't
+      // blocked (and the outgoing title's can't leak in). Covers both the cache
+      // hit and the full-parse path (they converge here).
+      window._loadedContentTitleId = window._activeTitleId || null;
 
       // Tag block-level descendants as .reading-chunk for dict / scroll-snap.
       // Also accumulate per-chunk char offsets for the bottom progress
@@ -4223,6 +4260,7 @@
       lastReadCueIdx = -1;
     }
     window._pagedCuesTitleId = window._activeTitleId || null;
+    window._loadedContentTitleId = window._activeTitleId || null;   // paged read content is now live for this title
     if (!window.srtParser?.parseSrt) { log('srtParser missing'); return false; }
 
     // Get audio + SRT paths. Try title-store first (newer), fall back to

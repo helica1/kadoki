@@ -651,6 +651,10 @@
       max_tokens: opts.maxTokens || 1500,
       stream: false,
       usage: { include: true },   // ask OpenRouter to return billed cost + token counts
+      // Suppress chain-of-thought. Reasoning models (DeepSeek etc.) otherwise leak
+      // their planning INTO message.content — self-talk mixed with the answer — which
+      // breaks JSON parsing. `exclude:true` drops reasoning from the response entirely.
+      reasoning: { exclude: true },
     };
     const headers = {
       'content-type': 'application/json',
@@ -715,8 +719,10 @@
       const r = await postOnce(fmtMode);
       if (r.status === 200 && r.data && !r.data.error) { data = r.data; break; }
       // Model rejected this response_format mode → step DOWN the ladder (json_schema
-      // → json_object → none) once each before giving up.
-      if (opts.outputSchema && fmtMode < 2 && orIsJsonComplaint(r.data)) { fmtMode++; continue; }
+      // → json_object) on a format complaint. FLOOR at json_object (fmtMode 1), never
+      // "none": an unconstrained response returns prose/CoT that fails to parse anyway,
+      // so losing the JSON constraint is worse than failing loudly (→ retry/backoff).
+      if (opts.outputSchema && fmtMode < 1 && orIsJsonComplaint(r.data)) { fmtMode++; continue; }
       const err = orErrorFor(r.status, r.data);
       // Transient overload retry (background callers only), like the Anthropic path.
       const overloaded = err._status === 429 || err._status === 529 || /overloaded/i.test(err.message || '');

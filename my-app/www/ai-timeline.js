@@ -756,6 +756,7 @@
 
       const overlay = document.createElement('div');
       overlay.id = 'kchapterView';
+      overlay.classList.add('kai-ai-page');   // stats.js: AI-material time tracking
       overlay.style.cssText =
         'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9000;' +
         'display:flex;align-items:center;justify-content:center;box-sizing:border-box;' +
@@ -1117,6 +1118,7 @@
 
       const overlay = document.createElement('div');
       overlay.id = 'kchapterView';
+      overlay.classList.add('kai-ai-page');   // stats.js: AI-material time tracking
       overlay.style.cssText =
         'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9000;' +
         'display:flex;align-items:center;justify-content:center;box-sizing:border-box;' +
@@ -1483,6 +1485,7 @@
 
       const overlay = document.createElement('div');
       overlay.id = 'bookmarksOverlay';   // keeps the swipe-block + dismiss conventions
+      overlay.classList.add('kai-ai-page');   // stats.js: AI-material time tracking (Timeline & Scenes panel)
       // Match the Characters screen: a centered card over a dimmed backdrop, inset from
       // the safe area, so on Android it sits BELOW the status bar instead of full-bleed
       // over it (a top-anchored full-screen panel put its header under the status bar).

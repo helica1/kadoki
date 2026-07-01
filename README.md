@@ -21,6 +21,18 @@ Unlike browser-script workflows, Kadoki is **fully integrated**. No plugins, bro
 
 ---
 
+## What's new in 1.6.3
+
+Fixes and refinements since 1.6.2:
+
+- **Faster reopens:** returning to a title you've opened before skips the "re-indexing" pause — the subtitle parse (subs2srs / card titles) and the EPUB page render (text-only books) are cached, so the book comes straight back up.
+- **AI companion — no more garbled output with OpenRouter models:** chapter summaries, the Timeline, Characters, and Scenes now generate reliably on reasoning models such as DeepSeek. The model's internal "thinking" no longer bleeds into the result, and a half-formed response is recovered instead of failing the whole chapter.
+- **History is now per-title:** the History list shows only your recent sessions in the book you're currently in, rather than a global list mixing every title.
+- **Position safety (continued):** while a title is still loading, its place can no longer be written onto — or inherited from — the title you just left. This closes the remaining window where a fast title switch could cross-contaminate reading position, bookmarks, and the furthest-listened mark.
+- **New "AI material" time in Stats:** time spent on the Characters, Timeline, and Scenes pages is tracked as its own category (today and yesterday), so browsing them no longer counts as reading time.
+
+---
+
 ## What's new in 1.6.2
 
 Fixes and refinements since 1.6.1:

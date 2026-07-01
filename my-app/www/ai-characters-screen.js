@@ -367,6 +367,7 @@
 
       const overlay = document.createElement('div');
       overlay.id = 'kcharsScreen';
+      overlay.classList.add('kai-ai-page');   // stats.js: AI-material time tracking
       // z 9000 — below dict popup (9999), toast (9500) and char popup (9400).
       overlay.style.cssText =
         'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9000;' +

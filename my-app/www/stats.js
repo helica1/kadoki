@@ -35,6 +35,9 @@
   const KEY_PREFIX = 'STATS_V1_';
   const TIMEOUT_CARD_SEC = 20;
   const TIMEOUT_READ_SEC = 120;
+  // AI-material pages (Characters / Timeline / Scenes overlays) accrue time
+  // while open + screen-on; 30 s of no interaction stops the timer.
+  const TIMEOUT_AI_SEC = 30;
   // Max chars a single noteReadPosition step may credit. Continuous reading
   // advances a few hundred chars between scroll events; a bigger jump is a
   // seek/jump-to-percent and must NOT credit the skipped gap as read.
@@ -80,6 +83,9 @@
     // credited with 35k chars on the next scroll.
     read:  { totalSec: 0, chars: 0, maxCharOffsetSeen: 0, baselineSet: false, lastInteraction: 0, runningSince: 0 },
     audio: { totalSec: 0, chars: 0,                                           runningSince: 0 },
+    // ai — time spent on AI-material overlays (Characters / Timeline / Scenes).
+    // Time only (no chars). Runs independently of the card/read/audio trio.
+    ai:    { totalSec: 0,                                  lastInteraction: 0, runningSince: 0 },
   };
 
   function persistableShape(mode) {
@@ -94,7 +100,7 @@
     try { localStorage.setItem(KEY_PREFIX + mode, JSON.stringify(persistableShape(mode))); } catch (e) {}
   }
   function load() {
-    for (const mode of ['card', 'read', 'audio']) {
+    for (const mode of ['card', 'read', 'audio', 'ai']) {
       try {
         const raw = localStorage.getItem(KEY_PREFIX + mode);
         if (!raw) continue;
@@ -136,7 +142,7 @@
   // so opening the stats popup doesn't continue ticking time the user
   // obviously isn't using.
   function stopAll() {
-    for (const m of ['card', 'read', 'audio']) {
+    for (const m of ['card', 'read', 'audio', 'ai']) {
       if (timers[m].runningSince) stopMode(m);
     }
   }
@@ -159,6 +165,7 @@
       // event can't credit hours of suspended time.
       const timeoutSec = mode === 'card' ? TIMEOUT_CARD_SEC
                        : mode === 'read' ? TIMEOUT_READ_SEC
+                       : mode === 'ai'   ? TIMEOUT_AI_SEC
                        : 0;
       if (timeoutSec > 0) {
         const capTs = t.lastInteraction + timeoutSec * 1000;
@@ -242,6 +249,33 @@
     if (!t.runningSince) startMode('card');
   }
 
+  // ----- AI-material page timer (Characters / Timeline / Scenes) -----
+  // These are full-screen overlays tagged `.kai-ai-page`. Time accrues while
+  // one is open and the screen is on; closing the page (back to the prior
+  // mode), the screen turning off, or 30 s of no interaction stops it. It runs
+  // INDEPENDENTLY of the card/read/audio trio: opening a page stops the book
+  // (card/read) timer so the time isn't double-counted, but audio is left
+  // playing so the user can listen while browsing the summary. The character
+  // POPUP (squiggle tap) is deliberately NOT tagged — that's captured by read.
+  let _aiPagePrevOpen = false;
+  function isAiPageVisible() {
+    try { return !!document.querySelector('.kai-ai-page'); } catch (_) { return false; }
+  }
+  // Interaction inside an AI page — starts or keeps alive the ai timer. Gated
+  // on the page actually being open and the app visible (same gate as bumpRead).
+  function aiBump() {
+    if (_shouldIgnoreBump()) return;
+    if (!isAiPageVisible()) return;
+    const t = timers.ai;
+    t.lastInteraction = Date.now();
+    if (!t.runningSince) {
+      if (timers.card.runningSince) stopMode('card');
+      if (timers.read.runningSince) stopMode('read');
+      t.runningSince = Date.now();
+      console.log('[stats] start ai');
+    }
+  }
+
   // ----- Anki round-trip suspension -----
   //
   // On iOS, sending to AnkiMobile hands off via `anki://x-callback-url`,
@@ -304,7 +338,7 @@
     // hidden-time audio auto-switch was skipped). Restarting the card timer
     // then accrues phantom card time for the whole pocketed listen — the
     // backgrounded span must never count as card reading.
-    if (window._bgPlaying && inCard && !timers.card.runningSince &&
+    if (window._bgPlaying && inCard && !timers.card.runningSince && !window._aiPageOpen &&
         (document.visibilityState === 'visible' || _ankiRoundtripActive)) startMode('card');
   }
 
@@ -316,9 +350,20 @@
       _lastDayCheck = Date.now();
       try { checkRollover(); } catch (e) {}
     }
+    const aiOpen = isAiPageVisible();
+    window._aiPageOpen = aiOpen;
     reconcileMode(currentMode());
 
     const now = Date.now();
+    // AI material (Characters / Timeline / Scenes overlays, class .kai-ai-page):
+    // treat opening as the first interaction; stop on close, screen-off, or 30 s idle.
+    if (aiOpen && !_aiPagePrevOpen) aiBump();
+    _aiPagePrevOpen = aiOpen;
+    if (timers.ai.runningSince) {
+      if (!aiOpen) stopMode('ai');
+      else if (document.visibilityState !== 'visible') stopMode('ai', { byBackground: true });
+      else if ((now - timers.ai.lastInteraction) / 1000 > TIMEOUT_AI_SEC) stopMode('ai', { byInactivity: true });
+    }
     // Card inactivity — skipped during CONTINUOUS PLAY (the user pressed play, so
     // cards auto-advance and audio plays continuously; they're actively listening,
     // not idle). Manual one-by-one viewing still times out at 20s of no swipe.
@@ -413,8 +458,8 @@
 
   // Capture-phase touch listeners — feed touch() on every interaction.
   // Now harmless for stopped timers (touch is a no-op when not running).
-  document.addEventListener('touchstart', () => touch(), { passive: true, capture: true });
-  document.addEventListener('mousedown',  () => touch(), { passive: true, capture: true });
+  document.addEventListener('touchstart', () => { if (isAiPageVisible()) aiBump(); else touch(); }, { passive: true, capture: true });
+  document.addEventListener('mousedown',  () => { if (isAiPageVisible()) aiBump(); else touch(); }, { passive: true, capture: true });
 
   // -------- Backgrounding / visibility stop --------
   //
@@ -441,7 +486,7 @@
       return;
     }
     let any = false;
-    for (const m of ['card', 'read']) {
+    for (const m of ['card', 'read', 'ai']) {
       if (timers[m].runningSince) { stopMode(m, { byBackground: true }); any = true; }
     }
     if (any) console.log('[stats] stopped interactive timers for background');
@@ -707,6 +752,7 @@
         card:  { sec: Math.round(liveTotal('card')),  chars: timers.card.chars, cards: timers.card.cards },
         read:  { sec: Math.round(liveTotal('read')),  chars: timers.read.chars },
         audio: { sec: Math.round(liveTotal('audio')), chars: timers.audio.chars },
+        ai:    { sec: Math.round(liveTotal('ai')) },
       },
     };
     try { localStorage.setItem(PREV_KEY, JSON.stringify(prev)); } catch (e) {}
@@ -761,6 +807,7 @@
     getCardSec:  () => liveTotal('card'),
     getReadSec:  () => liveTotal('read'),
     getAudioSec: () => liveTotal('audio'),
+    getAiSec:    () => liveTotal('ai'),
     getCardCount:  () => timers.card.cards,
     getCardChars:  () => timers.card.chars,
     getReadChars:  () => timers.read.chars,
@@ -772,7 +819,7 @@
     rebaselineRead,
     noteReadPosition,
     getYesterday,
-    touch, bumpCard, bumpRead, resetAll, resetMode, persist,
+    touch, bumpCard, bumpRead, aiBump, resetAll, resetMode, persist,
     markAnkiRoundtripActive, markAnkiRoundtripDone,
     stopAll, startMode, stopMode,
     currentMode,

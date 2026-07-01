@@ -145,6 +145,7 @@
     try {
       if (mode !== 'card' && mode !== 'read') return;   // audio is excluded
       if (window._titleSwitchInFlight) return;   // mid-switch: titleId↔location can disagree
+      if (window._positionSaveBlocked && window._positionSaveBlocked()) return;   // live content still belongs to the outgoing title
       const titleId = window._activeTitleId || null;
       if (!titleId) return;
       // Throttle: keep the list uncrowded — bookmarks stay ~1 minute apart.
@@ -213,6 +214,7 @@
       const mode = (opts && opts.mode) || currentMode();
       if (!mode) return;
       if (window._titleSwitchInFlight) return;   // mid-switch: outgoing location, incoming titleId — don't record a mismatched bookmark
+      if (window._positionSaveBlocked && window._positionSaveBlocked()) return;   // live content still belongs to the outgoing title
       const titleId = window._activeTitleId || null;
       if (!titleId) return;
       if (!(opts && opts.force)) {
@@ -457,8 +459,13 @@
   async function openHistory() {
     const prev = document.getElementById('historyOverlay');
     if (prev) prev.remove();
-    // Newest first across every title; entries are already deduped per spot.
-    const recent = list().slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 10);
+    // History is PER TITLE: only the active title's sessions, newest first.
+    // (Each record is stamped with its own titleId + location; filtering here
+    // guarantees every row belongs to the title you're currently in.)
+    const activeTitleId = window._activeTitleId || null;
+    const recent = list()
+      .filter(b => activeTitleId && b.titleId === activeTitleId)
+      .slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)).slice(0, 10);
     let nameById = new Map();
     try {
       if (window.titleStore && window.titleStore.list) {
@@ -481,7 +488,7 @@
     card.appendChild(head);
     const subhead = document.createElement('div');
     subhead.style.cssText = 'color:#888;font-size:.74rem;margin-bottom:10px;';
-    subhead.textContent = 'Your 10 most recent reading sessions — tap to jump back.';
+    subhead.textContent = 'Your recent sessions in this title — tap to jump back.';
     card.appendChild(subhead);
 
     if (!recent.length) {
