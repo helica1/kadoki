@@ -306,6 +306,9 @@ body.pref-audio-waveform-off #abRepeatBar { bottom: calc(env(safe-area-inset-bot
    toggled). Lavender when off, near-white when on — matches the post-toggle look. */
 #abRepeatToggle, #abRepeatToggle > span:first-child { color: #cfc0f5 !important; -webkit-text-fill-color: #cfc0f5 !important; }
 #abRepeatToggle.on, #abRepeatToggle.on > span:first-child { color: #efe8ff !important; -webkit-text-fill-color: #efe8ff !important; }
+/* Real (invisible) style delta for the one-frame repaint nudge in
+   abReflectRepeatUI — a class with no rule forces no raster. */
+#abRepeatToggle.kai-fr, #abRepeatToggle.kai-fr > span:first-child { letter-spacing: 0.02px; }
 #abNextChapterBtn {
   pointer-events: auto; display: none; align-items: center; gap: 6px;
   background: var(--accent-audio, #b794f6); color: #1a1226; border: none;
@@ -624,6 +627,23 @@ html[lang="ja"] #appHeader #shellTimerLabel.paused::before { content: "停止"; 
   z-index: 3600;
   min-width: 200px;
   padding: 4px 0;
+  /* Landscape: never taller than the viewport; scroll instead of clipping.
+     The items scroll inside .shell-menu-scroll — iOS WKWebView does not
+     reliably touch-scroll a dynamically-appended position:fixed element
+     itself, so the fixed shell only clamps and clips. */
+  max-height: calc(100vh - 64px);                            /* fallback */
+  max-height: calc(100dvh - 64px - env(safe-area-inset-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  touch-action: pan-y;
+}
+.shell-menu-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;        /* don't chain scroll to the page behind */
+  touch-action: pan-y;
 }
 .shell-menu .menu-item {
   display: block;
@@ -810,6 +830,17 @@ body.chrome-hidden #progressBar {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
+}
+/* Landscape: the card image is HEIGHT-constrained there (flex:1 +
+   object-fit:contain), so the reserved top/bottom gaps directly shrink it.
+   Drop them and let the top bar / progress bar overlay the card instead.
+   Portrait keeps the gaps — the image is width-locked, so they cost
+   nothing. */
+@media (orientation: landscape) {
+  #cardContainer {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
 }
 #cardContainer .subtitle-text {
   /* Cap long subtitles so the waveform + COPY button below them stay

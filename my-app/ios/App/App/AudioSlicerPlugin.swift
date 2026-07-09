@@ -38,6 +38,37 @@ public class AudioSlicerPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getWaveform", returnType: CAPPluginReturnPromise),
     ]
 
+    // MARK: - precise-timing asset cache (VBR MP3 fix)
+    //
+    // By default AVURLAsset positions a VBR MP3 by AVERAGE-bitrate estimation — it
+    // builds NO frame index — so AVAssetReader/AVAssetExportSession random-access
+    // (waveform windows, Anki/scene slices) seeks to the WRONG place. On a long VBR
+    // audiobook the byte↔time curve is non-linear by MINUTES, so slices/waveforms
+    // land far from the intended cue. Continuous PLAYBACK never random-seeks per cue
+    // (currentTime is counted forward), which is why subtitle-to-subtitle sync stays
+    // tight while every seek-based feature drifts. CBR files are linear, so their
+    // estimate is exact and they were always fine.
+    //
+    // AVURLAssetPreferPreciseDurationAndTimingKey forces AVFoundation to scan the
+    // file and build a real frame index → accurate random access, no re-encoding /
+    // no CBR conversion. The scan happens once (lazily, on first read); cache the
+    // asset per source path so the live waveform's repeated getWaveform() calls and
+    // the export slice reuse the same built index instead of re-parsing every call.
+    private static let assetLock = NSLock()
+    private static var cachedAssetPath: String?
+    private static var cachedAsset: AVURLAsset?
+    static func preciseAsset(for url: URL) -> AVURLAsset {
+        assetLock.lock(); defer { assetLock.unlock() }
+        if let a = cachedAsset, cachedAssetPath == url.path { return a }
+        let a = AVURLAsset(
+            url: url,
+            options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+        )
+        cachedAsset = a
+        cachedAssetPath = url.path
+        return a
+    }
+
     // MARK: - slice
 
     @objc func slice(_ call: CAPPluginCall) {
@@ -53,7 +84,7 @@ public class AudioSlicerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
 
         let url = URL(fileURLWithPath: stripFileScheme(srcPath))
-        let asset = AVURLAsset(url: url)
+        let asset = Self.preciseAsset(for: url)   // precise frame index → accurate VBR seek
 
         let stamp = Int(Date().timeIntervalSince1970 * 1000)
         let outURL = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -121,7 +152,7 @@ public class AudioSlicerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
 
         let url = URL(fileURLWithPath: stripFileScheme(srcPath))
-        let asset = AVURLAsset(url: url)
+        let asset = Self.preciseAsset(for: url)   // precise frame index → accurate VBR seek
         guard let track = asset.tracks(withMediaType: .audio).first else {
             call.reject("no audio track in source")
             return

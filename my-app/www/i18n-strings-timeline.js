@@ -33,6 +33,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'tl.tap_to_generate': { en: 'Tap to generate a summary', ja: 'タップして要約を生成' },
   'tl.failed_tap_retry': { en: 'Failed — tap to retry', ja: '失敗 — タップで再試行' },
   'tl.failed_reason_tap_retry': { en: 'Failed ({why}) — tap to retry', ja: '失敗（{why}）— タップで再試行' },
+  'tl.failed_retrying': { en: 'Failed — retrying automatically', ja: '失敗 — 自動再試行中' },
   'tl.enable_ai_first': { en: 'Enable AI in Preferences → AI assistant first', ja: '設定 → AIアシスタント でAIを有効にしてください' },
 
   // ---- failure reasons (chapter summary) ----

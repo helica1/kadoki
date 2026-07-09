@@ -699,9 +699,14 @@
 
   // ---- sync (submit pending → reconcile submitted → ingest done) ------------------
   let _syncing = false;
+  const _syncQueue = [];   // FIFO of {titleId, opts} requested while a pass was running (entries are already in the outbox)
   async function sync(titleId, opts) {
     opts = opts || {};
-    if (_syncing) return { ok: false, reason: 'busy' };
+    if (_syncing) {
+      _syncQueue.push({ titleId, opts });
+      if (_syncQueue.length > 8) _syncQueue.shift();
+      return { ok: true, queued: true, pending: true, submitted: 0, ingested: 0, errored: 0 };
+    }
     _syncing = true;
     try {
       const be = opts.backend || backend();
@@ -813,7 +818,10 @@
         return { ok: false, reason: 'submit-failed', submitted, ingested, errored };
       }
       return { ok: true, submitted, ingested, errored };
-    } finally { _syncing = false; }
+    } finally {
+      _syncing = false;
+      if (_syncQueue.length) { const a = _syncQueue.shift(); setTimeout(() => { sync(a.titleId, a.opts).catch(() => {}); }, 50); }
+    }
   }
 
   // FULL catch-up: pull EVERY recent done job from the server (NO `since` filter) and
@@ -1518,6 +1526,7 @@
             st.textContent = (r && r.reason === 'unreachable') ? window.i18n.t('im.cannot_connect_server', 'Cannot connect to the server')
               : (r && r.reason === 'no-key') ? window.i18n.t('im.openai_key_needed', 'OpenAI API key required (Settings)')
               : (r && r.reason === 'rate-limited') ? window.i18n.t('im.busy_queued_retry', 'Busy — queued (will retry automatically)')
+              : (r && (r.reason === 'busy' || r.queued)) ? window.i18n.t('im.queued_in_order', 'Queued… (generating in order)')
               : (r && r.error) ? window.i18n.fmt('im.failed_reason', { reason: String(r.error).slice(0, 70) })
               : (r && r.reason === 'refused') ? window.i18n.t('im.openai_declined', 'OpenAI declined the request') : window.i18n.t('im.send_failed', 'Send failed');
           } else {

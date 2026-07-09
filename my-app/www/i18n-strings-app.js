@@ -27,6 +27,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'ap.copied_flash':        { en: 'COPIED', ja: 'コピー済み' },
   'ap.failed_flash':        { en: 'FAILED', ja: '失敗' },
   'ap.copied_clipboard':    { en: 'Copied to clipboard', ja: 'クリップボードにコピーしました' },
+  'ap.invert':              { en: 'Invert', ja: '反転' },
   'ap.play_card_from_start': { en: 'Play card from start', ja: 'カードを最初から再生' },
   'ap.copy_srt':            { en: 'Copy SRT', ja: 'SRTをコピー' },
   'ap.copy_card':           { en: 'Copy Card', ja: 'カードをコピー' },

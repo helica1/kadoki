@@ -685,6 +685,7 @@
       const prev = btn.textContent; btn.textContent = window.i18n.t('cu.sending', '送信中…');
       lastErr = '';
       if (localBtn) { try { localBtn.remove(); } catch (_) {} localBtn = null; }
+      const prevHook = window._kaiImgProgress;   // restore on exit so a queued click doesn't steal another card's progress readout
       window._kaiImgProgress = (t) => { try { if (busy) status.textContent = t; } catch (_) {} };   // live stage readout from the deep layers
       try {
         await window.aiImages.queueCharacter(tid, rec);   // first image (no-op if already queued)
@@ -692,13 +693,14 @@
         if (!r || r.ok === false) {                       // surface the ACTUAL reason (sticky, not masked by 生成待ち)
           if (r && r.reason === 'refused') { lastErr = r.refusalMsg || window.i18n.t('cu.image_refused', '画像が拒否されました'); if (r.canLocal) offerLocalRetry(); }
           else if (r && r.reason === 'rate-limited') { lastErr = ''; }   // NOT a failure — stays queued + auto-drains; refresh() shows 順番待ち via the pending path
+          else if (r && (r.reason === 'busy' || r.queued)) { lastErr = ''; }   // queued — refresh() shows 生成待ち via the pending path
           else if (r && r.reason === 'no-key') lastErr = window.i18n.t('cu.set_api_key', 'APIキーを設定してください（設定→AI Image）');
           else if (r && r.reason === 'unreachable') lastErr = window.i18n.t('cu.local_unreachable', 'ローカルサーバーに接続できません');
           else lastErr = window.i18n.t('cu.failed', '失敗') + (r && r.error ? ('：' + r.error) : '');
           try { if (window.showToast && lastErr) window.showToast(lastErr, 7000); } catch (_) {}
         }
       } catch (e) { lastErr = window.i18n.t('common.error', 'エラー') + (e && e.message ? ('：' + e.message) : ''); try { if (window.showToast) window.showToast(lastErr, 7000); } catch (_) {} }
-      finally { btn.disabled = false; busy = false; btn.textContent = prev; refresh(); try { opts && opts.onChange && opts.onChange(); } catch (_) {} }
+      finally { window._kaiImgProgress = prevHook; btn.disabled = false; busy = false; btn.textContent = prev; refresh(); try { opts && opts.onChange && opts.onChange(); } catch (_) {} }
     });
     refresh();
     if (opts && typeof opts.registerRefresher === 'function') opts.registerRefresher(refresh);

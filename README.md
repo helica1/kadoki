@@ -21,6 +21,23 @@ Unlike browser-script workflows, Kadoki is **fully integrated**. No plugins, bro
 
 ---
 
+## What's new in 1.6.4
+
+Fixes and refinements since 1.6.3:
+
+- **Listening sessions survive switching to another audio app:** playing something else (e.g. YouTube Music) while Kadoki sat paused in the background could throw the audiobook back hours once Android reclaimed the app — and the lost session never even appeared in History. The playhead is now restored from the audio engine's own durable record, positions you deliberately chose are never overridden, and background listens are recorded in History.
+- **Audio stats no longer double-count:** listening characters read roughly double their true value — reading-along minutes were credited to both Read and Audio, and seeking could count skipped audio as heard. Every character now counts once, in the mode you consumed it, so chars/hour reflects the real narration pace.
+- **AI chapter summaries recover on their own:** one failed chapter no longer wedges every later chapter at "Waiting…". Temporary failures (rate limits, network drops, malformed responses) retry automatically with backoff — bounded, so retries can never burn through API credits — while unrecoverable ones (invalid key, out of credits) are skipped past and stay tappable to retry. Books that were already stuck unstick on their next open.
+- **The ☰ menu works again:** after using any menu item once, the next opened menu silently closed itself on the first touch (both platforms) — which also made it impossible to scroll. It now stays open and scrolls when taller than the screen, e.g. in landscape.
+- **Stats panel is reachable:** the Close button no longer hides beneath the top bar. The panel is sized to ~85% of the screen with a pinned header, and tapping anywhere outside dismisses it.
+- **Dictionary send-to-Anki no longer reports "Failed" when it worked:** every successful send flashed a red Failed button even as the note landed in Anki.
+- **Character images queue instead of failing:** requesting a second image while one is generating now queues it in order (it previously showed "Failed" even though the request was accepted).
+- **Card mode in landscape uses the full screen height:** the card image no longer reserves blank space for the top bar — the bar overlays instead.
+- **"Repeat Chapter" label no longer renders green** on first open of the audio view.
+- **iOS: precise audio slices on VBR MP3 audiobooks:** Anki clips and waveform windows could land minutes away from the intended line on long variable-bitrate files; they now hit the exact cue.
+
+---
+
 ## What's new in 1.6.3
 
 Fixes and refinements since 1.6.2:

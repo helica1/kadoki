@@ -550,6 +550,7 @@
       if (s && s.url && sn.url && s.url !== sn.url) return;   // different audio now — leave it
       // ALWAYS restore the exact prior spot (even ≤1s): the excerpt seeked the
       // single shared playhead forward, so not restoring = a forward place change.
+      window._audioStatsSeekTs = Date.now();   // jumped-over span wasn't heard — stats anchor, don't credit
       try { await bg.seek({ ms: Math.max(0, sn.ms), fadeMs: 40 }); } catch (_) {}
       // Mid-dict-lookup the pause belongs to the lookup; resuming here would
       // override it — its dismiss resumes at the restored spot. Resume ONLY if
@@ -586,6 +587,7 @@
       // Passage position events must not raise the never-regress furthest-listened
       // watermark (reading-mode guards on this flag).
       window._kaiPassageActive = true;
+      window._audioStatsSeekTs = Date.now();   // jumped-over span wasn't heard — stats anchor, don't credit
       await bg.seek({ ms: startMs, fadeMs: 40 });
       if (!_pSnap.playing) { try { await bg.resume({ fadeMs: 120 }); } catch (_) {} }
       _pBtn = btn;
@@ -710,7 +712,7 @@
       bg.getState().then((s) => {
         if (!s || !s.ready) return;
         if (g.url && s.url && s.url !== g.url) return;
-        if (Number(s.positionMs) < g.ms - 4000) bg.seek({ ms: g.ms, fadeMs: 40 });
+        if (Number(s.positionMs) < g.ms - 4000) { window._audioStatsSeekTs = Date.now(); bg.seek({ ms: g.ms, fadeMs: 40 }); }
       }).catch(() => {});
     } catch (_) {}
   }
@@ -1247,7 +1249,7 @@
           const q = await window.aiImages.queueSceneFromPrompt(titleId, ch.idx, s, { prompt: usePrompt, caption: sc.caption || '', style: sc.style || '', sceneId: sc.id || ('s' + s), label: chLabel });
           if (!q || q.ok === false) { gst.textContent = (q && q.reason === 'no-prompt') ? window.i18n.t('tl.no_prompt', 'プロンプトがありません') : window.i18n.t('tl.generation_failed', '生成に失敗'); return; }
           const r = await window.aiImages.sync(titleId);
-          if (!r || r.ok === false) gst.textContent = (r && r.reason === 'refused') ? (r.refusalMsg || window.i18n.t('tl.refused', '拒否されました')) : (r && r.reason === 'no-key') ? window.i18n.t('tl.set_key', 'キーを設定してください') : (window.i18n.t('tl.failed', '失敗') + (r && r.error ? ('：' + r.error) : ''));
+          if (!r || r.ok === false) gst.textContent = (r && r.reason === 'refused') ? (r.refusalMsg || window.i18n.t('tl.refused', '拒否されました')) : (r && r.reason === 'no-key') ? window.i18n.t('tl.set_key', 'キーを設定してください') : (r && (r.reason === 'busy' || r.reason === 'rate-limited' || r.queued)) ? window.i18n.t('tl.waiting_generation', '生成待ち…') : (window.i18n.t('tl.failed', '失敗') + (r && r.error ? ('：' + r.error) : ''));
           else gst.textContent = r.ingested ? '' : window.i18n.t('tl.waiting_generation', '生成待ち…');
           try { strip._reload && strip._reload(); } catch (_) {}
           armScenePoll();
@@ -1667,6 +1669,7 @@
               const ms = window._srtCues[cueStart].startMs;
               const bg = BG();
               if (bg && typeof bg.seek === 'function' && Number.isFinite(ms)) {
+                window._audioStatsSeekTs = Date.now();   // jumped-over span wasn't heard — stats anchor, don't credit
                 bg.seek({ ms: Math.max(0, Math.round(ms)) });
               }
             }
@@ -1749,7 +1752,13 @@
             sub.textContent = window.i18n.t('tl.queued_waiting', '待機中…');
           } else if (state === 'failed') {
             sub.style.cssText = 'margin-top:3px;color:#e08a8a;font-size:.8rem;';
-            sub.textContent = window.i18n.t('tl.failed_tap_retry', '失敗 — タップで再試行');
+            // Honest status: while the bounded auto-retry is still armed for this
+            // transient failure, say so — "tap to retry" only when it's manual-only.
+            const autoRetrying = !!(window.aiProcessor && window.aiProcessor.autoRetryState &&
+                                    window.aiProcessor.autoRetryState(titleId, ch) === 'retrying');
+            sub.textContent = autoRetrying
+              ? window.i18n.t('tl.failed_retrying', '失敗 — 自動再試行中')
+              : window.i18n.t('tl.failed_tap_retry', '失敗 — タップで再試行');
           } else if (complete) {
             sub.style.cssText = 'margin-top:3px;color:#8a7fb8;font-size:.8rem;';
             sub.textContent = window.i18n.t('tl.tap_to_generate', 'タップして要約を生成');
@@ -2069,19 +2078,27 @@
         else if (state === 'processing') { stext = window.i18n.t('tl.creating_ai_summary', 'AI要約を作成中…'); sc = '#cbbfee'; }
         else if (state === 'queued') { stext = window.i18n.t('tl.queued_waiting', '待機中…'); sc = '#888'; }
         else if (state === 'failed') {
-          // Surface WHY it failed (the request path captures it on the chunk) so a
-          // transient API hiccup (rate limit / overload / network) reads clearly
-          // instead of a bare "失敗". These are almost always retryable.
-          const er = (ch && ch.error) ? String(ch.error) : '';
-          let why = '';
-          if (/\b429\b|rate.?limit/i.test(er)) why = window.i18n.t('tl.fail_rate_limit', '混雑（429）');
-          else if (/\b529\b|overload/i.test(er)) why = window.i18n.t('tl.fail_overload', 'サーバー混雑');
-          else if (/network|connection|timeout|timed out/i.test(er)) why = window.i18n.t('tl.fail_network', '接続エラー');
-          else if (/\b401\b|api key/i.test(er)) why = window.i18n.t('tl.fail_api_key', 'APIキー要確認');
-          else if (/credit|billing|quota|insufficient|balance/i.test(er)) why = window.i18n.t('tl.fail_credit', 'クレジット不足');
-          else if (/refus/i.test(er)) why = window.i18n.t('tl.fail_refused', 'モデルが拒否');
-          else if (er) why = er.slice(0, 36);
-          stext = why ? window.i18n.fmt('tl.failed_reason_tap_retry', { why: why }, '失敗（' + why + '）— タップで再試行') : window.i18n.t('tl.failed_tap_retry', '失敗 — タップで再試行');
+          // While the bounded auto-retry is still armed for this transient
+          // failure, say so honestly instead of asking for a tap.
+          const autoRetrying = !!(window.aiProcessor && window.aiProcessor.autoRetryState &&
+                                  window.aiProcessor.autoRetryState(titleId, ch) === 'retrying');
+          if (autoRetrying) {
+            stext = window.i18n.t('tl.failed_retrying', '失敗 — 自動再試行中');
+          } else {
+            // Surface WHY it failed (the request path captures it on the chunk) so a
+            // transient API hiccup (rate limit / overload / network) reads clearly
+            // instead of a bare "失敗".
+            const er = (ch && ch.error) ? String(ch.error) : '';
+            let why = '';
+            if (/\b429\b|rate.?limit/i.test(er)) why = window.i18n.t('tl.fail_rate_limit', '混雑（429）');
+            else if (/\b529\b|overload/i.test(er)) why = window.i18n.t('tl.fail_overload', 'サーバー混雑');
+            else if (/network|connection|timeout|timed out/i.test(er)) why = window.i18n.t('tl.fail_network', '接続エラー');
+            else if (/\b401\b|api key/i.test(er)) why = window.i18n.t('tl.fail_api_key', 'APIキー要確認');
+            else if (/credit|billing|quota|insufficient|balance/i.test(er)) why = window.i18n.t('tl.fail_credit', 'クレジット不足');
+            else if (/refus/i.test(er)) why = window.i18n.t('tl.fail_refused', 'モデルが拒否');
+            else if (er) why = er.slice(0, 36);
+            stext = why ? window.i18n.fmt('tl.failed_reason_tap_retry', { why: why }, '失敗（' + why + '）— タップで再試行') : window.i18n.t('tl.failed_tap_retry', '失敗 — タップで再試行');
+          }
           sc = '#e08a8a';
         }
         else if (complete) { stext = window.i18n.t('tl.tap_to_generate', 'タップして要約を生成'); sc = '#8a7fb8'; }

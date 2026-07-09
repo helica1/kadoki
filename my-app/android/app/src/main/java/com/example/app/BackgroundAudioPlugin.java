@@ -358,6 +358,9 @@ public class BackgroundAudioPlugin extends Plugin {
         ret.put("url", url != null ? url : "");
         ret.put("positionMs", Math.max(0, ms));
         ret.put("hasSaved", ms >= 0 && url != null && !url.isEmpty());
+        // Wall-clock of the save (0 = unknown/older build) — JS stamps recovered
+        // History entries with the true end-of-session time.
+        ret.put("ts", BackgroundAudioService.readSavedTs(getContext()));
         call.resolve(ret);
     }
 

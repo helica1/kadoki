@@ -1514,11 +1514,11 @@ body.dimmed .card-image {
 
   <!-- Stats Modal — three sections (CARD / READ / AUDIO).
        Tap on the backdrop dismisses; tap inside the panel does not. -->
-  <div id="readingStatsModal" onclick="if(event.target===this)window.closeReadingStats&&window.closeReadingStats()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:2850;justify-content:center;align-items:center;">
-    <div class="stats-panel" style="background:var(--bg,#0c0c0c);border:1px solid var(--border,#2a2a2a);border-radius:12px;width:min(460px,94vw);max-height:88vh;overflow:auto;">
-      <div style="padding:14px 18px;border-bottom:1px solid var(--border,#2a2a2a);display:flex;align-items:center;justify-content:space-between;">
+  <div id="readingStatsModal" onclick="if(event.target===this)window.closeReadingStats&&window.closeReadingStats()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:2850;justify-content:center;align-items:center;padding:calc(env(safe-area-inset-top, 0px) + 56px) 16px 24px;box-sizing:border-box;">
+    <div class="stats-panel" style="background:var(--bg,#0c0c0c);border:1px solid var(--border,#2a2a2a);border-radius:12px;width:min(460px,88vw);max-height:85vh;max-height:min(85dvh,100%);overflow:auto;">
+      <div style="position:sticky;top:0;z-index:2;background:var(--bg,#0c0c0c);padding:14px 18px;border-bottom:1px solid var(--border,#2a2a2a);display:flex;align-items:center;justify-content:space-between;">
         <div class="label-cap" style="color:var(--text,#e8e8e8);">Session Stats</div>
-        <button onclick="window.closeReadingStats && window.closeReadingStats()" style="background:transparent;border:none;color:var(--text-muted,#888);font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;">Close</button>
+        <button onclick="window.closeReadingStats && window.closeReadingStats()" style="background:transparent;border:none;color:var(--text-muted,#888);font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:12px 14px;margin:-12px -14px;">Close</button>
       </div>
       <div style="padding:18px;">
         <!-- CARD -->

@@ -64,6 +64,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     // it within ~5s. JS reads it via getLastSavedPosition() as a forward-only floor.
     private static let posKeyUrl = "kadoki.audio.lastUrl"
     private static let posKeyMs  = "kadoki.audio.lastMs"
+    private static let posKeyTs  = "kadoki.audio.lastTs"   // wall-clock (epoch ms) of the save — JS stamps recovered spots with it
     /// Foreground/visible flag — the 150ms position emit slows to ~1s in the
     /// background/screen-off (nobody sees it), the biggest battery win for long
     /// listens. The lock screen is driven by Now Playing, not this emit.
@@ -186,6 +187,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let d = UserDefaults.standard
         d.set(currentUrlStr, forKey: Self.posKeyUrl)
         d.set(ms, forKey: Self.posKeyMs)
+        d.set(Int(Date().timeIntervalSince1970 * 1000), forKey: Self.posKeyTs)
         lastDurableSaveAt = Date().timeIntervalSince1970
     }
 
@@ -198,6 +200,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let d = UserDefaults.standard
         d.set(currentUrlStr, forKey: Self.posKeyUrl)
         d.set(max(0, ms), forKey: Self.posKeyMs)
+        d.set(Int(Date().timeIntervalSince1970 * 1000), forKey: Self.posKeyTs)
         lastDurableSaveAt = Date().timeIntervalSince1970
     }
 
@@ -220,10 +223,13 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let d = UserDefaults.standard
         let url = d.string(forKey: Self.posKeyUrl) ?? ""
         let ms = d.object(forKey: Self.posKeyMs) != nil ? d.integer(forKey: Self.posKeyMs) : -1
+        // Wall-clock (epoch ms) of the save; 0 = unknown/older build.
+        let ts = d.object(forKey: Self.posKeyTs) != nil ? d.integer(forKey: Self.posKeyTs) : 0
         call.resolve([
             "url": url,
             "positionMs": max(0, ms),
-            "hasSaved": ms >= 0 && !url.isEmpty
+            "hasSaved": ms >= 0 && !url.isEmpty,
+            "ts": max(0, ts)
         ])
     }
 

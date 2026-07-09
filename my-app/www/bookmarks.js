@@ -85,15 +85,16 @@
   }
 
   // High-water update. Called every audio position tick; cheap when not
-  // advancing. Persist is throttled (in-memory stays current for the menu).
-  function updateFurthest(titleId, ms) {
+  // advancing. Persist is throttled (in-memory stays current for the menu);
+  // opts.flush forces an immediate durable write (boot seed / recovery paths).
+  function updateFurthest(titleId, ms, opts) {
     if (!titleId || !Number.isFinite(ms) || ms <= 0) return;
     const map = loadFurthestSync();
     const cur = map[titleId];
     if (cur && Number.isFinite(cur.ms) && ms <= cur.ms) return;   // never regress
     map[titleId] = { ms: Math.floor(ms), ts: Date.now() };
     const now = Date.now();
-    if (now - _furthestLastSaveAt > FURTHEST_SAVE_GAP_MS) {
+    if ((opts && opts.flush) || now - _furthestLastSaveAt > FURTHEST_SAVE_GAP_MS) {
       _furthestLastSaveAt = now;
       const s = JSON.stringify(map);
       try { localStorage.setItem(FURTHEST_KEY, s); } catch (_) {}
@@ -240,6 +241,9 @@
   async function jumpTo(bm) {
     if (!bm) return;
     try {
+      // A History/Bookmark tap is deliberate navigation — the first-touch
+      // audio floor must not override the landing spot.
+      try { window.abMarkUserNav?.(); } catch (_) {}
       const sameTitle = !!bm.titleId && bm.titleId === window._activeTitleId;
       // Seed FIRST so a cross-title open lands at the bookmark, not the book's
       // own last position.

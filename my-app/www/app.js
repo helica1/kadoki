@@ -491,6 +491,11 @@ async function autoRestoreFromTitles() {
     }
     const a = t.attachments || {};
     debugLog(`autoRestoreFromTitles → "${t.name}" (id=${t.id})`);
+    // Seed the never-regress FURTHEST audio mark from the service's durable
+    // save (url-matched, forward-only, once per boot — latched inside) so the
+    // true playhead of the last listen is recoverable no matter what any later
+    // restore path overwrites. Fire-and-forget; never moves any position.
+    try { window.abSeedFurthestFromNativeSave?.(t); } catch (_) {}
 
     const setP = async (k, v) => {
       if (isCapacitorEnvironment() && window.Capacitor?.Plugins?.Preferences) {
@@ -1376,6 +1381,10 @@ window.playCardFromStart = async function () {
   _srtCardEndMs = (window.isContinuousMode && window.isContinuousMode())
     ? 0 : (window.audioAutoAdvance ? 0 : (card.audiobookEndMs || 0));
   _ensureBgListenersForSrtCards();
+  // First audio touch since boot: preserve a url-matched saved playhead >60s
+  // ahead (seed FURTHEST + History) BEFORE this play overwrites the durable
+  // save — the tap is an explicit cue choice, so the play target is untouched.
+  try { await window.abBeforeFirstCardPlay?.(card.audiobookPath, Math.round(card.audiobookStartMs)); } catch (_) {}
   try {
     await bg.play({ url, startMs: Math.max(0, Math.round(card.audiobookStartMs)), rate: window.audioPlaybackRate || 1 });
   } catch (e) { debugLog('playCardFromStart: ' + (e?.message || e)); }
@@ -1398,6 +1407,9 @@ window.playSrtCueFromMs = async function (startMs, audioPath, cueEndMs) {
   _srtCardEndMs = (window.isContinuousMode && window.isContinuousMode())
     ? 0 : (window.audioAutoAdvance ? 0 : (Number.isFinite(cueEndMs) ? cueEndMs : (card?.audiobookEndMs || 0)));
   _ensureBgListenersForSrtCards();
+  // Same first-touch preservation as playCardFromStart (explicit cue choice —
+  // never overridden; the prior spot just becomes recoverable first).
+  try { await window.abBeforeFirstCardPlay?.(path, Math.round(startMs)); } catch (_) {}
   try {
     await bg.play({ url, startMs: Math.max(0, Math.round(startMs) - (window.AUDIO_START_OFFSET_MS || 0)), rate: window.audioPlaybackRate || 1 });
     return true;
@@ -1827,6 +1839,7 @@ function promptCardJump() {
       target = parseInt(trimmed.replace(/,/g, ''));
     }
     if (Number.isFinite(target) && typeof window.jumpReadingToChars === 'function') {
+      try { window.abMarkUserNav?.(); } catch (_) {}   // deliberate jump — disables the first-touch audio floor
       window.jumpReadingToChars(target);
     }
     return;
@@ -1875,6 +1888,7 @@ function promptCardJump() {
   const input = prompt(`Enter card number (1–${allNotes.length}):`);
   const num = parseInt(input);
   if (!isNaN(num) && num >= 1 && num <= allNotes.length) {
+    try { window.abMarkUserNav?.(); } catch (_) {}   // deliberate jump — disables the first-touch audio floor
     updateCardIndex(num - 1);
   }
 }
@@ -3466,9 +3480,11 @@ function setupSwipe() {
             // "Reverse horizontal swipe direction" pref flips prev/next.
             const dxe = window._hSwipeReversed() ? -deltaX : deltaX;
             if (dxe < -30 && currentCardIndex < allNotes.length - 1) {
+              try { window.abMarkUserNav?.(); } catch (_) {}   // deliberate card navigation (first-touch floor gate)
               _armSwipeGuard(currentCardIndex + 1);
               updateCardIndex(currentCardIndex + 1);
             } else if (dxe > 30 && currentCardIndex > 0) {
+              try { window.abMarkUserNav?.(); } catch (_) {}   // deliberate card navigation (first-touch floor gate)
               _armSwipeGuard(currentCardIndex - 1);
               updateCardIndex(currentCardIndex - 1);
             }
@@ -3668,10 +3684,12 @@ document.addEventListener('keydown', (e) => {
   switch(e.code) {
     case 'ArrowLeft':
       e.preventDefault();
+      try { window.abMarkUserNav?.(); } catch (_) {}   // user nav, not auto-advance — disables the first-touch audio floor
       goToPreviousCard();
       break;
     case 'ArrowRight':
       e.preventDefault();
+      try { window.abMarkUserNav?.(); } catch (_) {}
       goToNextCard();
       break;
     case 'Space':
@@ -4046,6 +4064,7 @@ window.lockScreenCueJump = async function (dir) {
   const cue = cues[target];
   if (!cue || !Number.isFinite(cue.startMs)) return;
   window._lastAudioCueIdx = target; window._lastAudioCueTitleId = window._activeTitleId;
+  window._audioStatsSeekTs = Date.now();   // jumped-over span wasn't heard — stats anchor, don't credit
   const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
   try { bg.seek({ ms, fadeMs: 40 }); } catch (_) {}   // brief fade so the jump doesn't click
 };

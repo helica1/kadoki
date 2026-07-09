@@ -640,6 +640,17 @@
     menu.id = 'shellFloatingMenu';
     menu.className = 'shell-menu';
 
+    // Scroll-drag guard: the menu can overflow and scroll (landscape), and
+    // items fire on raw touchend — don't fire when the touch was a scroll.
+    let _menuTouchY0 = 0, _menuScrolled = false;
+    menu.addEventListener('touchstart', (e) => {
+      _menuTouchY0 = e.touches?.[0]?.clientY ?? 0; _menuScrolled = false;
+    }, { passive: true });
+    menu.addEventListener('touchmove', (e) => {
+      const y = e.touches?.[0]?.clientY;
+      if (y != null && Math.abs(y - _menuTouchY0) > 10) _menuScrolled = true;
+    }, { passive: true });
+
     const mkItem = (label, fn) => {
       const b = document.createElement('button');
       b.className = 'menu-item';
@@ -650,6 +661,7 @@
       // touchend ensures the action runs.
       let firing = false;
       const fire = (e) => {
+        if (e.type === 'touchend' && _menuScrolled) return;   // was a scroll, not a tap
         if (firing) return;
         firing = true;
         try { e.stopPropagation(); } catch (_) {}
@@ -698,6 +710,15 @@
 
     setTimeout(() => {
       const dismiss = (e) => {
+        // Self-clean when OUR menu is already gone (closed by an item fire or
+        // a programmatic dismiss): without this the stale listener closes the
+        // NEXT menu on its first touch — even touches INSIDE it — which made
+        // the menu impossible to scroll.
+        if (!menu.isConnected) {
+          document.removeEventListener('touchstart', dismiss, true);
+          document.removeEventListener('mousedown', dismiss, true);
+          return;
+        }
         if (menu.contains(e.target)) return;
         dismissShellMenu();
         document.removeEventListener('touchstart', dismiss, true);
@@ -858,6 +879,22 @@
     const menu = document.createElement('div');
     menu.id = 'shellFloatingMenu';
     menu.className = 'shell-menu';
+    // Items live in an inner scroller: iOS WKWebView does not reliably
+    // touch-scroll a dynamically-appended position:fixed element itself.
+    const list = document.createElement('div');
+    list.className = 'shell-menu-scroll';
+    menu.appendChild(list);
+
+    // Scroll-drag guard: the menu can overflow and scroll (landscape), and
+    // items fire on raw touchend — don't fire when the touch was a scroll.
+    let _menuTouchY0 = 0, _menuScrolled = false;
+    menu.addEventListener('touchstart', (e) => {
+      _menuTouchY0 = e.touches?.[0]?.clientY ?? 0; _menuScrolled = false;
+    }, { passive: true });
+    menu.addEventListener('touchmove', (e) => {
+      const y = e.touches?.[0]?.clientY;
+      if (y != null && Math.abs(y - _menuTouchY0) > 10) _menuScrolled = true;
+    }, { passive: true });
 
     const mkItem = (label, fn) => {
       const b = document.createElement('button');
@@ -865,6 +902,7 @@
       b.textContent = label;
       let firing = false;
       const fire = (e) => {
+        if (e.type === 'touchend' && _menuScrolled) return;   // was a scroll, not a tap
         if (firing) return;
         firing = true;
         try { e.stopPropagation(); } catch (_) {}
@@ -889,39 +927,39 @@
       return d;
     };
 
-    menu.appendChild(mkItem(window.i18n.t('menu.library', 'Library…'),        () => { if (typeof openLibrary === 'function') openLibrary(); }));
-    menu.appendChild(mkDivider());
+    list.appendChild(mkItem(window.i18n.t('menu.library', 'Library…'),        () => { if (typeof openLibrary === 'function') openLibrary(); }));
+    list.appendChild(mkDivider());
     const aiOn = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled());
     const bmItem = mkItem(window.i18n.t('menu.timeline_scenes', 'Timeline & Scenes…'), () => { if (window.bookmarks?.openMenu) window.bookmarks.openMenu(); });
     // AI configured → the AI surfaces glow.
     if (aiOn) bmItem.classList.add('kai-glow-text');
     bmItem.dataset.kaiProcRow = '1';
     bmItem.dataset.kaiCountKey = 'timeline';
-    menu.appendChild(bmItem);
+    list.appendChild(bmItem);
     const chItem = mkItem(window.i18n.t('menu.characters', 'Characters…'), () => { try { window.aiCharsScreen?.open?.(); } catch (_) {} });
     if (aiOn) chItem.classList.add('kai-glow-text');
     chItem.dataset.kaiProcRow = '1';
     chItem.dataset.kaiCountKey = 'characters';
-    menu.appendChild(chItem);
+    list.appendChild(chItem);
     // History: the 3 most recent reading sessions (read / audio / card), each
     // tappable to jump back to that place.
     if (window.bookmarks && window.bookmarks.openHistory) {
-      menu.appendChild(mkItem(window.i18n.t('menu.history', 'History…'), () => { try { window.bookmarks.openHistory(); } catch (_) {} }));
+      list.appendChild(mkItem(window.i18n.t('menu.history', 'History…'), () => { try { window.bookmarks.openHistory(); } catch (_) {} }));
     }
     // Glowing "(N)" badges = count of new (unseen) timeline/character updates
     // for the active title. Computed AFTER the menu is appended (below, via
     // updateShellAiCountBadges) so the SAME idempotent path also live-updates
     // the badges if a new chapter is summarized while the menu is still open.
-    menu.appendChild(mkDivider());
-    menu.appendChild(mkItem(window.i18n.t('menu.stats', 'Stats…'),          () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); }));
-    menu.appendChild(mkDivider());
-    menu.appendChild(mkItem(window.i18n.t('menu.playback_speed', 'Playback Speed…'), () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
-    menu.appendChild(mkDivider());
-    menu.appendChild(mkItem(window.i18n.t('menu.print', 'Print…'), () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); }));
+    list.appendChild(mkDivider());
+    list.appendChild(mkItem(window.i18n.t('menu.stats', 'Stats…'),          () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); }));
+    list.appendChild(mkDivider());
+    list.appendChild(mkItem(window.i18n.t('menu.playback_speed', 'Playback Speed…'), () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
+    list.appendChild(mkDivider());
+    list.appendChild(mkItem(window.i18n.t('menu.print', 'Print…'), () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); }));
     // "Log printed reading…" only appears once a print is pending (set by the
     // print flow, cleared after logging).
     if (typeof window.hasPendingPrintedReading === 'function' && window.hasPendingPrintedReading()) {
-      menu.appendChild(mkItem(window.i18n.t('menu.log_printed_reading', 'Log printed reading…'), () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); }));
+      list.appendChild(mkItem(window.i18n.t('menu.log_printed_reading', 'Log printed reading…'), () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); }));
     }
     // Cross-device sync (Google Drive). Two EXPLICIT directions (no guessing):
     // "Sync ↑" pushes the currently-open title's state up (only shown with a
@@ -930,25 +968,25 @@
     // open, which is how device 2 receives the latest. "Browse Drive…" lists /
     // downloads / force-syncs / deletes.
     if (window.driveSyncUI) {
-      menu.appendChild(mkDivider());
+      list.appendChild(mkDivider());
       if (window._activeTitleId && window.driveSyncUI.syncUp) {
-        menu.appendChild(mkItem(window.i18n.t('menu.sync_up', 'Sync ↑  (push this title)'), () => {
+        list.appendChild(mkItem(window.i18n.t('menu.sync_up', 'Sync ↑  (push this title)'), () => {
           try { window.driveSyncUI.syncUp(); } catch (_) {}
         }));
       }
       if (window.driveSyncUI.syncDown) {
-        menu.appendChild(mkItem(window.i18n.t('menu.sync_down', 'Sync ↓  (get latest)'), () => {
+        list.appendChild(mkItem(window.i18n.t('menu.sync_down', 'Sync ↓  (get latest)'), () => {
           try { window.driveSyncUI.syncDown(); } catch (_) {}
         }));
       }
       if (window.driveSyncUI.browseDrive) {
-        menu.appendChild(mkItem(window.i18n.t('menu.browse_drive', 'Browse Drive…'), () => {
+        list.appendChild(mkItem(window.i18n.t('menu.browse_drive', 'Browse Drive…'), () => {
           try { window.driveSyncUI.browseDrive(); } catch (_) {}
         }));
       }
     }
-    menu.appendChild(mkDivider());
-    menu.appendChild(mkItem(window.i18n.t('menu.preferences', 'Preferences…'),    () => { if (typeof openPreferences === 'function') openPreferences(); }));
+    list.appendChild(mkDivider());
+    list.appendChild(mkItem(window.i18n.t('menu.preferences', 'Preferences…'),    () => { if (typeof openPreferences === 'function') openPreferences(); }));
 
     document.body.appendChild(menu);
     updateShellProcSpinners();   // chapter processing in flight → spinner on both AI rows
@@ -965,6 +1003,15 @@
 
     setTimeout(() => {
       const dismiss = (e) => {
+        // Self-clean when OUR menu is already gone (closed by an item fire or
+        // a programmatic dismiss): without this the stale listener closes the
+        // NEXT menu on its first touch — even touches INSIDE it — which made
+        // the menu impossible to scroll.
+        if (!menu.isConnected) {
+          document.removeEventListener('touchstart', dismiss, true);
+          document.removeEventListener('mousedown', dismiss, true);
+          return;
+        }
         if (menu.contains(e.target)) return;
         dismissShellMenu();
         document.removeEventListener('touchstart', dismiss, true);

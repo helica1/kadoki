@@ -193,6 +193,7 @@
         if (g.url && s.url && s.url !== g.url) return;       // different audio now
         if (Number(s.positionMs) < g.ms - 4000) {
           console.log('[ai-place-guard] playhead regressed (' + s.positionMs + ' < ' + g.ms + ') — restoring');
+          window._audioStatsSeekTs = Date.now();   // jumped-over span wasn't heard — stats anchor, don't credit
           bg.seek({ ms: g.ms, fadeMs: 40 });
         }
       }).catch(() => {});

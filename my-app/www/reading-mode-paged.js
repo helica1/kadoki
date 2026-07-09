@@ -1500,7 +1500,13 @@
       log(`centerOnActiveCard: card ${idx}, chunk found, highlighting`);
       // Paint the highlight FIRST so the user sees the new active sentence
       // immediately, even before any scroll animation completes.
-      const range = setCueRangeHighlight(chunk, highlightText);
+      // NEVER while the reader is hidden (prewarm/boot in card/audio mode):
+      // a cue-active registration on non-rendered text is exactly the stale
+      // highlight that bled onto the audio view's Repeat Chapter label on
+      // first open (::highlight paint ignores element !important rules, so
+      // theme.css can't defend against it). Visible-reader entry repaints via
+      // runReaderEnterSetup/ensureGreenOnEnter, so nothing is lost.
+      if (!_readerHidden()) setCueRangeHighlight(chunk, highlightText);
       // Then scroll if any part of the highlight overflows the viewport,
       // respecting the user-scroll grace period (5 s = "they're reading
       // independently, don't yank back"). openView resets
@@ -2059,9 +2065,11 @@
       if (!Number.isFinite(cur) || cur < 0) return;
       const target = Math.max(0, Math.min(cues.length - 1, cur + dir));
       if (target === cur) return;   // already at the first / last cue
+      try { window.abMarkUserNav?.(); } catch (_) {}   // deliberate cue choice — disables the first-touch audio floor
       const cue = cues[target];
       const bg = window.Capacitor?.Plugins?.BackgroundAudio;
       if (bg && cue && Number.isFinite(cue.startMs)) {
+        window._audioStatsSeekTs = Date.now();   // swiped-over span wasn't heard — stats anchor, don't credit
         const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
         try { bg.seek({ ms, fadeMs: 70 }); } catch (_) {}   // brief fade, like the other modes
       }
@@ -2258,6 +2266,7 @@
             (landing - anchor) * Math.sign(_step) < Math.abs(_step) * 0.4) {
           landing = baseTarget;
         }
+        try { window.abMarkUserNav?.(); } catch (_) {}   // deliberate page turn (first-touch audio floor gate)
         _physAnimateTo(landing, PHYS.TURN_MS, () => { _scheduleEdgeMask(); _creditReadCharsFromVisible(); _creditReadFrontier(); _armBookmarkTimer(); });
       } else {
         // Slow drag → spring back to where you started.
@@ -3698,6 +3707,7 @@
     if (!src || document.getElementById('pagedImageLightbox')) return;
     const ov = document.createElement('div');
     ov.id = 'pagedImageLightbox';
+    ov.classList.add('kai-modal');
     ov.style.cssText = 'position:fixed;inset:0;z-index:13000;background:rgba(0,0,0,0.96);' +
       'display:flex;align-items:center;justify-content:center;touch-action:none;';
     const img = document.createElement('img');
@@ -3714,7 +3724,7 @@
     // back to blinding white when zoomed). Viewer-local: it never changes
     // the inline image or the preference.
     const inv = document.createElement('div');
-    inv.textContent = '◑ Invert';
+    inv.textContent = '◑ ' + (window.i18n ? window.i18n.t('ap.invert', 'Invert') : 'Invert');
     inv.style.cssText = 'position:fixed;top:calc(env(safe-area-inset-top,0px) + 12px);left:14px;' +
       'font:600 13px var(--font-sans,system-ui);color:#ddd;padding:9px 14px;' +
       'border:1px solid #555;border-radius:999px;background:rgba(20,20,20,.75);';
@@ -3780,6 +3790,7 @@
       closeTimer = setTimeout(() => { if (scale === 1) close(); }, 330);
     }, { passive: false });
   }
+  window.openImageLightbox = _openImageLightbox;
   let _imgTapAt = 0, _imgTapEl = null;
   function _wireImageLightbox() {
     if (!innerEl || innerEl._imgLightboxWired) return;
@@ -5360,25 +5371,28 @@
     // wanted the counter to track current playhead position even
     // outside read mode.
     if (Number.isFinite(idx) && idx >= 0) {
-      // Audio chars: credit cue text length as the playhead advances —
-      // but ONLY while the user is actually in AUDIO mode. Card-mode SRT
-      // clips share the BackgroundAudio plugin and also set _bgPlaying, so
-      // gating on _bgPlaying alone wrongly counted card browsing as
-      // listening. And only credit a CONTINUOUS forward advance: the first
-      // cue of a session (no prior baseline) or a big jump (seek / mode
-      // re-entry / catch-up) RE-BASELINES without crediting — previously the
-      // whole 0→N range got dumped in at once (the "huge chars" bug).
-      // Credit while audio plays in a LISTENING context — audio mode OR
-      // reading-along (read mode). Card mode is EXCLUDED: its SRT clips share
-      // the plugin and set _bgPlaying but aren't "listening" (this was the
-      // over-count source). Only a CONTINUOUS advance counts: the first cue of
-      // a session (no baseline) or a seek (big TIME gap) re-baselines WITHOUT
-      // crediting, so the whole range can never dump in at once. The baseline
-      // is reset on each audio-mode entry (openAudiobookMode), so re-entering
-      // at an earlier position credits cleanly instead of being swallowed by a
-      // stale high-water mark.
-      const listening = window._bgPlaying && !document.body.classList.contains('mode-card');
-      if (listening && window.stats?.incrementAudioChars) {
+      // Audio chars: credit cue text length as the playhead advances — but
+      // each consumed character must land in exactly ONE stats bucket, the
+      // mode the user consumed it in:
+      //   audio mode (incl. screen-off/pocket listening) → AUDIO chars, here;
+      //   read mode with audio (read-along/whispersync)  → READ chars, via
+      //     noteReadPosition further down — crediting AUDIO here too counted
+      //     every read-along minute twice ("audio chars ~double" bug: audio
+      //     TIME only accrues in mode-audio, so the audio panel showed ~2x
+      //     the chars its own clock could account for);
+      //   card mode → NEITHER (SRT clips share the plugin and set _bgPlaying
+      //     but browsing cards isn't listening).
+      // document.hidden overrides mode-read: a pocketed listen whose
+      // background auto-switch didn't land still counts as audio (the
+      // read-along credit below is skipped while hidden, so no double).
+      // Only a CONTINUOUS advance counts: the first cue of a session (no
+      // baseline) or a seek (big TIME gap) re-baselines WITHOUT crediting, so
+      // the whole range can never dump in at once. The baseline is reset on
+      // each audio-mode entry (openAudiobookMode).
+      const listening = window._bgPlaying &&
+                        !document.body.classList.contains('mode-card') &&
+                        (document.hidden || !document.body.classList.contains('mode-read'));
+      {
         const cuesS = (window.pagedCues?.length ? window.pagedCues : window.__abCues) || [];
         const prev = window._lastAudioCueIdxForStats ?? -1;
         // Capture the CURRENT playhead + wall clock, and read the PRIOR
@@ -5387,8 +5401,21 @@
         const rate = parseFloat(window.audioPlaybackRate) || 1;
         const lastWall = window._audioStatsLastWallMs ?? 0;
         const lastPos  = window._audioStatsLastPosMs ?? -1;
+        // The previous transition must ALSO have been a listening one: a span
+        // traversed in a non-listening context (card browsing) must anchor on
+        // the first listening transition, never lump-credit.
+        const wasListening = window._audioStatsPrevListening === true;
+        // Manual seek/swipe/jump → the jumped-over span was not heard; anchor
+        // without crediting (high-water still advances). CONSUME-based, not
+        // just time-based: a stamp NEWER than the last recorded transition
+        // means the seek's landing transition hasn't fired yet — seeks issued
+        // while PAUSED emit no position event until resume, which can be
+        // minutes/hours later, and the pause-inflated continuity allowance
+        // would otherwise lump-credit the whole jumped span.
+        const _seekTs = window._audioStatsSeekTs || 0;
+        const seekRecent = (nowWall - _seekTs < 1600) || (_seekTs > lastWall);
         const posMs = Number.isFinite(positionMs) ? positionMs : (cuesS[idx]?.startMs ?? 0);
-        if (idx > prev) {                       // credit FORWARD advances only
+        if (listening && window.stats?.incrementAudioChars && idx > prev) { // credit FORWARD advances only
           // CONTINUITY CHECK (replaces the old cue-start-time gap ≤ 3000ms,
           // which compared cue DURATIONS and silently dropped every cue
           // longer than 3 s — undercounting real listening by ~half).
@@ -5403,7 +5430,7 @@
           // together across a long suspended gap), and treats pause→resume
           // as continuous (playhead barely moved while wall ran on).
           let continuous = false;
-          if (prev >= 0 && lastWall > 0 && lastPos >= 0) {
+          if (wasListening && prev >= 0 && lastWall > 0 && lastPos >= 0) {
             const playheadAdvance = posMs - lastPos;     // ms of audio crossed
             const wallAdvance     = nowWall - lastWall;  // ms of real time elapsed
             // Allowed playhead motion for a continuous listen: wall×rate
@@ -5412,7 +5439,7 @@
             const allowed = wallAdvance * rate * 1.5 + 2500;
             continuous = playheadAdvance >= 0 && playheadAdvance <= allowed;
           }
-          if (continuous) {
+          if (continuous && !seekRecent) {
             let total = 0;
             for (let i = prev + 1; i <= idx; i++) {
               const c = (i === idx) ? (cue || cuesS[i]) : cuesS[i];
@@ -5424,16 +5451,19 @@
           }
           window._lastAudioCueIdxForStats = idx; // high-water (forward only)
         }
-        // Advance the continuity baseline on EVERY listening tick — forward,
-        // backward, or replay — NOT just forward advances. If we only moved
-        // it forward, a backward-seek detour (idx ≤ prev) would freeze
-        // lastWall/lastPos at the high-water cue while real time ran on, and
-        // a later forward seek would then look "continuous" (huge wallAdvance
-        // vs the frozen baseline) and get falsely credited. Tracking the
-        // playhead's ACTUAL position each tick keeps the next forward jump
-        // measured against where the audio really was.
+        // Advance the continuity baseline on EVERY cue transition in EVERY
+        // mode — forward, backward, replay, listening or not. If baselines
+        // only moved while listening, a card-mode dwell (or backward-seek
+        // detour) would freeze lastWall/lastPos while real time ran on, and
+        // the first listening transition afterwards would see a huge
+        // wallAdvance, pass the continuity window, and lump-credit a span
+        // that was never heard. Tracking the playhead's ACTUAL position each
+        // transition (plus the wasListening gate above) keeps every forward
+        // credit measured against where the audio really was, in a context
+        // that was really listening.
         window._audioStatsLastWallMs = nowWall;
         window._audioStatsLastPosMs  = posMs;
+        window._audioStatsPrevListening = listening;
       }
       window._lastAudioCueIdx = idx;
       // Strip repaint skipped while the PAGE is hidden (screen off): nothing

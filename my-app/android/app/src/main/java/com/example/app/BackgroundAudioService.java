@@ -181,6 +181,7 @@ public class BackgroundAudioService extends Service {
     private static final String POS_PREFS = "kadoki_audio_pos";
     private static final String POS_KEY_URL = "lastUrl";
     private static final String POS_KEY_MS = "lastMs";
+    private static final String POS_KEY_TS = "lastTs";   // wall-clock of the save — lets JS stamp recovered spots with the true end-of-session time
 
     @Override
     public void onCreate() {
@@ -210,7 +211,8 @@ public class BackgroundAudioService extends Service {
             int ms = getPositionMs();
             if (url == null || ms < 0) return;
             getSharedPreferences(POS_PREFS, Context.MODE_PRIVATE).edit()
-                .putString(POS_KEY_URL, url).putInt(POS_KEY_MS, ms).apply();
+                .putString(POS_KEY_URL, url).putInt(POS_KEY_MS, ms)
+                .putLong(POS_KEY_TS, System.currentTimeMillis()).apply();
         } catch (Exception ignored) {}
     }
 
@@ -223,6 +225,10 @@ public class BackgroundAudioService extends Service {
     public static int readSavedMs(Context ctx) {
         try { return ctx.getSharedPreferences(POS_PREFS, Context.MODE_PRIVATE).getInt(POS_KEY_MS, -1); }
         catch (Exception e) { return -1; }
+    }
+    public static long readSavedTs(Context ctx) {
+        try { return ctx.getSharedPreferences(POS_PREFS, Context.MODE_PRIVATE).getLong(POS_KEY_TS, 0L); }
+        catch (Exception e) { return 0L; }
     }
 
     @Override

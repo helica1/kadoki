@@ -2665,10 +2665,6 @@
                     window._lastDictSliceSrcPath = null;
 
                     await sendWordToAnki(ankiData);
-                    if (inReadingMode) {
-                        window.readingAnkiCount = (window.readingAnkiCount || 0) + 1;
-                    }
-                    
                     ankiBtn.textContent = dT('dc.added', 'Added');
                     ankiBtn.style.background = '#2196f3';
                     
@@ -2835,12 +2831,12 @@
         // No deck/note type chosen yet → guide the user instead of failing.
         if (!cfg.deck || !cfg.model) {
             alert(dT('dc.choose_deck_first', 'Choose a deck and note type in Preferences → Anki (dictionary) first.'));
-            return;
+            throw new Error('Anki deck/note type not configured');
         }
         // No field mapping → don't write into an empty field name (silent blank card).
         if (!cfg.fields || !cfg.fields.term) {
             alert(dT('dc.map_fields_first', 'Map your note type’s fields in Preferences → Anki (dictionary) first.'));
-            return;
+            throw new Error('Anki fields not mapped');
         }
 
         const imageFilename = `mining_${Date.now()}.jpg`;
@@ -3133,6 +3129,11 @@
             const pagedView = document.getElementById('readingPagedView');
             if (pagedView && pagedView.style.display !== 'none' &&
                 pagedView.style.visibility !== 'hidden' && pagedView.contains(e.target)) return;
+            // Taps inside the visible stats modal belong to IT — dismissing
+            // here would resume audio (hidePopup → maybeResumeAfterLookup)
+            // under the overlay, which openReadingStats deliberately paused.
+            const _sm = document.getElementById('readingStatsModal');
+            if (_sm && _sm.style.display !== 'none' && _sm.contains(e.target)) return;
             const popup = document.getElementById('dictPopup');
             if (popup && !popup.contains(e.target) && !e.target.classList.contains('dict-frag')) {
                 hidePopup();
@@ -3166,6 +3167,10 @@
             const pagedView = document.getElementById('readingPagedView');
             if (pagedView && pagedView.style.display !== 'none' &&
                 pagedView.style.visibility !== 'hidden' && pagedView.contains(e.target)) return;
+            // Same exclusion as the click path: taps inside the visible
+            // stats modal must not dismiss (and un-pause audio under) it.
+            const _sm = document.getElementById('readingStatsModal');
+            if (_sm && _sm.style.display !== 'none' && _sm.contains(e.target)) return;
             const popup = document.getElementById('dictPopup');
             if (!popup || popup.style.display === 'none') return;
             const t = e.target;

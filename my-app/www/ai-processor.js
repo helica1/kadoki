@@ -16,8 +16,10 @@
   const CHAP_PREFIX = 'AICHAP_V1_';
   const AUTO_PREF   = 'AI_AUTO_PROCESS';    // localStorage; default ON
   const TICK_MS     = 15 * 1000;
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = 3;                   // auto attempts per chapter per SESSION round
+  const LIFETIME_MAX_ATTEMPTS = 9;          // lifetime escalation: past this, manual retry only
   const RETRY_BASE_MS = 30 * 1000;          // ×2 per failed attempt (in-session)
+  const MAX_BACKOFF_MS = 10 * 60 * 1000;    // backoff ceiling (also caps an honored Retry-After)
   const CONFIRM_USD = 0.50;                 // catch-up confirm threshold (§12)
   const INPUT_CAP   = 60000;                // per-chunk text cap, tail-kept
   const OVERHEAD_CHARS = 5000;              // ≈6k tokens of prompt state (§12)
@@ -254,9 +256,72 @@
   let _cur = null;            // {titleId, idx} while a call is in flight
   let _openedFor = null;      // title whose open-sweep ran against a real map
   const _declined = {};       // titleId → true (catch-up confirm declined this session)
-  const _retryAt = {};        // 'titleId:idx' → earliest auto-retry ts
+  const _retryAt = {};        // 'titleId:idx' → earliest auto-retry ts (memory mirror of c.nextRetryTs)
+  const _sessAttempts = {};   // 'titleId:idx' → auto-retry attempts THIS session (bounded credit burn)
   const _forced = new Set();  // 'titleId:idx' user-targeted chapters that bypass the in-order pump
   function rk(t, i) { return t + ':' + i; }
+
+  // ---- failure classification (auto-retry policy) --------------------------------
+  // Permanent = retrying can never succeed without user action (bad key, no
+  // credit, model refusal, 4xx contract errors). Everything else — 429/529
+  // that survived ai.js' own internal retries, network drops, 5xx, JSON parse
+  // errors, 'chunk text unavailable' — is transient and auto-retried boundedly.
+  const PERM_MSG_RE = /declined this request|invalid api key|invalid openrouter key|insufficient credits|prompt is too long/i;
+  function classifyErr(e) {
+    const st = e && e._status;
+    const permanent = (st === 400 || st === 401 || st === 402 || st === 403 || st === 404) ||
+                      PERM_MSG_RE.test((e && e.message) || '');
+    const ra = e && e._retryAfterMs;
+    return { permanent, retryAfterMs: (Number.isFinite(ra) && ra > 0) ? ra : 0 };
+  }
+  // Effective error kind — incl. MIGRATION for chunks that failed before
+  // errKind existed: re-derive from the stored error string (no _status
+  // available there), defaulting to TRANSIENT when inconclusive, otherwise
+  // already-wedged users would stay wedged.
+  function effErrKind(c) {
+    if (c && (c.errKind === 'permanent' || c.errKind === 'transient')) return c.errKind;
+    return (c && c.error && PERM_MSG_RE.test(String(c.error))) ? 'permanent' : 'transient';
+  }
+  // Permanent for the AUTO paths: a truly permanent error, or the lifetime
+  // escalation (a "transient" failure that never succeeds must not burn credits
+  // forever). Manual retry (tap / Update) stays available.
+  function permanentForAuto(c) {
+    return effErrKind(c) === 'permanent' || (((c && c.attempts) | 0) >= LIFETIME_MAX_ATTEMPTS);
+  }
+  // Bounded per-session auto-retry gate for a failed chunk.
+  function sessRetryOk(titleId, c) {
+    return !permanentForAuto(c) && (_sessAttempts[rk(titleId, c.idx)] || 0) < MAX_ATTEMPTS;
+  }
+  // Earliest auto-retry time: in-memory backoff, else the persisted one (so a
+  // backoff survives an app restart).
+  function retryDueTs(titleId, c) {
+    return _retryAt[rk(titleId, c.idx)] || (c && c.nextRetryTs) || 0;
+  }
+  // Shared failure write (runs INSIDE a mutateMap fn, called once per failure):
+  // attempts/error/errKind/nextRetryTs land in the SAME map write; the session
+  // counter bumps alongside. Backoff honors a sane server Retry-After as the
+  // base, doubles per lifetime attempt, and is capped at MAX_BACKOFF_MS.
+  function markFailed(c, titleId, e) {
+    c.attempts = (c.attempts | 0) + 1;
+    c.state = 'failed';
+    c.error = String((e && e.message) || e || 'error').slice(0, 300);
+    const cls = classifyErr(e);
+    c.errKind = cls.permanent ? 'permanent' : 'transient';
+    const base = cls.retryAfterMs > 0 ? Math.min(cls.retryAfterMs, MAX_BACKOFF_MS) : RETRY_BASE_MS;
+    c.nextRetryTs = Date.now() + Math.min(base * Math.pow(2, Math.max(0, c.attempts - 1)), MAX_BACKOFF_MS);
+    const k = rk(titleId, c.idx);
+    _retryAt[k] = c.nextRetryTs;
+    _sessAttempts[k] = (_sessAttempts[k] || 0) + 1;
+  }
+  // UI: how a failed chunk will be handled — 'retrying' (bounded auto-retry
+  // still armed this session) or 'manual' (permanent / exhausted — tap to
+  // retry). null when the chunk isn't failed. The timeline status line reads this.
+  function autoRetryState(titleId, c) {
+    try {
+      if (!c || c.state !== 'failed') return null;
+      return (autoOn() && sessRetryOk(titleId, c)) ? 'retrying' : 'manual';
+    } catch (_) { return null; }
+  }
 
   // ---- gates / ai.js doc-contract guards ---------------------------------------
   function autoOn() {
@@ -384,7 +449,7 @@
   }
   // Complete-but-unready chunks, idx ascending. Chunk 0 is exempt from the
   // completion gate (first-chapter carve-out).
-  function owedChunks(map, opts) {
+  function owedChunks(titleId, map, opts) {
     const incFailedFinal = !!(opts && opts.failedFinal);
     const incQueued = !!(opts && opts.queued);
     const out = [];
@@ -393,7 +458,12 @@
       const st = c.state;
       if (st === 'ready' || st === 'processing') continue;
       if (st === 'queued' && !incQueued) continue;
-      if (st === 'failed' && (c.attempts | 0) >= MAX_ATTEMPTS && !incFailedFinal) continue;
+      // failed: auto-queue only transient failures with session budget left
+      // AND past their persisted backoff (flipping to 'queued' would otherwise
+      // bypass nextRunnable's due-check on every title open); permanent /
+      // exhausted ones go through the manual (failedFinal) paths.
+      if (st === 'failed' && !incFailedFinal &&
+          (!sessRetryOk(titleId, c) || Date.now() < retryDueTs(titleId, c))) continue;
       // idx 0 is carve-out exempt — except single-chunk titles (whole book)
       if ((c.idx !== 0 || map.chunks.length === 1) && !isComplete(map, c.idx)) continue;
       out.push(c);
@@ -431,6 +501,19 @@
       }
       return hit;
     });
+    // Re-arm the bounded auto-retry for THIS title (a title open grants one
+    // fresh session round): clear the session gate + in-memory backoff of
+    // transient failures. State stays 'failed' (the card keeps showing WHY) —
+    // the pump's failed-branch / runCatchUp pick these up directly. The
+    // persisted c.nextRetryTs still applies, so open-loops can't skip backoff.
+    try {
+      for (const c of map.chunks) {
+        if (!c || c.state !== 'failed' || effErrKind(c) !== 'transient') continue;
+        const k = rk(titleId, c.idx);
+        delete _sessAttempts[k];
+        delete _retryAt[k];
+      }
+    } catch (_) {}
     if (!auto) return;                     // OFF → only updateNow processes
     await runCatchUp(titleId, { manual: false, confirmAllowed: !_declined[titleId] });
     pump(titleId);
@@ -464,12 +547,12 @@
       // carve-out would summarize the ending unread — require completion.
       const carveOutOk = map.chunks.length > 1 || isComplete(map, 0);
       if (carveOutOk && (manual || c0.state === 'none' ||
-          (c0.state === 'failed' && (c0.attempts | 0) < MAX_ATTEMPTS))) {
+          (c0.state === 'failed' && sessRetryOk(titleId, c0)))) {
         toQueue.push(0);
       }
     }
 
-    const owed = owedChunks(map, { failedFinal: manual }).filter(c => c.idx !== 0);
+    const owed = owedChunks(titleId, map, { failedFinal: manual }).filter(c => c.idx !== 0);
     if (owed.length) {
       const usd = estimateChunks(model, owed);
       let ok = true;
@@ -495,7 +578,13 @@
           const c = chunkOf(m, i);
           if (!c || c.state === 'ready' || c.state === 'processing' || c.state === 'queued') continue;
           c.state = 'queued';
-          if (manual) { c.attempts = 0; c.error = null; delete _retryAt[rk(titleId, i)]; }
+          if (manual) {
+            // Manual = user-authorized spend: full reset, incl. the session gate.
+            c.attempts = 0; c.error = null;
+            delete c.errKind; delete c.nextRetryTs;
+            const k = rk(titleId, i);
+            delete _retryAt[k]; delete _sessAttempts[k];
+          }
           hit = true;
         }
         return hit;
@@ -515,14 +604,17 @@
     if (!map) return;
     const c = chunkOf(map, idx);
     if (!c || c.state === 'ready' || c.state === 'queued' || c.state === 'processing') return;
-    if (c.state === 'failed' && (c.attempts | 0) >= MAX_ATTEMPTS) return;   // manual only
+    if (c.state === 'failed' && !sessRetryOk(titleId, c)) return;   // manual only
 
     const pendingPreds = [];
     for (const p of map.chunks) {
       if (!p || p.idx >= idx) break;
       if (p.state === 'ready' || p.state === 'processing') continue;
       if (p.state === 'queued') { pendingPreds.push(p); continue; }
-      return;   // a none/failed predecessor blocks — catch-up handles it
+      // A permanently-failed predecessor is a SKIPPED chapter (its row keeps
+      // tap-to-retry; buildSynopsis is gap-tolerant) — it must not wedge the rest.
+      if (p.state === 'failed' && permanentForAuto(p)) continue;
+      return;   // a none/transient-failed predecessor blocks — catch-up/retry handles it
     }
     if (pendingPreds.length) {
       // burst guard: this chunk + queued-but-unprocessed predecessors must
@@ -578,7 +670,8 @@
   }
 
   // The first non-ready chunk is the only candidate (never process K until all
-  // <K are ready); it runs when queued, or failed(<3) past its backoff.
+  // <K are ready or permanently skipped); it runs when queued, or transient-
+  // failed with session budget left, past its backoff.
   function nextRunnable(map, titleId) {
     for (const c of map.chunks) {
       if (!c) continue;
@@ -587,8 +680,17 @@
         if (c.idx !== 0 && !isComplete(map, c.idx)) return null;   // spoiler guard
         return c;
       }
-      if (c.state === 'failed' && (c.attempts | 0) < MAX_ATTEMPTS) {
-        if (Date.now() >= (_retryAt[rk(titleId, c.idx)] || 0)) return c;
+      if (c.state === 'failed') {
+        // Permanent (or lifetime-exhausted) failure = a SKIPPED chapter: scan
+        // past it so later chapters don't wedge behind it forever. Its row
+        // keeps the tap-to-retry; buildSynopsis tolerates the gap.
+        if (permanentForAuto(c)) continue;
+        // Transient: bounded auto-retry (session budget + backoff) — only
+        // while auto-processing is enabled (manual paths run via nextForced /
+        // the failedFinal queue instead). It still BLOCKS later chapters
+        // while the retries are pending.
+        if (autoOn() && sessRetryOk(titleId, c) && Date.now() >= retryDueTs(titleId, c)) return c;
+        return null;
       }
       return null;
     }
@@ -610,8 +712,8 @@
       if (!isComplete(map, c.idx) && (c.idx !== 0 || map.chunks.length === 1)) continue;   // spoiler guard kept
       if (c.state === 'queued') { if (!best || c.idx < best.idx) best = c; continue; }
       if (c.state === 'failed') {
-        if ((c.attempts | 0) >= MAX_ATTEMPTS) { _forced.delete(k); continue; }
-        if (Date.now() >= (_retryAt[k] || 0) && (!best || c.idx < best.idx)) best = c;
+        if (!sessRetryOk(titleId, c)) { _forced.delete(k); continue; }
+        if (Date.now() >= retryDueTs(titleId, c) && (!best || c.idx < best.idx)) best = c;
       }
     }
     return best;
@@ -652,11 +754,7 @@
           await mutateMap(id, (m) => {
             const c = chunkOf(m, idx);
             if (!c) return false;
-            c.attempts = (c.attempts | 0) + 1;
-            c.state = 'failed';
-            c.error = String((e && e.message) || e || 'error').slice(0, 300);
-            _retryAt[rk(id, idx)] =
-              Date.now() + RETRY_BASE_MS * Math.pow(2, Math.max(0, c.attempts - 1));
+            markFailed(c, id, e);
             return true;
           });
           try { console.log('[ai-proc] chunk ' + idx + ' failed: ' + (e && e.message)); } catch (_) {}
@@ -972,12 +1070,14 @@
           const c = chunkOf(m, idx);
           if (c) {
             c.state = 'ready'; c.error = null; c.processedTs = pa.ts || Date.now();
+            delete c.errKind; delete c.nextRetryTs;
             if (!c.label && pa.label) c.label = pa.label;
           }
           m.synopsis = buildSynopsis(prior, m.fingerprint);
           return true;
         });
         delete _retryAt[rk(titleId, idx)];
+        delete _sessAttempts[rk(titleId, idx)];
         emitChanged(titleId, 'timeline');
         return;
       }
@@ -1132,6 +1232,7 @@
       const c = chunkOf(m, idx);
       if (c) {
         c.state = 'ready'; c.error = null; c.processedTs = Date.now();
+        delete c.errKind; delete c.nextRetryTs;
         if (!c.label && label) c.label = label;
       }
       m.synopsis = syn;
@@ -1139,6 +1240,7 @@
       return true;
     });
     delete _retryAt[rk(titleId, idx)];
+    delete _sessAttempts[rk(titleId, idx)];
     emitChanged(titleId, 'timeline');
     emitChanged(titleId, 'characters');
 
@@ -1425,7 +1527,7 @@
       const map = await readMap(id);
       if (!map) return null;
       const model = chapterModel();
-      const owed = owedChunks(map, { failedFinal: true, queued: true });
+      const owed = owedChunks(id, map, { failedFinal: true, queued: true });
       return { chunks: owed.length, usd: estimateChunks(model, owed) };
     } catch (_) { return null; }
   }
@@ -1441,11 +1543,14 @@
         if (counts[c.state] !== undefined) counts[c.state]++;
         return { idx: c.idx, state: c.state, attempts: c.attempts | 0,
                  error: c.error || null, label: c.label || null,
-                 processedTs: c.processedTs || null };
+                 processedTs: c.processedTs || null,
+                 errKind: (c.state === 'failed') ? effErrKind(c) : (c.errKind || null),
+                 nextRetryTs: c.nextRetryTs || null,
+                 sessAttempts: _sessAttempts[rk(id, c.idx)] || 0 };
       });
       return {
         titleId: id, hasMap: true, total: map.chunks.length, counts, chunks,
-        owed: owedChunks(map, { failedFinal: true, queued: true }).length,
+        owed: owedChunks(id, map, { failedFinal: true, queued: true }).length,
         inflightIdx: (_cur && _cur.titleId === id) ? _cur.idx : null,
         auto: autoOn(), declined: !!_declined[id],
       };
@@ -1488,6 +1593,30 @@
       try {
         const d = e && e.detail;
         if (d && d.titleId) onChunkCompleted(d.titleId, d.idx).catch(() => {});
+      } catch (_) {}
+    });
+    // Best-effort re-arm when connectivity returns: grant one fresh bounded
+    // auto-retry round for the active title's transient failures, then pump.
+    // navigator.onLine is unreliable in WKWebView, so this is NEVER the only
+    // re-arm (boot / title open re-arm too). Debounced to one round per minute.
+    let _lastOnlineRearm = 0;
+    window.addEventListener('online', () => {
+      try {
+        if (Date.now() - _lastOnlineRearm < 60 * 1000) return;
+        const id = window._activeTitleId;
+        if (!id) return;
+        _lastOnlineRearm = Date.now();
+        (async () => {
+          const map = await readMap(id);
+          if (!map) return;
+          for (const c of map.chunks) {
+            if (!c || c.state !== 'failed' || effErrKind(c) !== 'transient') continue;
+            const k = rk(id, c.idx);
+            delete _sessAttempts[k];
+            delete _retryAt[k];
+          }
+          pump(id);
+        })().catch(() => {});
       } catch (_) {}
     });
   } catch (_) {}
@@ -1601,16 +1730,24 @@
       // never be reached by nextRunnable and the tap would silently do nothing.
       if (_inflight) {
         _forced.add(rk(id, idx));
+        // Manual retry = user-authorized spend: clear the session gate so the
+        // forced run is never blocked by exhausted auto-retries.
+        delete _sessAttempts[rk(id, idx)];
+        delete _retryAt[rk(id, idx)];
         await mutateMap(id, (m) => {
           const c = chunkOf(m, idx);
           if (!c) return false;
           c.state = 'queued'; c.attempts = 0; c.error = null;
+          delete c.errKind; delete c.nextRetryTs;
           return true;
         });
         try { pump(id); } catch (_) {}
         return { ok: true, queued: true };
       }
       // Run it directly under the single-flight guard, bypassing nextRunnable.
+      // Manual = user-authorized spend: re-arm the session gate here too.
+      delete _sessAttempts[rk(id, idx)];
+      delete _retryAt[rk(id, idx)];
       _inflight = true;
       _cur = { titleId: id, idx };
       let ok = false;
@@ -1619,6 +1756,7 @@
           const c = chunkOf(m, idx);
           if (!c) return false;
           c.state = 'processing'; c.error = null;
+          c.attempts = 0; delete c.errKind; delete c.nextRetryTs;   // manual retry = full reset, same as the forced-queue branch
           return true;
         });
         emitProcStatus(id, true, idx, map);
@@ -1628,10 +1766,7 @@
         await mutateMap(id, (m) => {
           const c = chunkOf(m, idx);
           if (!c) return false;
-          c.attempts = (c.attempts | 0) + 1;
-          c.state = 'failed';
-          c.error = String((e && e.message) || e || 'error').slice(0, 300);
-          _retryAt[rk(id, idx)] = Date.now() + RETRY_BASE_MS * Math.pow(2, Math.max(0, c.attempts - 1));
+          markFailed(c, id, e);
           return true;
         });
         try { console.log('[ai-proc] chapter ' + idx + ' regen failed: ' + (e && e.message)); } catch (_) {}
@@ -1647,5 +1782,5 @@
     } catch (e) { return { ok: false, reason: (e && e.message) || 'error' }; }
   }
 
-  window.aiProcessor = { updateNow, owedEstimate, status, activate, ensureActivated, reDetectChapters, resetTitle, resync, generateSceneIdeas, processChapter, setScenePrompt, _tick };
+  window.aiProcessor = { updateNow, owedEstimate, status, activate, ensureActivated, reDetectChapters, resetTitle, resync, generateSceneIdeas, processChapter, setScenePrompt, autoRetryState, _tick };
 })();

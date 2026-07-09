@@ -1379,6 +1379,7 @@
   window.jumpAudioToMs = async function (targetMs) {
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (!bg) return;
+    window._audioStatsSeekTs = Date.now();   // jumped-over span wasn't heard — stats anchor, don't credit
     try { await bg.seek({ ms: Math.max(0, Math.round(targetMs)) }); } catch (e) {}
   };
 
@@ -2188,6 +2189,18 @@
   let _lastListenWallMs = 0;   // wall clock of the last observed playhead ADVANCE
   let _abPrevEventMs = -1;     // advance detector for the position listener
   let abOpenedDeckName = null; // deck that owns the open audio session (save key)
+  // ── First-audio-touch-since-boot gate (media-switch place-loss fix) ──
+  // A boot-restored card/read cursor is a restore ARTIFACT until either (a) this
+  // JS session starts/observes live audio, or (b) the user deliberately
+  // navigates. Only while BOTH are false may the seekToCurrentPosition path
+  // apply the forward-only native floors below (abApplyNativeFloorsForSeek).
+  let _abSessionHadAudio = false;        // transport call issued / live playing tick seen this JS boot
+  let _abUserNavigatedSinceBoot = false; // user-initiated card swipe or paged page-turn this JS boot
+  let _abPrevStatePlaying = false;       // dedicated prev-playing tracker (NOT window._bgPlaying — app.js overwrites it)
+  // User-gesture navigation hook (card swipe in app.js, page turn in the paged
+  // reader). Programmatic navigation (boot restore, cue-driven advance,
+  // mode-switch reconciliation) must NOT call this.
+  window.abMarkUserNav = function () { _abUserNavigatedSinceBoot = true; };
 
   // Expose abCues + abAudioPath to the paged reader as a fallback —
   // its own loadAudiobookCues can fail silently (title-store missing
@@ -2523,6 +2536,7 @@
       const cue = cues[target];
       if (!cue || !Number.isFinite(cue.startMs)) return;
       window._lastAudioCueIdx = target; window._lastAudioCueTitleId = window._activeTitleId;
+      window._audioStatsSeekTs = Date.now();   // swiped-over span wasn't heard — stats anchor, don't credit
       const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
       try { bg.seek({ ms, fadeMs: 40 }); } catch (_) {}   // brief fade so the jump doesn't click
       // Show the target subtitle immediately (works even while paused), then HOLD
@@ -2988,11 +3002,16 @@
       tgl.classList.toggle('on', has && abRepeatOn);
       tgl.setAttribute('aria-checked', (has && abRepeatOn) ? 'true' : 'false');
       // The label can paint with a stale tint (green) on first show until the class
-      // actually CHANGES — a manual toggle is what cleared it. Force the same style
-      // recalc + repaint once after paint so it renders the correct color from the start.
+      // actually CHANGES — a manual toggle is what cleared it. Force a REAL repaint:
+      // .kai-fr now has an actual (invisible) rule in theme.css, and the class must
+      // be HELD across a frame — the old same-frame add/void/remove left the final
+      // computed style unchanged, so engines skipped the raster and the hack was a
+      // no-op (root cause is fixed at the source: no cue-active highlight is
+      // registered on the hidden reader anymore; this is residual-ghost insurance).
       try {
         requestAnimationFrame(() => {
-          try { tgl.classList.add('kai-fr'); void tgl.offsetWidth; tgl.classList.remove('kai-fr'); } catch (_) {}
+          try { tgl.classList.add('kai-fr'); } catch (_) {}
+          requestAnimationFrame(() => { try { tgl.classList.remove('kai-fr'); } catch (_) {} });
         });
       } catch (_) {}
     }
@@ -3155,6 +3174,96 @@
   // before snapshotting (ownership-gated + forward-only inside).
   window.flushAudioPositionNow = flushAudioPositionNow;
 
+  // Synthesized History entry for a recovered native/durable audio spot — makes
+  // the pre-kill playhead visible in History even after process death (fix 3b).
+  // pct stamped only when cheaply derivable from the loaded notes.
+  function _abSynthHistoryEntry(titleId, ms, ts) {
+    try {
+      if (!titleId || !Number.isFinite(ms) || ms <= 0 || !window.bookmarks?.record) return;
+      const bm = { mode: 'audio', ts: (Number.isFinite(ts) && ts > 0) ? ts : Date.now(),
+                   titleId, titleName: '', location: { audioMs: Math.round(ms) }, audioMs: Math.round(ms) };
+      const n = window.allNotes;
+      const lastN = Array.isArray(n) && n.length ? n[n.length - 1] : null;
+      if (lastN && lastN.isSrtCard && Number(lastN.audiobookEndMs) > 0) {
+        bm.pct = Math.max(0, Math.min(100, Math.round((bm.audioMs / lastN.audiobookEndMs) * 100)));
+      }
+      window.bookmarks.record(bm);
+    } catch (_) {}
+  }
+
+  // ── Boot seed: never-regress FURTHEST mark from the SERVICE's durable save ──
+  // The service persists {url, ms} from its OWN process ~every 5s, so it holds
+  // the true end-of-last-listen even when every JS-side save is stale (frozen
+  // while backgrounded) or later overwritten (the cold-boot backward commit).
+  // Seed the per-title furthest high-water from it once per JS boot: whatever
+  // any later path does to the saves, the real spot stays recoverable via the
+  // pinned Bookmarks entry. STRICTLY url-matched (_abSameAudioFile) so it can
+  // never cross titles; updateFurthest itself never regresses. Invoked from
+  // abAttachListenersOnce AND app.js autoRestoreFromTitles — first REAL attempt
+  // (plugin + path resolved) wins the latch.
+  let _abFurthestSeeded = false;
+  async function abSeedFurthestFromNativeSave(titleArg) {
+    if (_abFurthestSeeded) return;
+    try {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg || typeof bg.getLastSavedPosition !== 'function') return;
+      if (!window.bookmarks?.updateFurthest) return;
+      const titleId = (titleArg && titleArg.id) || window._activeTitleId;
+      if (!titleId) return;
+      let path = abAudioPath;
+      if (!path && (titleArg || window.titleStore)) {
+        const t = titleArg || await window.titleStore.get(titleId);
+        path = t?.attachments?.audiobook?.cachePath || null;
+      }
+      if (!path) return;
+      if (_abFurthestSeeded) return;   // re-check: a concurrent invocation won during the awaits
+      _abFurthestSeeded = true;   // real attempt from here — once per boot
+      const ls = await bg.getLastSavedPosition();
+      if (!(ls && ls.hasSaved && ls.url && Number(ls.positionMs) > 0)) return;
+      if (!_abSameAudioFile(ls.url, path)) return;
+      // Baseline for the History synth: the spot only needs surfacing when the
+      // durable save is meaningfully ahead of everything JS would resume from.
+      let base = 0;
+      try { const f = window.bookmarks.getFurthest?.(titleId); if (f && Number.isFinite(f.ms)) base = f.ms; } catch (_) {}
+      try {
+        const deck = abOpenedDeckName || currentDeckName();
+        if (deck) { const last = await getAudiobookLastPosition(deck); if (Number(last.ms) > base) base = last.ms; }
+      } catch (_) {}
+      window.bookmarks.updateFurthest(titleId, ls.positionMs, { flush: true });
+      if (Number(ls.positionMs) > base + 60000) {
+        _abSynthHistoryEntry(titleId, ls.positionMs, Number(ls.ts) > 0 ? Number(ls.ts) : 0);
+      }
+      try { window.debugLog?.('[ab] furthest seeded from native save: ' + ls.positionMs + 'ms (base=' + base + ')'); } catch (_) {}
+    } catch (_) {}
+  }
+  window.abSeedFurthestFromNativeSave = abSeedFurthestFromNativeSave;
+
+  // First-audio-touch recovery for the card-mode play paths (playCardFromStart /
+  // playSrtCueFromMs). The tap is an EXPLICIT cue choice, so the play target is
+  // never overridden — but BEFORE that play lets the service's durable save be
+  // overwritten, make the old spot recoverable: a url-matched saved position
+  // >60s ahead of the requested cue seeds FURTHEST (flushed) + a History entry.
+  // Also latches the session-had-audio flag (the caller is about to issue a
+  // transport call). Forward-only bookkeeping — never moves any position.
+  window.abBeforeFirstCardPlay = async function (path, requestedMs) {
+    const first = !_abSessionHadAudio && !_abUserNavigatedSinceBoot;
+    _abSessionHadAudio = true;
+    if (!first) return;
+    try {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg || typeof bg.getLastSavedPosition !== 'function' || !path) return;
+      const ls = await bg.getLastSavedPosition();
+      if (!(ls && ls.hasSaved && ls.url && Number(ls.positionMs) > 0)) return;
+      if (!_abSameAudioFile(ls.url, path)) return;
+      const base = Number.isFinite(requestedMs) ? Math.max(0, requestedMs) : 0;
+      if (!(Number(ls.positionMs) > base + 60000)) return;
+      const titleId = window._activeTitleId;
+      if (titleId && window.bookmarks?.updateFurthest) window.bookmarks.updateFurthest(titleId, ls.positionMs, { flush: true });
+      _abSynthHistoryEntry(titleId, ls.positionMs, Number(ls.ts) > 0 ? Number(ls.ts) : 0);
+      try { window.debugLog?.('[ab] first card play: preserved prior audio spot ' + ls.positionMs + 'ms (requested ' + base + ')'); } catch (_) {}
+    } catch (_) {}
+  };
+
   // ── Smart rewind helper ──
   // One-shot −30s before a paused→playing resume in audio mode when the user
   // hasn't listened for ≥10 min. `st` may be a pre-fetched getState() result.
@@ -3245,6 +3354,7 @@
 
   function abAttachListenersOnce() {
     abAttachForegroundHooksOnce();
+    abSeedFurthestFromNativeSave();   // once-per-boot latch inside; forward-only
     if (abListenersAttached) return;
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (!bg) return;
@@ -3275,6 +3385,9 @@
         _abPrevEventMs = d.positionMs;
         _lastListenWallMs = Date.now();
       }
+      // Live playback observed this session → the cursors are no longer
+      // boot-restore artifacts (disables the first-touch seek floor).
+      if (d.playing) _abSessionHadAudio = true;
       abPositionRef.ms = d.positionMs || 0;
       abPositionRef.durMs = d.durationMs || 0;
       // Furthest-listened high-water mark (per active title) → feeds the
@@ -3340,6 +3453,20 @@
     bg.addListener('state', (d) => {
       const btn = document.getElementById('audiobookPlayPause');
       if (btn) btn.textContent = d.playing ? 'PAUSE' : 'PLAY';
+      // History capture for a background listen ended by another app taking
+      // audio focus / a lock-screen pause (fix 3a): a FRESH playing→false
+      // transition while hidden and in an audio session records the end spot.
+      // abPositionRef is current (position events flowed until the pause);
+      // stale replayed bursts (iOS foreground) are dropped by the ts gate and
+      // bookmarks' sameSpot dedup absorbs repeats.
+      const _sts = Number(d?.ts);
+      const _fresh = !(Number.isFinite(_sts) && _sts > 0 && Date.now() - _sts > 5000);
+      const _wasPlaying = _abPrevStatePlaying;
+      _abPrevStatePlaying = !!d.playing;
+      if (_wasPlaying && !d.playing && _fresh && document.hidden &&
+          (document.body.classList.contains('mode-audio') || window._autoAudioPrevMode)) {
+        try { window.bookmarks?.captureCurrent?.({ mode: 'audio', force: true }); } catch (_) {}
+      }
     });
     // Native chapter-repeat: idx>=0 while a chapter is in its repeat pass (reveal
     // 次の章へ), -1 when the pass ends/advances/skips (hide it).
@@ -3381,8 +3508,11 @@
   // playhead. One-shot latched so a genuinely unplayable file alerts instead
   // of looping. Returns true when playback was restarted (alert suppressed).
   // Same-file check for the durable-save floor below: prefix-insensitive
-  // (cache dirs move), restricted to the content-stable deck_<urihash> naming —
-  // mirrors the _norm/_tail/_sameAudio trio openAudiobookMode uses.
+  // (cache dirs move), extension-insensitive (a cache re-materialized across
+  // an app update can change extension), restricted to the title-unique
+  // deck_<urihash> / synced_<localId>_<kind> stems so it can never cross
+  // titles — same semantics as the _norm/_tail/_sameAudio trio
+  // openAudiobookMode uses.
   function _abSameAudioFile(a, b) {
     const norm = (u) => {
       const s = String(u || '').replace(/^file:\/+/, '').replace(/^\/+/, '');
@@ -3391,7 +3521,7 @@
     const tail = (u) => {
       const s = norm(u);
       const t = s.slice(s.lastIndexOf('/') + 1);
-      return t.startsWith('deck_') ? t : '';
+      return (t.startsWith('deck_') || t.startsWith('synced_')) ? t.replace(/\.[^.\/]+$/, '') : '';
     };
     if (!a || !b) return false;
     if (norm(a) === norm(b)) return true;
@@ -3455,6 +3585,7 @@
       const v = parseInt(scrub.value);
       if (bg && abPositionRef.durMs > 0 && Number.isFinite(v)) {
         const targetMs = Math.round((v / 1000) * abPositionRef.durMs);
+        window._audioStatsSeekTs = Date.now();   // scrubbed-over span wasn't heard — stats anchor, don't credit
         await bg.seek({ ms: targetMs });
       }
       abScrubbing = false;
@@ -3467,6 +3598,100 @@
   // read/card.
   window.abResyncCueFromMs = (ms) => { try { abUpdateCueDisplay(ms); } catch (_) {} };
 
+  // ── First-touch floors for the seekToCurrentPosition branch ──
+  // (media-switch place-loss fix). On the FIRST audio touch since boot, the
+  // card/read cursor feeding seekToCurrentPosition is a boot-restore artifact
+  // — committing it would seek the real playhead backward by however far the
+  // restore staled (hours, after a background listen + process death). Run the
+  // SAME forward-only floor trio as the saved-position path — live getState,
+  // cold getLastSavedPosition, furthest-listened — but with a 60s significance
+  // gate (adopt only when the floor is > startMs + 60000), so a normal
+  // in-session follow (cursor ≈ playhead) and a deliberate re-listen within a
+  // minute are untouched. This is a SEPARATE replica of the trio: the
+  // startMs==null block inside openAudiobookMode is preserved bit-identically
+  // (its _floorRaised/_floored/_nativePlaying flags feed smart rewind +
+  // resume-in-place and must not change). Fetches the per-deck AUDIO_LAST_TS
+  // itself for the furthest ts guard. Forward-only, url-matched, never 0.
+  async function abApplyNativeFloorsForSeek(startMs, deck) {
+    let out = Math.max(0, Math.round(startMs));
+    const gate = out + 60000;
+    try {
+      const _bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      // Same normalizer trio as the saved-position path (see the comments there).
+      const _norm = (u) => {
+        const s = String(u || '').replace(/^file:\/+/, '').replace(/^\/+/, '');
+        try { return decodeURIComponent(s); } catch (_) { return s; }
+      };
+      const _tail = (u) => {
+        const s = _norm(u);
+        const t = s.slice(s.lastIndexOf('/') + 1);
+        return (t.startsWith('deck_') || t.startsWith('synced_')) ? t.replace(/\.[^.\/]+$/, '') : '';
+      };
+      const _sameAudio = (a, b) => {
+        if (!a || !b) return false;
+        if (a === b) return true;
+        const ta = _tail(a), tb = _tail(b);
+        return !!ta && ta === tb;
+      };
+      const _mine = _norm(abAudioPath);
+      if (!_bg || !_mine) return out;
+      let _floored = false;
+      let _floorTs = 0;
+      // (1) Warm floor: live native playhead of the SAME audio.
+      if (typeof _bg.getState === 'function') {
+        for (let _try = 0; _try < 4; _try++) {
+          let _s = null;
+          try { _s = await _bg.getState(); } catch (_) {}
+          if (!_s) break;
+          const _matches = _s.url && _sameAudio(_norm(_s.url), _mine);
+          if (_s.ready) {
+            if (_matches && Number(_s.positionMs) > gate) { out = Math.round(_s.positionMs); _floored = true; }
+            break;
+          }
+          if (!_matches) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      // (2) Cold floor: the service's durable {url, ms} save.
+      if (!_floored && typeof _bg.getLastSavedPosition === 'function') {
+        try {
+          const _ls = await _bg.getLastSavedPosition();
+          if (_ls && _ls.hasSaved && _ls.url && _sameAudio(_norm(_ls.url), _mine) && Number(_ls.positionMs) > gate) {
+            out = Math.round(_ls.positionMs);
+            _floored = true;
+            if (Number(_ls.ts) > 0) _floorTs = Number(_ls.ts);
+          }
+        } catch (_) {}
+      }
+      // (3) Last resort: per-title furthest-listened high-water, only when more
+      // recently stamped than the deck's last-listened ts (fetched here — the
+      // seek branch never loaded it, unlike the saved-position path).
+      if (!_floored) {
+        try {
+          const _tid = window._activeTitleId;
+          const _f = (_tid && window.bookmarks && window.bookmarks.getFurthest) ? window.bookmarks.getFurthest(_tid) : null;
+          let _lastTs = 0;
+          if (deck) {
+            const _tsRaw = parseInt(await getPref(KEYS.AUDIO_LAST_TS_PREFIX + deck));
+            if (Number.isFinite(_tsRaw) && _tsRaw > 0) _lastTs = _tsRaw;
+          }
+          if (_f && Number.isFinite(_f.ms) && _f.ms > gate && (_f.ts || 0) > _lastTs) { out = Math.round(_f.ms); _floored = true; }
+        } catch (_) {}
+      }
+      if (_floored) {
+        // Recovered spot: pin it in FURTHEST (flushed) + surface it in History
+        // (fix 3b) so the pre-kill playhead stays visible either way.
+        try {
+          const _tid = window._activeTitleId;
+          if (_tid && window.bookmarks?.updateFurthest) window.bookmarks.updateFurthest(_tid, out, { flush: true });
+          _abSynthHistoryEntry(_tid, out, _floorTs);
+        } catch (_) {}
+        try { window.debugLog?.('[ab] first-touch seek floor: ' + startMs + ' → ' + out + 'ms'); } catch (_) {}
+      }
+    } catch (_) {}
+    return out;
+  }
+
   window.openAudiobookMode = async function (opts) {
     opts = opts || {};
     // Show the audiobook view IMMEDIATELY (before any awaits) so the user
@@ -3474,6 +3699,10 @@
     const view = document.getElementById('audiobookModeView');
     if (view) {
       view.style.display = 'flex';
+      // Defense-in-depth for the green-label bleed: no cue highlight may be
+      // registered across the audio view's first paint (::highlight paint
+      // beats element !important rules). Registry-only — no position writes.
+      try { clearCueHighlight(); CSS.highlights?.delete?.('cue-pending'); } catch (_) {}
       // Only show the "Loading audiobook…" placeholder when we actually have
       // to load. If the reader already pre-warmed the cue context for this
       // deck, skip the message — it'd flash visibly for ~0 ms.
@@ -3565,6 +3794,15 @@
         // below; NEVER coerce to 0.
         const readMs = (typeof window._pagedReadCueStartMs === 'function') ? window._pagedReadCueStartMs() : null;
         if (Number.isFinite(readMs)) startMs = readMs;
+      }
+      // FIRST audio touch since boot with NO deliberate user navigation → the
+      // cursor above is a boot-restore artifact, not a live in-session choice.
+      // Apply the forward-only floor trio (>60s significance gate) so a stale
+      // restore can't commit a large backward seek. An in-session card→audio
+      // follow, a user-navigated re-listen, and the Bookmarks one-shot
+      // (pendingStartMs) branch are all untouched.
+      if (startMs != null && !_abSessionHadAudio && !_abUserNavigatedSinceBoot) {
+        try { startMs = await abApplyNativeFloorsForSeek(startMs, deck); } catch (_) {}
       }
     }
     let _floorRaised = false;   // true ⇒ native getState() floored us (keeps smart-rewind's existing meaning)
@@ -3772,6 +4010,7 @@
       if (!didResume) {
         await bg.play({ url, startMs: adjStart, rate });
       }
+      _abSessionHadAudio = true;   // transport issued — later mode switches are in-session, not boot restores
       // Lock-screen / Control Center metadata, now with cover art pulled from
       // the active title (data URI → native decodes to MPMediaItemArtwork).
       let coverArt = '';
