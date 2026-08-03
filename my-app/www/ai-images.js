@@ -376,7 +376,24 @@
   function mutateOutbox(fn) { return lock(OUTBOX_KEY, async () => { const o = await loadOutbox(); const r = await fn(o); await writeJson(OUTBOX_KEY, o); return r; }); }
 
   function freshIdx() { return { v: 1, chars: {} }; }
-  function loadIdx(tid) { return readJson(idxKey(tid), freshIdx()).then(p => (p && p.v === 1 && p.chars) ? p : freshIdx()); }
+  // Per-title index cache: the timeline renders one thumbnail per scene row and
+  // each used to re-read + re-JSON.parse the whole per-title index from
+  // IndexedDB — N reads per render. Readers share one parsed copy; mutateIdx
+  // works on a FRESH load (never the shared object) and invalidates after its
+  // write; kai:img-data invalidates too (covers Drive-sync writing the blob
+  // directly).
+  const _idxCache = {};
+  const _loadIdxFresh = (tid) => readJson(idxKey(tid), freshIdx()).then(p => (p && p.v === 1 && p.chars) ? p : freshIdx());
+  function loadIdx(tid) {
+    if (!_idxCache[tid]) _idxCache[tid] = _loadIdxFresh(tid);
+    return _idxCache[tid];
+  }
+  try {
+    window.addEventListener('kai:img-data', (e) => {
+      const t = e && e.detail && e.detail.titleId;
+      if (t) delete _idxCache[t]; else Object.keys(_idxCache).forEach(k => delete _idxCache[k]);
+    });
+  } catch (_) {}
   // Unified per-character image list. Returned images land here directly (no
   // separate review step); `unseen` drives the per-card "新着" notification.
   // Migrates any legacy review/kept split into one list (bytes stay where they
@@ -393,7 +410,7 @@
     }
     return b;
   }
-  function mutateIdx(tid, fn) { return lock(idxKey(tid), async () => { const idx = await loadIdx(tid); const r = await fn(idx); await writeJson(idxKey(tid), idx); return r; }); }
+  function mutateIdx(tid, fn) { return lock(idxKey(tid), async () => { const idx = await _loadIdxFresh(tid); const r = await fn(idx); await writeJson(idxKey(tid), idx); delete _idxCache[tid]; return r; }); }
   // Image bytes live under the kept key for new images; legacy review images
   // kept their REV key — try both so a pre-migration image still loads.
   async function getImageBytes(tid, imgId) {
@@ -1123,6 +1140,20 @@
     const out = [];
     for (const m of list) { const d = await getImageBytes(tid, m.imgId); if (d) out.push({ imgId: m.imgId, dataUri: d, prompt: m.prompt || '', caption: m.caption || '', charSig: m.charSig || '', respId: m.respId || null, backend: m.backend || '', model: m.model || '', unseen: !!m.unseen, cropped: !!m.cropped }); }
     return out;
+  }
+  // Newest displayable image for a slot WITHOUT loading every image's bytes —
+  // getImages pulls ALL of a slot's multi-MB data URIs to show one thumbnail,
+  // which is the timeline's main-thread drag (worst on iOS, whose decode cache
+  // is small). Walks newest→oldest and returns the first with readable bytes.
+  async function getLatestImage(tid, charId) {
+    const idx = await loadIdx(tid);
+    const list = bucketImages(idx.chars[charId]);
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      const d = await getImageBytes(tid, m.imgId);
+      if (d) return { imgId: m.imgId, dataUri: d, prompt: m.prompt || '', caption: m.caption || '', unseen: !!m.unseen, cropped: !!m.cropped };
+    }
+    return null;
   }
   // Persist a caption on an image, and generate one with Claude (grounded ONLY
   // in the character's book-derived info + the actual render prompt) when the
@@ -1966,7 +1997,7 @@
     // scenes (illustrate a chapter → images under pseudo-charId scene_<idx>)
     queueScene, queueSceneFromPrompt, presentCharacters, capAutoScenes, sceneChapters, sceneStatusByChapter, refetchDone,
     // per-character image ops (the card is the gallery — no review step)
-    getImages, deleteImage, recropImage, markCharSeen, counts, statusFor, statusBatch,
+    getImages, getLatestImage, deleteImage, recropImage, markCharSeen, counts, statusFor, statusBatch,
     // cross-device sync: union-merge the image index (never lose images/crops)
     mergeIndexBlob,
     // UI

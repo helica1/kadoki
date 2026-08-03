@@ -317,24 +317,44 @@
     .deck-item-actions {
       position: absolute;
       top: 0; right: 0; bottom: 0;
-      width: 150px;
+      width: 222px;
       display: flex;
       z-index: 1;
+      /* iOS-style swipe actions: distinct rounded buttons with gaps, not a
+         flush color strip. */
+      gap: 6px;
+      padding: 7px 7px 7px 0;
+      box-sizing: border-box;
+      align-items: stretch;
     }
     .deck-action {
       flex: 1;
       border: none;
-      font-size: 0.82rem;
-      font-weight: 600;
-      letter-spacing: 0.04em;
+      border-radius: 12px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      color: #fff;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
+      /* Press-in + spring-back release (overshoot bezier = the tiny bounce). */
+      transition: transform .32s cubic-bezier(.34, 1.56, .64, 1), filter .15s ease;
     }
-    .deck-action-edit { background: #243744; color: #bfe3f2; }
-    .deck-action-del  { background: #46232a; color: #f4b3bb; }
-    .deck-action:active { filter: brightness(1.25); }
+    .deck-action:active {
+      transform: scale(.9);
+      filter: brightness(1.15);
+      transition-duration: .06s, .06s;
+    }
+    /* iOS system palette (dark variants): indigo / blue / red-destructive. */
+    .deck-action-stats { background: #5856d6; }
+    .deck-action-edit  { background: #2f7cf6; }
+    .deck-action-del   { background: #eb4d3d; }
+    /* Row tap feedback (no transform here — the swipe writes inline
+       translateX on this element; a brightness lift is conflict-free). */
+    .deck-item-content { transition: filter .18s ease; }
+    .deck-item-content:active { filter: brightness(1.12); }
 
     .title-chip {
       display: inline-block;
@@ -909,27 +929,6 @@ body.dimmed .card-image {
 
 
         <details class="prefs-section">
-          <summary class="prefs-heading" data-i18n="ph.sec_card_subs">Card subtitles</summary>
-          <div class="prefs-row" style="align-items:center;">
-            <label for="combineSubsToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.combine_subs">Combine short subtitles
-              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
-                Merge short subtitle fragments into one card (sentences &amp; quotes stay together); the playing line is highlighted.
-              </span>
-            </label>
-            <input type="checkbox" id="combineSubsToggle" />
-          </div>
-          <div style="font-size:.7rem;color:#777;margin:2px 2px 0;" data-i18n="ph.card_autosize_note">Cards are sized to fit your screen automatically (no scrolling unless a single subtitle is very long). Reopen the title for the on/off change to take effect.</div>
-          <div class="prefs-row" style="align-items:center;">
-            <label for="reverseHSwipeToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.reverse_hswipe">Reverse horizontal swipe
-              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
-                Flip prev/next for card, audio, and reader subtitle swipes.
-              </span>
-            </label>
-            <input type="checkbox" id="reverseHSwipeToggle" />
-          </div>
-        </details>
-
-        <details class="prefs-section">
           <summary class="prefs-heading" data-i18n="ph.sec_screen">Screen</summary>
           <div class="prefs-row" style="align-items:center;">
             <label for="keepAwakeMinSelect" style="flex:1;line-height:1.35;" data-i18n-html="ph.keep_awake">Keep screen awake
@@ -1200,12 +1199,11 @@ body.dimmed .card-image {
               <input type="number" id="aiSceneCharsPer" min="200" step="100" inputmode="numeric"
                      style="width:80px;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;color:#ddd;padding:6px 8px;font-size:.85rem;text-align:center;" />
             </div>
-            <div class="prefs-row" style="align-items:center;">
-              <label for="aiSceneAutoToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.scene_auto">Auto-illustrate scenes
-                <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">読み進むと約6,000字ごとに章の場面を自動生成（ダイナミックタイムラインに表示）。</span>
-              </label>
-              <input type="checkbox" id="aiSceneAutoToggle" />
-            </div>
+            <!-- LEGACY "Auto-illustrate scenes" (AISCENE_AUTO, ai-scenes.js) removed
+                 from the UI 2026-08-01: the position-driven per-6k-chars unlock predates
+                 the scene-ideas model and duplicated "Auto-generate scene pictures"
+                 below from the user's perspective. The engine + pref key remain
+                 functional (localStorage AISCENE_AUTO) but are no longer surfaced. -->
             <div class="prefs-row" style="align-items:center;">
               <label for="aiSceneAutoImgToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.scene_autoimg">Auto-generate scene pictures
                 <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">章の要約で場面が作られたら、その画像も自動で生成します（順番待ちで約20秒おきに生成しサーバーを過負荷にしません）。コストがかかります。</span>
@@ -1576,6 +1574,10 @@ body.dimmed .card-image {
             <span class="stat-label">Time playing</span>
             <span id="statsAudioTime" class="stat-value">0:00</span>
           </div>
+          <div class="stat-row" id="statsAudioWatchRow" style="display:none;">
+            <span class="stat-label">of which Apple Watch</span>
+            <span id="statsAudioWatchTime" class="stat-value">0:00</span>
+          </div>
           <div class="stat-row">
             <span class="stat-label">Chars heard</span>
             <span id="statsAudioChars" class="stat-value">0</span>
@@ -1753,6 +1755,10 @@ body.dimmed .card-image {
        of the write-amplified Capacitor Preferences store. -->
   <script src="blob-store.js"></script>
   <script src="title-store.js"></script>
+  <script src="auto-align.js"></script><!-- fuzzy ASR-cue → book-text matching for titles with a read source -->
+  <script src="auto-transcribe.js"></script><!-- on-device subtitle generation for audio-only titles (iOS 26+) -->
+  <script src="word-highlight.js"></script><!-- karaoke word highlighting from per-token timings -->
+
   <!-- Cross-device library sync (Google Drive). gdrive-auth = OAuth;
        drive-api = Drive REST; drive-index = whole-library membership index;
        drive-sync = per-title packaging/re-key/push/pull; drive-sync-ui = the
@@ -1766,6 +1772,9 @@ body.dimmed .card-image {
   <script src="folder-import.js"></script>
   <script src="cover-extract.js"></script>
   <script src="stats.js"></script>
+  <script src="title-stats.js"></script>
+  <script src="lookup-log.js"></script>
+  <script src="watch.js"></script>
   <script src="bookmarks.js"></script>
   <!-- Pure-observer per-title session log (timeline/AI plan slice 1). Reads
        positions only; nothing in the restore pipeline reads from it. -->
@@ -2014,6 +2023,7 @@ body.dimmed .card-image {
           : `<div class="title-avatar" style="width:56px;height:56px;border-radius:6px;background:var(--panel-elev);color:${avatarTint};display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:700;font-family:var(--font-sans);flex-shrink:0;border:1px solid var(--border);">${escapeHtml(firstLetter)}</div>`;
         item.innerHTML = `
           <div class="deck-item-actions">
+            <button class="deck-action deck-action-stats">${escapeHtml(window.i18n.t('lib.stats', 'Stats'))}</button>
             <button class="deck-action deck-action-edit">Edit</button>
             <button class="deck-action deck-action-del">Delete</button>
           </div>
@@ -2039,11 +2049,14 @@ body.dimmed .card-image {
           </div>
         `;
         // Action buttons (revealed by left-swipe).
+        item.querySelector('.deck-action-stats').addEventListener('click', (e) => {
+          e.stopPropagation(); window.kHaptic?.(); openTitleStats(title.id);
+        });
         item.querySelector('.deck-action-edit').addEventListener('click', (e) => {
-          e.stopPropagation(); openTitleEdit(title.id);
+          e.stopPropagation(); window.kHaptic?.(); openTitleEdit(title.id);
         });
         item.querySelector('.deck-action-del').addEventListener('click', async (e) => {
-          e.stopPropagation();
+          e.stopPropagation(); window.kHaptic?.('MEDIUM');
           if (window.titleStore && confirm('Remove this title from your library?')) {
             // Deletes are local-only: dismiss the syncId FIRST (awaited) so a
             // delete-then-immediate-Sync can't resurrect it from the cloud index.
@@ -2058,7 +2071,7 @@ body.dimmed .card-image {
 
     // Left-swipe a library item to reveal its Edit / Delete actions; tap to
     // open. The content layer follows the finger live, then snaps open/closed.
-    const SWIPE_ACTIONS_W = 150;
+    const SWIPE_ACTIONS_W = 222;
     function closeOtherSwipes(except) {
       document.querySelectorAll('#deckList .deck-item.swiped').forEach(el => {
         if (el !== except && typeof el._closeSwipe === 'function') el._closeSwipe();
@@ -2128,6 +2141,124 @@ body.dimmed .card-image {
       }[ch]));
     }
 
+    // ----- Title Stats card (library left-swipe → Stats) -----
+    window.openTitleStats = async function (id) {
+      try {
+        const title = await window.titleStore.get(id);
+        if (!title || !window.titleStats) return;
+        const st = await window.titleStats.getStats(id);
+        // Audio-duration fallback for titles the recorder never saw playing.
+        let durMs = st.durMs;
+        if (!durMs && window.autoTranscribe?.durationFor) {
+          try { durMs = await window.autoTranscribe.durationFor(id) || 0; } catch (_) {}
+        }
+        const t = (k, fb) => window.i18n.t(k, fb);
+        const fmtH = (ms) => {
+          const m = Math.round(ms / 60000);
+          return m >= 60 ? Math.floor(m / 60) + 'h ' + (m % 60) + 'm' : m + 'm';
+        };
+        const started = st.firstTs || title.createdAt || 0;
+        const hasAudio = st.curAMs > 0;
+        const hasRead = st.curRCh > 0;
+        const rows = [];
+        rows.push([t('ts.started', 'Started'), started ? new Date(started).toLocaleDateString() : '—']);
+        rows.push([t('ts.active_days', 'Active days'), String(st.activeDays || 0)]);
+        if (hasAudio) {
+          rows.push([t('ts.audio_progress', 'Audio progress'),
+            fmtH(st.curAMs) + (durMs > st.curAMs ? ' / ' + fmtH(durMs) + ' (' + Math.round(st.curAMs / durMs * 100) + '%)' : '')]);
+        }
+        if (hasRead) {
+          rows.push([t('ts.read_progress', 'Read progress'),
+            st.curRCh.toLocaleString() + (st.tCh > st.curRCh
+              ? ' / ' + st.tCh.toLocaleString() + t('ts.chars', ' chars') + ' (' + Math.round(st.curRCh / st.tCh * 100) + '%)'
+              : t('ts.chars', ' chars'))]);
+        }
+        if (hasAudio && st.paceAMs > 0) rows.push([t('ts.pace_audio', 'Pace (audio)'), fmtH(st.paceAMs) + t('ts.per_day', ' / day')]);
+        if (hasRead && st.paceRCh > 0) rows.push([t('ts.pace_read', 'Pace (read)'), Math.round(st.paceRCh).toLocaleString() + t('ts.chars', ' chars') + t('ts.per_day', ' / day')]);
+        // Time spent per mode (fed by the stats timers, per title per day).
+        const tsec = st.timeSec || {};
+        const fmtSec = (s) => {
+          const m = Math.round(s / 60);
+          return m >= 60 ? Math.floor(m / 60) + 'h ' + (m % 60) + 'm' : m + 'm';
+        };
+        if (tsec.card > 60) rows.push([t('ts.time_card', 'Time (cards)'), fmtSec(tsec.card)]);
+        if (tsec.read > 60) rows.push([t('ts.time_read', 'Time (reading)'), fmtSec(tsec.read)]);
+        if (tsec.audio > 60) rows.push([t('ts.time_audio', 'Time (audio)'), fmtSec(tsec.audio)]);
+        if (tsec.watch > 60) rows.push([t('ts.time_watch', 'Time (watch)'), fmtSec(tsec.watch)]);
+        // ETA from the dominant modality (audio when it has a pace, else read).
+        let etaDays = null;
+        if (hasAudio && st.paceAMs > 0 && durMs > st.curAMs) etaDays = (durMs - st.curAMs) / st.paceAMs;
+        else if (hasRead && st.paceRCh > 0 && st.tCh > st.curRCh) etaDays = (st.tCh - st.curRCh) / st.paceRCh;
+        if (etaDays !== null && Number.isFinite(etaDays)) {
+          const d = Math.max(1, Math.ceil(etaDays));
+          const fin = new Date(Date.now() + d * 86400000).toLocaleDateString();
+          rows.push([t('ts.eta', 'Est. finish'), window.i18n.fmt('ts.eta_val', { d, date: fin }, '~' + d + ' days (' + fin + ')')]);
+        }
+        // Last-14-days bar chart: audio (audio accent) + read (read accent),
+        // each normalized to its own 14-day max so both stay legible.
+        const byDay = {};
+        for (const d of st.days) byDay[d.day] = d;
+        const bars = [];
+        for (let i = 13; i >= 0; i--) {
+          const dt = new Date(Date.now() - i * 86400000);
+          const k = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+          const d = byDay[k];
+          bars.push({ day: dt.getDate(), a: d ? d.aDelta : 0, r: d ? d.rDelta : 0 });
+        }
+        const maxA = Math.max(1, ...bars.map((b) => b.a));
+        const maxR = Math.max(1, ...bars.map((b) => b.r));
+        const CH = 62;
+        const anyBars = bars.some((b) => b.a > 0 || b.r > 0);
+        const barHtml = bars.map((b) => {
+          let ah = b.a > 0 ? Math.max(3, Math.round((b.a / maxA) * CH)) : 0;
+          let rh = b.r > 0 ? Math.max(3, Math.round((b.r / maxR) * CH)) : 0;
+          // The two series are normalized independently but STACK in one
+          // column — cap the stack at the chart height, scaling both
+          // proportionally (a big audio+read day was overflowing upward
+          // into the rows above the chart).
+          if (ah + rh > CH) {
+            const k = CH / (ah + rh);
+            ah = Math.max(ah > 0 ? 2 : 0, Math.floor(ah * k));
+            rh = Math.max(rh > 0 ? 2 : 0, Math.floor(rh * k));
+          }
+          return '<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:1px;min-width:0;">' +
+            (rh ? '<div style="width:68%;height:' + rh + 'px;background:var(--accent-read,#4caf50);border-radius:2px;opacity:.85;"></div>' : '') +
+            (ah ? '<div style="width:68%;height:' + ah + 'px;background:var(--accent-audio,#b794f6);border-radius:2px;opacity:.85;"></div>' : '') +
+            ((!ah && !rh) ? '<div style="width:68%;height:2px;background:#26262e;border-radius:2px;"></div>' : '') +
+            '<div style="font-size:.54rem;color:#666;margin-top:2px;">' + b.day + '</div></div>';
+        }).join('');
+        const rowsHtml = rows.map(([k, v]) =>
+          '<div style="display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid #1f1f26;">' +
+          '<span style="color:#9a9aa6;font-size:.84rem;flex:none;">' + escapeHtml(k) + '</span>' +
+          '<span style="color:#e6e6ee;font-size:.84rem;text-align:right;min-width:0;">' + escapeHtml(v) + '</span></div>').join('');
+        const ov = document.createElement('div');
+        ov.className = 'kai-modal';
+        ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px;';
+        ov.innerHTML =
+          '<div style="background:#141419;border:1px solid #2a2a33;border-radius:14px;max-width:430px;width:100%;max-height:82vh;overflow-y:auto;padding:18px 18px 14px;">' +
+            '<div style="font-size:.72rem;font-weight:700;letter-spacing:.08em;color:#8a8a96;margin-bottom:2px;">' + escapeHtml(t('ts.title', 'Title stats')) + '</div>' +
+            '<div style="font-size:1.05rem;font-weight:700;color:#f0f0f4;margin-bottom:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml(title.name || 'Untitled') + '</div>' +
+            (anyBars || rows.length > 2 ? rowsHtml : '<div style="color:#8a8a96;font-size:.84rem;padding:8px 0;">' + escapeHtml(t('ts.no_data', 'No progress recorded yet — stats build up as you listen and read.')) + '</div>') +
+            (anyBars
+              ? '<div style="margin-top:12px;">' +
+                  '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">' +
+                    '<span style="color:#8a8a96;font-size:.7rem;font-weight:700;letter-spacing:.06em;">' + escapeHtml(t('ts.last14', 'Last 14 days')) + '</span>' +
+                    '<span style="font-size:.62rem;color:#777;">' +
+                      '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--accent-audio,#b794f6);vertical-align:middle;margin-right:3px;"></span>' + escapeHtml(t('ts.legend_audio', 'audio')) +
+                      '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--accent-read,#4caf50);vertical-align:middle;margin:0 3px 0 10px;"></span>' + escapeHtml(t('ts.legend_read', 'read')) +
+                    '</span>' +
+                  '</div>' +
+                  '<div style="display:flex;align-items:flex-end;gap:2px;height:' + (CH + 14) + 'px;overflow:hidden;">' + barHtml + '</div>' +
+                '</div>'
+              : '') +
+            '<button id="titleStatsClose" style="display:block;width:100%;margin-top:14px;background:#22222b;border:1px solid #33333e;color:#ccccd6;border-radius:8px;padding:9px 0;font-size:.88rem;">' + escapeHtml(t('common.close', 'Close')) + '</button>' +
+          '</div>';
+        ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+        ov.querySelector('#titleStatsClose').addEventListener('click', () => ov.remove());
+        document.body.appendChild(ov);
+      } catch (e) { console.warn('openTitleStats:', e); }
+    };
+
     // ----- Edit Title sheet -----
 
     let _editingTitleId = null;
@@ -2190,7 +2321,26 @@ body.dimmed .card-image {
       // Reading group: EPUB is the parent; Audio + SRT are its sync children.
       let html = groupLabel('Reading');
       html += rowHtml('epub', 'EPUB / TXT', false);
+      // Audiobook without a book: offer to package the on-device transcription
+      // as a readable EPUB (auto-generated at transcription completion too —
+      // this button covers titles finished earlier, or partial transcriptions).
+      if (!a.epub && a.audiobook) {
+        html += `
+          <div style="padding:8px 0 10px;border-bottom:1px solid #2a2a2a;">
+            <button onclick="createBookFromTranscription()" style="width:100%;background:#1d2b1f;color:#8fd694;border:1px solid #2f4a33;padding:9px 12px;border-radius:6px;font-size:0.85rem;">Create book from transcription</button>
+            <div style="font-size:0.7rem;color:#666;margin-top:5px;line-height:1.4;">Packages the generated subtitles as an EPUB so this title gains Read mode. Needs transcription data (play the audiobook first).</div>
+          </div>`;
+      }
       html += rowHtml('audiobook', 'Audiobook', true);
+      // Apple Watch: queue this title's audio + cues for offline listening on
+      // the wrist (iOS + paired watch + Kadoki watch app installed only).
+      if (a.audiobook && window.Capacitor?.Plugins?.WatchBridge) {
+        html += `
+          <div style="padding:8px 0 10px;border-bottom:1px solid #2a2a2a;">
+            <button onclick="sendTitleToWatch()" style="width:100%;background:#1a2333;color:#9fcaff;border:1px solid #2f4a6e;padding:9px 12px;border-radius:6px;font-size:0.85rem;">Send to Apple Watch</button>
+            <div id="watchSendStatus" style="font-size:0.7rem;color:#666;margin-top:5px;line-height:1.4;">Transfers audio + subtitles for offline listening (AirPods required on watch). Large books can take a long time — keep both devices nearby, ideally on chargers.</div>
+          </div>`;
+      }
       html += rowHtml('srt', 'SRT subtitles', true);
       // Cards group: the Anki deck stands on its own.
       html += groupLabel('Cards');
@@ -2503,11 +2653,64 @@ body.dimmed .card-image {
     }
 
     window.removeTitleAttachment = async function (kind) {
-      await window.titleStore.detach(_editingTitleId, kind);
+      const _tid = _editingTitleId;
+      // Auto-generated SRT? Inspect BEFORE detach (the flag lives on the record).
+      let _srtWasAuto = false;
+      if (kind === 'srt') {
+        try {
+          const t0 = (await window.titleStore.list()).find(t => t.id === _tid);
+          _srtWasAuto = !!t0?.attachments?.srt?.auto;
+        } catch (_) {}
+      }
+      await window.titleStore.detach(_tid, kind);
       const titles = await window.titleStore.list();
-      const title = titles.find(t => t.id === _editingTitleId);
+      const title = titles.find(t => t.id === _tid);
+      if (kind === 'srt' && title) {
+        // Removing an AUTO-generated SRT = "regenerate subtitles": also drop
+        // the transcription cache, else the next open would instantly
+        // re-finalize the SAME cues (a finalized title never re-activates
+        // the transcriber). Fresh generation picks up word timings etc.
+        if (_srtWasAuto) {
+          try { await window.blobStore?.remove?.('AUTO_CUES_V1_' + _tid); } catch (_) {}
+        }
+        // A detached SRT must not linger in the deck-name pairing prefs or
+        // the parsed-cue caches: a stale pairing fails the audio-mode SRT
+        // load AND blocks auto-transcription (gated on "no SRT").
+        try {
+          const P = window.Capacitor?.Plugins?.Preferences;
+          const names = [title.name, title.attachments?.deck?.name].filter(Boolean);
+          for (const nm of names) {
+            await P?.remove?.({ key: 'READING_SRT_PAIR_' + nm });
+            await P?.remove?.({ key: 'READING_SRT_NAME_' + nm });
+          }
+          await window.blobStore?.remove?.('SRT_CUES_V1_' + _tid);
+          await window.cueAlignment?.clearAlignment?.(_tid);
+          window.invalidateAbContext?.();
+        } catch (_) {}
+      }
       renderAttachmentRows(title);
       populateLibrary();
+    };
+
+    window.createBookFromTranscription = async function () {
+      const _tid = _editingTitleId;
+      try {
+        window.showToast?.('Creating book from transcription…', 1500);
+        const r = await window.autoTranscribe?.buildSyntheticEpub?.(_tid);
+        if (r?.ok) {
+          window.showToast?.('Book created (' + r.chapters + ' section' + (r.chapters === 1 ? '' : 's') + ')', 2500);
+        } else if (r?.reason === 'no-cues') {
+          window.showToast?.('No transcription data yet — play the audiobook first', 2800);
+        } else if (r?.reason !== 'has-epub') {
+          window.showToast?.('Could not create book', 2500);
+        }
+        const titles = await window.titleStore.list();
+        renderAttachmentRows(titles.find(t => t.id === _tid));
+        populateLibrary();
+        try { window.refreshTabAvailability?.(); } catch (_) {}
+      } catch (e) {
+        window.showToast?.('Could not create book: ' + (e?.message || e), 2500);
+      }
     };
 
     window.closeTitleEdit = function () {
@@ -2671,6 +2874,9 @@ body.dimmed .card-image {
       let _defMode = 'card';
       if (_en.read) _defMode = 'read';
       else if (!_en.card) _defMode = _en.audio ? 'audio' : 'card';
+      // Audio-only titles (card enabled only via auto-transcription) still
+      // default to AUDIO — cards may not exist yet on first open.
+      if (a.audiobook && !a.srt && !a.deck && !a.epub) _defMode = 'audio';
       const targetMode = (title.lastMode && _en[title.lastMode]) ? title.lastMode : _defMode;
       // If a deck is attached, reuse the existing deck-restore path. That
       // path already restores per-deck pairings (EPUB / audiobook / SRT)
@@ -2713,7 +2919,13 @@ body.dimmed .card-image {
         return;
       }
       // Deck-less title with audiobook + SRT → build synthetic cards from SRT.
-      if (a.audiobook && a.srt) {
+      // Audio-only titles ride the same path when on-device auto-transcription
+      // is available: loadTitleAsSrtCards builds cards from the transcribed
+      // cue cache. With no cues yet (fresh title) it returns false and we fall
+      // through to the audiobook-only open below (audio mode, cues stream in).
+      const _autoSubsOk = !a.srt && a.audiobook &&
+        !!(window.autoTranscribe && await window.autoTranscribe.available());
+      if (a.audiobook && (a.srt || _autoSubsOk)) {
         closeLibrary();
         try { await syncTitleToLegacyPrefs(title); } catch (e) {}
         if (typeof window.loadTitleAsSrtCards === 'function') {
@@ -2732,7 +2944,7 @@ body.dimmed .card-image {
             return;
           }
         }
-        return;
+        if (a.srt) return;
       }
       // EPUB-only title → switch to read mode and pre-warm the book so the
       // reader isn't blank on open (mirrors the auto-restore prewarm).

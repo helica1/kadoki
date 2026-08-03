@@ -18,6 +18,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(AnkiBridgePlugin.class);
         registerPlugin(ArchiveExtractorPlugin.class);
         registerPlugin(PdfExportPlugin.class);
+        registerPlugin(AutoTranscribePlugin.class);
         super.onCreate(savedInstanceState);
         enableImmersiveMode();
     }

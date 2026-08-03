@@ -21,6 +21,31 @@ Unlike browser-script workflows, Kadoki is **fully integrated**. No plugins, bro
 
 ---
 
+## What's new in 1.6.6
+
+The biggest update since the AI companion. Both platforms get karaoke-style highlighting, a dictionary lookup history, and per-title statistics; iOS gains a full **Apple Watch app**, and Android gains **on-device subtitle generation** for audiobooks.
+
+**On both platforms:**
+
+- **Karaoke word highlighting:** the old block-style green/orange line highlights are gone. In every mode the narration now lights up word by word — a soft glow sweeps the current word (in each mode's accent color) while a subtle pill marks the phrase about to be spoken, segmented with the dictionary so katakana and kanji words alike chunk naturally.
+- **Dictionary lookup history:** every word you look up is logged with the sentence around it. Open **Lookup history** from the menu to step back through past lookups in a split view — context on top (with the exact timestamp and position), full dictionary below — and send any of them to Anki with audio, without ever moving your place in the book.
+- **Per-title statistics:** swipe a title left in the library and tap **Stats** for that book's own picture: when you started, progress and reading pace, estimated time to finish, a 14-day activity chart, and time spent per mode.
+- **Read/unread markers in the AI companion:** Timeline and Scenes entries now work like an inbox — unread items are bold with a blue dot, a 続きから pill marks where you left off, and read items show a dim ✓.
+- **Smoother read-along:** read mode's auto-follow no longer stalls; a native-truth watchdog keeps the highlight flowing even when the app is under load.
+- **More tactile UI:** iOS-style rounded swipe buttons, spring feedback, and haptics across the menus.
+- **Subtitles generated an hour ahead** for audio-only titles, so a long walk never outruns them.
+
+**iOS:**
+
+- **Apple Watch companion app.** Send any audiobook to the watch and listen **entirely phone-free** — through the watch speaker or Bluetooth headphones — with live karaoke subtitles on the wrist, cover-art player, and the same gestures as the phone (tap or swipe down to play/pause, left/right to step subtitles). Positions sync both ways automatically (freshest listen wins — walk with the watch, come home, and the phone is already at the right spot), watch listening time appears in Stats as its own category, and swiping up **flags the current subtitle** so it lands in the phone's lookup history ready to study and send to Anki. Watch-face complications show the current book and progress.
+
+**Android:**
+
+- **On-device subtitle generation (whisper).** Audiobooks with no subtitle file now transcribe themselves right on the phone, just like on iOS: live Japanese subtitles with word-level karaoke timing appear as you listen, card mode unlocks for audio-only titles, and everything works offline. The speech model (~190 MB) downloads once inside the app after you confirm — nothing is bundled into the APK. Subtitle boundaries are snapped to the actual speech energy, so audio clips sent to Anki start and end cleanly. Requires a 64-bit device (any modern phone).
+- Everything in the shared list above — karaoke highlighting, lookup history, per-title stats, AI read markers — arrives on Android in this release (Android's last release was 1.6.0).
+
+---
+
 ## What's new in 1.6.4
 
 Fixes and refinements since 1.6.3:
@@ -158,6 +183,7 @@ Listen to the audiobook while staying synchronized with the reading modes.
 - Reliable interruptions — phone calls pause playback cleanly (short interruptions resume by themselves), and playback recovers automatically if the system clears the cached audio while backgrounded
 - Lock-screen subtitles — the current sentence shows large on the lock screen / Always-On Display while you listen (optional — turn it off in Preferences to show the book cover instead and save battery)
 - Efficient screen-off listening — overnight sessions do minimal background work
+- **No subtitles? Kadoki makes them** — audiobooks without an SRT are transcribed on-device (iOS 26+ / Android 64-bit) with word-level karaoke timing, staying about an hour ahead of the playhead; once the whole book is covered it becomes a normal subtitled title with card mode and Anki export
 
 Audio keeps playing as you switch between Card, Read, and Audio, and every view stays locked to the same playhead — so you can freely alternate between intensive reading and passive listening without ever stopping playback. To jump back to where you were reading before you started listening, use **Bookmarks** (in the hamburger menu): each time you switch into Audio, Kadoki quietly saves your last reading spot.
 

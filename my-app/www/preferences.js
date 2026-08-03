@@ -430,12 +430,26 @@
             try { window._refreshLockscreenArt?.(); } catch (_) {}
           }
         )));
+        // Generated (on-device) subtitles: comma-grained phrases vs the native
+        // sentence-grained cues. Read synchronously by auto-transcribe.js;
+        // affects newly split cues, so a change fully applies on next title open.
+        block.appendChild(row(window.i18n.t('pj.at_phrase', 'Generated subtitles: split at commas'), toggle(
+          () => { try { return localStorage.getItem('KADOKI_AT_PHRASE') !== '0'; } catch (_) { return true; } },
+          (on) => { try { localStorage.setItem('KADOKI_AT_PHRASE', on ? '1' : '0'); } catch (_) {} }
+        )));
       }
 
       // Card-only extras (moved from the deleted Card mode prefs section).
       if (mode === 'card') {
         block.appendChild(row(window.i18n.t('pj.subtitle_vertical_offset', 'Subtitle vertical offset'), subtitleOffsetRow()));
         block.appendChild(row(window.i18n.t('pj.stopwatch_timeout', 'Stopwatch inactivity timeout (s)'), stopwatchTimeoutRow()));
+        // "Combine short subtitles" (moved here from the removed Card-subtitles
+        // section; same KADOKI_COMBINE_SUBS pref + async wiring).
+        const combineCb = document.createElement('input');
+        combineCb.type = 'checkbox';
+        combineCb.id = 'combineSubsToggle';
+        block.appendChild(row(window.i18n.t('pj.combine_subs', 'Combine short subtitles'), combineCb));
+        setTimeout(() => { try { setupCombineSubsPref(); } catch (_) {} }, 0);
       }
       return block;
     };
@@ -748,23 +762,6 @@
     }
   }
 
-  // "Reverse horizontal swipe" toggle. Stored as REVERSE_H_SWIPE ('1'/'0',
-  // default off). The swipe handlers read it synchronously from localStorage
-  // (window._hSwipeReversed in app.js), so persist dual-writes localStorage +
-  // Capacitor Preferences; app.js mirrors Preferences→localStorage at boot.
-  async function setupReverseHSwipePref() {
-    const cb = document.getElementById('reverseHSwipeToggle');
-    if (!cb) return;
-    try { cb.checked = localStorage.getItem('REVERSE_H_SWIPE') === '1'; } catch (_) { cb.checked = false; }
-    if (!cb.dataset.wired) {
-      cb.dataset.wired = '1';
-      cb.addEventListener('change', () => {
-        const v = cb.checked ? '1' : '0';
-        try { localStorage.setItem('REVERSE_H_SWIPE', v); } catch (_) {}
-        try { window.Capacitor?.Plugins?.Preferences?.set({ key: 'REVERSE_H_SWIPE', value: v }); } catch (_) {}
-      });
-    }
-  }
 
   // "Keep screen awake (minutes)". Stored as KEEP_AWAKE_MIN ('0' = off). Persists
   // on change (dual-write localStorage + Capacitor Preferences); keep-awake.js
@@ -1282,7 +1279,6 @@
     buildAppearanceSection();
     buildDictionarySection();
     await setupCombineSubsPref();
-    await setupReverseHSwipePref();
     await setupKeepAwakePref();
     await setupAiPrefs();
     try { await setupOpenRouterPrefs(); } catch (_) {}   // text-AI backend selector + OpenRouter key/model picker

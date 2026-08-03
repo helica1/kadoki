@@ -19,6 +19,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'menu.timeline_scenes':     { en: 'Timeline & Scenes…', ja: 'タイムラインと場面…' },
   'menu.characters':          { en: 'Characters…',        ja: '登場人物…' },
   'menu.history':             { en: 'History…',           ja: '履歴…' },
+  'menu.lookup_history':      { en: 'Lookup history…',    ja: '辞書履歴…' },
   'menu.playback_speed':      { en: 'Playback Speed…',    ja: '再生速度…' },
   'menu.print':               { en: 'Print…',             ja: '印刷…' },
   'menu.log_printed_reading': { en: 'Log printed reading…', ja: '紙の読書を記録…' },

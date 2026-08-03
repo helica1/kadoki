@@ -134,7 +134,8 @@
       try {
         if (Number.isFinite(window.currentCardIndex) && window.titleStore && window.titleStore.setCardIndex) {
           const anchor = (typeof window._srtCardToCueAnchor === 'function') ? window._srtCardToCueAnchor(window.currentCardIndex) : window.currentCardIndex;
-          if (Number.isFinite(anchor)) await window.titleStore.setCardIndex(srcId, anchor);
+          const anchorMs = (typeof window._srtAnchorMsFor === 'function') ? window._srtAnchorMsFor(anchor) : null;
+          if (Number.isFinite(anchor)) await window.titleStore.setCardIndex(srcId, anchor, anchorMs);
         }
       } catch (_) {}
       try { if (a.audiobook && typeof window.flushAudioPositionNow === 'function') window.flushAudioPositionNow(); } catch (_) {}
@@ -217,6 +218,9 @@
       if (en) { const ci = parseInt(await prefGet(READ_BOOKMARK_PREFIX + en), 10); if (Number.isFinite(ci) && ci >= 0) readBookmark = { chunkIdx: ci, epubName: en }; }
     } catch (_) {}
     let cardIndex = (typeof title.lastCardIndex === 'number') ? title.lastCardIndex : 0;
+    // TIME twin of cardIndex (auto-transcribed titles restore by time — their
+    // cue INDICES aren't comparable across devices/sessions; see setCardIndex).
+    let cardMs = Number.isFinite(title.lastCardMs) ? title.lastCardMs : null;
     // LIVE override — ONLY when the running reader/audio genuinely belongs to
     // THIS title. _activeTitleId flips immediately on a title switch, but the
     // live getters (currentCardIndex / getAudioProgress / pagedGetReadLocation)
@@ -225,7 +229,7 @@
     // position. Guard with the on-screen title name + per-mode identity checks.
     const liveOwns = liveOwnsTitle(srcId, title);   // deck-aware header match
     if (liveOwns) {
-      try { if (Number.isFinite(window.currentCardIndex)) { const anchor = (typeof window._srtCardToCueAnchor === 'function') ? window._srtCardToCueAnchor(window.currentCardIndex) : window.currentCardIndex; if (Number.isFinite(anchor)) cardIndex = anchor; } } catch (_) {}
+      try { if (Number.isFinite(window.currentCardIndex)) { const anchor = (typeof window._srtCardToCueAnchor === 'function') ? window._srtCardToCueAnchor(window.currentCardIndex) : window.currentCardIndex; if (Number.isFinite(anchor)) { cardIndex = anchor; const lms = (typeof window._srtAnchorMsFor === 'function') ? window._srtAnchorMsFor(anchor) : null; if (Number.isFinite(lms)) cardMs = lms; } } } catch (_) {}
       // Audio: only when the audio engine is actually loaded FOR THIS TITLE
       // (abEngineOwnsActiveDeck), else getAudioProgress is the previous title's
       // leftover playhead. Falls back to the persisted value otherwise.
@@ -253,7 +257,7 @@
       } catch (_) {}
     }
     return {
-      cardIndex, audioResume, readBookmark, audioFurthestMs, aiActivation,
+      cardIndex, cardMs, audioResume, readBookmark, audioFurthestMs, aiActivation,
       cover: (a.cover && a.cover.dataUri) || null,
       bookmarks: bms,
       lastMode: title.lastMode || null,
@@ -408,7 +412,7 @@
       deviceId: me,
       snapshotTs: Date.now(),
       titleName: title.name,
-      monotonic: { audioFurthestMs: snap.audioFurthestMs, cardIndex: snap.cardIndex },
+      monotonic: { audioFurthestMs: snap.audioFurthestMs, cardIndex: snap.cardIndex, cardMs: snap.cardMs },
       audioResume: snap.audioResume,
       readBookmark: snap.readBookmark,
       lastMode: snap.lastMode,
@@ -638,6 +642,12 @@
       const ltc = await window.titleStore.get(localId);
       const localCard = (ltc && typeof ltc.lastCardIndex === 'number') ? ltc.lastCardIndex : 0;
       patch.lastCardIndex = Math.max(localCard, mono.cardIndex);
+      // TIME twin, merged monotonically too (auto-transcribed titles restore
+      // by lastCardMs; indices aren't comparable across devices). When neither
+      // side has a time, clear it so restore falls back to the merged index.
+      const localMs = (ltc && Number.isFinite(ltc.lastCardMs)) ? ltc.lastCardMs : -1;
+      const remoteMs = Number.isFinite(mono.cardMs) ? mono.cardMs : -1;
+      patch.lastCardMs = Math.max(localMs, remoteMs) >= 0 ? Math.max(localMs, remoteMs) : null;
     }
     if (manifest.lastMode) patch.lastMode = manifest.lastMode;
     await window.titleStore.update(localId, patch);

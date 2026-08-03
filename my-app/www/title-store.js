@@ -443,11 +443,19 @@
     return titles.find(t => t.id === id) || null;
   }
 
-  async function setCardIndex(id, idx) {
+  async function setCardIndex(id, idx, ms) {
     await load();
     const i = titles.findIndex(t => t.id === id);
     if (i < 0) return;
     titles[i].lastCardIndex = idx;
+    // TIME anchor for the same position (the saved cue's startMs). Auto-
+    // transcribed titles restore by TIME, never by index: their cue list
+    // densifies between save and reopen (phrase splitting / word-timing
+    // retrofit / cold-load re-split), so a saved cue INDEX maps minutes
+    // earlier on each reopen — the Ring minute-44 → minute-1 place loss.
+    // Cleared (not kept) when the caller can't resolve a time, so a stale
+    // anchor from an older save can never override a fresher index.
+    titles[i].lastCardMs = Number.isFinite(ms) ? Math.round(ms) : null;
     titles[i].lastOpenedAt = Date.now();
     await persist();
   }
@@ -468,8 +476,12 @@
   function enabledModes(title) {
     if (!title) return { card: false, read: false, audio: false };
     const a = title.attachments || {};
+    // Audio-only titles are card-capable when on-device auto-transcription
+    // is available (auto-transcribe.js generates the cues; shell.js
+    // refreshTabAvailability duplicates this rule — keep both in sync).
+    const autoSubs = !!(window.autoTranscribe && window.autoTranscribe.isSupportedSync && window.autoTranscribe.isSupportedSync());
     return {
-      card: !!a.deck || !!(a.audiobook && a.srt),  // deck OR (audiobook + srt)
+      card: !!a.deck || !!(a.audiobook && (a.srt || autoSubs)),
       read: !!a.epub,
       audio: !!a.audiobook
     };

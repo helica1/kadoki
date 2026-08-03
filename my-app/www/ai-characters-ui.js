@@ -259,10 +259,18 @@
   }
 
   let lastReadBucket = null;
+  // Scroll guard for the poll: the whole-document container scan + per-container
+  // textContent probe is a few ms of main-thread work, and landing it mid-gesture
+  // delays touch dispatch on iOS (timeline/scenes scrolling). Stamped by a
+  // capture-phase passive scroll listener (fires for ANY scrolling element);
+  // the poll just retries 1.5s later, so marking latency is unaffected at rest.
+  let _lastScrollTs = 0;
+  try { document.addEventListener('scroll', () => { _lastScrollTs = Date.now(); }, { capture: true, passive: true }); } catch (_) {}
   function pass() {
     try {
       if (window._kaiAiPaused) return;        // perf-probe kill switch
       if (document.hidden) return;
+      if (Date.now() - _lastScrollTs < 350) return;   // mid-scroll — skip this tick
       if (!window.aiCharacters) return;
       const m = window.aiCharacters.matcher();
       if (!m) return;
@@ -360,6 +368,11 @@
       // dict popup behind it and is swallowed (only the 2nd tap reaches the editor).
       // Mirrors enhanced-dictionary.js's #waveformEditorOverlay exclusions (2026-06-09).
       if (e.target && e.target.closest && e.target.closest('#waveformEditorOverlay')) return;
+      // Same lesson: taps in the lookup-history viewer (nav panel OR its
+      // background shield) belong to the viewer — it owns the popup lifecycle.
+      // Without this, the FIRST ◀/▶ tap dismissed the popup (capture-phase
+      // stopPropagation ate the button click) and only the SECOND stepped.
+      if (e.target && e.target.closest && e.target.closest('#lookupNavBar, #lookupNavShield')) return;
       // Dict popup open AND the tap is OUTSIDE it → this tap is a DISMISS. Close
       // it and do nothing else (no new lookup, no character popup). Taps INSIDE
       // the popup (Send to Anki, nav, audio buttons) must pass through to the

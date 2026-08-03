@@ -41,20 +41,9 @@ window._inSystemGestureZone = function (clientY) {
 // dual-writes localStorage + Capacitor Preferences on change. localStorage can
 // be wiped while Capacitor Preferences survives — restore the local copy at
 // boot so the toggle sticks (same pattern as AI_AUTO_PROCESS in ai.js).
-window._hSwipeReversed = () => { try { return localStorage.getItem('REVERSE_H_SWIPE') === '1'; } catch (_) { return false; } };
-(async () => {
-  try {
-    if (localStorage.getItem('REVERSE_H_SWIPE') === null) {
-      const p = window.Capacitor?.Plugins?.Preferences;
-      if (p) {
-        const r = await p.get({ key: 'REVERSE_H_SWIPE' });
-        if (r && r.value !== null && r.value !== undefined) {
-          localStorage.setItem('REVERSE_H_SWIPE', r.value);
-        }
-      }
-    }
-  } catch (_) {}
-})();
+// Hardwired ON: the reversed direction IS the intended swipe mapping (the
+// old toggle + its pref are gone).
+window._hSwipeReversed = () => true;
 // KEEP_AWAKE_MIN survives a localStorage wipe via Capacitor Preferences (same
 // pattern as REVERSE_H_SWIPE above). keep-awake.js reads localStorage.
 (async () => {
@@ -1054,6 +1043,19 @@ window._srtCardToCueAnchor = function (cardIdx) {
   return cardIdx;
 };
 
+// TIME (ms) of a cue anchor — persisted alongside the cue index so auto-
+// transcribed titles can restore by time (their cue lists densify between
+// sessions, which turns a saved index into a backward place-jump). Returns
+// null for deck-card titles (window._srtCues may still hold a previous
+// title's cues there — resolving against it would cross titles).
+window._srtAnchorMsFor = function (cueIdx) {
+  try {
+    if (!(Array.isArray(window.allNotes) && window.allNotes.length && window.allNotes[0]?.isSrtCard)) return null;
+    const c = Array.isArray(window._srtCues) ? window._srtCues[cueIdx] : null;
+    return (c && Number.isFinite(c.startMs)) ? Math.round(c.startMs) : null;
+  } catch (_) { return null; }
+};
+
 function updateCardIndex(newIndex) {
   if (newIndex >= 0 && newIndex < allNotes.length && newIndex !== currentCardIndex) {
     debugLog(`Updating card index from ${currentCardIndex} to ${newIndex}`);
@@ -1101,7 +1103,8 @@ function updateCardIndex(newIndex) {
       saveDeckState();
       if (window._activeTitleId && window.titleStore?.setCardIndex &&
           !(window._positionSaveBlocked && window._positionSaveBlocked())) {
-        window.titleStore.setCardIndex(window._activeTitleId, window._srtCardToCueAnchor(newIndex)).catch(() => {});
+        const _anchor = window._srtCardToCueAnchor(newIndex);
+        window.titleStore.setCardIndex(window._activeTitleId, _anchor, window._srtAnchorMsFor(_anchor)).catch(() => {});
       }
     }
     // Stats: a card advance counts toward the card-mode counter (even if
@@ -1257,6 +1260,14 @@ function updateProgressBar() {
     return;
   }
   // Card mode (default).
+  // While subtitles are still being generated (no real SRT yet) the cue list
+  // grows, so "10 / 71" is meaningless — show the audio position instead.
+  if (window._srtAutoLive && typeof window.getAudioProgress === 'function') {
+    const a = window.getAudioProgress();
+    bar.style.width = (a.pct || 0).toFixed(2) + '%';
+    label.textContent = a.dur ? `${fmtHms(a.ms)} / ${fmtHms(a.dur)}` : '';
+    return;
+  }
   const total = allNotes.length;
   const current = currentCardIndex + 1;
   const percent = total ? (current / total) * 100 : 0;
@@ -3033,6 +3044,9 @@ async function displayCard() {
   // re-render for the new index.
   const capturedIndex = currentCardIndex;
   const card = allNotes[capturedIndex];
+  // An out-of-range index must not throw mid-async (an uncaught rejection
+  // here leaves the card container permanently BLANK — no retry ever fires).
+  if (!card) { debugLog('displayCard: no card at index ' + capturedIndex + '/' + allNotes.length); return; }
   const container = document.getElementById("cardContainer");
   
   // Always start with the text content to avoid blank cards
@@ -3976,7 +3990,31 @@ window.displayCard = displayCard;
 // one. Called on every entry into card mode (shell.js). No-op when already fresh.
 window.ensureCardRenderedForActiveTitle = function () {
   try {
-    if (!Array.isArray(window.allNotes) || window.allNotes.length === 0) return;
+    if (!Array.isArray(window.allNotes) || window.allNotes.length === 0) {
+      // Self-heal for auto-transcribed titles: if the card build silently
+      // failed at title open (transient stat/cache miss → 0-cue snapshot),
+      // the CARD tab would stay blank forever — no merge event retries it
+      // while transcription is idle. Retry the full load ONCE per title on
+      // card entry.
+      const tid = window._activeTitleId;
+      if (tid && window.autoTranscribe && window.titleStore && window._autoCardHealTried !== tid) {
+        window._autoCardHealTried = tid;
+        (async () => {
+          try {
+            const t = (await window.titleStore.list()).find(x => x.id === tid);
+            const a = (t && t.attachments) || {};
+            if (t && a.audiobook && typeof window.loadTitleAsSrtCards === 'function' &&
+                (a.srt || await window.autoTranscribe.available())) {
+              debugLog('[autoCards] blank card view — retrying loadTitleAsSrtCards');
+              const ok = await window.loadTitleAsSrtCards(t, false);
+              debugLog('[autoCards] self-heal reload → ' + ok);
+              if (ok && typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
+            }
+          } catch (e) { debugLog('[autoCards] self-heal failed: ' + (e?.message || e)); }
+        })();
+      }
+      return;
+    }
     if (window._activeTitleId == null) return;                       // unknown title — leave as-is
     // Also re-render when the DOM page no longer contains the active cue, not
     // only on a title change. persistReadCue (reading past a page boundary in
@@ -3985,10 +4023,39 @@ window.ensureCardRenderedForActiveTitle = function () {
     // wrong line highlighted (displayCard is now the sole highlight driver).
     // displayCard is cheap when nothing moved (fast path). [review P2]
     const _srt = !!window.allNotes[0]?.isSrtCard;
+    // Replace a hidden-open ESTIMATED line budget with a measured one now that
+    // the card view is actually visible (title opened straight into audio mode
+    // → budget was estimated → pages could over/under-fill). No-op when the
+    // budget is unchanged (the refit's own guard).
+    if (_srt) { try { window._refitSrtCardsForLayout?.(); } catch (_) {} }
+    // MODE ENTRY MUST NEVER MOVE AUDIO (never-lose-place). displayCard's
+    // seek/play branches are for swipes; entering the card tab is passive.
+    // While the audiobook is playing, additionally adopt the card at the
+    // LIVE playhead — read mode only syncs the card index on debounced
+    // saves, and a stale index here used to seek the audio backward (even
+    // to 0:00) on a read→card tab switch, resetting the listening place.
+    if (_srt) {
+      if (window._bgPlaying && Number.isFinite(window._lastBgPosMs) &&
+          window._lastBgPosAt && (Date.now() - window._lastBgPosAt) < 15000) {
+        const pos = window._lastBgPosMs;
+        let idx = Math.max(0, Math.min(window.allNotes.length - 1, window.currentCardIndex || 0));
+        while (idx + 1 < window.allNotes.length && (window.allNotes[idx + 1].audiobookStartMs || 0) <= pos) idx++;
+        while (idx > 0 && (window.allNotes[idx].audiobookStartMs || 0) > pos + 1) idx--;
+        if (idx !== window.currentCardIndex && typeof updateCardIndex === 'function') {
+          window._skipNextCardAudioRestart = true;
+          updateCardIndex(idx);
+          return;   // updateCardIndex rendered the card (silently)
+        }
+      }
+      window._skipNextCardAudioRestart = true;
+    }
     const _pageMismatch = _srt && window._srtCueToPage &&
       window.currentCardIndex < window._srtCueToPage.length &&
       window._srtCueToPage[window.currentCardIndex] !== window._lastRenderedPageIdx;
-    if (window._cardRenderedTitleId === window._activeTitleId && !_pageMismatch) return; // already fresh
+    if (window._cardRenderedTitleId === window._activeTitleId && !_pageMismatch) {
+      window._skipNextCardAudioRestart = false;   // nothing rendered — don't leave a stale one-shot armed
+      return; // already fresh
+    }
     if (typeof window.displayCard === 'function') window.displayCard();
   } catch (_) {}
 };
@@ -4025,7 +4092,7 @@ window.persistReadCue = function (cueIdx) {
   currentCardIndex = map ? map[cueIdx] : cueIdx;   // keep the card synced to reading
   window.currentCardIndex = currentCardIndex;
   if (window._activeTitleId && window.titleStore?.setCardIndex) {
-    window.titleStore.setCardIndex(window._activeTitleId, cueIdx).catch(() => {});
+    window.titleStore.setCardIndex(window._activeTitleId, cueIdx, window._srtAnchorMsFor(cueIdx)).catch(() => {});
   }
 };
 
@@ -4198,6 +4265,16 @@ function _ensureBgListenersForSrtCards() {
       try { window.pagedUpdateProgressForCue?.(window._lastAudioCueIdx ?? -1); } catch (_) {}
     }
   });
+  // Prime the play-state mirror from truth. When these listeners attach
+  // MID-playback (auto-transcribed titles bootstrap their cards after audio
+  // already started), the transition-only 'state' event has long fired and
+  // window._bgPlaying would stay false — dead card-waveform playhead, and
+  // displayCard taking the restart branch instead of the seek branch.
+  try {
+    bg.getState?.().then?.((s) => {
+      if (s && typeof s.playing === 'boolean') window._bgPlaying = s.playing;
+    }).catch?.(() => {});
+  } catch (_) {}
   // Lock screen / Control Center remote commands. The audiobook is the ONLY
   // content the lock screen ever controls (card SRT clips are just segments of
   // the same audiobook file), so a remote "play" should always land us in
@@ -4246,6 +4323,10 @@ function _ensureBgListenersForSrtCards() {
     // without ts (older native build) pass through unchanged.
     const _ts = Number(d?.ts);
     if (Number.isFinite(_ts) && _ts > 0 && Date.now() - _ts > 3000) return;
+    // Live playhead mirror for synchronous consumers (card-mode ENTRY adopts
+    // the playing position instead of trusting a stale card index).
+    window._lastBgPosMs = d.positionMs || 0;
+    window._lastBgPosAt = Date.now();
     // Same constraint as the state handler — only repaint the strip
     // in audio mode, never while the page is hidden (screen off: the strip
     // isn't visible; the first foreground tick repaints). ~3 Hz throttle.
@@ -4292,7 +4373,8 @@ function _ensureBgListenersForSrtCards() {
             window._lastCardPersistAt = _nowP;
             if (window._activeTitleId && window.titleStore?.setCardIndex &&
                 !(window._positionSaveBlocked && window._positionSaveBlocked())) {
-              window.titleStore.setCardIndex(window._activeTitleId, window._srtCardToCueAnchor(idx)).catch(() => {});
+              const _anchor = window._srtCardToCueAnchor(idx);
+              window.titleStore.setCardIndex(window._activeTitleId, _anchor, window._srtAnchorMsFor(_anchor)).catch(() => {});
             }
           }
         }
@@ -4566,6 +4648,108 @@ window._refitSrtCardsForLayout = function () {
   window.onCardLayoutChanged = sched;
 })();
 
+// Bootstrap cards for a FRESH audio-only title: it opened with 0 transcribed
+// cues (loadTitleAsSrtCards bailed), audio mode is running, and the first cue
+// batches have now landed. Wires the same state loadTitleAsSrtCards would,
+// WITHOUT the cross-title resets (same title, audio already live) and without
+// rendering — the card view fills in when the user actually switches to it.
+window._bootstrapAutoSrtCards = function (titleId, cues, audioPath) {
+  try {
+    if (!titleId || titleId !== window._activeTitleId) return false;
+    if (window._srtAutoLive) return false;                       // already live
+    if (Array.isArray(window.allNotes) && window.allNotes.length) return false;
+    if (!Array.isArray(cues) || cues.length < 5) return false;
+    window._srtCues = cues;
+    window._srtAbPath = audioPath;
+    if (window._srtCombineOn === undefined) window._srtCombineOn = true;
+    const budget = (typeof window.computeCardLineBudget === 'function') ? window.computeCardLineBudget() : null;
+    if (typeof window.applyComboMaxHeightVar === 'function') window.applyComboMaxHeightVar(budget);
+    window._lastCardBudget = budget;
+    const built = window._buildSrtNotesFromCues(cues, audioPath, budget);
+    allNotes = built.notes;
+    window.allNotes = allNotes;
+    window._srtCueToCard = built.cueToCard;
+    notesProcessed = allNotes.length;
+    totalNotesExpected = allNotes.length;
+    isLoadingComplete = true;
+    // Start at the live audio position (this title is mid-listen by definition).
+    let idx = 0;
+    try {
+      const ms = window.getAudioProgress?.()?.ms;
+      if (Number.isFinite(ms) && window.srtParser) {
+        const at = window.srtParser.findCueAtTime(cues, ms);
+        if (at >= 0) idx = at;
+      }
+    } catch (_) {}
+    currentCardIndex = idx;
+    window.currentCardIndex = idx;
+    window._computeSrtPages(budget);
+    window._lastRenderedPageIdx = -1;
+    window._srtAutoLive = titleId;
+    // Same wiring loadTitleAsSrtCards does — without this the play-state
+    // mirror and card-end watcher never attach for bootstrapped titles.
+    _ensureBgListenersForSrtCards();
+    if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
+    return true;
+  } catch (e) { try { debugLog('autoBootstrap: ' + (e?.message || e)); } catch (_) {} return false; }
+};
+
+// Live refresh for AUTO-transcribed card titles (window._srtAutoLive set by
+// loadTitleAsSrtCards, called by auto-transcribe.js as new cues finalize).
+// Rebuilds the 1-note-per-cue list from the transcriber's growing cue array.
+// Appends only extend the list; BACKFILL inserts shift cue indices, so the
+// current card is re-anchored by TIME (audiobookStartMs) — place-safe.
+window._refreshAutoSrtCards = function (cues) {
+  try {
+    if (!window._srtAutoLive || window._srtAutoLive !== window._activeTitleId) return;
+    if (!Array.isArray(cues) || !cues.length) return;
+    if (!Array.isArray(window.allNotes) || !window.allNotes.length || !window.allNotes[0].isSrtCard) return;
+    const prevIdx = Math.max(0, Math.min(window.allNotes.length - 1, window.currentCardIndex || 0));
+    const curNote = window.allNotes[prevIdx];
+    const curStart = (curNote && Number.isFinite(curNote.audiobookStartMs)) ? curNote.audiobookStartMs : null;
+    // Snapshot the currently RENDERED page's identity before the rebuild so we
+    // can keep the displayCard fast path hot when it survives unchanged.
+    const prevPageIdx = window._lastRenderedPageIdx;
+    const prevPage = (Array.isArray(window._srtPages) && prevPageIdx >= 0) ? window._srtPages[prevPageIdx] : null;
+    window._srtCues = cues;
+    const built = window._buildSrtNotesFromCues(cues, window._srtAbPath, window._lastCardBudget);
+    allNotes = built.notes;
+    window.allNotes = allNotes;
+    notesProcessed = allNotes.length;
+    totalNotesExpected = allNotes.length;
+    isLoadingComplete = true;
+    let newIdx = prevIdx;
+    if (curStart != null) {
+      let lo = 0, hi = cues.length - 1;
+      while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (cues[mid].startMs <= curStart) lo = mid; else hi = mid - 1; }
+      newIdx = lo;
+    }
+    currentCardIndex = Math.max(0, Math.min(allNotes.length - 1, newIdx));
+    window.currentCardIndex = currentCardIndex;
+    window._computeSrtPages(window._lastCardBudget);
+    // Keep the rendered-page marker when the page under the user survived the
+    // rebuild at the same index with the same cue range (frontier APPENDS
+    // never touch earlier pages). Unconditionally resetting it made the next
+    // cue advance rebuild the whole page block (~every refresh during live
+    // transcription) instead of just sliding the orange highlight — the page
+    // must only visibly flip when the active cue crosses a page boundary.
+    const newPageIdx = (window._srtCueToPage && currentCardIndex < window._srtCueToPage.length)
+      ? window._srtCueToPage[currentCardIndex] : -1;
+    const newPage = (Array.isArray(window._srtPages) && newPageIdx >= 0) ? window._srtPages[newPageIdx] : null;
+    const pageSurvived = !!(prevPage && newPage && newPageIdx === prevPageIdx &&
+                            newPage.lo === prevPage.lo && newPage.hi === prevPage.hi);
+    if (!pageSurvived) window._lastRenderedPageIdx = -1;   // real change → next render rebuilds
+    // Re-render immediately only when the remap actually moved the user's card
+    // in visible card mode; otherwise the next natural render (cue advance /
+    // swipe) picks the new pages up without flicker.
+    if (newIdx !== prevIdx && document.body.classList.contains('mode-card') && typeof displayCard === 'function') {
+      window._skipNextCardAudioRestart = true;
+      displayCard();
+    }
+    if (typeof updateProgressBar === 'function') updateProgressBar();
+  } catch (e) { try { debugLog('autoRefresh: ' + (e?.message || e)); } catch (_) {} }
+};
+
 /**
  * Load a Title that has audiobook + SRT but no deck. Parses the SRT,
  * builds a synthetic allNotes array (one entry per cue), sets up state,
@@ -4588,7 +4772,12 @@ async function _cacheFileMissing(path) {
 window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   const ab = title?.attachments?.audiobook;
   const srtAtt = title?.attachments?.srt;
-  if (!ab || !srtAtt || !window.srtParser) return false;
+  if (!ab || !window.srtParser) return false;
+  // No SRT attachment → on-device auto-transcription source (iOS 26+).
+  // Cards build from the transcribed cue cache / live cue list instead of an
+  // SRT file; auto-transcribe.js keeps them fresh via _refreshAutoSrtCards.
+  const _autoMode = !srtAtt;
+  if (_autoMode && !window.autoTranscribe) return false;
   // Folder-imported titles carry {uri,name} lazily. rehydrateTitleCachePaths
   // normally fills cachePath before we get here, but be robust to ordering /
   // a silent rehydrate failure: materialize straight from the uri if needed.
@@ -4610,7 +4799,7 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
       try { const p = await window.driveSyncMedia.ensureLocalPath(title.id, kind, att, { background: kind === 'audiobook' }); if (p) att.cachePath = p; } catch (e) {}
     }
   }
-  if (!ab.cachePath || !srtAtt.cachePath) {
+  if (!ab.cachePath || (!_autoMode && !srtAtt.cachePath)) {
     alert(window.i18n.t('ap.load_audio_sub_failed', 'Could not load the audio/subtitles for this title.'));
     return false;
   }
@@ -4661,6 +4850,19 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   // cues — those are fast in-memory passes; the read+parse was the slow part.
   let cues = [];
   let _cuesFromCache = false;
+  let _autoAnchorMs = null;
+  if (_autoMode) {
+    // Auto-transcription source: live cue list when the transcriber is active
+    // for this title, else its sig-checked persistent cache. 0 cues (fresh
+    // title, nothing transcribed yet) → quiet false; the open flow falls back
+    // to the plain audio-only open and cards appear on a later visit.
+    try {
+      const got = await window.autoTranscribe.getCuesSnapshot(title.id, ab.cachePath, ab.name);
+      cues = got?.cues || [];
+      if (Number.isFinite(got?.cardAnchorMs)) _autoAnchorMs = got.cardAnchorMs;
+    } catch (e) { debugLog('[autoCards] snapshot failed: ' + (e?.message || e)); }
+    if (!cues.length) { debugLog('[autoCards] 0 cues in snapshot — no cards built'); return false; }
+  } else {
   const _srtSig = (srtAtt.name || '') + '|' + (srtAtt.size || 0);
   if (srtAtt.size && title?.id && window.blobStore?.get) {
     try {
@@ -4687,14 +4889,24 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
     alert(window.i18n.t('ap.srt_zero_cues', 'SRT parsed but found 0 cues. Check the file format.'));
     return false;
   }
+  }
 
   // Normalize cue indices to array position so they line up with
   // srtParser.findCueAtTime (which returns an array index) and the cue→card map.
   cues.forEach((c, i) => { c.index = i; });
 
+  // Auto-generated SRT parsed fresh (no word data in the SRT format): copy
+  // cached word timings back on for the karaoke highlight.
+  if (!_autoMode && srtAtt?.auto && title?.id) {
+    try { window.autoTranscribe?.enrichWordTimes?.(title.id, cues); } catch (_) {}
+  }
+
   // Persist the parsed cues for an instant reopen (only when freshly parsed).
-  if (!_cuesFromCache && srtAtt.size && title?.id && window.blobStore?.set) {
-    try { window.blobStore.set('SRT_CUES_V1_' + title.id, JSON.stringify({ sig: _srtSig, cues })); } catch (_) {}
+  if (!_autoMode && !_cuesFromCache && srtAtt.size && title?.id && window.blobStore?.set) {
+    try {
+      window.blobStore.set('SRT_CUES_V1_' + title.id,
+        JSON.stringify({ sig: (srtAtt.name || '') + '|' + (srtAtt.size || 0), cues }));
+    } catch (_) {}
   }
 
   // Read the "Combine short subtitles" preference (default ON). The per-card
@@ -4742,11 +4954,35 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   // toggling "Combine subtitles" or changing the limit never throws the user to
   // the wrong card — it lands on the card holding that cue.
   let restoreIdx = 0;
-  if (Number.isFinite(title.lastCardIndex)) {
+  // Cue index at (or just before) a given audio time in the CURRENT cue list.
+  const _cardIdxAtMs = (ms) => {
+    let lo = 0, hi = cues.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (cues[mid].startMs <= ms) lo = mid; else hi = mid - 1;
+    }
+    return cueToCard ? cueToCard[lo] : Math.max(0, Math.min(notes.length - 1, lo));
+  };
+  if (_autoMode && Number.isFinite(title.lastCardMs)) {
+    // AUTO-transcribed titles restore by TIME, never by index: the cue list
+    // DENSIFIES between save and reopen (book-match phrase splitting, the
+    // word-timing retrofit's splice-replace, the cold-snapshot re-split), so
+    // a saved cue index maps minutes earlier in the reopened list — and each
+    // reopen re-saves the earlier spot, compounding toward the start (the
+    // Ring minute-44 → minute-1 place loss). lastCardMs is stamped by every
+    // setCardIndex save site; time survives any re-split.
+    restoreIdx = _cardIdxAtMs(title.lastCardMs);
+  } else if (Number.isFinite(title.lastCardIndex)) {
+    // Index restore: exact for normal SRT titles (immutable cue lists) and
+    // the legacy fallback for auto titles saved before lastCardMs existed.
     const savedCue = Math.max(0, Math.min(cues.length - 1, title.lastCardIndex));
     restoreIdx = cueToCard
       ? cueToCard[savedCue]
       : Math.max(0, Math.min(notes.length - 1, savedCue));
+  } else if (_autoMode && Number.isFinite(_autoAnchorMs)) {
+    // No saved position at all (first card open) — land at the transcriber's
+    // time anchor (usually the audio playhead region).
+    restoreIdx = _cardIdxAtMs(_autoAnchorMs);
   }
   currentCardIndex = restoreIdx;
   window.currentCardIndex = restoreIdx;
@@ -4770,9 +5006,14 @@ window.loadTitleAsSrtCards = async function (title, skipCardDisplay) {
   try {
     await window.Capacitor?.Plugins?.Preferences?.set?.({ key: 'READING_AUDIO_PAIR_' + title.name, value: ab.cachePath });
     await window.Capacitor?.Plugins?.Preferences?.set?.({ key: 'READING_AUDIO_NAME_' + title.name, value: ab.name });
-    await window.Capacitor?.Plugins?.Preferences?.set?.({ key: 'READING_SRT_PAIR_' + title.name, value: srtAtt.cachePath });
-    await window.Capacitor?.Plugins?.Preferences?.set?.({ key: 'READING_SRT_NAME_' + title.name, value: srtAtt.name });
+    if (srtAtt) {
+      await window.Capacitor?.Plugins?.Preferences?.set?.({ key: 'READING_SRT_PAIR_' + title.name, value: srtAtt.cachePath });
+      await window.Capacitor?.Plugins?.Preferences?.set?.({ key: 'READING_SRT_NAME_' + title.name, value: srtAtt.name });
+    }
   } catch (e) { debugLog('pref sync: ' + e.message); }
+  // Flag the live-updating card source so auto-transcribe.js refreshes the
+  // note list as new cues finalize (cleared when a real SRT source loads).
+  window._srtAutoLive = _autoMode ? title.id : null;
 
   _ensureBgListenersForSrtCards();
 
@@ -4857,25 +5098,26 @@ window.toggleReadingPlayback = function () {
                           (window.allNotes?.[window.currentCardIndex]?.audiobookPath);
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
     if (audiobookPath && bg) {
-      // Start point fallback (prefer the LIVE paged read cursor — the line the
-      // user actually read — over the legacy _currentReadingCueStartMs, which
-      // the paged reader never updates so it's stale/unset in the active flow):
-      //   1. Paged read cursor's cue startMs (window._pagedReadCueStartMs)
+      // Start point fallback — play the line the user SEES:
+      //   1. Paged read cursor's cue startMs (window._pagedReadCueStartMs) —
+      //      the visible/restored line. (Cursor-first for SRT-card titles too:
+      //      card→read entry now syncs lastReadCueIdx in centerOnActiveCard,
+      //      so the old "card index is truer" ordering is obsolete — and the
+      //      card fallback below still covers a null cursor.)
       //   2. Legacy _currentReadingCueStartMs (if a legacy session set it)
-      //   3. SRT-card's audiobookStartMs
-      //   4. 0 (the position listener will then drive the highlight)
-      // For SRT-card titles the card index is the truer read position (card
-      // navigation doesn't advance the paged read cursor, so it can be stale),
-      // so prefer audiobookStartMs there; for deck/EPUB use the live read cursor.
-      const isSrtCardTitle = Array.isArray(window.allNotes) && window.allNotes[0]?.isSrtCard;
-      const readCueMs = (!isSrtCardTitle && typeof window._pagedReadCueStartMs === 'function')
+      //   3. SRT-card's audiobookStartMs (cold boot before any scroll/follow)
+      //   4. NOTHING known → resolve the saved/durable position below —
+      //      NEVER 0. The old `?? 0` fallback restarted the book from the
+      //      beginning on a fresh open into READ mode (place-scare).
+      const readCueMs = (typeof window._pagedReadCueStartMs === 'function')
         ? window._pagedReadCueStartMs() : null;
-      const startCueMs = Number.isFinite(readCueMs)
-        ? readCueMs
-        : (Number.isFinite(window._currentReadingCueStartMs)
-            ? window._currentReadingCueStartMs
-            : (window.allNotes?.[window.currentCardIndex]?.audiobookStartMs ?? 0));
-      const startMs = Math.max(0, Math.round(startCueMs) - (window.AUDIO_START_OFFSET_MS || 0));
+      const cardMs = window.allNotes?.[window.currentCardIndex]?.audiobookStartMs;
+      const startCueMs = Number.isFinite(readCueMs) ? readCueMs
+        : Number.isFinite(window._currentReadingCueStartMs) ? window._currentReadingCueStartMs
+        : Number.isFinite(cardMs) ? cardMs
+        : null;
+      const hasCue = Number.isFinite(startCueMs);
+      const startMs = hasCue ? Math.max(0, Math.round(startCueMs) - (window.AUDIO_START_OFFSET_MS || 0)) : 0;
       const url = audiobookPath.startsWith('file://') ? audiobookPath : 'file://' + audiobookPath;
       console.log('[reader-play] audiobookPath=' + audiobookPath + ' startMs=' + startMs);
       bg.getState().then(s => {
@@ -4888,9 +5130,17 @@ window.toggleReadingPlayback = function () {
           // Pause any deck-mode card audio first so we don't get a
           // cacophony of two sources.
           try { if (currentAudio && !currentAudio.paused) currentAudio.pause(); } catch (e) {}
-          bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 })
-            .then(() => console.log('[reader-play] bg.play resolved'))
-            .catch(err => console.warn('[reader-play] bg.play err: ' + err?.message));
+          (async () => {
+            let ms = startMs;
+            // Cold start with NO cue context: resolve the best known position
+            // (JS save + the service's durable url-matched save) instead of 0.
+            if (!hasCue && typeof window.abBestColdStartMs === 'function') {
+              try { ms = await window.abBestColdStartMs(audiobookPath, 0); } catch (_) {}
+            }
+            bg.play({ url, startMs: ms, rate: window.audioPlaybackRate || 1 })
+              .then(() => console.log('[reader-play] bg.play resolved @' + ms))
+              .catch(err => console.warn('[reader-play] bg.play err: ' + err?.message));
+          })();
         }
       }).catch((err) => { console.warn('[reader-play] getState err:', err); });
       return true;

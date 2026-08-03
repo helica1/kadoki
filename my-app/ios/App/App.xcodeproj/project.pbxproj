@@ -20,11 +20,78 @@
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		5959FA6E5FB2AC407987D2D1 /* ArchiveExtractorPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DF5C3F132ED80A31C3CE8D0 /* ArchiveExtractorPlugin.swift */; };
 		763A6A097EB909AC131545C6 /* AudioSlicerPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */; };
+		77A1B2C3D4E5F60718293A4B /* AutoTranscribePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */; };
 		A084ECDBA7D38E1E42DFC39D /* Pods_App.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */; };
 		A8BFD7E4B17BF44E40C7FC5D /* BackgroundAudioPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */; };
 		C5C183F988E421195EE65059 /* AnkiBridgePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */; };
 		EF8A04896EEFB1F1528F779D /* FileAccessPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */; };
+		A1B2C3D400000000000000B2 /* WatchBridgePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000B1 /* WatchBridgePlugin.swift */; };
+		A1B2C3D400000000000000E1 /* KadokiWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F1 /* KadokiWatchApp.swift */; };
+		A1B2C3D400000000000000E2 /* WatchConnectivityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F2 /* WatchConnectivityManager.swift */; };
+		A1B2C3D400000000000000E3 /* WatchTitleStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F3 /* WatchTitleStore.swift */; };
+		A1B2C3D400000000000000E4 /* WatchPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F4 /* WatchPlayer.swift */; };
+		A1B2C3D400000000000000E5 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F5 /* ContentView.swift */; };
+		A1B2C3D400000000000000E6 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F6 /* PlayerView.swift */; };
+		A1B2C3D400000000000000D2 /* Kadoki Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000D1 /* Kadoki Watch App.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		A1B2C3D400000000000000E7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F7 /* Assets.xcassets */; };
+		B2C3D4E500000000000000E1 /* KadokiWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E500000000000000F1 /* KadokiWidgets.swift */; };
+		B2C3D4E500000000000000D2 /* KadokiWatchWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A1B2C3D400000000000000A8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 504EC2FC1FED79650016851F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A1B2C3D400000000000000A1;
+			remoteInfo = "Kadoki Watch App";
+		};
+		B2C3D4E500000000000000A8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 504EC2FC1FED79650016851F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B2C3D4E500000000000000A1;
+			remoteInfo = KadokiWatchWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A1B2C3D4000000000000000A /* Embed Watch Content */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Watch";
+			dstSubfolderSpec = 16;
+			files = (
+				A1B2C3D400000000000000D2 /* Kadoki Watch App.app in Embed Watch Content */,
+			);
+			name = "Embed Watch Content";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2C3D4E500000000000000AA /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				B2C3D4E500000000000000D2 /* KadokiWatchWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A1B2C3D400000000000000A9 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A1B2C3D400000000000000A1 /* Kadoki Watch App */;
+			targetProxy = A1B2C3D400000000000000A8 /* PBXContainerItemProxy */;
+		};
+		B2C3D4E500000000000000A9 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B2C3D4E500000000000000A1 /* KadokiWatchWidgets */;
+			targetProxy = B2C3D4E500000000000000A8 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXFileReference section */
 		2DF5C3F132ED80A31C3CE8D0 /* ArchiveExtractorPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ArchiveExtractorPlugin.swift; sourceTree = "<group>"; };
@@ -40,6 +107,7 @@
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
 		7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiBridgePlugin.swift; sourceTree = "<group>"; };
 		88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSlicerPlugin.swift; sourceTree = "<group>"; };
+		88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutoTranscribePlugin.swift; sourceTree = "<group>"; };
 		8ED7087512EE4319DE456390 /* PdfExportPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PdfExportPlugin.swift; sourceTree = "<group>"; };
 		AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_App.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		AF51FD2D460BCFE21FA515B2 /* Pods-App.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.release.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.release.xcconfig"; sourceTree = "<group>"; };
@@ -48,6 +116,20 @@
 		E732BA54E00EA38613613122 /* AnkiMediaServer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiMediaServer.swift; sourceTree = "<group>"; };
 		EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BackgroundAudioPlugin.swift; sourceTree = "<group>"; };
 		FC68EB0AF532CFC21C3344DD /* Pods-App.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.debug.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.debug.xcconfig"; sourceTree = "<group>"; };
+		A1B2C3D400000000000000B1 /* WatchBridgePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchBridgePlugin.swift; sourceTree = "<group>"; };
+		A1B2C3D400000000000000F1 /* KadokiWatchApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiWatchApp.swift; sourceTree = "<group>"; };
+		A1B2C3D400000000000000F2 /* WatchConnectivityManager.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchConnectivityManager.swift; sourceTree = "<group>"; };
+		A1B2C3D400000000000000F3 /* WatchTitleStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchTitleStore.swift; sourceTree = "<group>"; };
+		A1B2C3D400000000000000F4 /* WatchPlayer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchPlayer.swift; sourceTree = "<group>"; };
+		A1B2C3D400000000000000F5 /* ContentView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A1B2C3D400000000000000F6 /* PlayerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
+		A1B2C3D400000000000000D1 /* Kadoki Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Kadoki Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D400000000000000F7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		B2C3D4E500000000000000F1 /* KadokiWidgets.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiWidgets.swift; sourceTree = "<group>"; };
+		B2C3D4E500000000000000F2 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B2C3D4E500000000000000F3 /* KadokiWatch.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = KadokiWatch.entitlements; sourceTree = "<group>"; };
+		B2C3D4E500000000000000F4 /* KadokiWatchWidgets.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = KadokiWatchWidgets.entitlements; sourceTree = "<group>"; };
+		B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = KadokiWatchWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -56,6 +138,20 @@
 			buildActionMask = 2147483647;
 			files = (
 				A084ECDBA7D38E1E42DFC39D /* Pods_App.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D400000000000000A6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2C3D4E500000000000000A6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -74,6 +170,8 @@
 			isa = PBXGroup;
 			children = (
 				504EC3061FED79650016851F /* App */,
+				A1B2C3D400000000000000C1 /* KadokiWatch */,
+				B2C3D4E500000000000000C1 /* KadokiWatchWidgets */,
 				504EC3051FED79650016851F /* Products */,
 				7F8756D8B27F46E3366F6CEA /* Pods */,
 				27E2DDA53C4D2A4D1A88CE4A /* Frameworks */,
@@ -84,6 +182,8 @@
 			isa = PBXGroup;
 			children = (
 				504EC3041FED79650016851F /* App.app */,
+				A1B2C3D400000000000000D1 /* Kadoki Watch App.app */,
+				B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -102,12 +202,14 @@
 				50B271D01FEDC1A000F3C39B /* public */,
 				EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */,
 				88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */,
+				88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */,
 				7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */,
 				BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */,
 				B2A380C7719E1A050488C62B /* MainViewController.swift */,
 				E732BA54E00EA38613613122 /* AnkiMediaServer.swift */,
 				2DF5C3F132ED80A31C3CE8D0 /* ArchiveExtractorPlugin.swift */,
 				8ED7087512EE4319DE456390 /* PdfExportPlugin.swift */,
+				A1B2C3D400000000000000B1 /* WatchBridgePlugin.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -119,6 +221,31 @@
 				AF51FD2D460BCFE21FA515B2 /* Pods-App.release.xcconfig */,
 			);
 			name = Pods;
+			sourceTree = "<group>";
+		};
+		A1B2C3D400000000000000C1 /* KadokiWatch */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D400000000000000F1 /* KadokiWatchApp.swift */,
+				A1B2C3D400000000000000F2 /* WatchConnectivityManager.swift */,
+				A1B2C3D400000000000000F3 /* WatchTitleStore.swift */,
+				A1B2C3D400000000000000F4 /* WatchPlayer.swift */,
+				A1B2C3D400000000000000F5 /* ContentView.swift */,
+				A1B2C3D400000000000000F6 /* PlayerView.swift */,
+				A1B2C3D400000000000000F7 /* Assets.xcassets */,
+				B2C3D4E500000000000000F3 /* KadokiWatch.entitlements */,
+			);
+			path = KadokiWatch;
+			sourceTree = "<group>";
+		};
+		B2C3D4E500000000000000C1 /* KadokiWatchWidgets */ = {
+			isa = PBXGroup;
+			children = (
+				B2C3D4E500000000000000F1 /* KadokiWidgets.swift */,
+				B2C3D4E500000000000000F2 /* Info.plist */,
+				B2C3D4E500000000000000F4 /* KadokiWatchWidgets.entitlements */,
+			);
+			path = KadokiWatchWidgets;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -133,15 +260,53 @@
 				504EC3011FED79650016851F /* Frameworks */,
 				504EC3021FED79650016851F /* Resources */,
 				9592DBEFFC6D2A0C8D5DEB22 /* [CP] Embed Pods Frameworks */,
+				A1B2C3D4000000000000000A /* Embed Watch Content */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A1B2C3D400000000000000A9 /* PBXTargetDependency */,
 			);
 			name = App;
 			productName = App;
 			productReference = 504EC3041FED79650016851F /* App.app */;
 			productType = "com.apple.product-type.application";
+		};
+		A1B2C3D400000000000000A1 /* Kadoki Watch App */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A1B2C3D400000000000000A2 /* Build configuration list for PBXNativeTarget "Kadoki Watch App" */;
+			buildPhases = (
+				A1B2C3D400000000000000A5 /* Sources */,
+				A1B2C3D400000000000000A6 /* Frameworks */,
+				A1B2C3D400000000000000A7 /* Resources */,
+				B2C3D4E500000000000000AA /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B2C3D4E500000000000000A9 /* PBXTargetDependency */,
+			);
+			name = "Kadoki Watch App";
+			productName = "Kadoki Watch App";
+			productReference = A1B2C3D400000000000000D1 /* Kadoki Watch App.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B2C3D4E500000000000000A1 /* KadokiWatchWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B2C3D4E500000000000000A2 /* Build configuration list for PBXNativeTarget "KadokiWatchWidgets" */;
+			buildPhases = (
+				B2C3D4E500000000000000A5 /* Sources */,
+				B2C3D4E500000000000000A6 /* Frameworks */,
+				B2C3D4E500000000000000A7 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = KadokiWatchWidgets;
+			productName = KadokiWatchWidgets;
+			productReference = B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -152,6 +317,12 @@
 				LastSwiftUpdateCheck = 920;
 				LastUpgradeCheck = 920;
 				TargetAttributes = {
+					B2C3D4E500000000000000A1 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					A1B2C3D400000000000000A1 = {
+						CreatedOnToolsVersion = 15.0;
+					};
 					504EC3031FED79650016851F = {
 						CreatedOnToolsVersion = 9.2;
 						LastSwiftMigration = 1100;
@@ -173,6 +344,8 @@
 			projectRoot = "";
 			targets = (
 				504EC3031FED79650016851F /* App */,
+				A1B2C3D400000000000000A1 /* Kadoki Watch App */,
+				B2C3D4E500000000000000A1 /* KadokiWatchWidgets */,
 			);
 		};
 /* End PBXProject section */
@@ -189,6 +362,21 @@
 				50379B232058CBB4000EE86E /* capacitor.config.json in Resources */,
 				504EC30D1FED79650016851F /* Main.storyboard in Resources */,
 				2FAD9763203C412B000D30F8 /* config.xml in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D400000000000000A7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D400000000000000E7 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2C3D4E500000000000000A7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -238,12 +426,35 @@
 				504EC3081FED79650016851F /* AppDelegate.swift in Sources */,
 				A8BFD7E4B17BF44E40C7FC5D /* BackgroundAudioPlugin.swift in Sources */,
 				763A6A097EB909AC131545C6 /* AudioSlicerPlugin.swift in Sources */,
+				77A1B2C3D4E5F60718293A4B /* AutoTranscribePlugin.swift in Sources */,
 				C5C183F988E421195EE65059 /* AnkiBridgePlugin.swift in Sources */,
 				EF8A04896EEFB1F1528F779D /* FileAccessPlugin.swift in Sources */,
 				05FF0594F8EB556FD1B63E77 /* MainViewController.swift in Sources */,
 				35AE8C7605511205A5E3FD31 /* AnkiMediaServer.swift in Sources */,
 				5959FA6E5FB2AC407987D2D1 /* ArchiveExtractorPlugin.swift in Sources */,
 				2D4D5772C9FC21E5D19B4CB9 /* PdfExportPlugin.swift in Sources */,
+				A1B2C3D400000000000000B2 /* WatchBridgePlugin.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A1B2C3D400000000000000A5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1B2C3D400000000000000E1 /* KadokiWatchApp.swift in Sources */,
+				A1B2C3D400000000000000E2 /* WatchConnectivityManager.swift in Sources */,
+				A1B2C3D400000000000000E3 /* WatchTitleStore.swift in Sources */,
+				A1B2C3D400000000000000E4 /* WatchPlayer.swift in Sources */,
+				A1B2C3D400000000000000E5 /* ContentView.swift in Sources */,
+				A1B2C3D400000000000000E6 /* PlayerView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B2C3D4E500000000000000A5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B2C3D4E500000000000000E1 /* KadokiWidgets.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -382,13 +593,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 24;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				INFOPLIST_FILE = App/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 1.6.4;
+				MARKETING_VERSION = 1.6.6;
 				OTHER_SWIFT_FLAGS = "$(inherited) \"-D\" \"COCOAPODS\" \"-DDEBUG\"";
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -404,18 +615,122 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 22;
+				CURRENT_PROJECT_VERSION = 24;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				INFOPLIST_FILE = App/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 1.6.4;
+				MARKETING_VERSION = 1.6.6;
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		A1B2C3D400000000000000A3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = KadokiWatch/KadokiWatch.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 24;
+				DEVELOPMENT_TEAM = KKG5M9X7V7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKApplication = YES;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.helica1.yama;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.6.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		A1B2C3D400000000000000A4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = KadokiWatch/KadokiWatch.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 24;
+				DEVELOPMENT_TEAM = KKG5M9X7V7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_WKApplication = YES;
+				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.helica1.yama;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.6.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.watchkitapp;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Release;
+		};
+		B2C3D4E500000000000000A3 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = KadokiWatchWidgets/KadokiWatchWidgets.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 24;
+				DEVELOPMENT_TEAM = KKG5M9X7V7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = KadokiWatchWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
+				MARKETING_VERSION = 1.6.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.watchkitapp.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		B2C3D4E500000000000000A4 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = KadokiWatchWidgets/KadokiWatchWidgets.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 24;
+				DEVELOPMENT_TEAM = KKG5M9X7V7;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = KadokiWatchWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
+				MARKETING_VERSION = 1.6.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.watchkitapp.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
 			name = Release;
 		};
@@ -436,6 +751,24 @@
 			buildConfigurations = (
 				504EC3171FED79650016851F /* Debug */,
 				504EC3181FED79650016851F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A1B2C3D400000000000000A2 /* Build configuration list for PBXNativeTarget "Kadoki Watch App" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A1B2C3D400000000000000A3 /* Debug */,
+				A1B2C3D400000000000000A4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B2C3D4E500000000000000A2 /* Build configuration list for PBXNativeTarget "KadokiWatchWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B2C3D4E500000000000000A3 /* Debug */,
+				B2C3D4E500000000000000A4 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

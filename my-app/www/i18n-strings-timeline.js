@@ -3,10 +3,12 @@
 // CONTENT (chapter summaries, scene captions, anchorQuote book text, character names,
 // chapter labels derived from the book) is NOT here. Missing JA falls back to EN.
 window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
+  'tl.continue': { en: 'Continue', ja: '続きから' },
   // ---- chapter / count labels (generated; book/AI labels are kept untranslated) ----
   'tl.chapter_n': { en: 'Chapter {n}', ja: '第{n}章' },
   'tl.chars': { en: '{n} chars', ja: '{n}字' },
   'tl.chars_from': { en: 'from {n} chars', ja: '{n}字〜' },
+  'tl.time_from': { en: 'from {t}', ja: '{t}〜' },
   'tl.chapters_count': { en: '{n} ch.', ja: '{n}章' },
   'tl.pct_read': { en: '{n}% read', ja: '{n}% 読了' },
   'tl.unread': { en: 'Unread', ja: '未読' },

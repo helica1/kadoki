@@ -89,3 +89,7 @@ my-app/ios/App/App.xcworkspace/xcuserdata/
 Kadoki-README.html
 ~$*
 *.tmp
+
+# pbxproj safety backups from watch-target surgery — local only
+*.pbxproj.bak
+*.pbxproj.bak2

@@ -82,7 +82,7 @@
     // so a user who resets at char 35,000 doesn't immediately get
     // credited with 35k chars on the next scroll.
     read:  { totalSec: 0, chars: 0, maxCharOffsetSeen: 0, baselineSet: false, lastInteraction: 0, runningSince: 0 },
-    audio: { totalSec: 0, chars: 0,                                           runningSince: 0 },
+    audio: { totalSec: 0, chars: 0, watchSec: 0,                              runningSince: 0 },
     // ai — time spent on AI-material overlays (Characters / Timeline / Scenes).
     // Time only (no chars). Runs independently of the card/read/audio trio.
     ai:    { totalSec: 0,                                  lastInteraction: 0, runningSince: 0 },
@@ -93,7 +93,7 @@
     const out = { totalSec: t.totalSec };
     if (mode === 'card')  { out.cards = t.cards; out.chars = t.chars; }
     if (mode === 'read')  { out.chars = t.chars; out.maxCharOffsetSeen = t.maxCharOffsetSeen; out.baselineSet = t.baselineSet; }
-    if (mode === 'audio') { out.chars = t.chars; }
+    if (mode === 'audio') { out.chars = t.chars; out.watchSec = t.watchSec || 0; }
     return out;
   }
   function persist(mode) {
@@ -113,6 +113,7 @@
           timers[mode].maxCharOffsetSeen = o.maxCharOffsetSeen;
         if (mode === 'read' && typeof o.baselineSet === 'boolean')
           timers[mode].baselineSet = o.baselineSet;
+        if (mode === 'audio' && Number.isFinite(o.watchSec)) timers[mode].watchSec = o.watchSec;
         if (mode === 'audio' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
       } catch (e) {}
       timers[mode].runningSince = 0;
@@ -350,6 +351,18 @@
       _lastDayCheck = Date.now();
       try { checkRollover(); } catch (e) {}
     }
+    // Per-title time-spent log (library Stats card): 1s per tick to whichever
+    // mode timer is currently running (the timers already encode all the
+    // active/idle/playback rules — this just attributes their seconds to the
+    // active title).
+    try {
+      const _tid = window._activeTitleId;
+      if (_tid && window.titleStats?.noteTime) {
+        for (const _m of ['card', 'read', 'audio']) {
+          if (timers[_m] && timers[_m].runningSince) window.titleStats.noteTime(_tid, _m, 1);
+        }
+      }
+    } catch (_) {}
     const aiOpen = isAiPageVisible();
     window._aiPageOpen = aiOpen;
     reconcileMode(currentMode());
@@ -647,6 +660,9 @@
   // pixel calculation.
   function noteReadPosition(charPosition) {
     if (!Number.isFinite(charPosition) || charPosition <= 0) return;
+    // Per-title daily progress log (library Stats card): jp-position high-water
+    // per day. Own daily-max semantics inside — safe at any call cadence.
+    try { window.titleStats?.noteRead(window._activeTitleId, charPosition, window._pagedTotalJpChars); } catch (_) {}
     const t = timers.read;
     // First call after a reset (or first launch): just anchor the
     // baseline. Don't credit chars retroactively — otherwise resetting
@@ -679,6 +695,17 @@
   }
   // Credit an off-screen printed-reading session to the READ bucket: the user
   // read a printed segment for `sec` seconds covering `chars` characters.
+  // Apple Watch listening (queued deltas via WatchBridge) — credited to the
+  // AUDIO listening total (it IS listening; the per-title Stats card keeps its
+  // own separate "watch" category for the breakdown).
+  function addWatchListening(sec) {
+    if (!Number.isFinite(sec) || sec <= 0) return;
+    timers.audio.totalSec += sec;                                  // counts toward the audio total…
+    timers.audio.watchSec = (timers.audio.watchSec || 0) + sec;    // …AND tracked separately for its own stats row
+    persist('audio');
+    console.log('[stats] watch listening +' + Math.round(sec) + 's');
+  }
+
   function addPrintedReading(sec, chars) {
     if (Number.isFinite(sec) && sec > 0) timers.read.totalSec += sec;
     if (Number.isFinite(chars) && chars > 0) timers.read.chars += chars;
@@ -816,6 +843,8 @@
     incrementCardChars,
     incrementAudioChars,
     addPrintedReading,
+    addWatchListening,
+    getWatchSec: () => timers.audio.watchSec || 0,
     rebaselineRead,
     noteReadPosition,
     getYesterday,

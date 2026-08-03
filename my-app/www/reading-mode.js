@@ -124,6 +124,19 @@
     await setPref(KEYS.SRT_PAIR_PREFIX + deckName, cachePath);
     if (displayName) await setPref(KEYS.SRT_NAME_PREFIX + deckName, displayName);
   }
+  // A pairing pref that points at a dead file (SRT detached in the title
+  // builder, or a cache path from an older app container) keeps failing the
+  // audio-mode SRT load AND blocks the auto-transcription branch, which is
+  // gated on "no SRT". Callers clear it on a definitive read failure; the
+  // titleStore attachment fallback is untouched, so a temporarily
+  // unavailable-but-real SRT recovers on its own.
+  async function clearSrtPairing(deckName) {
+    if (!deckName) return;
+    try { await setPref(KEYS.SRT_PAIR_PREFIX + deckName, ''); } catch (_) {}
+    try { await setPref(KEYS.SRT_NAME_PREFIX + deckName, ''); } catch (_) {}
+  }
+  window.clearSrtPairingForDeck = clearSrtPairing;
+
   async function getSrtPairing(deckName) {
     if (!deckName) return null;
     let path = await getPref(KEYS.SRT_PAIR_PREFIX + deckName);
@@ -1227,6 +1240,13 @@
     setRunning('statsRead', s.isRunning('read'));
 
     setText('statsAudioTime', formatSec(audioSec));
+    // Watch listening: separate line under the audio total (hidden until any).
+    try {
+      const wSec = (typeof s.getWatchSec === 'function') ? s.getWatchSec() : 0;
+      const wRow = document.getElementById('statsAudioWatchRow');
+      if (wRow) wRow.style.display = wSec >= 60 ? '' : 'none';
+      setText('statsAudioWatchTime', formatSec(wSec));
+    } catch (_) {}
     const audioChars = (typeof s.getAudioChars === 'function') ? s.getAudioChars() : 0;
     setText('statsAudioChars', audioChars.toLocaleString());
     if (audioSec < 1 || audioChars === 0) {
@@ -2312,6 +2332,37 @@
     abAttachListenersOnce();
   };
 
+  // Live-updating cue ingest for on-device auto-transcription
+  // (auto-transcribe.js). Replaces the module cue array wholesale — the
+  // orchestrator owns the master sorted list — and forces a repaint on the
+  // next position tick. Cue↔chunk maps are dropped while the list is still
+  // growing (they rebuild lazily from the final list). Never touches the
+  // playhead or any saved position.
+  // Adopt the audio context for an auto-transcribed (no-SRT) title WITHOUT a
+  // full context load. The paged resolver calls this on a fresh open into
+  // READ mode so PLAY / Set-playhead / dict cue audio work before audio mode
+  // is ever visited (they read abAudioPath via __abAudioPath).
+  window.abAdoptAutoAudio = function (path, name) {
+    if (!path) return;
+    abAudioPath = path;
+    abAudioName = name || '';
+    window._audiobookSrcPath = path;
+    // CRITICAL: the paged reader's cue-follow, read-cursor tracking
+    // (lastReadCueIdx) and position saving are ALL driven by the legacy
+    // position listener — historically attached only on audio-mode entry.
+    // A cold start straight into READ mode (this path) must attach it too,
+    // or the highlight never advances and mode switches lose the place.
+    abAttachListenersOnce();
+  };
+
+  window.abIngestAutoCues = function (cues) {
+    if (!Array.isArray(cues) || !cues.length) return;
+    abCues = cues;
+    abCueToChunk = null;
+    abChunkToCue = null;
+    abCurrentCueIdx = -2;  // force re-render even when the cue index is unchanged
+  };
+
   // Build cue↔chunk maps via the preprocessing module (cue-alignment.js)
   // when available, with the legacy srtParser.buildCueChunkMaps as fallback.
   // Returns the matched count for logging.
@@ -2395,7 +2446,21 @@
     if (!deck) return false;
     const audio = await getAudiobookPairing(deck);
     const srt   = await getSrtPairing(deck);
-    if (!audio || !srt) return false;
+    if (!audio || !srt) {
+      // Audio-only title with on-device transcription support: expose the
+      // audio path so read-mode PLAY can route through bg, and let the
+      // auto-transcriber stream cues in (abIngestAutoCues). Maps stay unbuilt
+      // until the generated SRT is final.
+      if (audio && !srt && window.autoTranscribe && await window.autoTranscribe.available()) {
+        abAudioPath = audio.path;
+        abAudioName = audio.name;
+        window._audiobookSrcPath = audio.path;
+        window.autoTranscribe.activate({ audioPath: audio.path, audioName: audio.name });
+        abContextLoadedForDeck = deck;
+        return abCues.length > 0;
+      }
+      return false;
+    }
     abAudioPath = audio.path;
     abAudioName = audio.name;
     window._audiobookSrcPath = audio.path;
@@ -2403,11 +2468,24 @@
       const url = window.Capacitor?.convertFileSrc
         ? window.Capacitor.convertFileSrc(srt.path) : 'file://' + srt.path;
       const res = await fetch(url);
-      if (!res.ok) return false;
+      if (!res.ok) throw new Error('fetch status ' + res.status);
       const text = await res.text();
       abCues = window.srtParser.parseSrt(text);
       abLastSrtName = srt.name || '';
-    } catch (e) { return false; }
+      // Auto-generated SRT: copy cached word timings back on (karaoke).
+      try { window.autoTranscribe?.enrichWordTimes?.(window._activeTitleId, abCues); } catch (_) {}
+    } catch (e) {
+      // Dead pairing (SRT detached / file gone): clear it and fall through
+      // to on-device transcription when available, instead of a dead mode.
+      await clearSrtPairing(deck);
+      if (window.autoTranscribe && await window.autoTranscribe.available()) {
+        rlog('SRT pairing dead (' + (e?.message || e) + ') — switching to auto-transcription');
+        window.autoTranscribe.activate({ audioPath: audio.path, audioName: audio.name });
+        abContextLoadedForDeck = deck;
+        return abCues.length > 0;
+      }
+      return false;
+    }
     await _buildAbCueMaps(abLastSrtName);
     // Mark pre-warm successful so a later openAudiobookMode skips re-loading.
     abContextLoadedForDeck = deck;
@@ -2435,6 +2513,27 @@
     const audio = await getAudiobookPairing(deck);
     const srt = await getSrtPairing(deck);
     if (!audio || !srt) {
+      // Audio-only title + on-device transcription support (iOS 26
+      // SpeechTranscriber) → generate cues live instead of demanding an SRT.
+      // auto-transcribe.js streams finalized cues in via abIngestAutoCues;
+      // once the whole file is covered it attaches a real .srt to the title
+      // and this branch never runs again for it.
+      if (audio && !srt && window.autoTranscribe && await window.autoTranscribe.available()) {
+        // Different title/audio than the current context → drop stale cues.
+        if (abContextLoadedForDeck !== deck || abAudioPath !== audio.path) {
+          abCues = [];
+          abCueToChunk = null;
+          abChunkToCue = null;
+          abCurrentCueIdx = -1;
+        }
+        abAudioPath = audio.path;
+        abAudioName = audio.name;
+        abLastSrtName = '';
+        window._audiobookSrcPath = audio.path;
+        abContextLoadedForDeck = deck;
+        window.autoTranscribe.activate({ audioPath: audio.path, audioName: audio.name });
+        return true;
+      }
       renderInlineAudiobookPicker(!audio, !srt);
       // Also make sure the audiobook view is visible so the user sees the picker.
       const view = document.getElementById('audiobookModeView');
@@ -2462,7 +2561,24 @@
       abCues = window.srtParser.parseSrt(text);
       abLastSrtName = srt.name || '';
       rlog(`SRT: ${abCues.length} cues from ${srt.name}`);
+      // Auto-generated SRT: copy cached word timings back on (karaoke).
+      try { window.autoTranscribe?.enrichWordTimes?.(window._activeTitleId, abCues); } catch (_) {}
     } catch (e) {
+      // Dead pairing (SRT detached in the title builder, stale cache path):
+      // clear it and fall through to on-device transcription when available
+      // — the stale pref must not fail audio mode OR block the auto branch.
+      await clearSrtPairing(deck);
+      if (window.autoTranscribe && await window.autoTranscribe.available()) {
+        rlog('SRT pairing dead (' + (e?.message || e) + ') — switching to auto-transcription');
+        abCues = [];
+        abCueToChunk = null;
+        abChunkToCue = null;
+        abCurrentCueIdx = -1;
+        abLastSrtName = '';
+        abContextLoadedForDeck = deck;
+        window.autoTranscribe.activate({ audioPath: audio.path, audioName: audio.name });
+        return true;
+      }
       alert('Failed to read SRT: ' + (e?.message || e));
       return false;
     }
@@ -2762,6 +2878,9 @@
     if (cueEl) {
       if (idx >= 0) {
         renderAudiobookCueTokens(cueEl, abCues[idx].text, idx);
+        // Karaoke: word-level sweep on the freshly rendered cue (no-op
+        // without word timings).
+        try { window.wordHighlight?.setSpanCue(cueEl, abCues[idx]); } catch (_) {}
       } else {
         cueEl.textContent = '…';
       }
@@ -3528,6 +3647,85 @@
     const ta = tail(a), tb = tail(b);
     return !!ta && ta === tb;
   }
+
+  // Best known playhead for a COLD read-mode PLAY (native player not ready and
+  // no cue context resolved). The old fallback of 0 restarted the book from
+  // the beginning — a place-scare on every fresh open into READ mode. Resolves
+  // max(candidate, JS saved position for the current deck, the service's
+  // durable {url,ms} save) — the durable save url-matched via _abSameAudioFile
+  // so it can never adopt a different title's position. Forward-only over the
+  // candidate; returns the candidate itself when nothing better is known.
+  window.abBestColdStartMs = async function (path, candidateMs) {
+    let ms = Number.isFinite(candidateMs) ? Math.max(0, Math.round(candidateMs)) : 0;
+    try {
+      const deck = currentDeckName();
+      if (deck) {
+        const last = await getAudiobookLastPosition(deck);
+        if (Number(last.ms) > ms) ms = Math.round(last.ms);
+      }
+    } catch (_) {}
+    try {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      const ls = await bg?.getLastSavedPosition?.();
+      if (ls?.hasSaved && Number(ls.positionMs) > ms && _abSameAudioFile(ls.url, path)) {
+        ms = Math.round(ls.positionMs);
+      }
+    } catch (_) {}
+    return ms;
+  };
+
+  // Durable saved position for a title (watch sync push): { ms, ts } from the
+  // per-deck prefs — the value the pause-flush wrote, with its REAL last-listen
+  // timestamp (fresher-listen-wins on the watch depends on honest ts).
+  window.abGetSavedPositionForTitle = async function (titleId) {
+    try {
+      const t = await window.titleStore?.get?.(titleId);
+      const deck = t?.name;
+      if (!deck) return null;
+      const last = await getAudiobookLastPosition(deck);
+      if (!(Number(last.ms) > 0)) return null;
+      return { ms: Math.round(last.ms), ts: Number(last.ts) > 0 ? Math.round(last.ts) : 0 };
+    } catch (_) { return null; }
+  };
+
+  // Adopt a position reported by ANOTHER DEVICE (Apple Watch) for a title.
+  // Fresher-listen-wins: only when the external listen ts is NEWER than this
+  // phone's last-listen stamp (respects a deliberate scrub-back on either
+  // device — the user's latest listening spot is the truth), and never while
+  // THIS phone is actively playing that title (live wins). The FURTHEST pin
+  // is separate and forward-only, so even adopting a deliberate backward
+  // watch position can never destroy the high-water (never-lose-place).
+  window.abAdoptExternalPosition = async function (titleId, ms, ts) {
+    try {
+      if (!titleId || !Number.isFinite(ms) || ms <= 0 || !Number.isFinite(ts) || ts <= 0) return;
+      const t = await window.titleStore?.get?.(titleId);
+      const deck = t?.name;
+      if (!deck) return;
+      if (window._activeTitleId === titleId && window._bgPlaying) return;   // live local playback wins
+      const curTs = parseInt(await getPref(KEYS.AUDIO_LAST_TS_PREFIX + deck));
+      if (Number.isFinite(curTs) && curTs >= ts) return;                    // local listen is fresher
+      await saveAudiobookLastPosition(deck, Math.round(ms), -1, Math.round(ts));
+      // LIVE view update: this title is on screen and PAUSED → show the
+      // adopted spot immediately (cue text, time label, scrub) and seek the
+      // paused native player so a later resume continues THERE instead of at
+      // the pre-sync paused position. Playing is already excluded above.
+      try {
+        if (window._activeTitleId === titleId && abEngineOwnsActiveDeck() &&
+            Math.abs((abPositionRef.ms || 0) - ms) > 2000) {
+          const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+          let st = null;
+          try { st = await bg?.getState?.(); } catch (_) {}
+          if (st && st.ready && !st.playing) {
+            try { await bg.seek({ ms: Math.round(ms) }); } catch (_) {}
+          }
+          abPositionRef.ms = Math.round(ms);
+          try { abUpdateCueDisplay(ms); } catch (_) {}
+          try { _abPaintTimeLabelScrub(); } catch (_) {}
+        }
+      } catch (_) {}
+      try { window.debugLog?.('[watch] adopted external position ' + Math.round(ms) + 'ms for "' + deck + '"'); } catch (_) {}
+    } catch (_) {}
+  };
 
   let _abLastRecoverAt = 0;
   async function abRecoverFromPlaybackError(restart) {
@@ -4381,14 +4579,17 @@
 
     const zip = await JSZip.loadAsync(blob);
 
-    const containerXml = await zip.file('META-INF/container.xml')?.async('string');
+    // UTF-8 BOM strip — iOS WebKit's XML parser fails on content before
+    // <?xml (Blink tolerates it); JSZip keeps the BOM in decoded strings.
+    const _deBom = (s) => (s ? s.replace(/^\uFEFF+/, '') : s);
+    const containerXml = _deBom(await zip.file('META-INF/container.xml')?.async('string'));
     if (!containerXml) throw new Error('Not a valid EPUB (no META-INF/container.xml)');
     const opfPath = new DOMParser()
       .parseFromString(containerXml, 'application/xml')
       .querySelector('rootfile')?.getAttribute('full-path');
     if (!opfPath) throw new Error('No OPF rootfile in container.xml');
 
-    const opfXml = await zip.file(opfPath).async('string');
+    const opfXml = _deBom(await zip.file(opfPath).async('string'));
     const opfDoc = new DOMParser().parseFromString(opfXml, 'application/xml');
     const opfDir = opfPath.includes('/') ? opfPath.replace(/[^/]+$/, '') : '';
 

@@ -40,7 +40,7 @@
   // ends with a CLOSING quote 」/』 that brought the quote depth back to 0 — i.e.
   // a complete quote turn. A trailing run with no terminator is its own unit.
   // Quotes are never split mid-quote (a full quote is never shown as a fragment).
-  function splitIntoUnits(cues) {
+  function splitIntoUnits(cues, hardChars) {
     const units = [];
     let cur = null;
     let quoteDepth = 0;
@@ -60,6 +60,17 @@
       // (a) regular sentence end (strip trailing closers/brackets first).
       const stripped = combined.replace(TRAIL_CLOSERS, '');
       const endsSentence = quoteDepth <= 0 && SENT_END.test(stripped.slice(-1));
+      // (c) degenerate-run guard: auto-transcribed (ASR) text can run for
+      // hundreds of chars with no recognized sentence-ender, or poison the
+      // rest of the list with one unmatched 「. Force a unit end well past
+      // the card budget so no single unit can grow unbounded.
+      const forceFlush = Number.isFinite(hardChars) && hardChars > 0 && cur.chars >= hardChars;
+      if (forceFlush && !(endsQuote || endsSentence)) {
+        cur.text = combined;
+        cur.isQuote = false;
+        units.push(cur); cur = null; quoteDepth = 0;
+        continue;
+      }
       if (endsQuote || endsSentence) {
         cur.text = combined;
         // A "standalone quote turn" both opens and closes with a bracket — those
@@ -108,9 +119,14 @@
     const charsOf = (c) => charLen((c.text || '').trim());
     const total = cueList.reduce((a, c) => a + charsOf(c), 0);
     if (total <= maxChars || cueList.length < 2) return [{ cues: cueList, startDepth: 0 }];
-    const canBreakAfter = cueList.map((c, i) =>
+    let canBreakAfter = cueList.map((c, i) =>
       i < cueList.length - 1 && SENT_END.test((c.text || '').trim().replace(TRAIL_CLOSERS, '')));
-    if (!canBreakAfter.some(Boolean)) return [{ cues: cueList, startDepth: 0 }];
+    if (!canBreakAfter.some(Boolean)) {
+      // No sentence-ender at any cue edge (ASR output) — a whole-unit return
+      // here produced an unbounded, scrolling card. Cue edges are speech-gap
+      // boundaries, so breaking at ANY of them lands on a natural pause.
+      canBreakAfter = cueList.map((c, i) => i < cueList.length - 1);
+    }
     // N chunks scaled to the (adjustable) limit; balance toward equal sizes.
     const N = Math.max(2, Math.ceil(total / maxChars));
     const target = total / N;
@@ -177,7 +193,9 @@
 
     const tooBig = (u) => lineMode ? (unitLineCost(u.chars, cpl) > maxLines) : (u.chars > maxChars);
 
-    const units = splitIntoUnits(list);
+    // Hard unit-size ceiling ~3 cards: only degenerate (sentence-ender-free)
+    // ASR runs ever reach it, so human-punctuated SRT layouts are unchanged.
+    const units = splitIntoUnits(list, effMaxChars * 3);
     const cards = [];
     let curCues = null, curChars = 0, curLines = 0;
     const flushPacked = () => { if (curCues) { cards.push(cardFromCues(curCues, 0)); curCues = null; curChars = 0; curLines = 0; } };

@@ -17,6 +17,13 @@
 
   function el(id) { return document.getElementById(id); }
 
+  // Light haptic tick for tactile UI (menu items, library swipe actions).
+  // Fired on ACTIVATION (tap handlers), not touchstart, so scroll-starts
+  // never tick. No-op when the plugin is missing (web/dev builds).
+  window.kHaptic = function (style) {
+    try { window.Capacitor?.Plugins?.Haptics?.impact({ style: style || 'LIGHT' }); } catch (_) {}
+  };
+
   // Continuous mode (Preferences → Playback). When on, Card / Read / Audio
   // all track ONE playhead: audio never pauses on a mode switch and the
   // audio→card/read reentry dialog is suppressed — each mode just follows
@@ -136,6 +143,10 @@
           // reader's huge vertical-rl canvas, which is multi-hundred-ms on
           // device. Every lookup/dismiss tap was paying that cost = the
           // "summary reading is laggy" bug.
+          t.closest('#lookupNavBar') ||
+          t.closest('#lookupNavShield') ||
+          t.closest('#lookupLogOverlay') ||
+          t.closest('.kai-modal') ||
           t.closest('#bookmarksOverlay') ||
           t.closest('#kchapterView') ||
           t.closest('#kcharsScreen') ||
@@ -207,7 +218,10 @@
     // attachments exclusively. Only when no Title is active (legacy / raw
     // deck) do we fall back to "are cards actually loaded in memory."
     const titleResolved = source.indexOf('title:') === 0;
-    let hasCards = hasDeck || (hasAudio && hasSrt);
+    // Audio-only titles count as card-capable when on-device auto-
+    // transcription is supported (auto-transcribe.js builds the cards).
+    const autoSubs = !!(window.autoTranscribe && window.autoTranscribe.isSupportedSync && window.autoTranscribe.isSupportedSync());
+    let hasCards = hasDeck || (hasAudio && (hasSrt || autoSubs));
     if (!titleResolved && !hasCards) {
       hasCards = !!(window.allNotes && window.allNotes.length > 0);
     }
@@ -666,6 +680,7 @@
         firing = true;
         try { e.stopPropagation(); } catch (_) {}
         try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+        try { window.kHaptic(); } catch (_) {}
         console.log('[shell-menu] item:', label);
         dismissShellMenu();
         try { fn(); } catch (err) { console.warn('menu action:', err); }
@@ -907,6 +922,7 @@
         firing = true;
         try { e.stopPropagation(); } catch (_) {}
         try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+        try { window.kHaptic(); } catch (_) {}
         console.log('[shell-menu] item:', label);
         dismissShellMenu();
         try { fn(); } catch (err) { console.warn('menu action:', err); }
@@ -945,6 +961,10 @@
     // tappable to jump back to that place.
     if (window.bookmarks && window.bookmarks.openHistory) {
       list.appendChild(mkItem(window.i18n.t('menu.history', 'History…'), () => { try { window.bookmarks.openHistory(); } catch (_) {} }));
+    }
+    // Dictionary lookup history — words looked up, with context, → Anki.
+    if (window.lookupLog && window.lookupLog.openScreen) {
+      list.appendChild(mkItem(window.i18n.t('menu.lookup_history', 'Lookup history…'), () => { try { window.lookupLog.openScreen(); } catch (_) {} }));
     }
     // Glowing "(N)" badges = count of new (unseen) timeline/character updates
     // for the active title. Computed AFTER the menu is appended (below, via

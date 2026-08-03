@@ -817,23 +817,130 @@
   }
 
   // ---- SRT-only titles (no EPUB/TXT — map lives in cue space, §2) -----------------
-  async function _ensureFromCues(titleId, cues) {
+
+  // First cue index whose startMs >= ms (== cues.length past the last cue).
+  function _cueIdxAtMs(cues, ms) {
+    let lo = 0, hi = cues.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (cues[mid].startMs < ms) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+
+  // TIME-anchored cue maps (chunks carry msStart): derive every per-chunk
+  // range (cue/raw/jp) + totals from the CURRENT cue list. Bound times never
+  // move, so a growing auto-transcription only ever refines the derived
+  // fields — chapters wholly beyond the transcribed frontier hold empty
+  // ranges (cueStart > cueEnd) until their cues arrive. Returns true when
+  // anything changed.
+  function _applyCueTimeRanges(map, cues, cc) {
+    let changed = false;
+    const n = map.chunks.length;
+    for (let k = 0; k < n; k++) {
+      const ch = map.chunks[k];
+      const cs = _cueIdxAtMs(cues, ch.msStart);
+      const ceExcl = (k + 1 < n) ? _cueIdxAtMs(cues, map.chunks[k + 1].msStart) : cues.length;
+      const rawStart = cs < cues.length ? cc.offsets[cs] : cc.text.length;
+      const rawEnd = ceExcl < cues.length ? cc.offsets[ceExcl] : cc.text.length;
+      const jpStart = cs < cues.length ? cc.jpOffs[cs] : cc.totalJp;
+      const jpEnd = ceExcl < cues.length ? cc.jpOffs[ceExcl] : cc.totalJp;
+      if (ch.cueStart !== cs || ch.cueEnd !== ceExcl - 1 || ch.rawStart !== rawStart ||
+          ch.rawEnd !== rawEnd || ch.jpStart !== jpStart || ch.jpEnd !== jpEnd) {
+        ch.cueStart = cs; ch.cueEnd = ceExcl - 1; ch.startChunk = cs;
+        ch.rawStart = rawStart; ch.rawEnd = rawEnd; ch.jpStart = jpStart; ch.jpEnd = jpEnd;
+        changed = true;
+      }
+    }
+    if (map.totals.raw !== cc.text.length || map.totals.jp !== cc.totalJp || map.totals.cues !== cues.length) {
+      map.totals.raw = cc.text.length; map.totals.jp = cc.totalJp; map.totals.cues = cues.length;
+      changed = true;
+    }
+    return changed;
+  }
+
+  // autocues fingerprints ('autocues|<name>|<size>') compare name-only when
+  // either side carries size 0: a transient Filesystem.stat failure stamps
+  // size 0, and treating that as a DIFFERENT audio file would rebuild the
+  // map and orphan every chapter artifact (mirrors auto-transcribe's
+  // sigMatches tolerance).
+  function _autoFpEq(a, b) {
+    if (a === b) return true;
+    if (!a || !b || a.indexOf('autocues|') !== 0 || b.indexOf('autocues|') !== 0) return false;
+    const split = (s) => { const i = s.lastIndexOf('|'); return [s.slice(9, i), s.slice(i + 1)]; };
+    const [na, sa] = split(a), [nb, sb] = split(b);
+    return na === nb && (sa === '0' || sb === '0');
+  }
+
+  async function _ensureFromCues(titleId, cues, force) {
     if (_building.has(titleId)) return _building.get(titleId);
     const job = (async () => {
-      const fp = fpFromCues(cues);
+      // Auto-transcribed titles get a STABLE fingerprint keyed to the audio
+      // file — the cue list is still growing, and fpFromCues would churn on
+      // every batch, orphaning all chapter artifacts (filterArtifacts).
+      let autoFp = null;
+      try { autoFp = await (window.autoTranscribe && window.autoTranscribe.stableFp && window.autoTranscribe.stableFp(titleId)); } catch (_) {}
+      const fp = autoFp || fpFromCues(cues);
       const existing = await getMap(titleId);
-      if (existing && (existing.space !== 'cue' || existing.fingerprint === fp)) return existing;
+      if (!force && existing && (existing.space !== 'cue' || _autoFpEq(existing.fingerprint, fp))) return existing;
       const cc = cueConcat(cues);
       const info = cues.map((c, i) => ({ i, raw: cc.offsets[i], jp: cc.jpOffs[i], head: false }));
-      let bounds = _ruleBounds(info, cc.totalJp);
-      let labels = bounds.map(() => null);
-      const refined = await _haikuRefine(cc.text, info, bounds);
-      if (refined) { bounds = refined.bounds; labels = refined.labels; }
+      // Chapter bounds, best source first:
+      //   1. embedded audio chapter markers (m4b, native read) — real titles
+      //   2. 30-minute time slices for audiobooks without markers
+      //   3. legacy ~12k-jp rule (+ Haiku refine) for time-less cue sets
+      let bounds = null, labels = null, msBounds = null;
+      const timed = !!(cues[0] && Number.isFinite(cues[0].startMs));
+      if (timed) {
+        let markers = [];
+        try { markers = (await (window.autoTranscribe && window.autoTranscribe.getAudioChapters && window.autoTranscribe.getAudioChapters(titleId))) || []; } catch (_) {}
+        markers = (markers || []).filter(m => m && Number.isFinite(m.startMs));
+        // FULL audio duration, not the transcribed frontier: mid-transcription
+        // the last cue is only minutes in, and gating the 30-min slices on it
+        // built a time-less rule map that then froze forever (no msStart →
+        // refreshCueMap can't re-derive it).
+        let fullDur = 0;
+        try { fullDur = (await (window.autoTranscribe && window.autoTranscribe.durationFor && window.autoTranscribe.durationFor(titleId))) || 0; } catch (_) {}
+        const durMs = Math.max(fullDur, cues[cues.length - 1].endMs || 0);
+        if (markers.length >= 2) {
+          msBounds = []; labels = [];
+          if (markers[0].startMs > 60000) { msBounds.push(0); labels.push(null); }
+          for (const m of markers) {
+            const last = msBounds.length ? msBounds[msBounds.length - 1] : -Infinity;
+            if (m.startMs - last < 60000) continue;   // micro-chapter guard
+            msBounds.push(m.startMs); labels.push(m.title || null);
+          }
+        } else if (durMs >= 40 * 60 * 1000) {
+          msBounds = []; labels = [];
+          for (let ms = 0; ms < durMs - 5 * 60 * 1000; ms += 30 * 60 * 1000) {
+            msBounds.push(ms); labels.push(null);
+          }
+        }
+        if (msBounds && msBounds.length >= 2) {
+          bounds = msBounds.map(ms => Math.min(_cueIdxAtMs(cues, ms), cues.length - 1));
+        } else {
+          msBounds = null; labels = null;
+        }
+      }
+      if (!bounds) {
+        bounds = _ruleBounds(info, cc.totalJp);
+        labels = bounds.map(() => null);
+        const refined = await _haikuRefine(cc.text, info, bounds);
+        if (refined) { bounds = refined.bounds; labels = refined.labels; }
+      }
       const map = _assembleMap(titleId, fp, bounds, labels, 'cues', info, cc.text.length, cc.totalJp, 'cue');
       map.totals.cues = cues.length;
       for (let k = 0; k < map.chunks.length; k++) {
         map.chunks[k].cueStart = bounds[k];
         map.chunks[k].cueEnd = (k + 1 < bounds.length) ? bounds[k + 1] - 1 : cues.length - 1;
+        if (msBounds) map.chunks[k].msStart = msBounds[k];
+      }
+      // Time-anchored bounds: derive the real ranges (incl. empty ranges for
+      // chapters past the transcribed frontier) from the anchor times, and
+      // record the FULL audio duration so the timeline axis spans the whole
+      // book (last-cue end only reaches the transcription frontier).
+      if (msBounds) {
+        _applyCueTimeRanges(map, cues, cc);
+        let durMs = 0;
+        try { durMs = (await (window.autoTranscribe && window.autoTranscribe.durationFor && window.autoTranscribe.durationFor(titleId))) || 0; } catch (_) {}
+        map.durMs = Math.max(durMs, cues[cues.length - 1].endMs || 0);
       }
       _cacheMap(titleId, map);
       _mapMiss.delete(titleId);
@@ -842,6 +949,46 @@
     })().catch(() => null).finally(() => { _building.delete(titleId); });
     _building.set(titleId, job);
     return job;
+  }
+
+  // Public: re-derive a TIME-anchored cue map from the live (growing) cue
+  // list — called by auto-transcribe.js as new cues finalize. Also serves as
+  // the build retry for titles whose cues arrived after the one-shot
+  // title-change build window.
+  async function refreshCueMap(titleId) {
+    try {
+      if (!titleId || titleId !== window._activeTitleId) return;
+      const cues = window._srtCues;
+      if (!Array.isArray(cues) || !cues.length) return;
+      const map = await getMap(titleId);
+      if (!map) {
+        if (await _isSrtOnly(titleId)) await _ensureFromCues(titleId, cues);
+        return;
+      }
+      if (map.space !== 'cue' || !map.chunks.length) return;
+      if (!Number.isFinite(map.chunks[0].msStart)) {
+        // Time-less rule map (built before duration/markers were known, or
+        // pre-fix). It can never re-derive ranges, so with today's data it
+        // is a trap: phrase-split re-indexing leaves its saved cue/raw
+        // bounds pointing at wrong text. Upgrade ONCE per session by force-
+        // rebuilding — same stable fingerprint, so artifacts keyed to it
+        // survive; if bounds still can't be timed it just rebuilds the rule
+        // map with fresh indices, which is strictly better than stale ones.
+        if (!_msUpgradeTried.has(titleId)) {
+          _msUpgradeTried.add(titleId);
+          await _ensureFromCues(titleId, cues, true);
+        }
+        return;
+      }
+      _ccCache = null;   // cues grow by IN-PLACE mutation — bust the ref-keyed memo
+      const cc = cueConcat(cues);
+      let changed = _applyCueTimeRanges(map, cues, cc);
+      let durMs = 0;
+      try { durMs = (await (window.autoTranscribe && window.autoTranscribe.durationFor && window.autoTranscribe.durationFor(titleId))) || 0; } catch (_) {}
+      const bestDur = Math.max(durMs, cues[cues.length - 1].endMs || 0, map.durMs || 0);
+      if (bestDur > (map.durMs || 0)) { map.durMs = bestDur; changed = true; }
+      if (changed) persistMap(titleId, map, true);
+    } catch (_) {}
   }
 
   // True when the title has NO book-text attachment (epub key also carries
@@ -854,10 +1001,15 @@
       const t = titles && titles.find && titles.find(x => x.id === titleId);
       if (!t) return false;
       const at = t.attachments || {};
-      if (at.epub && (at.epub.uri || at.epub.name)) return false;
+      // A SYNTHETIC book (auto:true, generated from the transcription) does
+      // not flip the title to the reader-DOM map: the cue-space map stays
+      // canonical so its chapter summaries/characters/scenes survive.
+      if (at.epub && !at.epub.auto && (at.epub.uri || at.epub.name)) return false;
       return !!at.srt || (Array.isArray(window._srtCues) && window._srtCues.length > 0);
     } catch (_) { return false; }
   }
+
+  const _msUpgradeTried = new Set();   // one force-rebuild attempt per title/session
 
   async function _maybeCueBuild() {
     try {
@@ -868,6 +1020,14 @@
       if (!(await _isSrtOnly(titleId))) return;
       if (titleId !== window._activeTitleId || cues !== window._srtCues) return; // switched mid-await
       await _ensureFromCues(titleId, cues);
+      // ALWAYS re-derive ranges against the CURRENT cue list on open. The
+      // stable fingerprint returns the existing map untouched, but its saved
+      // cue/raw ranges were computed against an older cue indexing (live
+      // growth, phrase re-splitting) — and after the title finalizes its SRT
+      // the transcriber never refreshes again, so this open-time pass is the
+      // only thing that unfreezes chapters left with empty ranges mid-
+      // transcription (they wedged the processing pump).
+      await refreshCueMap(titleId);
     } catch (_) {}
   }
 
@@ -906,6 +1066,9 @@
 
   function _completeAt(map, ch, jp, cue) {
     // ONE space per comparison (§2): jp vs jp, cue vs cue — never converted.
+    // A time-anchored chapter past the transcribed frontier has an EMPTY cue
+    // range (cueStart > cueEnd) — it can't be complete, its text isn't there.
+    if (map.space === 'cue' && ch.cueStart > ch.cueEnd) return false;
     if (map.space !== 'cue' && ch.jpEnd > ch.jpStart && jp >= ch.jpEnd) return true;
     if (ch.cueEnd >= 0 && cue >= ch.cueEnd) return true;
     return false;
@@ -977,6 +1140,16 @@
         }
       }
       const cue = _currentCue();
+      // Cue-space maps: derive the jp frontier from the current cue so the
+      // read-frontier event fires and ai-scenes can unlock for audio titles.
+      if (map.space === 'cue' && cue >= 0 &&
+          Array.isArray(window._srtCues) && window._srtCues.length) {
+        try {
+          const cc = cueConcat(window._srtCues);
+          const ci = Math.min(cue, cc.jpOffs.length - 1);
+          if (ci >= 0 && cc.jpOffs[ci] > jp) jp = cc.jpOffs[ci];
+        } catch (_) {}
+      }
 
       let changed = false, jpAdvanced = false;
       if (jp > prevJp) { f.jp = jp; changed = true; jpAdvanced = true; }
@@ -1088,7 +1261,9 @@
         if (titleId !== window._activeTitleId) return null;
         const cues = window._srtCues;
         if (!Array.isArray(cues) || !cues.length) return null;
-        if (map.fingerprint !== fpFromCues(cues)) return null;
+        // autocues| maps are audio-keyed (stable across cue growth) — their
+        // offsets are kept current by refreshCueMap, not by fp equality.
+        if (map.fingerprint.indexOf('autocues|') !== 0 && map.fingerprint !== fpFromCues(cues)) return null;
         return cueConcat(cues).text.slice(ch.rawStart, ch.rawEnd);
       }
       const text = await getText(titleId);
@@ -1102,14 +1277,28 @@
   // frontier (jp). Returns only what the reader has actually passed, so a server
   // scene-pick can never draw on unread text. jp→raw is interpolated within the
   // chapter and trimmed CONSERVATIVELY (×0.97 + to the last paragraph break) so a
-  // jp/raw-count mismatch can't leak ahead. Read (jp-space) titles only.
+  // jp/raw-count mismatch can't leak ahead. Read (jp-space) titles use the
+  // AITEXT cache; audio-only (cue-space) titles slice the live cue concat —
+  // their jp frontier comes from the current audio cue (_pollTick), so the
+  // same jp cut applies (this used to hard-reject cue maps, which silently
+  // disabled auto-scenes for every audio-only title).
   async function chunkTextUpToJp(titleId, idx, frontierJp) {
     try {
       const map = await getMap(titleId);
-      if (!map || map.space === 'cue' || !map.chunks || !map.chunks[idx]) return null;
+      if (!map || !map.chunks || !map.chunks[idx]) return null;
       const ch = map.chunks[idx];
-      const text = await getText(titleId);
-      if (!text || typeof text.raw !== 'string' || text.fingerprint !== map.fingerprint) return null;
+      let raw = null;
+      if (map.space === 'cue') {
+        if (map.chunks[idx].cueStart > map.chunks[idx].cueEnd) return null;   // untranscribed chapter
+        const cues = window._srtCues;
+        if (!Array.isArray(cues) || !cues.length || !(ch.rawEnd > ch.rawStart)) return null;
+        raw = cueConcat(cues).text;
+        if (ch.rawEnd > raw.length) return null;   // stale ranges — refresh hasn't run yet
+      } else {
+        const text = await getText(titleId);
+        if (!text || typeof text.raw !== 'string' || text.fingerprint !== map.fingerprint) return null;
+        raw = text.raw;
+      }
       let end = ch.rawEnd;
       const targetJp = Number.isFinite(frontierJp) ? (frontierJp - ch.jpStart) : Infinity;
       if (targetJp < (ch.jpEnd - ch.jpStart)) {
@@ -1121,7 +1310,7 @@
           let lo = ch.rawStart, hi = ch.rawEnd;
           while (lo < hi) {
             const mid = (lo + hi + 1) >> 1;
-            if (window.jpCharCount(text.raw.slice(ch.rawStart, mid)) <= targetJp) lo = mid; else hi = mid - 1;
+            if (window.jpCharCount(raw.slice(ch.rawStart, mid)) <= targetJp) lo = mid; else hi = mid - 1;
           }
           end = lo;
         } else {
@@ -1130,7 +1319,7 @@
           end = ch.rawStart + Math.floor((ch.rawEnd - ch.rawStart) * frac * 0.9);
         }
       }
-      let s = text.raw.slice(ch.rawStart, Math.max(ch.rawStart, end));
+      let s = raw.slice(ch.rawStart, Math.max(ch.rawStart, end));
       const nl = s.lastIndexOf('\n');
       if (nl > s.length * 0.5) s = s.slice(0, nl);   // don't end mid-sentence
       return s;
@@ -1358,6 +1547,7 @@
     rubyGlossarySync,
     isComplete,
     refreshCueBounds,
+    refreshCueMap,
     markerCount,
     reSegment,
     clearTitle,

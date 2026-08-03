@@ -55,7 +55,9 @@
       _busy = true;
       const map = (window.aiChunks && window.aiChunks.getMap) ? await window.aiChunks.getMap(titleId) : null;
       if (!map || !Array.isArray(map.chunks) || !map.chunks.length) return;   // no map yet → retry next tick (don't lose boundaries)
-      if (map.space === 'cue') { hwmSet(titleId, target); return; }           // audio-only: never unlock, advance past
+      // Cue-space (audio-only) maps unlock like read maps: the cue-map poll
+      // now derives a jp frontier from the current cue, and the processor's
+      // cue branch (locatePassages/cueRangeForQuote) anchors scene audio.
       let did = 0;
       for (let b = hwmGet(titleId) + 1; b <= target && did < MAX_PER_PASS; b++) {
         const bj = b * SEG;

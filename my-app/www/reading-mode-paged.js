@@ -923,8 +923,32 @@
   // Locates each candidate cue's normalized text inside the chunk's
   // normalized text, picks the one whose range contains the tap. If no
   // cue maps to this chunk, returns null.
+  // Expected audio ms for a position inside a chunk, from the aligner's
+  // inverse anchor mapping. Null when no live aligner (normal SRT titles —
+  // their cue↔chunk maps make text-scan collisions moot). Used to reject
+  // tap→cue candidates whose TIME is nowhere near the tapped BOOK position:
+  // with thousands of short phrase cues, identical text elsewhere in the
+  // book used to win the text scan and seek the audio to a random spot.
+  const TAP_TIME_BOUND_MS = 180000;
+  function expectedMsAtChunkPos(chunk, charIndex) {
+    try {
+      if (!window.autoAlign?.msForProgress || !chunks.length) return null;
+      const lastC = chunks[chunks.length - 1];
+      const total = parseInt(lastC.dataset.charOffset || '0', 10) +
+                    parseInt(lastC.dataset.charLen || '0', 10);
+      if (!(total > 0)) return null;
+      const off = parseInt(chunk.dataset.charOffset || '0', 10) + Math.max(0, charIndex | 0);
+      return window.autoAlign.msForProgress(Math.max(0, Math.min(1, off / total)));
+    } catch (_) { return null; }
+  }
+
   function findCueForTap(chunk, flatText, charIndex) {
-    if (!pagedCues?.length || !chunks?.length) return null;
+    // Auto-transcribed titles have no pagedCues (no SRT yet) — fall back to
+    // the legacy engine's live cue list, same as findNearestChunkCue.
+    const cues = pagedCues?.length ? pagedCues : (window.__abCues || []);
+    if (!cues.length || !chunks?.length) return null;
+    // Time bound (fallback mode only): the map-less text scan needs it.
+    const expMs = pagedCues?.length ? null : expectedMsAtChunkPos(chunk, charIndex);
     const chunkIdx = chunks.indexOf(chunk);
     if (chunkIdx < 0) return null;
     // Build the normalized version of the chunk text + a raw-to-norm
@@ -940,18 +964,20 @@
     // scanning all cues for ones whose normalized text appears in the
     // chunk (slower but works without prebuilt map).
     const candidateIdxs = [];
-    if (pagedCueToChunk) {
+    if (pagedCueToChunk && pagedCues?.length) {   // map indexes pagedCues only
       for (let i = 0; i < pagedCueToChunk.length; i++) {
         if (pagedCueToChunk[i] === chunkIdx) candidateIdxs.push(i);
       }
     }
     if (!candidateIdxs.length) {
-      for (let i = 0; i < pagedCues.length; i++) candidateIdxs.push(i);
+      for (let i = 0; i < cues.length; i++) candidateIdxs.push(i);
     }
     // Strict containment first.
     let best = null, bestDist = Infinity;
     for (const ci of candidateIdxs) {
-      const cue = pagedCues[ci];
+      const cue = cues[ci];
+      if (expMs != null && Number.isFinite(cue?.startMs) &&
+          Math.abs(cue.startMs - expMs) > TAP_TIME_BOUND_MS) continue;
       const normCue = normalizeJP(cue?.text || '');
       if (!normCue) continue;
       const start = normFlat.indexOf(normCue);
@@ -1052,6 +1078,11 @@
         ' source=' + cuesSource +
         ' charIndex=' + (hasTap ? charIndex : 'n/a'));
     if (!cues.length) { log('findNearestChunkCue: NO cues from any source'); return null; }
+    // Time bound (legacy/map-less source only): reject text-scan candidates
+    // whose audio TIME is nowhere near the tapped BOOK position — identical
+    // phrase text elsewhere in the book used to win and seek randomly.
+    const expMs = (cuesSource === 'legacy')
+      ? expectedMsAtChunkPos(chunk, hasTap ? charIndex : 0) : null;
 
     // --- Strategy 1: best cue whose text appears in this chunk ---
     // Algorithm (v6):
@@ -1064,7 +1095,9 @@
     //        taps; a full-sentence cue containing the same tap is the
     //        right answer.
     //     B. If no pair contains the tap, pick the smallest distance.
-    const normChunk = chunk ? normalizeJP(chunk.textContent || '') : '';
+    // Ruby-stripped: textContent interleaves furigana readings, which both
+    // hid cue occurrences AND disagreed with tapNormIdx's flatText coords.
+    const normChunk = chunk ? chunkNormNoRuby(chunk) : '';
     if (normChunk) {
       let tapNormIdx = -1;
       if (hasTap) {
@@ -1080,6 +1113,7 @@
       for (let i = 0; i < cues.length; i++) {
         const c = cues[i];
         if (!Number.isFinite(c?.startMs) || !Number.isFinite(c?.endMs)) continue;
+        if (expMs != null && Math.abs(c.startMs - expMs) > TAP_TIME_BOUND_MS) continue;
         const norm = normalizeJP(c?.text || '');
         if (!norm || norm.length < 3) continue;
         // Walk all occurrences of this cue's text in the chunk.
@@ -1137,6 +1171,24 @@
       if (best) { log('findNearestChunkCue: cueToChunk cue#' + best.idx + ' dist=' + bestDist); return best; }
     }
 
+    // --- Strategy 2.5: aligner time estimate (map-less auto titles) ---
+    // Better than proportional: the anchor mapping accounts for frontmatter
+    // and narration-speed drift. Nearest cue by startMs to the expected ms.
+    if (expMs != null) {
+      let lo = 0, hi = cues.length - 1, k = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if ((cues[mid]?.startMs ?? Infinity) <= expMs) { k = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      for (const idx of [k, k + 1, k - 1]) {
+        const c = cues[idx];
+        if (c && Number.isFinite(c.startMs) && Number.isFinite(c.endMs)) {
+          log('findNearestChunkCue: aligner-estimate cue#' + idx);
+          return { idx, startMs: c.startMs, endMs: c.endMs };
+        }
+      }
+    }
+
     // --- Strategy 3: proportional ---
     if (targetIdx >= 0 && chunks?.length) {
       const ratio = targetIdx / Math.max(1, chunks.length);
@@ -1187,14 +1239,40 @@
       .replace(/[\s　「」『』、。・…！？!?,.;:""'']/g, '');
   }
 
-  // Find the first chunk whose normalized text CONTAINS the normalized
-  // target. Returns the chunk DOM node or null.
+  // Normalized RUBY-STRIPPED chunk text, lazily cached on the element.
+  // chunk.textContent interleaves furigana readings with the base text
+  // (<ruby>漢字<rt>かんじ</rt></ruby> → "漢字かんじ"), so matching cue text
+  // against textContent silently fails for ANY cue overlapping a ruby run —
+  // furigana sentences never resolved a chunk (no highlight at all), and the
+  // old global fallback then matched a ruby-free identical string elsewhere
+  // (the mid-book teleport). Search text must be base-only.
+  function chunkNormNoRuby(c) {
+    if (c.dataset.nrNorm != null) return c.dataset.nrNorm;
+    let acc = '';
+    const w = document.createTreeWalker(c, NodeFilter.SHOW_TEXT, {
+      acceptNode(n) {
+        let p = n.parentNode;
+        while (p && p !== c) {
+          if (p.tagName === 'RT' || p.tagName === 'RP') return NodeFilter.FILTER_REJECT;
+          p = p.parentNode;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    let n;
+    while ((n = w.nextNode())) acc += n.nodeValue || '';
+    const v = normalizeJP(acc);
+    c.dataset.nrNorm = v;
+    return v;
+  }
+
+  // Find the first chunk whose normalized (ruby-stripped) text CONTAINS the
+  // normalized target. Returns the chunk DOM node or null.
   function findChunkForText(target) {
     const t = normalizeJP(target);
     if (!t) return null;
     for (const c of chunks) {
-      const ct = normalizeJP(c.textContent);
-      if (ct.includes(t)) return c;
+      if (chunkNormNoRuby(c).includes(t)) return c;
     }
     return null;
   }
@@ -1212,7 +1290,7 @@
     const hi = Math.min(chunks.length - 1, anchorIdx + radius);
     let best = null, bestDist = Infinity;
     for (let i = lo; i <= hi; i++) {
-      if (normalizeJP(chunks[i].textContent).includes(t)) {
+      if (chunkNormNoRuby(chunks[i]).includes(t)) {
         const d = (i >= anchorIdx) ? (i - anchorIdx) : (anchorIdx - i) + 0.5;
         if (d < bestDist) { bestDist = d; best = chunks[i]; }
       }
@@ -1220,12 +1298,41 @@
     return best;
   }
 
+  // Expected chunk index for a cue, derived from the auto-transcription
+  // aligner's anchor lattice (audio ms → book char fraction; frontmatter the
+  // narrator skips is accounted for because anchors interpolate between
+  // ACTUAL matched positions, not uniform progress). -1 when unavailable
+  // (no live aligner — e.g. a normal SRT title, where the alignment map
+  // already resolves cues and this estimate is never needed).
+  function expectedChunkForCue(cueIdx) {
+    try {
+      if (!chunks.length || !window.autoAlign?.progressAt) return -1;
+      const cue = (Array.isArray(pagedCues) && pagedCues[cueIdx]) ||
+                  (window.__abCues && window.__abCues[cueIdx]) || null;
+      if (!cue || !Number.isFinite(cue.startMs)) return -1;
+      const ratio = window.autoAlign.progressAt(cue.startMs);
+      if (!(ratio >= 0)) return -1;
+      const lastC = chunks[chunks.length - 1];
+      const total = parseInt(lastC.dataset.charOffset || '0', 10) +
+                    parseInt(lastC.dataset.charLen || '0', 10);
+      if (!(total > 0)) return -1;
+      const target = ratio * total;
+      let lo = 0, hi = chunks.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (parseInt(chunks[mid].dataset.charOffset || '0', 10) <= target) lo = mid; else hi = mid - 1;
+      }
+      return lo;
+    } catch (_) { return -1; }
+  }
+
   // Resolve the chunk for a cue: alignment map → bounded local search around
-  // the current green chunk → (only if allowGlobal) a book-wide search.
-  // allowGlobal is FALSE for passive audio-follow (a book-wide first-match
-  // could fling the view a chapter away) and TRUE for deliberate navigation
-  // (reader enter, explicit jumps) where showing SOMETHING beats showing
-  // nothing.
+  // the current green chunk → BOUNDED search around the aligner's expected
+  // position → (only if allowGlobal, and only with no position estimate) a
+  // book-wide search. A book-wide first match on a short phrase cue used to
+  // teleport the highlight to an identical string mid-book; with an estimate
+  // available, a miss inside the bounded window now paints NOTHING instead
+  // (the next matched cue recovers) — wrong-spot is worse than no-paint.
   function resolveCueChunk(cueIdx, cueText, allowGlobal) {
     if (pagedCueToChunk && cueIdx >= 0 && cueIdx < pagedCueToChunk.length &&
         pagedCueToChunk[cueIdx] >= 0) {
@@ -1234,6 +1341,12 @@
     }
     const near = findChunkForTextNear(cueText, lastHighlightedChunkIdx, 8);
     if (near) return near;
+    const expIdx = expectedChunkForCue(cueIdx);
+    if (expIdx >= 0) {
+      // ~2% of the book each side, floor 20 / cap 200 chunks.
+      const radius = Math.min(200, Math.max(20, Math.round(chunks.length * 0.02)));
+      return findChunkForTextNear(cueText, expIdx, radius);
+    }
     return allowGlobal ? findChunkForText(cueText) : null;
   }
 
@@ -1348,15 +1461,27 @@
       // (e.g. the nearest matched cue's text genuinely isn't locatable),
       // try a book-wide resolve of the INTENDED cue before giving up, so we
       // never leave the viewport uncolored.
-      let r = setCueRangeHighlight(chunk, paintText);
+      // Word-timed cue → entry shows the karaoke GLOW parked on the line, not
+      // the static block green (the user's "old static highlighting" on mode
+      // re-entry). setCueRangeHighlight still resolves the range for the
+      // scroll; the glow is the cursor.
+      const _kw = (c) => !!(c && Array.isArray(c.w) && c.w.length && window.wordHighlight);
+      let paintCue = (matchCue >= 0) ? cues[matchCue] : (cues[want] || null);
+      let r = setCueRangeHighlight(chunk, paintText, _kw(paintCue));
       if (!r) {
         const alt = resolveCueChunk(want, cues[want]?.text || '', true);
         if (alt && alt !== chunk) {
-          const r2 = setCueRangeHighlight(alt, cues[want]?.text || '');
-          if (r2) { chunk = alt; r = r2; }
+          const r2 = setCueRangeHighlight(alt, cues[want]?.text || '', _kw(cues[want]));
+          if (r2) { chunk = alt; r = r2; paintCue = cues[want] || null; }
         }
       }
       if (!r) { log('ensureGreenOnEnter: paint failed want=' + want); return false; }
+      if (_kw(paintCue)) {
+        let ok = false;
+        try { ok = !!window.wordHighlight.readerCuePainted(r, paintCue); } catch (_) {}
+        // Glow didn't bind → repaint the block highlight (never NO indicator).
+        if (!ok) { try { setCueRangeHighlight(chunk, (paintCue && paintCue.text) || paintText); } catch (_) {} }
+      }
       lastHighlightedCue = -1;             // let the next live audio-follow paint fire
       window._lastAudioCueIdx = want; window._lastAudioCueTitleId = window._activeTitleId;      // keep the shared cursor at the intended cue (title-stamped)
       lastProgrammaticScrollTime = Date.now();
@@ -1506,7 +1631,19 @@
       // first open (::highlight paint ignores element !important rules, so
       // theme.css can't defend against it). Visible-reader entry repaints via
       // runReaderEnterSetup/ensureGreenOnEnter, so nothing is lost.
-      if (!_readerHidden()) setCueRangeHighlight(chunk, highlightText);
+      if (!_readerHidden()) {
+        // Word-timed cue → park the karaoke glow instead of the static block
+        // highlight (same entry treatment as ensureGreenOnEnter).
+        const _cCue = (pagedCues[_aCueIdx] && highlightText === pagedCues[_aCueIdx].text)
+          ? pagedCues[_aCueIdx] : null;
+        const _cKw = !!(_cCue && Array.isArray(_cCue.w) && _cCue.w.length && window.wordHighlight);
+        const _r = setCueRangeHighlight(chunk, highlightText, _cKw);
+        if (_cKw && _r) {
+          let _ok = false;
+          try { _ok = !!window.wordHighlight.readerCuePainted(_r, _cCue); } catch (_) {}
+          if (!_ok) { try { setCueRangeHighlight(chunk, highlightText); } catch (_) {} }
+        }
+      }
       // Then scroll if any part of the highlight overflows the viewport,
       // respecting the user-scroll grace period (5 s = "they're reading
       // independently, don't yank back"). openView resets
@@ -3900,14 +4037,19 @@
         if (!_fromReadCache) {
         const zip = await JSZip.loadAsync(blob);
 
-        const containerXml = await zip.file('META-INF/container.xml')?.async('string');
+        // Strip a UTF-8 BOM before XML parsing: JSZip's string decode keeps
+        // it, and iOS WebKit treats content before <?xml as FATAL (parser-
+        // error doc → "No OPF rootfile"), while Blink tolerates it — the
+        // "works on Android, fails on iOS" epub bug.
+        const _deBom = (s) => (s ? s.replace(/^\uFEFF+/, '') : s);
+        const containerXml = _deBom(await zip.file('META-INF/container.xml')?.async('string'));
         if (!containerXml) throw new Error('Not a valid EPUB');
         const opfPath = new DOMParser()
           .parseFromString(containerXml, 'application/xml')
           .querySelector('rootfile')?.getAttribute('full-path');
         if (!opfPath) throw new Error('No OPF rootfile');
 
-        const opfXml = await zip.file(opfPath).async('string');
+        const opfXml = _deBom(await zip.file(opfPath).async('string'));
         const opfDoc = new DOMParser().parseFromString(opfXml, 'application/xml');
         const opfDir = opfPath.includes('/') ? opfPath.replace(/[^/]+$/, '') : '';
 
@@ -4151,6 +4293,7 @@
       });
       totalChars = charAcc;       // raw coordinate space (cue alignment / highlight)
       totalJpChars = jpAcc;       // displayed total — matches ttu / desktop reader
+      window._pagedTotalJpChars = jpAcc;   // mirror for title-stats (read ETA denominator)
 
       // ai-chunks.js hook — fire-and-forget. Nothing here awaits it or reads
       // back from it (never-lose-place + open-perf invariants).
@@ -4303,6 +4446,21 @@
       }
     }
     if (!audio || !srt) {
+      // Audio + no SRT + on-device transcription support: no SRT will exist
+      // until the transcriber finishes, so adopt the audio context and start
+      // generation RIGHT HERE — a fresh open into READ mode could otherwise
+      // neither play nor set the playhead until audio mode was visited once.
+      // Cues stream into the legacy engine (__abCues), which every paged cue
+      // lookup already falls back to; cue↔chunk maps stay unbuilt until the
+      // final SRT exists.
+      if (audio && !srt && window.autoTranscribe && await window.autoTranscribe.available()) {
+        pagedAudioPath = audio.path;
+        window._pagedAudioPath = audio.path;
+        try { window.abAdoptAutoAudio?.(audio.path, audio.name); } catch (_) {}
+        window.autoTranscribe.activate({ audioPath: audio.path, audioName: audio.name });
+        log('auto-transcribe context adopted for paged reader (no SRT)');
+        return true;
+      }
       log('No audio/srt context for paged reader');
       // Wipe the stale LEGACY audiobook context ONLY for a GENUINELY EPUB-only
       // title (epub + NO audiobook/audio/srt/deck attachment). `!audio||!srt`
@@ -4340,6 +4498,8 @@
       const text = await res.text();
       pagedCues = window.srtParser.parseSrt(text);
       log(`Loaded ${pagedCues.length} SRT cues for paged reader`);
+      // Auto-generated SRT: copy cached word timings back on (karaoke).
+      try { window.autoTranscribe?.enrichWordTimes?.(window._activeTitleId, pagedCues); } catch (_) {}
     } catch (e) { log('SRT load failed:', e.message); return false; }
 
     // Build cue→chunk mapping. Preferred path: the new preprocessing
@@ -4351,7 +4511,10 @@
     // module is missing or returns a suspiciously low match rate.
     // dataset.norm is still populated because findChunkForText and the
     // dict tap-handler search rely on it.
-    for (const c of chunks) c.dataset.norm = normalizeJP(c.textContent);
+    // Ruby-stripped (srt-parser's fallback matcher compares cue text against
+    // dataset.norm — readings interleaved in textContent hid every cue that
+    // overlaps a ruby run).
+    for (const c of chunks) c.dataset.norm = chunkNormNoRuby(c);
     if (!chunks.length || !pagedCues.length) return true;
 
     let used = 'none';
@@ -4514,7 +4677,16 @@
       log(`paintCueHighlight: no chunk for cue ${cueIdx} "${cue.text.slice(0, 20)}"`);
       return;
     }
-    const range = setCueRangeHighlight(chunk, cue.text);
+    // Word-timed cue → karaoke glow only, no block highlight (kwOnly).
+    const kwOnly = !!(Array.isArray(cue.w) && cue.w.length && window.wordHighlight);
+    const range = setCueRangeHighlight(chunk, cue.text, kwOnly);
+    _lastFollowPaintAt = Date.now();   // follow-freeze watchdog heartbeat
+    // Karaoke: word-level glow inside the located cue (no-op without cue.w).
+    let glowed = false;
+    try { glowed = !!window.wordHighlight?.readerCuePainted(range, cue); } catch (_) {}
+    // Glow failed to bind (walker mismatch, dead range) → repaint the block
+    // highlight so the reader is never left with NO indicator at all.
+    if (kwOnly && !glowed && range) { try { setCueRangeHighlight(chunk, cue.text); } catch (_) {} }
     if (Date.now() - lastUserScrollTime < 5000) return;
     autoScrollForRange(range);
   }
@@ -4524,7 +4696,13 @@
   // nodes (skip rt/rp), normalizes, locates the cue's normalized index
   // in the chunk's normalized text, maps back to raw offsets and finally
   // (node, offset) pairs for a Range.
-  function setCueRangeHighlight(chunk, cueText) {
+  // `suppressPaint` (audio-follow with word timings): compute + return the
+  // range for scroll/karaoke, but do NOT paint the block cue-active highlight
+  // — the karaoke glow is the live indicator, and skipping the block paint
+  // removes both the leftover activation flash and the "green ≠ what Anki
+  // gets" mismatch. Any lingering green from an explicit action (set-playhead,
+  // reader-entry centering — those still paint) is cleared.
+  function setCueRangeHighlight(chunk, cueText, suppressPaint) {
     if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
     const normCue = normalizeJP(cueText);
     if (!normCue) { clearCueHighlight(); return; }
@@ -4604,6 +4782,22 @@
       const r = new Range();
       r.setStart(sNode, sOff);
       r.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
+      if (suppressPaint) {
+        clearCueHighlight();
+        lastHighlightedChunkIdx = chunks.indexOf(chunk);
+        return r;
+      }
+      // PAINTED range: the precise range snapped OUTWARD to whole text nodes.
+      // A ::highlight boundary that lands MID-text-node makes WebKit split
+      // that node's paint run and re-rasterize the UN-highlighted remainder
+      // at different subpixel positions — the long-standing ~1px jiggle when
+      // a line turns green (lab-measured: a mid-node seam churns ~8-12% of
+      // the line's ink pixels; node-boundary seams churn ~0%). Snapping only
+      // widens the green to the sentence-segment edges (between rubies /
+      // chunk bounds); scroll + karaoke below still use the precise `r`.
+      const rp = new Range();
+      rp.setStart(sNode, 0);
+      rp.setEnd(eNode, eNode.nodeValue.length);
       // Reuse a single Highlight across all paints — clear its range
       // set, then add the new one, then re-set on the registry. Creating
       // a fresh Highlight via `new Highlight(r)` + replace caused
@@ -4615,7 +4809,7 @@
         activeCueHighlight = new Highlight();
       }
       activeCueHighlight.clear();
-      activeCueHighlight.add(r);
+      activeCueHighlight.add(rp);
       // Re-set on the registry to ensure the registry knows the highlight
       // is current (set-after-mutate is the documented pattern; some
       // browsers paint immediately on add, others need the registry
@@ -4623,7 +4817,8 @@
       CSS.highlights.set('cue-active', activeCueHighlight);
       // iOS: ::highlight color doesn't reach the kanji BASE of <ruby>, only the
       // furigana — color the active cue's ruby elements directly (no DOM mutation).
-      try { window._applyCueRubyColor && window._applyCueRubyColor(r, chunk); } catch (_) {}
+      // Uses the SNAPPED range so ruby coloring matches the painted extent.
+      try { window._applyCueRubyColor && window._applyCueRubyColor(rp, chunk); } catch (_) {}
       document.body.classList.add('has-cue-highlight');
       // Remember which chunk is green — anchors the bounded local search.
       lastHighlightedChunkIdx = chunks.indexOf(chunk);
@@ -4713,11 +4908,40 @@
   // one already rendered — used after Sync↓ re-downloads a title's read source in
   // place (same id, new content) so the reader doesn't keep the stale book.
   window.pagedInvalidateLoadedTitle = function (tid) { if (!tid || tid === currentTitleId) currentTitleId = null; };
+  // "Generated text" chip: shown in read mode while the loaded book is a
+  // SYNTHETIC one (built from the on-device transcription). Body-class gated
+  // so it vanishes the moment a real book loads or the mode changes.
+  function _setSynthChip(on) {
+    try {
+      document.body.classList.toggle('kadoki-synth-book', !!on);
+      if (on && !document.getElementById('synthBookChip')) {
+        const d = document.createElement('div');
+        d.id = 'synthBookChip';
+        d.textContent = (window.i18n && window.i18n.t) ? window.i18n.t('at.synth_chip', 'Generated text') : 'Generated text';
+        document.body.appendChild(d);
+      }
+    } catch (_) {}
+  }
+
   async function tryLoadFromActiveTitle() {
     if (!window.titleStore || !window._activeTitleId) return false;
-    // Don't reload the same book we already have.
+    // Don't reload the same book we already have — EXCEPT a growing synthetic
+    // book that gained cues since this render (the transcriber's tick rebuilds
+    // the file; append-only, so the reload keeps every position valid).
     if (window._activeTitleId === currentTitleId &&
-        innerEl.querySelector('.reading-chunk')) return false;
+        innerEl.querySelector('.reading-chunk')) {
+      let grew = false;
+      if (window._synthBookLoadedCues > 0) {
+        try {
+          const t0 = (await window.titleStore.list()).find(x => x.id === currentTitleId);
+          const ec = t0?.attachments?.epub;
+          grew = !!(ec?.auto && Number.isFinite(ec.cueCount) &&
+                    ec.cueCount > window._synthBookLoadedCues + 5);
+        } catch (_) {}
+      }
+      if (!grew) return false;
+      log('synthetic book grew — reloading');
+    }
     const titleId = window._activeTitleId;
     // COALESCE concurrent loads. openView (visible load when restoring straight
     // into read mode) and pagedPrewarm (hidden preload) both fire on the same
@@ -4750,6 +4974,8 @@
         }
         log(`Auto-load from active title: ${ep.name}`);
         await loadEpubFromUri(ep.uri || null, ep.name, ep.cachePath || null);
+        window._synthBookLoadedCues = (ep.auto && Number.isFinite(ep.cueCount)) ? ep.cueCount : 0;
+        _setSynthChip(!!ep.auto);
         return true;
       } catch (e) {
         log('tryLoadFromActiveTitle error: ' + (e?.message || e));
@@ -4872,17 +5098,37 @@
       recompute();
       centerOnActiveCard();
       _scheduleEdgeMask(); // paint the leftover-column mask now that content is laid out
+      // ENTRY LATENCY: consume the one-shot signals + re-arm BOTH cue gates
+      // BEFORE the await below. (a) While audio plays, the live follow could
+      // otherwise only repaint on the next cue CHANGE — up to a whole cue of
+      // blank reader after a mode switch; re-armed gates make the very next
+      // position event repaint. (b) On a warm same-title re-entry the cues +
+      // maps from the previous visit are still loaded — paint NOW instead of
+      // waiting out loadAudiobookCues' fetch/parse/validate.
+      // ("Stay at read position" captures the read cue at dialog time, before
+      // loadAudiobookCues wipes lastReadCueIdx — top priority.)
+      const jumpCue = window._reentryAudioJumpCueIdx;
+      window._reentryAudioJumpCueIdx = null;
+      const stayCue = window._reentryStayCueIdx;
+      window._reentryStayCueIdx = null;
+      lastHighlightedCue = -1;
+      try { window._resetAbCueGate?.(); } catch (_) {}
+      const _preferredCue = () => {
+        const bm = (_bookmarkChunkIdx >= 0 && pagedChunkToCue &&
+                    _bookmarkChunkIdx < pagedChunkToCue.length && pagedChunkToCue[_bookmarkChunkIdx] >= 0)
+          ? pagedChunkToCue[_bookmarkChunkIdx] : -1;
+        return (Number.isFinite(stayCue) && stayCue >= 0) ? stayCue
+          : (Number.isFinite(jumpCue) && jumpCue >= 0) ? jumpCue
+          : bm;
+      };
+      if (!_cameFromCardEntry && window._pagedCuesTitleId === window._activeTitleId &&
+          ((pagedCues && pagedCues.length) || (window.__abCues || []).length)) {
+        try { ensureGreenOnEnter(_preferredCue()); } catch (_) {}
+      }
       await loadAudiobookCues();
       attachBgListener();
       if (_readerHidden()) return;       // bailed during await
       lastUserScrollTime = 0; // deliberate enter → always allow centering
-      const jumpCue = window._reentryAudioJumpCueIdx;
-      window._reentryAudioJumpCueIdx = null;
-      // "Stay at read position" captures the read cue at dialog time (before
-      // this function's loadAudiobookCues wipes lastReadCueIdx). Honor it with
-      // TOP priority so STAY lands on the read position, not the audio-ahead cue.
-      const stayCue = window._reentryStayCueIdx;
-      window._reentryStayCueIdx = null;
       // CARD → READ: centerOnActiveCard (run above + re-run inside loadAudiobookCues)
       // is the SOLE positioner — it resolves the card's chunk for SRT-cards AND
       // deck-cards and has already painted + scrolled the card's EXACT line. Skip
@@ -4897,12 +5143,9 @@
       }
       // Plain reopen → land on the BOOKMARK line (the single anchor). A reentry
       // stay/jump choice still wins when one is present.
-      const bmCue = (_bookmarkChunkIdx >= 0 && pagedChunkToCue &&
-                     _bookmarkChunkIdx < pagedChunkToCue.length && pagedChunkToCue[_bookmarkChunkIdx] >= 0)
-        ? pagedChunkToCue[_bookmarkChunkIdx] : -1;
-      const preferred = (Number.isFinite(stayCue) && stayCue >= 0) ? stayCue
-        : (Number.isFinite(jumpCue) && jumpCue >= 0) ? jumpCue
-        : bmCue;
+      // Recompute with the FRESH maps loadAudiobookCues just built (the warm
+      // pre-await paint used the previous visit's maps).
+      const preferred = _preferredCue();
       const cueN = (pagedCues?.length ? pagedCues : (window.__abCues || [])).length;
       if (cueN <= 0) { centerOnActiveCard(); _revealReaderSettled(); return; }
       // GUARANTEED green-on-enter, WITH RETRY. chunks, cues, and the alignment
@@ -4926,7 +5169,9 @@
       tryPaint();
       _revealReaderSettled();
     };
-    setTimeout(runReaderEnterSetup, 80);
+    // First attempt on the next FRAME (the old flat 80ms was pure added
+    // latency — the chunk poll inside already handles a not-yet-rendered book).
+    requestAnimationFrame(() => { runReaderEnterSetup(); });
   }
   // Synchronously persist the reader's current position. Called on EVERY exit
   // from the reader (closeView, mode-switch away, app background) because the
@@ -5160,11 +5405,17 @@
       log('pagedCenterOnCue: no chunk for cue ' + cueIdx);
       return false;
     }
-    // Paint the cue-active highlight so the user sees a clear marker
-    // exactly at the new playhead. setCueRangeHighlight is the same
-    // helper __onPagedCueUpdate uses, so the visual matches the
-    // auto-follow look.
-    try { setCueRangeHighlight(chunk, cue.text); } catch (_) {}
+    // Paint the marker exactly at the new playhead. Word-timed cue → park the
+    // karaoke glow (the follow look); w-less → the block cue-active highlight.
+    try {
+      const _jKw = !!(Array.isArray(cue.w) && cue.w.length && window.wordHighlight);
+      const _jr = setCueRangeHighlight(chunk, cue.text, _jKw);
+      if (_jKw && _jr) {
+        let _jok = false;
+        try { _jok = !!window.wordHighlight.readerCuePainted(_jr, cue); } catch (_) {}
+        if (!_jok) { try { setCueRangeHighlight(chunk, cue.text); } catch (_) {} }
+      }
+    } catch (_) {}
     // Reset the highlight-cue gate so the next position event (when
     // user resumes audio from here) actually paints — without this,
     // the listener's idx === lastHighlightedCue early return can
@@ -5364,7 +5615,84 @@
     try { updateProgress({ cueIdx: window._lastAudioCueIdx ?? -1 }); } catch (_) {}
   };
 
+  // ── follow-freeze watchdog ────────────────────────────────────────────────
+  // The reader follow has wedged through several distinct paths (stale play
+  // flags, swallowed gate resets, mid-session cue reloads) and each fix left
+  // another. This is the belt-and-suspenders: while the reader is VISIBLE and
+  // audio is PLAYING, compare the cue at the live playhead against the last
+  // painted cue every 2s — if they disagree and the follow hasn't painted for
+  // >2.5s, force a repaint through the normal hook (gates reset first) and
+  // log the wedge so the root cause is identifiable from a device session.
+  // NATIVE-TRUTH version: the first watchdog trusted the JS mirrors
+  // (_bgPlaying / _lastBgPosMs), which are fed by the SAME listener plumbing
+  // the follow chain hangs off — when that plumbing starves, the mirrors
+  // freeze and the watchdog starved with the exact wedge it was monitoring
+  // (the "still freezes, mode-switch fixes it" report). Poll bg.getState()
+  // directly instead: it cannot lie and cannot starve. Each tick also HEALS
+  // the downstream layers from that truth — the play-state/position mirrors
+  // and the karaoke clock (feedPosition, a no-op while live events are
+  // healthy) — so the glow keeps gliding even if every listener died.
+  let _lastFollowPaintAt = 0;
+  let _wdBusy = false;
+  setInterval(async () => {
+    try {
+      if (_wdBusy || _readerHidden() || document.hidden) return;
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg?.getState) return;
+      _wdBusy = true;
+      let s = null;
+      try { s = await bg.getState(); } catch (_) {}
+      _wdBusy = false;
+      if (!s || !s.playing || !(Number(s.positionMs) > 0)) return;
+      const pos = Number(s.positionMs);
+      // Heal the mirrors (only when they've actually gone quiet — a healthy
+      // event stream refreshes them several times a second).
+      window._bgPlaying = true;
+      if (!window._lastBgPosAt || Date.now() - window._lastBgPosAt > 1500) {
+        window._lastBgPosMs = pos;
+        window._lastBgPosAt = Date.now();
+      }
+      try { window.wordHighlight?.feedPosition?.(pos, true); } catch (_) {}
+      const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+      if (!cues.length || !window.srtParser?.findCueAtTime) return;
+      const idx = window.srtParser.findCueAtTime(cues, pos);
+      if (idx < 0 || idx === lastHighlightedCue) return;       // in a gap / follow current
+      if (Date.now() - _lastFollowPaintAt < 1600) return;      // cue boundary in flight
+      try {
+        window.debugLog?.('[follow-watchdog] wedged: liveCue=' + idx + ' painted=' + lastHighlightedCue +
+          ' lastPaint=' + (_lastFollowPaintAt ? (Date.now() - _lastFollowPaintAt) + 'ms ago' : 'never') +
+          ' mirrors: bgPlaying=' + window._bgPlaying + ' posAge=' +
+          (window._lastBgPosAt ? Date.now() - window._lastBgPosAt : -1) + 'ms');
+      } catch (_) {}
+      try { window._resetAbCueGate?.(); } catch (_) {}
+      lastHighlightedCue = -1;
+      try { window.__onPagedCueUpdate(idx, cues[idx], pos); } catch (_) {}
+      _lastFollowPaintAt = Date.now();
+    } catch (_) { _wdBusy = false; }
+  }, 1500);
+
+  // Growing synthetic book, mid-session runway: when the playhead nears the
+  // end of the LOADED text while transcription continues ahead, reload the
+  // rebuilt book in place (append-only → every position and the audio-follow
+  // survive). Throttled hard; the entry-time reload handles the common case.
+  function _maybeExtendSynthBook(cueIdx, force) {
+    try {
+      if (!(window._synthBookLoadedCues > 0) || _readerHidden()) return;
+      if (!Number.isFinite(cueIdx) || cueIdx < window._synthBookLoadedCues - 30) return;
+      const now = Date.now();
+      // `force` (playhead ALREADY past the loaded frontier — the follow is
+      // actively stalled on it): 8s floor instead of the easy 45s throttle.
+      if (window._synthExtendAt && now - window._synthExtendAt < (force ? 8000 : 45000)) return;
+      const total = (window.__abCues || []).length;
+      if (force ? (total <= window._synthBookLoadedCues) : (total <= window._synthBookLoadedCues + 30)) return;
+      window._synthExtendAt = now;
+      currentTitleId = null;              // defeat the same-book guard → full reload path
+      tryLoadFromActiveTitle();
+    } catch (_) {}
+  }
+
   window.__onPagedCueUpdate = function (idx, cue, positionMs) {
+    try { _maybeExtendSynthBook(idx); } catch (_) {}
     // Update the top-left progress strip regardless of whether the
     // paged reader view is visible — the strip lives at body level
     // and is visible across all modes (card / read / audio). User
@@ -5500,7 +5828,16 @@
     // even when the alignment map left this cue unmatched, without risking
     // the book-wide far-jump that the old "SKIP unmatched" guarded against.
     const chunk = resolveCueChunk(idx, cue.text, !pagedCueMapFromAlignment);
-    if (!chunk) return; // genuinely unplaceable — keep the current highlight
+    if (!chunk) {
+      // Genuinely unplaceable — keep the current highlight. But if the cue is
+      // past the loaded SYNTHETIC-book frontier, the follow would stall here
+      // on every event until the 45s extension throttle woke up (reads as
+      // "the follow just stops") — force the extension check now (8s floor).
+      if (window._synthBookLoadedCues > 0 && idx >= window._synthBookLoadedCues - 5) {
+        try { _maybeExtendSynthBook(idx, true); } catch (_) {}
+      }
+      return;
+    }
     // READ-ALONG char credit: the reader is VISIBLE (read mode — guaranteed by the
     // _readerHidden early-return above) and the playhead is advancing, so the user
     // is reading along with the audio. Credit the read frontier from the line now
@@ -5524,7 +5861,16 @@
       // keeps overwriting this via the user-scroll path — last writer wins.)
       lastReadCueIdx = idx;
     }
-    const range = setCueRangeHighlight(chunk, cue.text);
+    // Word-timed cue → karaoke glow only, no block highlight (kwOnly).
+    const kwOnly = !!(Array.isArray(cue.w) && cue.w.length && window.wordHighlight);
+    const range = setCueRangeHighlight(chunk, cue.text, kwOnly);
+    _lastFollowPaintAt = Date.now();   // follow-freeze watchdog heartbeat
+    // Karaoke: word-level glow inside the located cue (no-op without cue.w).
+    let glowed = false;
+    try { glowed = !!window.wordHighlight?.readerCuePainted(range, cue); } catch (_) {}
+    // Glow failed to bind (walker mismatch, dead range) → repaint the block
+    // highlight so the reader is never left with NO indicator at all.
+    if (kwOnly && !glowed && range) { try { setCueRangeHighlight(chunk, cue.text); } catch (_) {} }
     if (!range || !scrollEl) return;
     // No user-scroll grace gate here — this hook only fires when the
     // cue INDEX changes (the earlier `idx === lastHighlightedCue` early

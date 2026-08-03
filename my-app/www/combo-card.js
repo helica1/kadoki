@@ -24,13 +24,18 @@
   }
 
   // Build the inner HTML for the .subtitle-text element of a combined card.
-  // Each unit (sentence/quote) is a block (line break between units); each cue
-  // is an inline .combo-cue span carrying its bounds; each char is a .dict-frag.
+  // A line break after every sentence end and completed quote; each cue is an
+  // inline .combo-cue span carrying its bounds; each char is a .dict-frag.
   function buildSubtitleHTML(card) {
     // Flatten to (char, cueOrdinal) so we can insert a line break at every
-    // sentence end (。！？) and every complete quote (」/』) at depth 0 — EVEN
-    // when one subtitle cue contains several (e.g. "…おいて」「それは…」") — while
-    // keeping each cue a tappable .combo-cue span (highlight + dict + Anki bounds).
+    // sentence end (。！？) and every completed quote (」/』) — EVEN when one
+    // subtitle cue contains several (e.g. "…おいて」「それは…」") — while
+    // keeping each cue a tappable .combo-cue span (highlight + dict + Anki
+    // bounds). Breaks are NOT gated on quote depth: with generated (ASR/book)
+    // text the open/close bookkeeping drifts (unmatched cues swallow a 」, some
+    // books quote with 「「), and one drifted open used to suppress every break
+    // on the page — the dense-paragraph card. A multi-sentence quote now breaks
+    // at its inner 。 too, which is the readable outcome for long quotes anyway.
     const flat = [];
     for (let o = 0; o < card.cueTexts.length; o++) {
       for (const ch of (card.cueTexts[o] || '')) flat.push({ ch, o });
@@ -39,9 +44,7 @@
       for (let j = i + 1; j < flat.length; j++) { if (!/\s/.test(flat[j].ch)) return flat[j].ch; }
       return '';
     };
-    // A continued-quote chunk (a later piece of a split long quote) starts INSIDE
-    // the quote, so seed the depth so its internal 。 keep flowing (no break).
-    let html = '', depth = card.startDepth || 0, curO = -1;
+    let html = '', curO = -1;
     for (let i = 0; i < flat.length; i++) {
       const { ch, o } = flat[i];
       if (o !== curO) {
@@ -53,15 +56,15 @@
         curO = o;
       }
       html += '<span class="dict-frag">' + esc(ch) + '</span>';
-      if (ch === '「' || ch === '『') depth++;
-      else if (ch === '」' || ch === '』') depth = Math.max(0, depth - 1);
-      // Break AFTER this char when, at depth 0, it ends a sentence or closes a
-      // quote — but NOT an embedded quote continuing with と/って (e.g. 「ふうん」と…),
-      // and never after the final char of the card.
-      if (i < flat.length - 1 && depth === 0) {
-        const isSentEnd = /[。．！？!?]/.test(ch);
+      // Break AFTER a sentence end or a quote close — but not when a closing
+      // bracket follows (the break fires after IT instead, so 」 never dangles
+      // at a line start), not before a quote continuation (「ふうん」と…), and
+      // never after the final char of the card.
+      if (i < flat.length - 1) {
+        const nx = nextNonSpace(i);
+        const isSentEnd = /[。．！？!?]/.test(ch) && nx !== '」' && nx !== '』' && nx !== '）';
         let isQuoteEnd = (ch === '」' || ch === '』');
-        if (isQuoteEnd) { const nx = nextNonSpace(i); if (nx === 'と' || nx === 'っ') isQuoteEnd = false; }
+        if (isQuoteEnd && (nx === 'と' || nx === 'っ')) isQuoteEnd = false;
         if (isSentEnd || isQuoteEnd) html += '<span class="combo-nl"></span>';
       }
     }
@@ -186,6 +189,12 @@
     if (!activeEl) return;
     _lastOrdinal = o;
     cues.forEach((el) => el.classList.toggle('combo-cue-active', el === activeEl));
+    // Karaoke: hand the active cue's span to the word-highlight engine (no-op
+    // for cues without word timings — deck cards, imported SRTs).
+    try {
+      const gi = parseInt(activeEl.getAttribute('data-gi'), 10);
+      window.wordHighlight?.setSpanCue(activeEl, window._srtCues?.[gi]);
+    } catch (_) {}
     if (_curCard) bindCueContext(activeEl, _curCard);
     window._comboActiveContext = ctxFromCueEl(activeEl);
     // Keep the highlighted line visible inside a CLIPPED page (a long single

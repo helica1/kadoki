@@ -6,6 +6,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   // ---- fonts ----
   'pj.font_import_failed': { en: 'Font import failed: {err}', ja: 'フォントのインポートに失敗しました: {err}' },
   'pj.font_serif': { en: 'Serif', ja: '明朝体' },
+  'pj.combine_subs': { en: 'Combine short subtitles', ja: '短い字幕をまとめる' },
   'pj.font_sans': { en: 'Sans-serif', ja: 'ゴシック体' },
   'pj.font_system': { en: 'System', ja: 'システム' },
   'pj.import_ttf': { en: '➕ Import TTF…', ja: '➕ TTFをインポート…' },
@@ -32,6 +33,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'pj.show_upcoming_subtitle': { en: 'Show upcoming subtitle', ja: '次の字幕を表示' },
   'pj.invert_line_art': { en: 'Invert line art (dark mode)', ja: '線画を反転（ダークモード）' },
   'pj.lockscreen_subtitle_art': { en: 'Lock screen: subtitle as cover art', ja: 'ロック画面: 字幕をカバーアートに' },
+  'pj.at_phrase': { en: 'Generated subtitles: split at commas', ja: '生成字幕: 読点で分割' },
   'pj.subtitle_vertical_offset': { en: 'Subtitle vertical offset', ja: '字幕の垂直オフセット' },
   'pj.stopwatch_timeout': { en: 'Stopwatch inactivity timeout (s)', ja: 'ストップウォッチの無操作タイムアウト（秒）' },
 

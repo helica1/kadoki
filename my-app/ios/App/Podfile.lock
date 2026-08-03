@@ -9,6 +9,8 @@ PODS:
   - CapacitorFilesystem (7.1.1):
     - Capacitor
     - IONFilesystemLib (~> 1.0)
+  - CapacitorHaptics (7.0.5):
+    - Capacitor
   - CapacitorPreferences (7.0.1):
     - Capacitor
   - CapacitorSplashScreen (7.0.1):
@@ -26,6 +28,7 @@ DEPENDENCIES:
   - "CapacitorBrowser (from `../../node_modules/@capacitor/browser`)"
   - "CapacitorCordova (from `../../node_modules/@capacitor/ios`)"
   - "CapacitorFilesystem (from `../../node_modules/@capacitor/filesystem`)"
+  - "CapacitorHaptics (from `../../node_modules/@capacitor/haptics`)"
   - "CapacitorPreferences (from `../../node_modules/@capacitor/preferences`)"
   - "CapacitorSplashScreen (from `../../node_modules/@capacitor/splash-screen`)"
   - FileAccess (from `../../../file-access`)
@@ -47,6 +50,8 @@ EXTERNAL SOURCES:
     :path: "../../node_modules/@capacitor/ios"
   CapacitorFilesystem:
     :path: "../../node_modules/@capacitor/filesystem"
+  CapacitorHaptics:
+    :path: "../../node_modules/@capacitor/haptics"
   CapacitorPreferences:
     :path: "../../node_modules/@capacitor/preferences"
   CapacitorSplashScreen:
@@ -60,12 +65,13 @@ SPEC CHECKSUMS:
   CapacitorBrowser: 6d09f59655e89aede71654ef08b98de55cf032b6
   CapacitorCordova: 2b36392a7292c3c451dcae154185ee8804d7b6b3
   CapacitorFilesystem: 39173fe5a0e77851119998d0d8c61c70551a412a
+  CapacitorHaptics: 1b145fa83c622e5383a3bac04ea81e2514f0b0f5
   CapacitorPreferences: 6c98117d4d7508034a4af9db64d6b26fc75d7b94
   CapacitorSplashScreen: 1d67815a422a9b61539c94f283c08ed56667c0fc
   FileAccess: 9455ddbf1298d175a259496429abfd4f619ba3e5
   GCDWebServer: 2c156a56c8226e2d5c0c3f208a3621ccffbe3ce4
   IONFilesystemLib: 21a63377696b2d8fab5632ecfb7d2ac67bddb68a
 
-PODFILE CHECKSUM: 2c97ecd34254c273e6b04fda208a20f315102371
+PODFILE CHECKSUM: 46fc920d9a5dca00b7a33056211eeeeaaba4a893
 
 COCOAPODS: 1.16.2

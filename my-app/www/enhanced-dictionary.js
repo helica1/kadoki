@@ -1284,6 +1284,33 @@
     
     function positionDictPopup(popup) {
         if (!popup) return;
+        // Lookup-history viewer (split layout): the viewer panel owns the TOP
+        // half of the screen, the popup gets the BOTTOM half — fixed geometry,
+        // no quadrant logic (the old floating placement overlapped the panel).
+        // closeViewer clears these inline styles so normal lookups reposition.
+        if (document.getElementById('lookupNavBar')) {
+            // CONNECTED to the viewer panel: flush seam at 50vh, the panel
+            // keeps only its bottom hairline as the divider, and the pair
+            // shares one rounded outline (panel rounds the top corners, the
+            // popup the bottom ones). Width pinned identically to the panel
+            // (left/right 12px) with every width-affecting property forced,
+            // so the two edges can never diverge. closeViewer resets all of
+            // these inline styles.
+            popup.style.left = '12px';
+            popup.style.right = '12px';
+            popup.style.width = 'auto';
+            popup.style.maxWidth = 'none';
+            popup.style.margin = '0';
+            popup.style.transform = 'none';
+            popup.style.boxSizing = 'border-box';
+            popup.style.top = '50vh';
+            popup.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 12px)';
+            popup.style.height = 'auto';
+            popup.style.maxHeight = 'none';
+            popup.style.borderRadius = '0 0 14px 14px';
+            popup.style.borderTop = 'none';
+            return;
+        }
         const vw = window.innerWidth, vh = window.innerHeight;
         const margin = 12;
 
@@ -1726,9 +1753,9 @@
                 fontSize: '16px',
                 zIndex: 9999,
                 display: 'none',
-                // Layered shadow — close-and-tight for the lift, plus a
-                // wider diffuse for the ambient "hovering" feel.
-                boxShadow: '0 4px 12px rgba(0,0,0,.45), 0 24px 60px rgba(0,0,0,.55)',
+                // Single mid-size shadow: the old second 60px-blur ambient
+                // layer cost a large blurred raster on every popup open (iOS).
+                boxShadow: '0 8px 24px rgba(0,0,0,.55)',
                 border: '1px solid #262a30',
                 overflow: 'auto',
                 overscrollBehavior: 'contain'
@@ -1835,6 +1862,14 @@
             console.log('[dict-resume] skipped: waveform editor open');
             return;
         }
+        // Lookup-history viewer open: stepping ◀ ▶ re-runs lookups, each of
+        // which calls hidePopup() internally — resuming audio between steps
+        // would blip playback. Keep the flag SET; the real resume fires at
+        // closeViewer (it removes #lookupNavBar BEFORE its hideDictPopup).
+        if (document.getElementById('lookupNavBar')) {
+            console.log('[dict-resume] skipped: lookup-history viewer open');
+            return;
+        }
         // AI overlays open (chapter view / Characters screen / …): they can
         // drive their own audio (key-passage playback) — never auto-resume
         // underneath them. Flag stays SET, same as the editor: resume happens
@@ -1884,6 +1919,7 @@
     // AI text; unwrap them on clear so the container returns to plain text.
     let lazyHighlightSpans = [];
     function clearLazyHighlight() {
+        _lazyMapCacheReset();   // text nodes mutate (split/wrap/unwrap) — flat maps stale
         for (const sp of lazyHighlightSpans) {
             try {
                 const parent = sp.parentNode;
@@ -1896,6 +1932,7 @@
         lazyHighlightSpans = [];
     }
     function clearHighlight() {
+        _lazyMapCacheReset();   // text nodes mutate (split/wrap/unwrap) — flat maps stale
         lastHovered.forEach(s => { try { s.classList.remove('highlight'); } catch (_) {} });
         lastHovered = [];
         if (lazyHighlightSpans.length) clearLazyHighlight();
@@ -1984,6 +2021,19 @@
         }
         return fallback;
     }
+
+    // Exposed for the karaoke chunk segmenter (word-highlight.js): longest
+    // dictionary word (deinflection-aware) starting at `start`. Read-only,
+    // one existsBulk per call.
+    window.dictSegmentWord = greedyDeinflect;
+
+    // Exposed for the lookup-history screen (lookup-log.js): run the normal
+    // popup lookup on a text+index via the lazy path. applyHighlight is a
+    // required member of the lazy object (called unguarded) — no-op here,
+    // there is no on-screen tap to highlight.
+    window.dictLookupFromHistory = function (text, charIndex) {
+        try { performLookup(null, 0, { text, charIndex, applyHighlight: () => {} }); } catch (_) {}
+    };
 
     // ==================== MAIN LOOKUP FUNCTION ====================
     
@@ -2133,6 +2183,12 @@
             lap(`multiDictionaryLookup → ${results.length} results`);
             currentLookupResults = results;
             currentResultIndex = 0;
+            // Lookup history: log successful lookups with their tap context
+            // (sentence + cue audio range) — skips re-logging history-driven
+            // re-lookups so reviewing an entry doesn't bump it as new.
+            if (results.length && window.lookupContext?.source !== 'history') {
+                try { window.lookupLog?.add({ term: best.match, base: best.base, ctx: window.lookupContext }); } catch (_) {}
+            }
             
             if (isFirstLookup) {
                 // Complete loading bar and show completion message briefly
@@ -2227,6 +2283,9 @@
         const btn = document.getElementById('setPlayheadBtn');
         if (!btn) return;
         const ctx = window.lookupContext || {};
+        // History review must NEVER move the place — hide the seek action
+        // entirely for lookups re-opened from the lookup-history viewer.
+        if (ctx.source === 'history') { btn.style.display = 'none'; return; }
         if (!Number.isFinite(ctx.cueIndex) && !Number.isFinite(ctx.cueStartMs)) {
             btn.disabled = true;
             return;
@@ -2604,7 +2663,16 @@
                         cues: editCues,
                         cueIndex: editAnchor
                       });
-                      if (!adjusted) return; // user cancelled
+                      if (!adjusted) {
+                        // User cancelled the waveform editor: restore the Add
+                        // button (it was left disabled saying "Adding…") and
+                        // fall back to the dictionary popup, which is still
+                        // open beneath the editor overlay.
+                        ankiBtn.disabled = false;
+                        ankiBtn.textContent = dT('dc.add_to_anki', 'Add to Anki');
+                        ankiBtn.style.background = '#4caf50';
+                        return;
+                      }
                       // The editor's `adjusted.text` is the concatenation
                       // of cues[leftIdx..rightIdx]. If the user didn't
                       // touch the +/- buttons, leftIdx===rightIdx===anchor
@@ -2665,6 +2733,7 @@
                     window._lastDictSliceSrcPath = null;
 
                     await sendWordToAnki(ankiData);
+                    try { window.lookupLog?.markAnkiSent(result.term); } catch (_) {}
                     ankiBtn.textContent = dT('dc.added', 'Added');
                     ankiBtn.style.background = '#2196f3';
                     
@@ -3123,6 +3192,10 @@
             // the audio bounds. The editor sits above the popup; leave the
             // popup alone until the editor flow finishes.
             if (document.getElementById('waveformEditorOverlay')) return;
+            // Lookup-history viewer open: IT owns popup lifecycle (its ✕ /
+            // shield close the popup through closeViewer) — same lesson as
+            // the waveform editor exclusion.
+            if (document.getElementById('lookupNavBar')) return;
             // Taps inside a visible AI overlay (chapter view, Characters
             // screen, …) belong to that overlay — don't dismiss under it.
             if (inAiOverlay(e.target)) return;
@@ -3159,6 +3232,8 @@
             // drag/tap gestures inside the editor — capture-phase runs
             // before the editor overlay can stop propagation.
             if (document.getElementById('waveformEditorOverlay')) return;
+            // Lookup-history viewer open — same exclusion as the click path.
+            if (document.getElementById('lookupNavBar')) return;
             // Same exclusion as the click path: gestures inside a visible AI
             // overlay must not dismiss (and via maybeResumeAfterLookup,
             // un-pause audio under) the popup, nor stamp the dismissed-ts
@@ -3377,7 +3452,7 @@
                 };
                 if (!_inBox(off, off + 1) && _inBox(off - 1, off)) off = off - 1;
             } catch (_) {}
-            const map = buildLazyFlatMap(container);
+            const map = buildLazyFlatMapCached(container);
             const seg = map.segments.find(s => s.node === node);
             if (!seg) return null;
             const charIndex = seg.start + Math.min(off, seg.len);
@@ -3391,6 +3466,7 @@
     // lastHovered (popup positioning reads their rects) and lazyHighlightSpans
     // (clearHighlight unwraps them). Caller has already cleared prior highlight.
     function applyLazyHighlight(segments, charIndex, length) {
+        _lazyMapCacheReset();   // text nodes mutate (split/wrap/unwrap) — flat maps stale
         try {
             const end = charIndex + Math.max(1, length || 1);
             for (const seg of segments) {
@@ -3417,6 +3493,20 @@
             }
         } catch (_) {}
     }
+
+    // Per-container flat-map cache: rebuilding via TreeWalker on EVERY tap was
+    // a constant lookup overhead (AI overlays, history viewer). Invalidated
+    // whenever highlight ops mutate text nodes (splitText/wrap/unwrap).
+    let _lazyMapCache = new WeakMap();
+    function buildLazyFlatMapCached(container) {
+        const sig = (container.textContent || '').length;
+        const hit = _lazyMapCache.get(container);
+        if (hit && hit.sig === sig && hit.map) return hit.map;
+        const map = buildLazyFlatMap(container);
+        _lazyMapCache.set(container, { sig, map });
+        return map;
+    }
+    function _lazyMapCacheReset() { _lazyMapCache = new WeakMap(); }
 
     function dictEnableLookupInLazy(container) {
         if (container.dataset.dictLazyWired === '1') {
@@ -3457,7 +3547,10 @@
                 e.preventDefault();
                 e.stopPropagation();
                 clearHighlight();    // unwrap any prior highlight BEFORE we measure
-                window.lookupContext = null;
+                // Containers that pre-bind their own lookupContext (the
+                // lookup-history viewer: sentence + cue audio range) keep it —
+                // nulling it here handed Anki the WRONG context for those taps.
+                if (container.dataset.dictKeepCtx !== '1') window.lookupContext = null;
                 performLookup(null, 0, {
                     text: hit.flatText,
                     charIndex: hit.charIndex,
@@ -3906,8 +3999,12 @@
             background-color: transparent !important;
         }
         
+        /* NO -webkit-overflow-scrolling: touch here — it forces the legacy
+           re-rastering UIScrollView layer on iOS at popup-show time (the
+           lookup-open lag). Modern WebKit scrolls overflow:auto natively;
+           overscroll-behavior already stops scroll chaining. Same removal as
+           the timeline/characters panels. */
         #dictPopup {
-            -webkit-overflow-scrolling: touch !important;
             overscroll-behavior: contain;
             overflow-y: auto !important;
             overflow-x: hidden;

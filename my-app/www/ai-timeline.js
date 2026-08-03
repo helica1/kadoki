@@ -112,10 +112,63 @@
     } catch (_) { return text; }
   }
 
+  // H:MM:SS (or M:SS) for the time axis.
+  function fmtDur(ms) {
+    const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    return h > 0 ? (h + ':' + String(m).padStart(2, '0') + ':' + String(ss).padStart(2, '0'))
+                 : (m + ':' + String(ss).padStart(2, '0'));
+  }
+
   // ---- axis ---------------------------------------------------------------
   // Map axis: total = chunk-map totals.jp; cue→jp is piecewise-linear per
   // chunk through the (cueStart,jpStart)→(cueEnd+1,jpEnd) anchor pairs.
   function buildMapAxis(map) {
+    // STRICTLY TIME-BASED axis for audio-anchored cue maps (auto-transcribed
+    // audiobooks; chunks carry msStart). Their jp totals only cover what has
+    // been transcribed so far, so a char scale reads near-complete minutes
+    // into the book and every future chapter shows the same start offset.
+    const tCues = window._srtCues;
+    if (map.space === 'cue' && map.chunks.length && Number.isFinite(map.chunks[0].msStart) &&
+        Array.isArray(tCues) && tCues.length && Number.isFinite(tCues[0].startMs)) {
+      const lastCh = map.chunks[map.chunks.length - 1];
+      const lastCueEnd = tCues[tCues.length - 1].endMs || 0;
+      let durMs = (Number.isFinite(map.durMs) && map.durMs > 0) ? map.durMs : 0;
+      if (!durMs) durMs = Math.max(lastCueEnd, (lastCh.msStart || 0) + 60000);
+      const chunks = map.chunks;
+      return {
+        total: durMs, useJp: false, isTime: true, cueCum: null,
+        chStart(ch) { return Number.isFinite(ch.msStart) ? ch.msStart : 0; },
+        chEnd(ch) {
+          const i = chunks.indexOf(ch);
+          const nx = chunks[i + 1];
+          return (nx && Number.isFinite(nx.msStart)) ? nx.msStart : durMs;
+        },
+        cueToChars(idx) {   // axis units are MILLISECONDS on this axis
+          const cues = window._srtCues;
+          if (!Number.isFinite(idx) || !Array.isArray(cues) || !cues.length) return null;
+          if (idx >= cues.length) return cues[cues.length - 1].endMs || durMs;
+          return cues[Math.max(0, idx)].startMs;
+        },
+        pos(p) {
+          if (!p) return null;
+          if (p.k === 'read') return null;
+          let cue = Number.isFinite(p.cueIdx) ? p.cueIdx : null;
+          if (cue === null && Number.isFinite(p.cardIndex)) {
+            try {
+              cue = (typeof window._srtCardToCueAnchor === 'function')
+                ? window._srtCardToCueAnchor(p.cardIndex) : p.cardIndex;
+            } catch (_) { cue = p.cardIndex; }
+          }
+          return (cue !== null) ? this.cueToChars(cue) : null;
+        },
+        range(space, a, b) {
+          if (space === 'jp') return null;
+          const r0 = this.cueToChars(a), r1 = this.cueToChars(b + 1);
+          return (r0 !== null && r1 !== null) ? [r0, r1] : null;
+        },
+      };
+    }
     const total = map.totals.jp;
     const an = [];
     for (const ch of map.chunks) {
@@ -146,6 +199,8 @@
     const cueScale = cueTotal ? (total / cueTotal) : 1;
     return {
       total, useJp: true, cueCum,
+      chStart(ch) { return ch.jpStart || 0; },
+      chEnd(ch) { return Number.isFinite(ch.jpEnd) ? ch.jpEnd : (ch.jpStart || 0); },
       cueToChars(idx) {
         if (!Number.isFinite(idx)) return null;
         if (anchors.length >= 2) {
@@ -333,7 +388,16 @@
       const cl = document.body.classList;
       mode = cl.contains('mode-read') ? 'read' : (cl.contains('mode-audio') ? 'audio' : (cl.contains('mode-card') ? 'card' : null));
     } catch (_) {}
-    const audioPos = () => (Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) ? ax.cueToChars(window._lastAudioCueIdx) : null;
+    const audioPos = () => {
+      // Time axis: the live playhead is finer than cue granularity.
+      if (ax.isTime) {
+        try {
+          const ms = window.getAudioProgress && window.getAudioProgress().ms;
+          if (Number.isFinite(ms) && ms > 0) return ms;
+        } catch (_) {}
+      }
+      return (Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) ? ax.cueToChars(window._lastAudioCueIdx) : null;
+    };
     const cardPos = () => {
       if (!Number.isFinite(window.currentCardIndex)) return null;
       try {
@@ -413,8 +477,9 @@
 
   // Read % of a chapter (union of coverage segments ∪ furthest watermark) and
   // its dominant mode (most covered chars in range).
-  function chapterProgress(ch, segs, furthestJp) {
-    const a = ch.jpStart, b = ch.jpEnd;
+  function chapterProgress(axis, ch, segs, furthestJp) {
+    // Ranges and segs are in AXIS units (jp chars, or ms on the time axis).
+    const a = axis.chStart(ch), b = axis.chEnd(ch);
     if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) return { pct: 0, mode: null };
     const len = b - a;
     const ivs = [];
@@ -733,6 +798,37 @@
     try { const all = sceneTrimAll(titleId); all[slotId] = { startMs: Math.round(startMs), endMs: Math.round(endMs) }; localStorage.setItem(trimKey(titleId), JSON.stringify(all)); } catch (_) {}
   }
 
+  // ---- AI-content read tracking (Timeline/Scenes) -----------------------------
+  // Which chapter summaries + scene cards the USER has actually OPENED, per
+  // title: AIREAD_V1_<tid> = { ch: {idx: ts}, sc: {'idx_slot': ts} }. Drives
+  // the ✓ (read) / ○ (unread) / ▸続きから (continue here) markers so it's
+  // visible where to pick up reading the AI content. In-memory cache; persists
+  // on each new mark (marks are rare — one per card open).
+  const _aiReadCache = {};
+  async function aiReadLoad(tid) {
+    if (!tid) return { ch: {}, sc: {} };
+    if (_aiReadCache[tid]) return _aiReadCache[tid];
+    let o = null;
+    try { const raw = await window.blobStore?.get('AIREAD_V1_' + tid); o = raw ? JSON.parse(raw) : null; } catch (_) {}
+    if (!o || typeof o !== 'object' || typeof o.ch !== 'object' || typeof o.sc !== 'object') o = { ch: {}, sc: {} };
+    _aiReadCache[tid] = o;
+    return o;
+  }
+  function _aiReadPersist(tid) {
+    const o = _aiReadCache[tid];
+    if (!o) return;
+    try { window.blobStore?.set('AIREAD_V1_' + tid, JSON.stringify(o)); } catch (_) {}
+  }
+  async function aiReadMarkChapter(tid, idx) {
+    const o = await aiReadLoad(tid);
+    if (!o.ch[idx]) { o.ch[idx] = Date.now(); _aiReadPersist(tid); }
+  }
+  async function aiReadMarkScene(tid, idx, slot) {
+    const o = await aiReadLoad(tid);
+    const k = idx + '_' + slot;
+    if (!o.sc[k]) { o.sc[k] = Date.now(); _aiReadPersist(tid); }
+  }
+
   // ---- chapter view -----------------------------------------------------------
   // z 9000 (below dict 9999 / toast 9500). The timeline panel is CLOSED before
   // this opens (z-order rule) and reopened via `reopen` on close.
@@ -755,6 +851,8 @@
         try { await stopPassage(); } catch (_) {}
       }
       armLookGuard();
+      // Opening a chapter WITH a summary counts as reading its AI content.
+      if (art) { try { aiReadMarkChapter(titleId, ch.idx); } catch (_) {} }
 
       const overlay = document.createElement('div');
       overlay.id = 'kchapterView';
@@ -796,7 +894,8 @@
         'width:min(94vw,720px);height:86vh;max-height:100%;display:flex;flex-direction:column;overflow:hidden;';
 
       const label = (art && art.label) || ch.label || window.i18n.fmt('tl.chapter_n', { n: ch.idx + 1 }, '第' + (ch.idx + 1) + '章');
-      const lenJp = (Number.isFinite(ch.jpEnd) && Number.isFinite(ch.jpStart))
+      const chIsTime = Number.isFinite(ch.msStart);
+      const lenJp = (!chIsTime && Number.isFinite(ch.jpEnd) && Number.isFinite(ch.jpStart))
         ? (ch.jpEnd - ch.jpStart) : 0;
 
       const head = document.createElement('div');
@@ -808,7 +907,8 @@
       ht.innerHTML =
         '<div style="font-weight:600;color:#eee;font-size:1rem;">' + esc(label) + '</div>' +
         '<div style="color:#888;font-size:.72rem;margin-top:2px;">' + esc(window.i18n.fmt('tl.chapter_n', { n: ch.idx + 1 }, '第' + (ch.idx + 1) + '章')) +
-        (lenJp > 0 ? (' · ' + window.i18n.fmt('tl.chars', { n: lenJp.toLocaleString() }, lenJp.toLocaleString() + '字')) : '') + '</div>';
+        (chIsTime ? (' · ' + esc(window.i18n.fmt('tl.time_from', { t: fmtDur(ch.msStart) }, fmtDur(ch.msStart) + '〜')))
+                  : (lenJp > 0 ? (' · ' + window.i18n.fmt('tl.chars', { n: lenJp.toLocaleString() }, lenJp.toLocaleString() + '字')) : '')) + '</div>';
       const cp = document.createElement('button');
       cp.textContent = '⧉';
       cp.title = window.i18n.t('tl.copy_chapter_summary', 'Copy chapter summary');
@@ -1085,6 +1185,8 @@
   // CLOSED while open and reopened via `reopen`. preEnum/preIdx thread the flat
   // scene list through ▲/▼ nav so it isn't rebuilt each hop.
   async function openSceneCard(titleId, ch, art, s, reopen, preEnum, preIdx, animDir) {
+    // Viewing a scene card counts as reading that scene's AI content.
+    try { aiReadMarkScene(titleId, ch.idx, s); } catch (_) {}
     const reopenSafe = () => { if (reopen) { try { reopen(); } catch (_) {} } };
     try {
       const scenes = (art && Array.isArray(art.scenes)) ? art.scenes : [];
@@ -1454,6 +1556,8 @@
       } catch (_) {}
       const furthest = (window.bookmarks && window.bookmarks.getFurthest)
         ? window.bookmarks.getFurthest(titleId) : null;
+      // Read-state of the AI content (✓ / ○ / ▸続きから markers).
+      let _aiRead = await aiReadLoad(titleId);
 
       try {
         if (window.ai && typeof window.ai.markSeen === 'function') window.ai.markSeen(titleId, 'timeline');
@@ -1474,6 +1578,7 @@
       async function refreshSceneHave() {
         if (!document.body.contains(overlay)) { try { window.removeEventListener('kai:img-data', refreshSceneHave); } catch (_) {} return; }
         try {
+          _aiRead = await aiReadLoad(titleId);
           if (window.aiImages && window.aiImages.sceneStatusByChapter) _sceneStat = await window.aiImages.sceneStatusByChapter(titleId) || {};
           // per-scene slot status for the inline feed rows (thumbnail vs 生成 button)
           if (window.aiImages && window.aiImages.statusBatch) {
@@ -1519,7 +1624,8 @@
       const title = document.createElement('div');
       title.style.cssText = 'flex:1;font-weight:600;color:#eee;font-size:1rem;';
       title.innerHTML = esc(window.i18n.t('tl.title', 'Timeline & Scenes')) + ' <span style="color:#666;font-size:.68rem;font-weight:400;">' +
-                        window.i18n.fmt('tl.chars', { n: Math.round(axis.total).toLocaleString() }, Math.round(axis.total).toLocaleString() + '字') + '</span>';
+                        (axis.isTime ? esc(fmtDur(axis.total))
+                                     : window.i18n.fmt('tl.chars', { n: Math.round(axis.total).toLocaleString() }, Math.round(axis.total).toLocaleString() + '字')) + '</span>';
       const mkBtn = (txt, fn, dim) => {
         const b = document.createElement('button');
         b.textContent = txt;
@@ -1604,6 +1710,44 @@
       // or a stale-fp entry) must NOT count, or the card would say "tap to
       // generate" while the tap merely opened an empty view (the skipped-chapter bug).
       function hasSummary(a) { return !!(a && a.shortSummary); }
+      // Lowest chapter idx whose summary exists but hasn't been opened — the
+      // "continue reading here" marker. O(chapters) scan, trivial at list size.
+      function aiFirstUnreadIdx() {
+        try {
+          const idxs = Object.keys(arts || {}).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+          for (const i of idxs) {
+            if (hasSummary(arts[i]) && !_aiRead.ch[i]) return i;
+          }
+        } catch (_) {}
+        return -1;
+      }
+      // 'read' | 'next' (continue here) | 'unread' | null (no summary yet).
+      function aiReadMarkFor(idx, art) {
+        if (!hasSummary(art)) return null;
+        if (_aiRead.ch[idx]) return 'read';
+        return idx === aiFirstUnreadIdx() ? 'next' : 'unread';
+      }
+      // Small marker element for a chapter row/card meta line. Email-style:
+      // unread = conspicuous BLUE dot (+ blue "continue" pill on the first
+      // unread); read = quiet green check. Titles bold/dim to match (the
+      // builders read the mark via aiReadMarkFor).
+      function aiReadMarkEl(mark) {
+        if (!mark) return null;
+        const el = document.createElement('span');
+        if (mark === 'read') {
+          el.textContent = '✓';
+          el.style.cssText = 'flex:none;color:#5f8f6a;font-size:.8rem;font-weight:700;line-height:1;';
+        } else if (mark === 'next') {
+          el.textContent = '● ' + window.i18n.t('tl.continue', '続きから');
+          el.style.cssText = 'flex:none;color:#cfe4ff;font-size:.68rem;font-weight:800;' +
+            'background:rgba(61,132,255,.24);border:1px solid #3d84ff;border-radius:999px;padding:1px 9px;';
+        } else {
+          el.textContent = '●';
+          el.style.cssText = 'flex:none;color:#3d9bff;font-size:.9rem;line-height:1;';
+        }
+        return el;
+      }
+      const aiUnreadMark = (mark) => mark === 'next' || mark === 'unread';
 
       // Targeted regenerate of one chapter's summary. Routes through the new
       // chapter-targeted processor that bypasses the strict in-order pump (so a
@@ -1705,12 +1849,17 @@
           const n = document.createElement('span');
           n.style.cssText = 'color:#888;font-size:.9rem;font-weight:700;';
           n.textContent = String(idx + 1);
+          const _zMark = aiReadMarkFor(idx, art);
           const l = document.createElement('span');
-          l.style.cssText = 'flex:1;min-width:0;color:' + (unread ? '#999' : '#e6e6e6') +
-            ';font-size:1.02rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+          l.style.cssText = 'flex:1;min-width:0;color:' +
+            (aiUnreadMark(_zMark) ? '#fff' : (_zMark === 'read' ? '#a9a9b5' : (unread ? '#999' : '#e6e6e6'))) +
+            ';font-size:1.02rem;font-weight:' + (aiUnreadMark(_zMark) ? 800 : 600) +
+            ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
           l.textContent = unread ? ((ch.label || window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章')) + ' · ' + window.i18n.t('tl.unread', '未読')) : label;
           card.appendChild(n);
           card.appendChild(l);
+          const _rmz = aiReadMarkEl(_zMark);
+          if (_rmz) card.appendChild(_rmz);
           if (prog.pct > 0) {
             const pc = document.createElement('span');
             pc.style.cssText = 'color:#777;font-size:.72rem;';
@@ -1722,12 +1871,17 @@
           card.style.cssText = css;
           const titleRow = document.createElement('div');
           titleRow.style.cssText = 'display:flex;align-items:flex-start;gap:8px;';
+          const _cMark = aiReadMarkFor(idx, art);
           const titleEl = document.createElement('div');
           titleEl.style.cssText =
-            'flex:1;min-width:0;font-weight:700;font-size:1.12rem;line-height:1.3;color:' + (unread ? '#aaa' : '#f0f0f0') + ';';
+            'flex:1;min-width:0;font-weight:' + (aiUnreadMark(_cMark) ? 800 : (_cMark === 'read' ? 600 : 700)) +
+            ';font-size:1.12rem;line-height:1.3;color:' +
+            (aiUnreadMark(_cMark) ? '#ffffff' : (_cMark === 'read' ? '#b4b4c0' : (unread ? '#aaa' : '#f0f0f0'))) + ';';
           // chapter NAME: AI label → EPUB chapter name (ch.label) → 第N章
           titleEl.textContent = (art && art.label) || ch.label || window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章');
           titleRow.appendChild(titleEl);
+          const _rmc = aiReadMarkEl(_cMark);
+          if (_rmc) { _rmc.style.marginTop = '3px'; titleRow.appendChild(_rmc); }
           // jump-to-chapter arrow (navigate the book to this chapter's start)
           const jb = document.createElement('button');
           jb.textContent = '➤';
@@ -1774,7 +1928,7 @@
             bar.style.cssText =
               'margin-top:8px;height:3px;background:#26262e;border-radius:2px;' +
               'overflow:hidden;position:relative;';
-            const a = ch.jpStart, b = ch.jpEnd;
+            const a = axis.chStart(ch), b = axis.chEnd(ch);
             const len = (Number.isFinite(a) && Number.isFinite(b) && b > a) ? (b - a) : 0;
             const pieces = len > 0 ? barSegments(segs, a, b) : [];
             if (pieces.length) {
@@ -1817,8 +1971,8 @@
           const art = arts ? (arts[idx] || null) : null;
           const state = ch.state || 'none';
           const complete = chapterComplete(map, ch);
-          const prog = chapterProgress(ch, segs, furthestJp);
-          const anchor = Math.max(0, Math.min(innerH, Y(ch.jpStart || 0)));
+          const prog = chapterProgress(axis, ch, segs, furthestJp);
+          const anchor = Math.max(0, Math.min(innerH, Y(axis.chStart(ch))));
           const nodeY = Math.max(NODE_R, Math.min(innerH - NODE_R, anchor));
           const onTap = makeChapterTap(ch, art, complete);
 
@@ -1859,7 +2013,7 @@
             // cards tile the axis perfectly — a long chapter is a tall card, a
             // short one a short card. Content clips (overflow) when the span is
             // tight; a small floor keeps at least the title legible.
-            const bot = Y(Number.isFinite(ch.jpEnd) ? ch.jpEnd : ch.jpStart);
+            const bot = Y(axis.chEnd(ch));
             const spanH = Math.max(0, bot - anchor);
             card.style.top = anchor + 'px';
             // Floor at ~one title line + padding so a short / zoomed-out chapter never
@@ -2020,6 +2174,11 @@
           'position:relative;margin:0 0 8px;padding:11px 13px;border-radius:10px;box-sizing:border-box;' +
           'background:' + (isCur ? '#1c1830' : '#16161d') + ';' +
           'border:1px solid ' + (isCur ? '#5a4f8c' : '#26262e') + ';' +
+          // Offscreen rows skip layout/paint (and their thumbnails skip decode)
+          // — the chapter list is fully rendered with no virtualization, and on
+          // iOS the decode-cache pressure showed up as scroll lag. `auto`
+          // intrinsic-size keeps the last measured height once seen.
+          'content-visibility:auto;contain-intrinsic-size:auto 88px;' +
           'touch-action:pan-y;' + (onTap ? 'cursor:pointer;' : '') + (unread ? 'opacity:.6;' : '');
         // meta line (wraps so the current-chapter summary button never overflows)
         const meta = document.createElement('div');
@@ -2028,9 +2187,15 @@
         num.style.cssText = 'flex:none;color:' + (art && complete ? '#a594e6' : '#888') + ';font-size:.74rem;font-weight:700;';
         num.textContent = window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章');
         meta.appendChild(num);
+        // AI-content read state: ✓ read / ● unread (blue) / ●続きから first-unread.
+        const _aiMark = aiReadMarkFor(idx, art);
+        const _rm = aiReadMarkEl(_aiMark);
+        if (_rm) meta.appendChild(_rm);
         const cc = document.createElement('span');
         cc.style.cssText = 'flex:1;min-width:0;color:#6a6a76;font-size:.68rem;';
-        cc.textContent = window.i18n.fmt('tl.chars_from', { n: (Number.isFinite(ch.jpStart) ? ch.jpStart.toLocaleString() : '0') }, (Number.isFinite(ch.jpStart) ? ch.jpStart.toLocaleString() : '0') + '字〜');
+        cc.textContent = (axis && axis.isTime)
+          ? window.i18n.fmt('tl.time_from', { t: fmtDur(axis.chStart(ch)) }, fmtDur(axis.chStart(ch)) + '〜')
+          : window.i18n.fmt('tl.chars_from', { n: (Number.isFinite(ch.jpStart) ? ch.jpStart.toLocaleString() : '0') }, (Number.isFinite(ch.jpStart) ? ch.jpStart.toLocaleString() : '0') + '字〜');
         meta.appendChild(cc);
         if (isCur) {
           const now = document.createElement('span');
@@ -2062,14 +2227,27 @@
             destroy();
             const space = (map && map.space === 'cue') ? 'cue' : 'jp';
             const a = (space === 'cue') ? (Number.isFinite(ch.cueStart) ? ch.cueStart : 0) : (ch.jpStart || 0);
-            try { window.aiSummary.summarizeRange({ space, a, b: pos, mode: 'read' }); } catch (_) {}
+            // Cue space: b must be a CUE INDEX like a — derive it from the
+            // live cue cursor, never from the axis position (axis units are
+            // chars/ms, not indices).
+            let bPos = pos;
+            if (space === 'cue') {
+              bPos = (Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0)
+                ? window._lastAudioCueIdx
+                : ((typeof window._srtCardToCueAnchor === 'function' && Number.isFinite(window.currentCardIndex))
+                    ? window._srtCardToCueAnchor(window.currentCardIndex) : null);
+              if (!Number.isFinite(bPos)) bPos = Number.isFinite(ch.cueEnd) && ch.cueEnd >= 0 ? ch.cueEnd : a;
+            }
+            try { window.aiSummary.summarizeRange({ space, a, b: bPos, mode: 'read' }); } catch (_) {}
           });
           meta.appendChild(sumBtn);
         }
         row.appendChild(meta);
-        // title
+        // title — email-style weight: unread AI content bold+bright, read dimmed.
         const titleEl = document.createElement('div');
-        titleEl.style.cssText = 'font-weight:700;font-size:1.08rem;line-height:1.3;color:' + (unread ? '#aaa' : '#f0f0f0') + ';';
+        const _tw = aiUnreadMark(_aiMark) ? 800 : (_aiMark === 'read' ? 600 : 700);
+        const _tc = aiUnreadMark(_aiMark) ? '#ffffff' : (_aiMark === 'read' ? '#b4b4c0' : (unread ? '#aaa' : '#f0f0f0'));
+        titleEl.style.cssText = 'font-weight:' + _tw + ';font-size:1.08rem;line-height:1.3;color:' + _tc + ';';
         titleEl.textContent = label;
         row.appendChild(titleEl);
         // 1-line (2-clamped) summary / state
@@ -2112,7 +2290,7 @@
         if (prog && prog.pct > 0) {
           const bar = document.createElement('div');
           bar.style.cssText = 'margin-top:7px;height:3px;background:#26262e;border-radius:2px;overflow:hidden;position:relative;';
-          const a = ch.jpStart, b = ch.jpEnd;
+          const a = axis.chStart(ch), b = axis.chEnd(ch);
           const len = (Number.isFinite(a) && Number.isFinite(b) && b > a) ? (b - a) : 0;
           const pieces = len > 0 ? barSegments(segs, a, b) : [];
           if (pieces.length) {
@@ -2148,8 +2326,13 @@
             if (has) {
               const im = document.createElement('img');
               im.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+              // iOS scroll-jank guards: decode off the main thread, don't decode
+              // offscreen rows at all, and fetch ONLY the newest image's bytes
+              // (getImages loaded every multi-MB data URI in the slot to show one).
+              im.decoding = 'async';
+              im.loading = 'lazy';
               thumb.appendChild(im);
-              (async () => { try { const rows = await window.aiImages.getImages(titleId, sCharId); if (rows && rows.length) im.src = rows[rows.length - 1].dataUri; } catch (_) {} })();
+              (async () => { try { const row = await window.aiImages.getLatestImage(titleId, sCharId); if (row) im.src = row.dataUri; } catch (_) {} })();
             } else {
               thumb.style.border = '1px dashed #463a6b'; thumb.style.color = '#9b8fd0';
               thumb.textContent = pending ? window.i18n.t('tl.generating', '生成中') : window.i18n.t('common.generate', '生成');
@@ -2159,6 +2342,20 @@
             desc.style.cssText = 'flex:1;min-width:0;font-size:.82rem;line-height:1.4;color:#cdd;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;';
             desc.textContent = scn.caption || scn.title || window.i18n.fmt('tl.scene_n', { n: s + 1 }, 'シーン ' + (s + 1));
             sr.appendChild(desc);
+            // Scene read state: ✓ once its card has been opened, blue ● + bold
+            // caption while unread (email-style).
+            const _scRead = !!_aiRead.sc[idx + '_' + s];
+            const sk = document.createElement('span');
+            if (_scRead) {
+              sk.textContent = '✓';
+              sk.style.cssText = 'flex:none;color:#5f8f6a;font-size:.78rem;font-weight:700;';
+            } else {
+              sk.textContent = '●';
+              sk.style.cssText = 'flex:none;color:#3d9bff;font-size:.8rem;line-height:1;';
+              desc.style.fontWeight = '700';
+              desc.style.color = '#e8f1ff';
+            }
+            sr.appendChild(sk);
             sr.addEventListener('click', (e) => { e.stopPropagation(); destroy(); openSceneCard(titleId, ch, art, s, () => { try { openPanel(); } catch (_) {} }); });
             sceneBox.appendChild(sr);
           });
@@ -2194,19 +2391,24 @@
           renderAxis();
           return;
         }
-        const furthestJp = (map.furthest && Number.isFinite(map.furthest.jp)) ? map.furthest.jp : null;
+        // Furthest watermark in AXIS units: jp for char axes, ms (via the
+        // furthest cue) for the time axis.
+        const furthestJp = axis.isTime
+          ? ((map.furthest && Number.isFinite(map.furthest.cue) && map.furthest.cue >= 0)
+              ? axis.cueToChars(map.furthest.cue) : null)
+          : ((map.furthest && Number.isFinite(map.furthest.jp)) ? map.furthest.jp : null);
         const curP = currentAxisPos(axis);
         const pos = (curP !== null && Number.isFinite(curP)) ? curP : (furthestJp || 0);
         let curIdx = -1;
         for (const ch of chapters) {
-          const a = ch.jpStart || 0, b = Number.isFinite(ch.jpEnd) ? ch.jpEnd : Infinity;
-          if (pos >= a && pos < b) { curIdx = ch.idx; break; }
+          const a = axis.chStart(ch), b = axis.chEnd(ch);
+          if (pos >= a && pos < (b > a ? b : Infinity)) { curIdx = ch.idx; break; }
         }
         for (const ch of chapters) {
           const idx = ch.idx;
           const art = arts ? (arts[idx] || null) : null;
           const complete = chapterComplete(map, ch);
-          const prog = chapterProgress(ch, segs, furthestJp);
+          const prog = chapterProgress(axis, ch, segs, furthestJp);
           const onTap = makeChapterTap(ch, art, complete);
           const row = buildChapterRow(ch, art, complete, prog, onTap, idx === curIdx, pos);
           inner.appendChild(row);

@@ -92,6 +92,9 @@
     const map = loadFurthestSync();
     const cur = map[titleId];
     if (cur && Number.isFinite(cur.ms) && ms <= cur.ms) return;   // never regress
+    // Per-title daily progress log (library Stats card) — genuine forward
+    // audio progress only, which is exactly what passes the regress gate.
+    try { window.titleStats?.noteAudio(titleId, ms); } catch (_) {}
     map[titleId] = { ms: Math.floor(ms), ts: Date.now() };
     const now = Date.now();
     if ((opts && opts.flush) || now - _furthestLastSaveAt > FURTHEST_SAVE_GAP_MS) {
@@ -284,6 +287,14 @@
   // Unified "% of book" so card / read / furthest spots are directly comparable.
   // Every position maps to an audio time; pct = time / total audiobook duration.
   function totalDurationMs() {
+    // Prefer the NATIVE audio duration: for auto-transcribed titles the cue
+    // list only reaches the transcription frontier, and dividing by the last
+    // cue's end inflated History percentages (e.g. "70%" at 44 min of a 9 h
+    // book whose first hour was transcribed).
+    try {
+      const g = window.getAudioProgress?.();
+      if (g && g.dur > 60000) return g.dur;
+    } catch (_) {}
     try {
       const n = window.allNotes;
       const last = Array.isArray(n) && n.length ? n[n.length - 1] : null;

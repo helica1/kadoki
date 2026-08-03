@@ -75,6 +75,52 @@
     return 'file://' + path;
   }
 
+  // Read an arbitrary byte range. Returns null when the server ignored the
+  // Range header for a non-zero offset (a 200-with-full-body would hand us
+  // bytes from position 0 and silently corrupt the atom walk).
+  async function readRange(url, start, len) {
+    const r = await fetch(url, { headers: { Range: `bytes=${start}-${start + len - 1}` } });
+    if (!r.ok && r.status !== 206 && r.status !== 0) {
+      throw new Error('fetch ' + url + ' → ' + r.status);
+    }
+    if (start > 0 && r.status !== 206) {
+      const cr = r.headers.get('Content-Range');
+      if (!cr || !cr.includes(String(start))) {
+        try { r.body?.cancel(); } catch (e) {}
+        return null;
+      }
+    }
+    const reader = r.body.getReader();
+    const chunks = [];
+    let total = 0;
+    while (total < len) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+    try { reader.cancel(); } catch (e) {}
+    if (total === 0) return null;
+    const out = new Uint8Array(Math.min(total, len));
+    let off = 0;
+    for (const c of chunks) {
+      if (off >= out.length) break;
+      out.set(c.subarray(0, Math.min(c.byteLength, out.length - off)), off);
+      off += c.byteLength;
+    }
+    return out;
+  }
+
+  async function getFileSize(cachePath) {
+    try {
+      const fs = window.Capacitor?.Plugins?.Filesystem;
+      const p = cachePath.startsWith('file://') ? cachePath : 'file://' + cachePath;
+      const st = await fs?.stat({ path: p });
+      if (st && st.size > 0) return st.size;
+    } catch (e) {}
+    return 0;
+  }
+
   // ============================================================
   // EPUB cover
   // ============================================================
@@ -88,14 +134,17 @@
       const blob = await res.blob();
       const zip = await JSZip.loadAsync(blob);
 
-      const containerXml = await zip.file('META-INF/container.xml')?.async('string');
+      // UTF-8 BOM strip — iOS WebKit's XML parser fails on content before
+      // <?xml (Blink tolerates it); JSZip keeps the BOM in decoded strings.
+      const deBom = (s) => (s ? s.replace(/^\uFEFF+/, '') : s);
+      const containerXml = deBom(await zip.file('META-INF/container.xml')?.async('string'));
       if (!containerXml) return null;
       const opfPath = new DOMParser()
         .parseFromString(containerXml, 'application/xml')
         .querySelector('rootfile')?.getAttribute('full-path');
       if (!opfPath) return null;
 
-      const opfXml = await zip.file(opfPath).async('string');
+      const opfXml = deBom(await zip.file(opfPath).async('string'));
       const opfDoc = new DOMParser().parseFromString(opfXml, 'application/xml');
       const opfDir = opfPath.includes('/') ? opfPath.replace(/[^/]+$/, '') : '';
 
@@ -220,6 +269,52 @@
     return { dataUri: makeDataUri(pic, mime), mime };
   }
 
+  // Locate the top-level moov atom by hopping atom headers with ranged
+  // reads (ftyp → free → mdat → … → moov), then fetch the whole moov and
+  // reuse the in-buffer walker. Handles 64-bit (size==1 + largesize) and
+  // to-end-of-file (size==0) atoms, both common with multi-GB mdat.
+  async function findMp4CoverByRangedWalk(url, cachePath) {
+    try {
+      const fileSize = await getFileSize(cachePath);
+      if (!fileSize) return null;
+      let off = 0;
+      for (let hops = 0; hops < 64 && off + 16 <= fileSize; hops++) {
+        const hdr = await readRange(url, off, 16);
+        if (!hdr || hdr.length < 8) return null;
+        let size = readU32BE(hdr, 0);
+        const type = String.fromCharCode(hdr[4], hdr[5], hdr[6], hdr[7]);
+        let headerLen = 8;
+        if (size === 1) {
+          if (hdr.length < 16) return null;
+          size = readU32BE(hdr, 8) * 4294967296 + readU32BE(hdr, 12);
+          headerLen = 16;
+        } else if (size === 0) {
+          size = fileSize - off;
+        }
+        if (!/^[\x20-\x7e]{4}$/.test(type) || size < headerLen) return null;
+        if (type === 'moov') {
+          const MAX_MOOV = 32 * 1024 * 1024;
+          const buf = await readRange(url, off, Math.min(size, MAX_MOOV));
+          if (!buf) return null;
+          if (size > buf.length) {
+            // Truncated fetch — clamp the moov size field so the in-buffer
+            // walker's bounds checks hold (covr sits near the front of moov).
+            if (headerLen !== 8) return null;
+            const c = buf.length;
+            buf[0] = (c >>> 24) & 255; buf[1] = (c >>> 16) & 255;
+            buf[2] = (c >>> 8) & 255;  buf[3] = c & 255;
+          }
+          return findMp4Cover(buf, 0, buf.length);
+        }
+        off += size;
+      }
+      return null;
+    } catch (e) {
+      console.warn('[cover] ranged moov walk failed:', e?.message || e);
+      return null;
+    }
+  }
+
   async function fromAudio(cachePath) {
     if (!cachePath) return null;
     try {
@@ -279,8 +374,16 @@
           console.log('[cover] MP4 covr found, ' + r.dataUri.length + ' base64 chars ' + r.mime);
           return r;
         }
-        console.warn('[cover] MP4 has no covr atom in the first ' +
-          Math.round(MAX_AUDIO_HEAD_BYTES / 1024 / 1024) + ' MB. Cover may be in mvhd > udta past the buffer.');
+        // moov usually sits AFTER the multi-hundred-MB mdat in audiobook
+        // m4b files (non-faststart mux), so the head buffer never reaches
+        // it. Walk the top-level atoms via ranged reads to find moov
+        // anywhere in the file, fetch just that atom, and walk inside it.
+        const r2 = await findMp4CoverByRangedWalk(urlFor(cachePath), cachePath);
+        if (r2) {
+          console.log('[cover] MP4 covr found via ranged moov walk, ' + r2.mime);
+          return r2;
+        }
+        console.warn('[cover] MP4 has no reachable covr atom (head + ranged moov walk).');
         return null;
       }
 
