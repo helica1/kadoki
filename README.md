@@ -23,7 +23,7 @@ Unlike browser-script workflows, Kadoki is **fully integrated**. No plugins, bro
 
 ## What's new in 1.6.6
 
-The biggest update since the AI companion: **on-device subtitle generation and book sync, on both platforms**. SRT files are no longer needed — and results are actually better without them. A book + audiobook pair is transcribed on device in real time and matched to the book's own text; an audiobook alone gets natively generated subtitles. Generated lines carry word-level timing (karaoke highlighting, precise Anki audio clips) that pre-made SRTs don't have. No more preprocessing with SubPlz; existing SRTs remain fully supported.
+The biggest update since the AI companion: **on-device subtitle generation and book sync, on both platforms**. SRT files are no longer needed — and results are actually better without them, as word-level karaoke-style highlighting is now possible. A book + audiobook pair is transcribed on device in real time and matched to the book's own text; an audiobook alone gets natively generated subtitles. It is no longer necessary to perform preprocessing with SubPlz, although existing SRTs remain fully supported.
 
 Beyond that, both platforms get karaoke-style highlighting, a dictionary lookup history, and per-title statistics — and iOS gains a full **Apple Watch app**.
 
