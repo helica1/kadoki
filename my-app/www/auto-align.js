@@ -692,6 +692,7 @@
     seedFromCues, // rebuild anchors from persisted b:1 cues after a restart
     progressAt,   // (ms) → anchor-interpolated book fraction 0..1, or null
     msForProgress,// (ratio 0..1) → anchor-interpolated audio ms, or null
+    textLen: () => (state && state.flat) ? state.flat.length : 0,  // full raw book chars (render-independent)
     stats,
     _internals: { normalizeStr, fuzzyFind, _adoptText, expectedPos: (ms) => state && expectedPos(state, ms) }
   };

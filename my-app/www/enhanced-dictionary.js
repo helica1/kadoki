@@ -2665,7 +2665,8 @@
         // History review must NEVER move the place — hide the seek action
         // entirely for lookups re-opened from the lookup-history viewer.
         if (ctx.source === 'history') { btn.style.display = 'none'; return; }
-        if (!Number.isFinite(ctx.cueIndex) && !Number.isFinite(ctx.cueStartMs)) {
+        if (!Number.isFinite(ctx.cueIndex) && !Number.isFinite(ctx.cueStartMs) &&
+            !(Number.isFinite(ctx.bookFrac) && ctx.cueAudioPath)) {
             btn.disabled = true;
             return;
         }
@@ -2692,6 +2693,36 @@
                 } else if (typeof window.pagedPlayFromCue === 'function' &&
                     Number.isFinite(ctx.cueIndex)) {
                     ok = await window.pagedPlayFromCue(ctx.cueIndex);
+                }
+                // LAST-RESORT (and now the reliable path for uncovered regions):
+                // book-position fraction × live audio duration. Duration is
+                // fetched HERE, async — the transcription cache's copy can be
+                // gone (the store-loss incident) but the audio engine knows it
+                // the moment the file is loaded.
+                if (!ok && !Number.isFinite(ctx.cueStartMs) && Number.isFinite(ctx.bookFrac) && ctx.cueAudioPath) {
+                    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+                    let durMs = 0;
+                    try {
+                        const kd = window._abKnownDur;
+                        if (kd && kd.ms > 0) durMs = kd.ms;
+                    } catch (_) {}
+                    if (!durMs) { try { durMs = (await window.autoTranscribe?.durationFor?.(window._activeTitleId)) || 0; } catch (_) {} }
+                    if (!durMs && bg) { try { const st = await bg.getState(); if (st?.durationMs > 0) durMs = Math.floor(st.durationMs); } catch (_) {} }
+                    if (durMs > 0 && bg) {
+                        const audioPath = ctx.cueAudioPath;
+                        const url = audioPath.startsWith('file://') ? audioPath : 'file://' + audioPath;
+                        const startMs = Math.max(0, Math.round(ctx.bookFrac * durMs) - 4000);
+                        await bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
+                        ok = true;
+                        ctx.cueEstimated = true;
+                    } else {
+                        try { window.showToast?.(window.i18n?.t?.('dc.playhead_nodur', 'Audio length unknown yet — play any audio once, then retry.') || 'Audio length unknown yet', 3000); } catch (_) {}
+                    }
+                }
+                // Uncovered region: the seek time is a book-position estimate;
+                // say so instead of letting it read as a mis-seek.
+                if (ctx.cueEstimated) {
+                  try { window.showToast?.(window.i18n?.t?.('dc.playhead_estimated', 'Subtitles not generated here yet — playing from the approximate position.') || 'Playing from approximate position', 3200); } catch (_) {}
                 }
                 // Fallback: direct bg.play if the helper isn't loaded
                 // (e.g., paged reader not active for some reason).

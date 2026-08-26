@@ -234,8 +234,13 @@
     if (cacheSig === liveSig) return true;
     const [cn, cs] = String(cacheSig).split('|');
     const [ln, ls] = String(liveSig).split('|');
-    if (cn !== ln) return false;
-    return cs === '0' || ls === '0';
+    if (cn === ln) return cs === '0' || ls === '0';
+    // Different NAME but the same nonzero byte size: the same audio under a
+    // new name (re-import, Drive sync rename, re-materialized cache file).
+    // For a multi-hundred-MB audiobook the size is the stronger identity —
+    // refusing here is how a full first-pass transcription got discarded
+    // (incident 2026-08-26: hours of cues lost to a start-from-scratch).
+    return !!(cs && ls && cs !== '0' && cs === ls);
   }
 
   // Cue snapshot for loadTitleAsSrtCards: the LIVE list when transcribing
@@ -259,9 +264,15 @@
   // Full audio duration for a title (ms) — live value when transcribing,
   // else the persisted cache. 0 when unknown.
   async function durationFor(titleId) {
-    if (active && active.titleId === titleId && active.durationMs > 0) return active.durationMs;
-    const obj = await loadCacheObj(titleId);
-    return (obj && obj.durMs > 0) ? obj.durMs : 0;
+    let ms = 0;
+    if (active && active.titleId === titleId && active.durationMs > 0) ms = active.durationMs;
+    else {
+      const obj = await loadCacheObj(titleId);
+      ms = (obj && obj.durMs > 0) ? obj.durMs : 0;
+    }
+    // Warm the SYNC duration cache every consumer of the guard reads.
+    try { if (ms > 0) window._abKnownDur = { tid: titleId, ms: Math.floor(ms) }; } catch (_) {}
+    return ms;
   }
 
   // Stable AI-map fingerprint for auto-transcribed titles: keyed to the AUDIO
@@ -596,6 +607,7 @@
         aheadMs: LOOKAHEAD_MS
       });
       if (r?.durationMs > 0 && !(a.durationMs > 0)) a.durationMs = Math.floor(r.durationMs);
+      try { if (a.durationMs > 0) window._abKnownDur = { tid: a.titleId, ms: a.durationMs }; } catch (_) {}
     } catch (e) {
       log('job start failed: ' + (e?.message || e));
       job = null;
@@ -1060,7 +1072,25 @@
     // Adopt cached partial progress (stat-failure-tolerant sig match; keep
     // the cache's sig when ours came from a failed stat so future exact
     // matches still work).
-    const obj = await loadCacheObj(titleId);
+    let obj = await loadCacheObj(titleId);
+    // A populated store that fails the sig check must NEVER be silently
+    // discarded (the fresh run's first persist would overwrite hours of
+    // transcription). Park it under _PREV — and conversely, if the main key
+    // came back empty/unreadable but a parked copy matches, adopt that.
+    if (obj && Array.isArray(obj.cues) && obj.cues.length && !sigMatches(obj.sig, me.sig)) {
+      try {
+        await window.blobStore?.set(CACHE_PREFIX + titleId + '_PREV', JSON.stringify(obj));
+        log('SIG MISMATCH: cache=' + obj.sig + ' live=' + me.sig + ' — ' + obj.cues.length +
+            ' cues parked to _PREV, starting fresh');
+      } catch (_) {}
+    }
+    if (!(obj && sigMatches(obj.sig, me.sig) && Array.isArray(obj.cues) && obj.cues.length)) {
+      const prev = await loadCacheObj(titleId + '_PREV');
+      if (prev && sigMatches(prev.sig, me.sig) && Array.isArray(prev.cues) && prev.cues.length) {
+        log('adopting _PREV backup: ' + prev.cues.length + ' cues');
+        obj = prev;
+      }
+    }
     if (obj && sigMatches(obj.sig, me.sig) && Array.isArray(obj.cues)) {
       if (/\|0$/.test(me.sig) && obj.sig && !/\|0$/.test(obj.sig)) me.sig = obj.sig;
       me.cues = normalizeCues(obj.cues);

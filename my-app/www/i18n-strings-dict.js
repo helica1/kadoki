@@ -65,6 +65,8 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'dc.sending_to_deck': { en: 'Sending to {deck}…', ja: '{deck} に送信中…' },
   'dc.ankimobile_error': { en: '✗ AnkiMobile: {msg}', ja: '✗ AnkiMobile: {msg}' },
   'dc.ankimobile_rejected': { en: '✗ AnkiMobile rejected the note. Check that model "{model}" and its fields exist.', ja: '✗ AnkiMobile がノートを拒否しました。ノートタイプ「{model}」とそのフィールドが存在するか確認してください。' },
+  'dc.playhead_nodur': { en: 'Audio length unknown yet — play any audio once, then retry.', ja: '音声の長さが未取得です。一度再生してから再試行してください。' },
+  'dc.playhead_estimated': { en: 'Subtitles not generated here yet — playing from the approximate position.', ja: 'この箇所の字幕は未生成です。おおよその位置から再生します。' },
   'dc.ankimobile_no_reply': { en: '? No reply from AnkiMobile. Sent model="{model}". Verify it exists in AnkiMobile → Manage note types.', ja: '? AnkiMobile から応答がありません。送信したノートタイプ="{model}"。AnkiMobile → ノートタイプの管理 で存在を確認してください。' },
   'dc.sent_to_deck': { en: '✓ Sent to {deck}', ja: '✓ {deck} に送信しました' },
   'dc.media_server_stuck': { en: '✗ Anki media server stuck — restart the app to recover', ja: '✗ Anki メディアサーバーが応答しません — アプリを再起動して復旧してください' },

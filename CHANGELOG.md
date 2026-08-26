@@ -4,6 +4,13 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.7.1 — 2026-08-26
+
+### Fixed
+- **Critical: reading-position protection.** Fixed a chain of bugs that could throw the saved reading place to the wrong spot (sometimes the end of the book) after reopening a title, make History entries restore to a different position than their label, and let a wrong audio-follow match overwrite the stored place. Position stores are now only written from verified matches, restores resolve by durable character offsets, and a stale saved scroll can no longer snap to the book's end.
+- **Generated subtitles can no longer be silently lost.** The on-device subtitle store survives storage hiccups and audio-file renames; if it's ever invalidated it is parked as a backup and re-adopted instead of being overwritten.
+- **Set playhead works everywhere** — including parts of the book whose subtitles haven't been generated yet: it seeks to the approximate position from your place in the book (with a notice), and subtitle generation backfills from there. It also no longer briefly flashes a whole block of green text.
+
 ## v1.7.0 — 2026-08-26
 
 ### Added

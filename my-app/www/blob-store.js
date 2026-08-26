@@ -55,7 +55,15 @@
         const d = req.result;
         if (!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE);
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const d = req.result;
+        // WKWebView closes IDB connections under memory pressure WITHOUT an
+        // error on in-flight requests — the next transaction on the dead
+        // connection throws. Drop the cached promise so the next op reopens
+        // (same healing dict-store needed; see project IDB-wedge notes).
+        try { d.onclose = () => { _dbp = null; }; } catch (_) {}
+        resolve(d);
+      };
       req.onerror = () => reject(req.error);
     });
     // A transient open failure must not poison the whole session — the next

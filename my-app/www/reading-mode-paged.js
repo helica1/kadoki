@@ -1036,11 +1036,49 @@
     } catch (_) { return null; }
   }
 
+  // Sync estimate of the audio time at a chunk (book char fraction × known
+  // duration) + whether that position lies beyond the cue list's coverage.
+  // Duration comes from the title-stamped _abKnownDur cache (audio engine /
+  // transcriber) — NEVER from async getters (a Promise compared to a number
+  // silently disabled an earlier version of this guard).
+  function _estAudioMsFor(chunk, cues) {
+    try {
+      const kd = window._abKnownDur;
+      const durMs = (kd && kd.tid === window._activeTitleId && kd.ms > 0) ? kd.ms : 0;
+      if (!(durMs > 60000) || !chunks?.length || !chunk) return null;
+      const lastC = chunks[chunks.length - 1];
+      let total = (parseInt(lastC.dataset.charOffset || '0', 10) || 0) +
+                  (parseInt(lastC.dataset.charLen || '0', 10) || 0);
+      // Truncated/corrupt render: the aligner's independently-loaded book
+      // text is the honest total (same raw-char space as charOffset).
+      try { total = Math.max(total, window.autoAlign?.textLen?.() || 0); } catch (_) {}
+      const off = parseInt(chunk?.dataset?.charOffset || '-1', 10);
+      if (!(total > 0) || off < 0) return null;
+      const est = (off / total) * durMs;
+      const lastEnd = (cues && cues.length) ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
+      return {
+        est, durMs, lastEnd,
+        uncovered: lastEnd < durMs * 0.92 && est > lastEnd + 45000,
+      };
+    } catch (_) { return null; }
+  }
+
   function findCueForTap(chunk, flatText, charIndex) {
     // Auto-transcribed titles have no pagedCues (no SRT yet) — fall back to
     // the legacy engine's live cue list, same as findNearestChunkCue.
     const cues = pagedCues?.length ? pagedCues : (window.__abCues || []);
     if (!cues.length || !chunks?.length) return null;
+    // UNCOVERED region: every cue lives elsewhere in the book, so ANY text
+    // match here is a coincidence (short/repeated phrase) — and a "found"
+    // cue doesn't just mis-seek, it PAINTS and AUTO-SCROLLS the reader to
+    // the wrong region (user: tapped at char 82k, got yanked to 11k). No
+    // cue match may even be attempted; the fraction fallback owns this.
+    const _est0 = _estAudioMsFor(chunk, cues);
+    if (_est0 && _est0.uncovered) {
+      log('findCueForTap: UNCOVERED (est ' + Math.round(_est0.est / 1000) + 's > coverage ' +
+          Math.round(_est0.lastEnd / 1000) + 's) — skipping cue match');
+      return null;
+    }
     // Time bound (fallback mode only): the map-less text scan needs it.
     const expMs = pagedCues?.length ? null : expectedMsAtChunkPos(chunk, charIndex);
     const chunkIdx = chunks.indexOf(chunk);
@@ -1064,7 +1102,23 @@
       }
     }
     if (!candidateIdxs.length) {
-      for (let i = 0; i < cues.length; i++) candidateIdxs.push(i);
+      // No per-chunk map (auto-transcribed titles). NEVER scan every cue
+      // unbounded: a short repeated phrase matched a cue anywhere in the
+      // book and "Set playhead here" started audio from a random spot.
+      // Bound candidates around the tapped chunk's position in the book
+      // (char fraction → cue fraction, ±12%); the aligner time bound below
+      // tightens further when available. A second pass over the full list
+      // is allowed only for LONG cue texts (≥12 normalized chars — long
+      // enough to be effectively unique in one book).
+      const frac = chunks.length > 1 ? chunkIdx / (chunks.length - 1) : 0;
+      const center = Math.round(frac * (cues.length - 1));
+      const span = Math.max(20, Math.round(cues.length * 0.12));
+      const lo2 = Math.max(0, center - span), hi2 = Math.min(cues.length - 1, center + span);
+      for (let i = lo2; i <= hi2; i++) candidateIdxs.push(i);
+      for (let i = 0; i < cues.length; i++) {
+        if (i >= lo2 && i <= hi2) continue;
+        if (normalizeJP(cues[i]?.text || '').length >= 12) candidateIdxs.push(i);
+      }
     }
     // Strict containment first.
     let best = null, bestDist = Infinity;
@@ -1113,7 +1167,19 @@
 
   function bindCueLookupContext(chunk, flatText, charIndex) {
     try {
-      const found = findCueForTap(chunk, flatText, charIndex);
+      let found = findCueForTap(chunk, flatText, charIndex);
+      // A found cue must roughly AGREE with where this text sits in the book:
+      // a match whose audio time is >max(10min, 15% of the book) away from
+      // the position estimate is a coincidental text hit, and following it
+      // paints/scrolls/plays the wrong region. Estimate wins.
+      if (found?.cue && Number.isFinite(found.cue.startMs)) {
+        const e2 = _estAudioMsFor(chunk, pagedCues?.length ? pagedCues : (window.__abCues || []));
+        if (e2 && Math.abs(found.cue.startMs - e2.est) > Math.max(600000, e2.durMs * 0.15)) {
+          log('bindCueLookupContext: cue#' + found.idx + ' at ' + Math.round(found.cue.startMs / 1000) +
+              's contradicts position estimate ' + Math.round(e2.est / 1000) + 's — dropping match');
+          found = null;
+        }
+      }
       if (found?.cue) {
         const cueText = String(found.cue.text || '').trim();
         window.lookupContext = {
@@ -1138,13 +1204,34 @@
         const sentence = extractSentenceAround(flatText, charIndex) ||
                          (chunk?.textContent || '').slice(0, 200).trim();
         const nearest = findNearestChunkCue(chunk, flatText, charIndex);
+        let bookFrac = null;
+        try {
+          const lastC = chunks[chunks.length - 1];
+          const total = (parseInt(lastC.dataset.charOffset || '0', 10) || 0) +
+                        (parseInt(lastC.dataset.charLen || '0', 10) || 0);
+          const off = parseInt(chunk?.dataset?.charOffset || '-1', 10);
+          // The rendered chunk list can be TRUNCATED/CORRUPT (incident: the
+          // last chunk claimed ~84k of a ~114k book, so char 82k computed as
+          // "98%" and every estimate seeked near the audio's end). The
+          // aligner's book text is loaded from the EPUB source independently
+          // of the render — when it says the book is longer, IT is the
+          // denominator. Same raw-char coordinate space as charOffset.
+          let fullLen = 0;
+          try { fullLen = window.autoAlign?.textLen?.() || 0; } catch (_) {}
+          const denom = Math.max(total, fullLen);
+          if (denom > 0 && off >= 0) bookFrac = off / denom;
+        } catch (_) {}
         window.lookupContext = {
           source: 'paged-reader',
           sentence,
           card: null,
-          cueAudioPath: nearest ? (pagedAudioPath || window.__abAudioPath || null) : null,
+          // Audio path is NOT gated on a cue match: the fraction fallback in
+          // the Set-playhead button needs it even when no cue was found.
+          cueAudioPath: pagedAudioPath || window.__abAudioPath || null,
           cueStartMs:   nearest?.startMs ?? null,
-          cueEndMs:     nearest?.endMs   ?? null
+          cueEndMs:     nearest?.endMs   ?? null,
+          cueEstimated: !!nearest?.est,
+          bookFrac
         };
         log(`bindCueLookupContext: no cue — sentence-fallback "${sentence.slice(0,30)}…"` +
             (nearest ? ` audio=cue${nearest.idx}` : ' audio=NONE'));
@@ -1177,6 +1264,41 @@
     // phrase text elsewhere in the book used to win and seek randomly.
     const expMs = (cuesSource === 'legacy')
       ? expectedMsAtChunkPos(chunk, hasTap ? charIndex : 0) : null;
+
+    // --- Strategy 0: UNCOVERED region of a partially-transcribed book ---
+    // MUST RUN FIRST (round 2: "works for small adjustments, totally off
+    // after a 10k-char jump"): when the tapped position lies beyond the cue
+    // list's coverage, NO cue-based strategy can be right — the text search
+    // false-positives on repeated phrases anywhere in the partial list, and
+    // the aligner estimate clamps to its anchor frontier (~the last
+    // transcribed minute). Estimate from the BOOK CHAR FRACTION over the
+    // FULL audio duration instead; seeking there makes the transcriber
+    // restart at that spot and backfill, so real cues follow shortly.
+    try {
+      const tid = window._activeTitleId;
+      // SYNC duration only — durationFor() is ASYNC and comparing its
+      // Promise to a number silently disabled this whole strategy (the
+      // "Set playhead does nothing after a big jump" bug). _abKnownDur is
+      // title-stamped and fed by the audio engine + transcriber.
+      const kd = window._abKnownDur;
+      const durMs = (kd && kd.tid === tid && kd.ms > 0) ? kd.ms : 0;
+      const lastEnd = cues.length ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
+      if (durMs > 60000 && lastEnd < durMs * 0.92 && chunks?.length && chunk) {
+        const lastC = chunks[chunks.length - 1];
+        let total = (parseInt(lastC.dataset.charOffset || '0', 10) || 0) +
+                    (parseInt(lastC.dataset.charLen || '0', 10) || 0);
+        try { total = Math.max(total, window.autoAlign?.textLen?.() || 0); } catch (_) {}
+        const off = parseInt(chunk.dataset.charOffset || '-1', 10);
+        if (total > 0 && off >= 0) {
+          const est = (off / total) * durMs;
+          if (est > lastEnd + 45000) {
+            log('findNearestChunkCue: UNCOVERED — char-fraction estimate ' + Math.round(est / 1000) + 's (coverage ends ' + Math.round(lastEnd / 1000) + 's)');
+            return { idx: -1, startMs: Math.max(0, Math.round(est) - 4000), endMs: null, est: true };
+          }
+        }
+      }
+    } catch (_) {}
+
 
     // --- Strategy 1: best cue whose text appears in this chunk ---
     // Algorithm (v6):
@@ -1389,7 +1511,7 @@
         if (d < bestDist) { bestDist = d; best = chunks[i]; }
       }
     }
-    if (best) return best;
+    if (best) { _lastNearWasFuzzy = false; return best; }
     // FUZZY fallback (small windows only — the follow's ±8 search): exact
     // substring match fails whenever the ASR cue text diverges from the book
     // by a few characters, and each such cue used to freeze the follow for
@@ -1398,7 +1520,10 @@
     // exact 6-char runs of the cue wins, needing ≥25% of grams so a stray
     // shared phrase can't hijack it. Same technique as the quote-clip
     // resolver (ai-chunks gramVote).
-    if (radius <= 24 && t.length >= 8) {
+    // NEVER fuzzy-match from an unknown anchor: anchorIdx clamps to 0 above,
+    // and a loose gram vote over chunks 0..8 is how a mid-book cue teleported
+    // the follow (and every place store downstream) to the START of the book.
+    if (radius <= 24 && t.length >= 8 && Number.isFinite(anchorIdx) && anchorIdx > 0) {
       const G = 6, STEP = 3;
       const grams = [];
       for (let o = 0; o + G <= t.length; o += STEP) grams.push(t.substr(o, G));
@@ -1413,10 +1538,11 @@
         const d = (i >= anchorIdx) ? (i - anchorIdx) : (anchorIdx - i) + 0.5;
         if (score > bestScore || (score === bestScore && d < bestD)) { bestScore = score; bestD = d; bestC = chunks[i]; }
       }
-      if (bestC) return bestC;
+      if (bestC) { _lastNearWasFuzzy = true; return bestC; }
     }
     return null;
   }
+  let _lastNearWasFuzzy = false;   // how findChunkForTextNear got its last answer
 
   // Expected chunk index for a cue, derived from the auto-transcription
   // aligner's anchor lattice (audio ms → book char fraction; frontmatter the
@@ -1563,27 +1689,66 @@
   // teleport the highlight to an identical string mid-book; with an estimate
   // available, a miss inside the bounded window now paints NOTHING instead
   // (the next matched cue recovers) — wrong-spot is worse than no-paint.
+  // PLACE-INVARIANT TRUST GATE (incident 2026-08-26): whatever chunk the
+  // follow paints feeds the place stores (History's lastHighlightedChunkIdx,
+  // the MONOTONIC stats read frontier, the scroll save, the settle bookmark —
+  // and via Drive sync's max-merge a bad forward value becomes permanent).
+  // The resolver therefore reports HOW it found the chunk, and untrusted
+  // answers (fuzzy gram vote, global text search) may paint but must never
+  // persist place — and are rejected outright when they'd teleport the
+  // follow far from the last trusted spot during sequential listening.
+  let _lastResolveTrusted = false;                 // how resolveCueChunk got its last answer
+  let _lastTrustedCi = -1, _lastTrustedCueIdx = -1;
+  function _noteTrusted(chunk, cueIdx) {
+    _lastResolveTrusted = true;
+    const ci = chunks.indexOf(chunk);
+    if (ci >= 0) { _lastTrustedCi = ci; _lastTrustedCueIdx = cueIdx; }
+  }
+  function _rejectTeleport(chunk, cueIdx) {
+    if (_lastTrustedCi < 0) return false;
+    const ci = chunks.indexOf(chunk);
+    if (ci < 0) return true;
+    // Sequential listening (small cue delta) cannot legitimately move the
+    // follow dozens of chunks — that shape is a mismatch, not a seek.
+    return Math.abs(cueIdx - _lastTrustedCueIdx) <= 6 && Math.abs(ci - _lastTrustedCi) > 30;
+  }
   function resolveCueChunk(cueIdx, cueText, allowGlobal) {
+    _lastResolveTrusted = false;
     if (pagedCueToChunk && cueIdx >= 0 && cueIdx < pagedCueToChunk.length &&
         pagedCueToChunk[cueIdx] >= 0) {
       const c = chunks[pagedCueToChunk[cueIdx]];
-      if (c) { _fcSyncFrom(cueIdx, cueText, c); return c; }
+      if (c) { _noteTrusted(c, cueIdx); _fcSyncFrom(cueIdx, cueText, c); return c; }
     }
     // Sequential cursor: the next cue starts where the last one ended.
+    // Head-matched from a trusted lock in a tiny window → trusted.
     const cc = _fcAdvance(cueIdx, cueText);
-    if (cc) return cc;
+    if (cc) { _noteTrusted(cc, cueIdx); return cc; }
     const near = findChunkForTextNear(cueText, lastHighlightedChunkIdx, 8);
-    if (near) { _fcSyncFrom(cueIdx, cueText, near); return near; }
+    if (near) {
+      if (_lastNearWasFuzzy) {
+        if (_rejectTeleport(near, cueIdx)) return null;
+        _fcSyncFrom(cueIdx, cueText, near);
+        return near;                               // paint-only: _lastResolveTrusted stays false
+      }
+      _noteTrusted(near, cueIdx); _fcSyncFrom(cueIdx, cueText, near); return near;
+    }
     const expIdx = expectedChunkForCue(cueIdx);
     if (expIdx >= 0) {
       // ~2% of the book each side, floor 20 / cap 200 chunks.
       const radius = Math.min(200, Math.max(20, Math.round(chunks.length * 0.02)));
       const far = findChunkForTextNear(cueText, expIdx, radius);
-      if (far) _fcSyncFrom(cueIdx, cueText, far);
+      if (far) {
+        if (_rejectTeleport(far, cueIdx)) return null;
+        if (!_lastNearWasFuzzy) _noteTrusted(far, cueIdx);
+        _fcSyncFrom(cueIdx, cueText, far);
+      }
       return far;
     }
     const glob = allowGlobal ? findChunkForText(cueText) : null;
-    if (glob) _fcSyncFrom(cueIdx, cueText, glob);
+    if (glob) {
+      if (_rejectTeleport(glob, cueIdx)) return null;
+      _fcSyncFrom(cueIdx, cueText, glob);          // legacy path — paint-only, never trusted
+    }
     return glob;
   }
 
@@ -2832,6 +2997,15 @@
       // only reject when a DIFFERENT book is named.
       if ((loc.bookName && loc.bookName !== currentName) || !chunks?.length) return;
       let idx = loc.chunkIdx;
+      // The char offset (jpOff) is the durable coordinate — a chunk INDEX is
+      // only valid against the pagination it was captured on (font change,
+      // synthetic-book growth, re-split). An in-range-but-stale index was the
+      // "History said char 106,000, jumped to char 15,000" bug: resolve the
+      // offset independently and trust IT whenever the two disagree.
+      if (Number.isFinite(loc.jpOff) && loc.jpOff > 0) {
+        const byOff = _findChunkForJpOff(loc.jpOff);
+        if (byOff >= 0 && (!(idx >= 0 && idx < chunks.length) || Math.abs(byOff - idx) > 2)) idx = byOff;
+      }
       if (!(idx >= 0 && idx < chunks.length)) idx = _findChunkForJpOff(loc.jpOff);
       if (!(idx >= 0 && idx < chunks.length)) return;
       _bookmarkChunkIdx = idx;
@@ -4780,7 +4954,15 @@
         }
       }
       if (!_restored) {
-        scrollEl.scrollTo({ left: resumeLeft, behavior: 'instant' }); // no/late bookmark → raw fallback
+        // A scrollLeft saved against a wider layout (font/orientation change)
+        // exceeds the new max and the browser CLAMPS it — literally the end
+        // of the book. A restore may be approximate; it must never be that.
+        const _max = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
+        if (resumeLeft <= _max - 8 || _max <= 8) {
+          scrollEl.scrollTo({ left: resumeLeft, behavior: 'instant' }); // no/late bookmark → raw fallback
+        } else {
+          log('[restore] stale scrollLeft ' + resumeLeft + ' > max ' + _max + ' — skipped (would clamp to book end)');
+        }
       }
       setTimeout(() => { suppressScrollSave = false; }, 200);
     } catch (e) {
@@ -6013,12 +6195,15 @@
     }
     if (!chunk) chunk = findChunkForText(cue.text);
     if (chunk) {
-      // Paint the cue-active (GREEN) highlight directly — the same key the
-      // audio auto-follow uses — so the line is green immediately AND keeps
-      // following as audio advances. (The old paintSelectionHighlight set the
-      // separate reader-selection key, which is static and doesn't move with
-      // the playhead.)
-      try { setCueRangeHighlight(chunk, cue.text || ''); } catch (e) {}
+      // Paint the same way the audio follow would: word-timed cues take the
+      // karaoke glow ONLY (kwOnly) — the unconditional block paint here made
+      // Set-playhead flash the whole passage green for a second until the
+      // follow's kwOnly repaint cleared it.
+      try {
+        const kwOnly = !!(Array.isArray(cue.w) && cue.w.length && window.wordHighlight);
+        const range = setCueRangeHighlight(chunk, cue.text || '', kwOnly);
+        if (kwOnly && range) { try { window.wordHighlight?.readerCuePainted(range, cue); } catch (_) {} }
+      } catch (e) {}
     }
     // Reset BOTH cue gates so the position listener re-renders and re-fires
     // __onPagedCueUpdate for the landing cue — even when the audio lands on the
@@ -6091,6 +6276,11 @@
       _wdBusy = true;
       let s = null;
       try { s = await bg.getState(); } catch (_) {}
+      try {
+        if (s && s.durationMs > 0 && window._activeTitleId) {
+          window._abKnownDur = { tid: window._activeTitleId, ms: Math.floor(s.durationMs) };
+        }
+      } catch (_) {}
       _wdBusy = false;
       if (!s || !s.playing || !(Number(s.positionMs) > 0)) return;
       const pos = Number(s.positionMs);
@@ -6258,7 +6448,11 @@
         window._audioStatsLastPosMs  = posMs;
         window._audioStatsPrevListening = listening;
       }
+      // Title-stamped like every other writer of this cursor: without the
+      // stamp, a cue index from one title could be adopted as the reopen
+      // position of another (ensureGreenOnEnter checks the stamp).
       window._lastAudioCueIdx = idx;
+      try { window._lastAudioCueTitleId = window._activeTitleId; } catch (_) {}
       // Strip repaint skipped while the PAGE is hidden (screen off): nothing
       // is visible, and in read mode updateProgress scans chunk rects.
       if (!document.hidden) try { updateProgress({ cueIdx: idx }); } catch (_) {}
@@ -6339,8 +6533,12 @@
     // reintroduce the old auto-scroll over-count.
     if (document.body.classList.contains('mode-read')) {
       try {
-        const _jpEnd = (parseInt(chunk.dataset.jpOff) || 0) + (parseInt(chunk.dataset.jpLen) || 0);
-        if (_jpEnd > 0) window.stats?.noteReadPosition?.(_jpEnd);
+        // MONOTONIC frontier: only a TRUSTED resolution may advance it — a
+        // wrong forward paint can never be walked back (place invariant).
+        if (_lastResolveTrusted) {
+          const _jpEnd = (parseInt(chunk.dataset.jpOff) || 0) + (parseInt(chunk.dataset.jpLen) || 0);
+          if (_jpEnd > 0) window.stats?.noteReadPosition?.(_jpEnd);
+        }
         window.stats?.bumpRead?.();
       } catch (_) {}
       // READ-ALONG cursor: the reader is visibly tracking the spoken line, so
