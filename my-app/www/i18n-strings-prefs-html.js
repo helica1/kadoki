@@ -118,4 +118,13 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
     en: 'Auto-generate scene pictures<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">When scenes are created during chapter summarization, their images are also generated automatically (queued about every 20 seconds so the server is not overloaded). This costs money.</span>',
     ja: 'シーン画像を自動生成<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">章の要約で場面が作られたら、その画像も自動で生成します（順番待ちで約20秒おきに生成しサーバーを過負荷にしません）。コストがかかります。</span>'
   },
+
+  // ---- Backup & transfer settings ----
+  'ph.sec_transfer': { en: 'Backup & transfer settings', ja: '設定のバックアップ・引き継ぎ' },
+  'ph.transfer_desc': {
+    en: 'Move all settings to another device or installation: appearance, playback, AI configuration (including API keys), Anki mappings, and dictionary preferences. Positions, stats, and library content are never included. The exported file contains your API keys - keep it private.',
+    ja: '外観・再生・AI設定（APIキーを含む）・Anki設定・辞書設定を別の端末やインストールへ移行します。読書位置・統計・ライブラリは含まれません。エクスポートファイルにはAPIキーが含まれるため、取り扱いに注意してください。'
+  },
+  'ph.export_settings': { en: 'Export settings…', ja: '設定をエクスポート…' },
+  'ph.import_settings': { en: 'Import settings…', ja: '設定をインポート…' },
 });

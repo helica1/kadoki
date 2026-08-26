@@ -56,6 +56,8 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'at.toast_book':          { en: 'No native subtitles — generating on device and matching to the book text', ja: 'ネイティブ字幕がないため、端末上で生成し本文と照合します' },
   'at.synth_chip':          { en: 'Generated text', ja: '生成テキスト' },
   'at.generating':          { en: 'Generating subtitles on device…', ja: '端末上で字幕を生成中…' },
+  'at.syncing':             { en: 'Syncing subtitles…', ja: '字幕を同期中…' },
+  'at.overall':             { en: 'overall', ja: '全体' },
   'at.downloading':         { en: 'Downloading speech model…', ja: '音声認識モデルをダウンロード中…' },
   'at.download_failed':     { en: 'Speech model download failed. Check your connection and reopen the title.', ja: '音声認識モデルのダウンロードに失敗しました。接続を確認してタイトルを開き直してください。' },
   'at.failed':              { en: 'Subtitle generation failed. Reopen the title to retry.', ja: '字幕の生成に失敗しました。タイトルを開き直して再試行してください。' },

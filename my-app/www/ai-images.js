@@ -200,7 +200,13 @@
   // mime preserved; raw base64 is png-wrapped downstream). Typed errors mirror fal:
   // ._status, ._refused (content policy), ._terminal (bad request / no model).
   async function openrouterRenderImage(o) {
-    const orm = openrouterImageModel();
+    let orm = openrouterImageModel();
+    // Per-entry override (viewer regenerate with a one-off model choice) — read
+    // at render time like the default, so it survives the outbox drain delay.
+    if (o && o.orModel) {
+      const hit = Array.isArray(_orImgModelsCache) ? _orImgModelsCache.find(x => x.id === o.orModel) : null;
+      orm = hit ? Object.assign({}, hit) : { id: String(o.orModel), name: String(o.orModel), outMods: ['image', 'text'] };
+    }
     if (!orm || !orm.id) { const e = new Error('No OpenRouter image model selected (Preferences → AI Image)'); e._terminal = true; throw e; }
     const key = (window.ai && window.ai.openrouterKey && window.ai.openrouterKey()) || '';
     if (!key) { const e = new Error('No OpenRouter key — add one in Preferences → AI Features'); e._status = 401; throw e; }
@@ -564,6 +570,7 @@
         prompt: String(opts.prompt), caption: opts.caption || '', style: opts.style || '', sceneId: opts.sceneId || charId,
         scenes: 1, size: opts.size || defSize(),
         backend: backend(),
+        orModel: opts.orModel || null,   // per-entry OpenRouter model override (viewer regenerate)
         attempt, serverJobId: null, batchId: null, status: 'pending', ts: Date.now(), error: null,
       });
       return { ok: true, queued: true };
@@ -1252,14 +1259,15 @@
   // when the book has a reading (it usually does, but NOT always — so this is
   // conditional). The whole caption is dict-tappable, and class 'kai-summary-text'
   // lets the character-name squiggle poll mark names (tap → character popup).
-  function buildCaptionEl(caption, rec) {
+  function buildCaptionEl(caption, rec, capOpts) {
     // A labelled block: a small "画像キャプション" header tells the reader this is an
     // image caption (not body text), with the caption itself just under card size.
     // (Colour lives on the wrapper so callers — e.g. the fullscreen viewer — can
     // brighten the whole caption by setting the returned element's color.)
+    capOpts = capOpts || {};
     const wrapEl = el('div', 'margin-top:8px;color:#cdd;');
-    wrapEl.appendChild(el('div', 'font-size:calc(var(--font-size-card, 1rem) * 0.6);color:#8a93b8;letter-spacing:.08em;margin-bottom:3px;opacity:.9;', window.i18n.t('im.image_caption_label', 'Image caption')));
-    const box = el('div', 'font-size:calc(var(--font-size-card, 1rem) * 0.82);line-height:1.5;font-family:var(--font-family-card);white-space:pre-wrap;');
+    if (!capOpts.noLabel) wrapEl.appendChild(el('div', 'font-size:calc(var(--font-size-card, 1rem) * 0.6);color:#8a93b8;letter-spacing:.08em;margin-bottom:3px;opacity:.9;', window.i18n.t('im.image_caption_label', 'Image caption')));
+    const box = el('div', 'font-size:' + (capOpts.fontSize || 'calc(var(--font-size-card, 1rem) * 0.82)') + ';line-height:1.5;font-family:var(--font-family-card);white-space:pre-wrap;');
     box.className = 'kai-summary-text';
     box.dataset.dictLazy = '1';
     const reading = rec && (rec.rubyReading || rec.standardReading);
@@ -1290,8 +1298,16 @@
     if (!Array.isArray(list) || !list.length) return;
     let idx = Math.max(0, Math.min(startIdx || 0, list.length - 1));
     const canCrop = !!(opts.interactive && opts.titleId && opts.charId);
+    // A native <select> (the corner model picker) opening/dismissing its own
+    // OS-level picker sheet can bounce a ghost tap back onto the overlay —
+    // same WebView-compatibility-click family as swallowGhostClick below, just
+    // triggered by a DIFFERENT control. The caller (buildFooter) calls
+    // ctx.suppressClose() around that interaction to swallow it here, mirroring
+    // how the dictionary popup ignores taps that originate from its own pickers.
+    let closeGuardUntil = 0;
 
     const ov = el('div', 'position:fixed;inset:0;background:rgba(0,0,0,.93);z-index:9700;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:14px;box-sizing:border-box;');
+    ov.id = 'kaiLightbox';   // dict-overlay exclusion: taps inside must not dismiss the dict popup
     shieldOverlay(ov);
     const stage = el('div', 'position:relative;overflow:hidden;border-radius:8px;background:#0c0c12;touch-action:none;');
     const img = el('img', 'position:absolute;left:0;top:0;object-fit:contain;transform-origin:0 0;will-change:transform;user-select:none;-webkit-user-drag:none;pointer-events:none;');
@@ -1299,7 +1315,13 @@
     const slideImg = el('img', 'position:absolute;left:0;top:0;object-fit:contain;will-change:transform;user-select:none;-webkit-user-drag:none;pointer-events:none;display:none;');
     stage.appendChild(img);
     stage.appendChild(slideImg);
-    ov.appendChild(stage);
+    // Wrapper (not `stage` itself) hosts the optional corner action buttons —
+    // they must sit OUTSIDE stage's own pointerdown/pointerup listeners (siblings,
+    // not descendants) so tapping them never gets mistaken for a tap-to-close or
+    // starts a pan/swipe.
+    const stageWrap = el('div', 'position:relative;');
+    stageWrap.appendChild(stage);
+    ov.appendChild(stageWrap);
 
     const closeBtn = el('button', 'position:absolute;top:calc(12px + env(safe-area-inset-top,0px));left:12px;z-index:5;background:rgba(0,0,0,.62);border:1px solid rgba(255,255,255,.28);color:#fff;font-size:1.5rem;width:48px;height:48px;border-radius:50%;cursor:pointer;line-height:46px;text-align:center;padding:0;-webkit-tap-highlight-color:transparent;', '✕');
     const counter = el('div', 'position:absolute;top:18px;right:16px;z-index:3;background:rgba(0,0,0,.5);color:#fff;font-size:.74rem;padding:3px 10px;border-radius:9px;');
@@ -1326,7 +1348,7 @@
     const resetZoom = () => { S = 1; tx = 0; ty = 0; applyT(); cropBar.style.display = 'none'; };
     const fit = () => {
       const natW = img.naturalWidth || 1, natH = img.naturalHeight || 1;
-      const f = Math.min((window.innerWidth * 0.96) / natW, (window.innerHeight * 0.72) / natH, 1);
+      const f = Math.min((window.innerWidth * 0.96) / natW, (window.innerHeight * (opts.fitH || 0.72)) / natH, 1);
       dispW = Math.max(1, Math.round(natW * f)); dispH = Math.max(1, Math.round(natH * f));
       stage.style.width = dispW + 'px'; stage.style.height = dispH + 'px';
       img.style.width = dispW + 'px'; img.style.height = dispH + 'px';
@@ -1347,8 +1369,14 @@
       if (multi) list.forEach((_, k) => dots.appendChild(el('span', 'width:7px;height:7px;border-radius:50%;background:' + (k === idx ? '#fff' : 'rgba(255,255,255,.4)') + ';')));
       capWrap.innerHTML = '';
       const cap = list[idx].caption;
-      if (cap) { const c = buildCaptionEl(cap, opts.rec); c.style.color = '#e6e6ee'; capWrap.appendChild(c); try { window.aiCharsUi && window.aiCharsUi.markNow(c); } catch (_) {} }
-      hint.textContent = canCrop ? window.i18n.t('im.hint_pinch_swipe', 'Pinch to zoom → "Crop" · Swipe for next image') : (multi ? window.i18n.t('im.hint_swipe_next', 'Swipe for next image') : '');
+      const compact = typeof opts.buildFooter === 'function';   // the scene viewer: compact purple caption, no label
+      if (cap) {
+        const c = buildCaptionEl(cap, opts.rec, compact ? { noLabel: true, fontSize: '.85rem' } : null);
+        c.style.color = compact ? '#a89fc6' : '#e6e6ee';
+        capWrap.appendChild(c);
+        try { window.aiCharsUi && window.aiCharsUi.markNow(c); } catch (_) {}
+      }
+      hint.textContent = compact ? '' : (canCrop ? window.i18n.t('im.hint_pinch_swipe', 'Pinch to zoom → "Crop" · Swipe for next image') : (multi ? window.i18n.t('im.hint_swipe_next', 'Swipe for next image') : ''));
     };
     const show = (k) => { idx = Math.max(0, Math.min(k, list.length - 1)); cropBar.style.display = 'none'; img.src = list[idx].dataUri; updateInfo(); };   // clamp, no wrap
     img.onload = fit;
@@ -1397,7 +1425,7 @@
       slideTimer = setTimeout(() => { slideImg.style.display = 'none'; slideImg.style.transition = 'none'; img.style.transition = 'none'; applyT(); }, 165);
     };
 
-    const close = () => { try { ov.remove(); } catch (_) {} };
+    const close = () => { try { ov.remove(); } catch (_) {} try { if (opts.onClose) opts.onClose(); } catch (_) {} };
     // Android WebView synthesizes a `click` shortly after a closing TAP's pointerup;
     // with `ov` already removed it lands on the inline image behind and REOPENS the
     // viewer (image flashes away then back). Swallow exactly that one ghost click.
@@ -1413,7 +1441,53 @@
     closeBtn.addEventListener('click', (e) => { e.stopPropagation(); close(); });
     prevBtn.addEventListener('click', (e) => { e.stopPropagation(); show(idx - 1); });
     nextBtn.addEventListener('click', (e) => { e.stopPropagation(); show(idx + 1); });
-    ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+    ov.addEventListener('click', (e) => { if (e.target === ov && Date.now() >= closeGuardUntil) close(); });
+
+    // Optional caller-built action footer (the timeline feed's viewer: delete /
+    // regenerate / model picker). Rendered under the caption; the caller gets
+    // {current, close} to act on the image being viewed.
+    if (typeof opts.buildFooter === 'function') {
+      try {
+        capWrap.style.maxHeight = '10vh';   // compact viewer: caption is a single small line now
+        const ctx = {
+          current: () => ({ idx, row: list[idx] }), close,
+          suppressClose(ms) { closeGuardUntil = Date.now() + (ms || 700); },
+        };
+        const built = opts.buildFooter(ctx);
+        // buildFooter may return a plain footer node (legacy), or
+        // {footer, corner} — corner renders over the TOP of the image (clear
+        // of the picture's own subject, which usually sits lower/center), not
+        // in the scrollable footer. corner is either [delEl, regenEl]
+        // (top-left / top-right) or {left, right, below} where `below` (e.g.
+        // the model picker) sits centered just under the left/right pair —
+        // grouped together since they're all "regenerate" controls.
+        const footEl = (built && built instanceof Node) ? built : (built && built.footer) || null;
+        const cornerEls = (built && !(built instanceof Node) && built.corner) ? built.corner : null;
+        if (footEl) { footEl.style.zIndex = '5'; ov.appendChild(footEl); }
+        if (cornerEls) {
+          // A REAL layout row placed ABOVE the image (inserted before stageWrap
+          // in ov's flex-column flow), not an absolute overlay on top of it —
+          // an overlay anchored by a fixed pixel offset looked fine for a tall
+          // portrait image but landed mid-picture for a shorter/landscape one,
+          // since the offset was relative to the image's own (variable) height.
+          // A flow row can't ever overlap the picture, whatever its aspect ratio.
+          const topBar = el('div', 'display:flex;flex-direction:column;gap:6px;align-items:stretch;width:min(94vw,640px);box-sizing:border-box;');
+          const row = (a, b) => {
+            const r = el('div', 'display:flex;gap:10px;justify-content:space-between;align-items:center;');
+            if (a) r.appendChild(a);
+            if (b) r.appendChild(b);
+            return r;
+          };
+          if (Array.isArray(cornerEls)) {
+            topBar.appendChild(row(cornerEls[0], cornerEls[1]));
+          } else {
+            topBar.appendChild(row(cornerEls.left, cornerEls.right));
+            if (cornerEls.below) topBar.appendChild(cornerEls.below);
+          }
+          ov.insertBefore(topBar, stageWrap);
+        }
+      } catch (_) {}
+    }
 
     // ---- gestures: pinch-zoom / pan (when zoomed) / swipe (when not) -------
     const pts = new Map();
@@ -1475,7 +1549,9 @@
       if (pts.size === 0) {
         if (swipe) {
           const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y;
-          if (swipe.dir == null && Math.abs(dx) < 24 && Math.abs(dy) < 24) { swallowGhostClick(); close(); }   // genuine tap (no peek started) → close full screen
+          if (swipe.dir == null && Math.abs(dx) < 24 && Math.abs(dy) < 24) {   // genuine tap (no peek started) → close full screen
+            if (Date.now() >= closeGuardUntil) { swallowGhostClick(); close(); }
+          }
           else if (swipe.dir != null) {                                        // a neighbor was peeked → commit or snap back
             const elapsed = Math.max(1, Date.now() - (swipe.t || 0));
             const consistent = (swipe.dir === 1 && dx < 0) || (swipe.dir === -1 && dx > 0);   // released in the peeked direction
@@ -2001,7 +2077,7 @@
     // cross-device sync: union-merge the image index (never lose images/crops)
     mergeIndexBlob,
     // UI
-    buildImageStrip, openCropper, wireSettings, shieldOverlay, compositeScene,
+    buildImageStrip, openCropper, openLightbox, wireSettings, shieldOverlay, compositeScene,
     cardTextFor,
   };
 })();

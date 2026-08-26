@@ -171,7 +171,7 @@ struct PlayerView: View {
                     .minimumScaleFactor(0.5)
                     .shadow(color: .black, radius: 3, x: 0, y: 1)
             } else {
-            Text(karaokeText(cue: cue, relMs: ms - cue.s))
+            Text(WatchKaraoke.karaokeText(cue: cue, relMs: ms - cue.s))
                 .font(.system(size: 23, weight: .bold))
                 .multilineTextAlignment(.center)
                 .minimumScaleFactor(0.5)
@@ -185,36 +185,6 @@ struct PlayerView: View {
             Text(player.cues.isEmpty ? "" : "…")
                 .foregroundStyle(.tertiary)
         }
-    }
-
-    // Word-by-word fill: read tokens in accent, the token being spoken in
-    // bright white, upcoming text dimmed. Token spans/times come from the
-    // transferred word timings (UTF-16 offsets, cue-relative ms).
-    private func karaokeText(cue: WatchCue, relMs: Double) -> AttributedString {
-        let ns = NSMutableAttributedString(string: cue.text)
-        let full = NSRange(location: 0, length: ns.length)
-        guard let w = cue.w, !w.isEmpty else {
-            ns.addAttribute(.foregroundColor, value: UIColor.white, range: full)
-            return AttributedString(ns)
-        }
-        let dim = UIColor.white.withAlphaComponent(0.38)
-        let fill = UIColor(red: 0.72, green: 0.58, blue: 0.96, alpha: 1)
-        let hot = UIColor.white
-        ns.addAttribute(.foregroundColor, value: dim, range: full)
-        var i = 0
-        while i + 3 < w.count {
-            let off = Int(w[i]), len = Int(w[i + 1])
-            let ts = w[i + 2], te = w[i + 3]
-            i += 4
-            guard off >= 0, len > 0, off + len <= ns.length else { continue }
-            let r = NSRange(location: off, length: len)
-            if relMs >= te {
-                ns.addAttribute(.foregroundColor, value: fill, range: r)
-            } else if relMs >= ts {
-                ns.addAttribute(.foregroundColor, value: hot, range: r)
-            }
-        }
-        return AttributedString(ns)
     }
 
     private func clock(_ sec: Double) -> String {

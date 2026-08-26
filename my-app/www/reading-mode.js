@@ -1260,6 +1260,11 @@
     const aiSec = (typeof s.getAiSec === 'function') ? s.getAiSec() : 0;
     setText('statsAiTime', formatSec(aiSec));
     setRunning('statsAi', s.isRunning('ai'));
+
+    // Vocab review (SRS overlay) — time only, split out from AI material.
+    const srsSec = (typeof s.getSrsSec === 'function') ? s.getSrsSec() : 0;
+    setText('statsSrsTime', formatSec(srsSec));
+    setRunning('statsSrs', s.isRunning('srs'));
   }
 
   let statsRefreshTimer = null;
@@ -1280,14 +1285,34 @@
   }
   window.markReadingInteraction = markInteraction;
 
+  // Strict post-pause rule (user, 2026-08-26): the timer stops 10 s after the
+  // PLAYHEAD stops, unless the user has interacted since (scroll/tap = still
+  // reading silently — then the normal 60 s idle rule applies instead). Any
+  // interaction after the auto-stop revives the timer (markInteraction).
+  const PLAYHEAD_STOP_GRACE_MS = 10000;
+  let _watchWasPlaying = false;
+  let _playheadStopAt = 0;
   function startInactivityWatcher() {
     if (inactivityInterval) return;
     lastInteractionMs = Date.now();
     inactivityInterval = setInterval(() => {
       if (timerStart === null) return; // already paused (manually or auto)
-      const playing = typeof window.isReadingPlaying === 'function' && window.isReadingPlaying();
+      const playing = (typeof window.isReadingPlaying === 'function' && window.isReadingPlaying()) ||
+                      !!window._bgPlaying;
       if (playing) {
         lastInteractionMs = Date.now(); // playback counts as active
+        _watchWasPlaying = true;
+        _playheadStopAt = 0;
+        return;
+      }
+      if (_watchWasPlaying) { _watchWasPlaying = false; _playheadStopAt = Date.now(); }
+      if (_playheadStopAt && lastInteractionMs <= _playheadStopAt &&
+          Date.now() - _playheadStopAt >= PLAYHEAD_STOP_GRACE_MS) {
+        _playheadStopAt = 0;
+        autoStoppedByInactivity = true;
+        stopTimer();
+        refreshTimerUI();
+        rlog('Timer auto-paused (10 s after playhead stop)');
         return;
       }
       if (Date.now() - lastInteractionMs >= INACTIVITY_MS) {
@@ -1296,7 +1321,7 @@
         refreshTimerUI();
         rlog('Timer auto-paused (1 min idle, no audio)');
       }
-    }, 5000);
+    }, 2000);
   }
   function stopInactivityWatcher() {
     if (!inactivityInterval) return;
@@ -2609,6 +2634,164 @@
       sp.textContent = ch;
       host.appendChild(sp);
     }
+    try { abApplyWordChunks(host); } catch (_) {}
+  }
+
+  // ---- Vision word chunks -------------------------------------------------
+  // Group the flat per-char spans into dictionary-word wrappers (.kword) so
+  // visionOS renders ONE gaze-hover glow per WORD — the targeting feedback
+  // for lookups. The char spans stay pointer-events:none; the wrapper is the
+  // interactive element, so the hover region is word-sized. Particles and
+  // short kana runs are deliberately left inert (no glow noise: nobody looks
+  // up は). Vision-only: phones keep the flat span list untouched.
+  let _kwordToken = 0;
+  const _kwDiag = (msg) => {   // TEMP: one-shot pipeline diagnostic (remove once glow confirmed)
+    try {
+      if (window._kwDiagged || !window.KADOKI_VISION) return;
+      window._kwDiagged = true;
+      window.showToast && window.showToast('kw: ' + msg, 4500);
+    } catch (_) {}
+  };
+  async function abApplyWordChunks(cueEl) {
+    if (!window.KADOKI_VISION) return;
+    if (!cueEl) return;
+    if (typeof window.dictSegmentWord !== 'function') { _kwDiag('no segmenter'); return; }
+    const tok = ++_kwordToken;
+    const frags = Array.from(cueEl.querySelectorAll('.dict-frag'));
+    if (!frags.length) return;
+    // UTF-16 offset of each frag (a frag is one code point — may be 2 units).
+    const offs = []; let acc = 0;
+    for (const f of frags) { offs.push(acc); acc += (f.textContent || '').length; }
+    const text = frags.map(f => f.textContent).join('');
+    const isJa = (ch) => /[぀-ヿ一-鿿㐀-䶿々〆]/.test(ch);
+    const hasKanjiKana = (s) => /[゠-ヿ一-鿿㐀-䶿々]/.test(s);
+    const segs = [];
+    let pos = 0;
+    while (pos < text.length) {
+      if (!isJa(text[pos])) { pos++; continue; }
+      let r = null;
+      try { r = await window.dictSegmentWord(text, pos); } catch (_) {}
+      if (tok !== _kwordToken || !cueEl.isConnected) return;   // cue changed mid-run
+      const len = (r && r.length >= 1) ? r.length : 1;
+      const surface = text.substr(pos, len);
+      if (hasKanjiKana(surface) || surface.length >= 3) segs.push({ u16: pos, len });
+      pos += len;
+    }
+    if (tok !== _kwordToken || !cueEl.isConnected) return;
+    const fragIdxAt = (u16) => offs.indexOf(u16);   // ≤ ~200 entries; must align exactly
+    for (let i = segs.length - 1; i >= 0; i--) {
+      const fs = fragIdxAt(segs[i].u16);
+      if (fs < 0) continue;
+      let fe = fs;
+      const endU16 = segs[i].u16 + segs[i].len;
+      while (fe + 1 < frags.length && offs[fe + 1] < endU16) fe++;
+      const first = frags[fs];
+      if (!first || !first.parentNode) continue;
+      // Every frag in the run must share a parent — skip runs the squiggle
+      // marker (or anything else) has already re-wrapped.
+      let ok = true;
+      for (let k = fs + 1; k <= fe; k++) {
+        if (!frags[k] || frags[k].parentNode !== first.parentNode) { ok = false; break; }
+      }
+      if (!ok) continue;
+      const w = document.createElement('span');
+      w.className = 'kword';
+      w._kwFragStart = fs;   // word identity — copied onto the hit overlays
+      first.parentNode.insertBefore(w, first);
+      for (let k = fs; k <= fe; k++) w.appendChild(frags[k]);
+    }
+    if (!document.getElementById('abKwordStyle')) {
+      const st = document.createElement('style');
+      st.id = 'abKwordStyle';
+      // EXPERIMENTALLY ESTABLISHED: gaze-hover regions attach to the
+      // INNERMOST hit-testable elements. Hit-testable per-char frags → a
+      // flickering capsule per character; inert frags inside a listener-
+      // carrying wrapper → no region at all. So the chars stay inert and the
+      // glow target is a transparent word-sized overlay (.kword-hit below) —
+      // childless, so IT is the innermost target: one steady capsule per word.
+      // The word overlays are the ONLY hit-testable things in the subtitle —
+      // wrappers and frags are fully inert, so the region system has exactly
+      // one candidate per word (kills the letter-level flicker AND quantizes
+      // taps to words structurally).
+      st.textContent = '#audiobookCueText { position: relative; }' +
+        '#audiobookCueText .kword { pointer-events: none; }' +
+        '#audiobookCueText .kword-hit { position: absolute; pointer-events: auto; cursor: pointer; border-radius: 8px; z-index: 2; background: transparent; }';
+      document.head.appendChild(st);
+    }
+    // Build the word hit overlays from each wrapper's laid-out rects (a word
+    // wrapping across lines yields one overlay per line fragment). Rebuilt
+    // with every cue render (innerHTML reset wipes them with the frags).
+    // Each overlay carries its word's frag index: a tap on it looks up THAT
+    // word — never the individual character under the gaze point.
+    try {
+      const base = cueEl.getBoundingClientRect();
+      const noop = () => {};
+      const rects = [];
+      for (const w of Array.from(cueEl.querySelectorAll('.kword'))) {
+        for (const r of Array.from(w.getClientRects())) {
+          if (!(r.width > 0 && r.height > 0)) continue;
+          rects.push({ left: r.left - base.left, top: r.top - base.top,
+                       width: r.width, height: r.height, fs: w._kwFragStart });
+        }
+      }
+      // ANTI-FLICKER: the system capsule blinked because the gaze kept
+      // crossing dead zones between words (particles, spacing) where no
+      // overlay exists. Fill each same-line gap with a SEPARATE overlay
+      // (not by widening the word's own — that visually swallowed the
+      // が/を into the word's highlight). The gap strip glows as its own
+      // small capsule and a tap on it looks up the word it follows.
+      rects.sort((a, b) => (Math.abs(a.top - b.top) > a.height / 2 ? a.top - b.top : a.left - b.left));
+      const gapRects = [];
+      for (let i = 0; i + 1 < rects.length; i++) {
+        const a = rects[i], b = rects[i + 1];
+        if (Math.abs(a.top - b.top) <= a.height / 2 && b.left > a.left) {
+          const gap = b.left - (a.left + a.width);
+          if (gap > 2 && gap < 140) {
+            gapRects.push({ left: a.left + a.width + 1, top: a.top,
+                            width: gap - 2, height: a.height, fs: a.fs });
+          }
+        }
+      }
+      for (const rc of rects.concat(gapRects)) {
+        const h = document.createElement('span');
+        h.className = 'kword-hit';
+        h._kwFragStart = rc.fs;
+        h.style.left = rc.left + 'px';
+        h.style.top = (rc.top - 3) + 'px';           // vertical slack: steadier
+        h.style.width = rc.width + 'px';             // capsule as the gaze
+        h.style.height = (rc.height + 6) + 'px';     // drifts off the line
+        h.addEventListener('touchstart', noop, { passive: true });
+        h.addEventListener('click', noop);
+        cueEl.appendChild(h);
+      }
+      // Name/place squiggle runs get their own capsule; tap forwards to the
+      // wrapper's OWN handler (character/place popup, not the dictionary).
+      // Squiggles are marked asynchronously (1.5s poll), so run once now and
+      // once after the marker has had a chance.
+      const nameOverlays = () => {
+        if (tok !== _kwordToken || !cueEl.isConnected) return;
+        const nbase = cueEl.getBoundingClientRect();
+        for (const nm of Array.from(cueEl.querySelectorAll('.kchar-name, .kplace-name'))) {
+          if (nm._kvHit) continue;
+          nm._kvHit = 1;
+          for (const r of Array.from(nm.getClientRects())) {
+            if (!(r.width > 0 && r.height > 0)) continue;
+            const h = document.createElement('span');
+            h.className = 'kword-hit kv-name-hit';
+            h.style.left = (r.left - nbase.left) + 'px';
+            h.style.top = (r.top - nbase.top - 3) + 'px';
+            h.style.width = r.width + 'px';
+            h.style.height = (r.height + 6) + 'px';
+            h.style.zIndex = '3';   // names win over the word overlays beneath
+            h.addEventListener('touchstart', noop, { passive: true });
+            h.addEventListener('click', (e) => { e.stopPropagation(); try { nm.click(); } catch (_) {} });
+            cueEl.appendChild(h);
+          }
+        }
+      };
+      nameOverlays();
+      setTimeout(nameOverlays, 1900);
+    } catch (_) {}
   }
   // Swipe-down on the audiobook view toggles bg play/pause, matching
   // the reader's behavior. Attached once. Skip swipes that originate
@@ -2627,6 +2810,7 @@
     // swipe landed on the wrong cue ("moves an unclear second or two"). In a gap
     // between cues, derive prev/next from the live position. swipe-RIGHT (dx>0)
     // → previous, swipe-LEFT (dx<0) → next.
+    _abNavByDx = (dx) => navByDx(dx);   // transport-bar buttons reuse the swipe's cue-step logic
     const navByDx = (dx) => {
       // "Reverse horizontal swipe direction" pref: flip ONCE here so every
       // internal branch (current-cue step + both in-gap derivations) stays
@@ -2736,18 +2920,333 @@
   // Tap handler for the audiobook subtitle: on dict-frag tap, set up
   // lookupContext with the tapped cue's audio range so a subsequent
   // "Add to Anki" pulls the right sentence/audio.
+  // ---- Vision Pro transport bar -------------------------------------------
+  // Shown when the hardware is a RealityDevice (compatibility mode lies about
+  // everything else — see BackgroundAudio.deviceModel). Big gaze-sized
+  // buttons: cue back / play-pause / cue forward, plus the 辞書 pill that
+  // toggles dictionary interactivity on the subtitle text. NO seek bar, ever.
+  let _abNavByDx = null;          // assigned by installAudiobookSwipeHandler
+  let _abTpBound = false;
+  let _kvDetected = false;
+  // Vision detection must run at BOOT, not first-audio-open: a session that
+  // starts in read/card mode needs the body class (word overlays, ghost
+  // popup, transport bar) immediately. Retries cover a late bridge.
+  setTimeout(() => { try { detectVisionDevice(); } catch (_) {} }, 700);
+  setTimeout(() => { try { detectVisionDevice(); setupAbTransportBar(); } catch (_) {} }, 2500);
+  async function detectVisionDevice() {
+    if (_kvDetected) return;
+    try {
+      if (localStorage.getItem('KADOKI_VISION_UI') === '1') { window.KADOKI_VISION = true; }
+      else {
+        const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+        if (!bg || typeof bg.deviceModel !== 'function') {
+          try { if (!window._kvToasted) { window._kvToasted = true; window.showToast && window.showToast('hw: no deviceModel', 3000); } } catch (_) {}
+          return;
+        }
+        const r = await bg.deviceModel();
+        // Compat mode fakes utsname ("iPad13,4" observed on device) — match on
+        // the deeper signals instead; ANY hit means visionOS. A REAL machine
+        // string means the NATIVE visionOS build: the transport is a system
+        // ornament there, so the in-window HTML bar stays hidden
+        // (kadoki-vision-native instead of kadoki-vision).
+        const model = String(r?.model || '');
+        const sig = (String(r?.productName || '') + ' ' + String(r?.hwTarget || '') + ' ' +
+                     String(r?.hwProduct || '') + ' ' + model);
+        const isVision = !!r?.visionClass || /visionos|xros|reality/i.test(sig);
+        if (!isVision) return;
+        window.KADOKI_VISION = true;
+        window.KADOKI_VISION_NATIVE = model.startsWith('RealityDevice');
+      }
+      _kvDetected = true;
+      document.body.classList.add(window.KADOKI_VISION_NATIVE ? 'kadoki-vision-native' : 'kadoki-vision');
+      // Durable sync marker: detection lands ~700ms after boot, but app.js's
+      // init (auto-restore) runs earlier — persist so the NEXT boot can gate
+      // Vision-only diagnostics from its very first line.
+      try { localStorage.setItem('KADOKI_IS_VISION', '1'); } catch (_) {}
+      // Native build: keep the ornament informed of the ACTIVE MODE so it can
+      // overlap the window bottom in audio mode (lots of dead black space
+      // there) but hang fully below in card/read mode.
+      if (window.KADOKI_VISION_NATIVE) {
+        let lastMode = '';
+        const pushMode = () => {
+          const b = document.body.classList;
+          const m = b.contains('mode-audio') ? 'audio' : (b.contains('mode-read') ? 'read' : 'card');
+          if (m === lastMode) return;
+          lastMode = m;
+          try { window.Capacitor?.Plugins?.BackgroundAudio?.tpState?.({ mode: m }); } catch (_) {}
+        };
+        try { new MutationObserver(pushMode).observe(document.body, { attributes: true, attributeFilter: ['class'] }); } catch (_) {}
+        pushMode();
+        kvInstallCardNavZones();
+      }
+    } catch (e) {
+      try { if (!window._kvToasted) { window._kvToasted = true; window.showToast && window.showToast('hw err: ' + ((e && e.message) || e), 3500); } } catch (_) {}
+    }
+  }
+  // Card-mode gaze nav zones (Vision native only): three big transparent
+  // buttons — left = previous card, bottom-center = replay, right = next.
+  // Each is its own interaction region, so the system hover glow lights the
+  // whole zone (glyph included) when gazed. Clicks synthesize the existing
+  // keyboard shortcuts (ArrowLeft / Space / ArrowRight), so navigation and
+  // replay run the exact same code paths as a hardware keyboard — including
+  // abMarkUserNav and the audio-floor bookkeeping. z-index 1 keeps them
+  // UNDER the word-lookup overlays (z2/z3): gaze on text = dictionary, gaze
+  // beside it = navigation. Being <button>s, the shell's chrome tap handler
+  // skips them automatically.
+  // GAZE GLOW OFF (user call, 2026-08-22): a band lighting up whenever the
+  // gaze crossed the picture was distracting, and on a spatial card it also
+  // flashed on advance (the zone's glow/:active state is hidden under the
+  // depth layer until the card swap exposes the page for a frame). So the
+  // zones are pointer-events:none — an element that is not a hit-test target
+  // gets no hover region — and the pinch is resolved by COORDINATES from a
+  // document-level capture listener instead (same pattern as the audio
+  // subtitle frags). Word overlays still win: a click whose target is any
+  // interactive element or the subtitle never reaches the zone check.
+  const KV_NAV_ZONES = [['kvCardPrev', 'ArrowLeft'], ['kvCardReplay', 'Space'], ['kvCardNext', 'ArrowRight']];
+  function kvInstallCardNavZones() {
+    if (document.getElementById('kvCardPrev')) return;
+    const mk = (id, glyph) => {
+      const b = document.createElement('div');
+      b.id = id;
+      b.className = 'kv-cardnav-zone';
+      b.innerHTML = '<span>' + glyph + '</span>';
+      b.setAttribute('aria-hidden', 'true');
+      document.body.appendChild(b);
+    };
+    mk('kvCardPrev',   '‹');
+    mk('kvCardReplay', '⟲');
+    mk('kvCardNext',   '›');
+    document.addEventListener('click', (e) => {
+      try {
+        const b = document.body.classList;
+        if (!b.contains('mode-card') || b.contains('card-srt')) return;
+        const t = e.target;
+        if (t && t.closest && t.closest('.kv-card-hit, .subtitle-text, .dict-frag, #dictPopup, button, a, input, select, textarea, [role="button"], .kai-modal, #cardCopyBtn, #kvSpatialDiag')) return;
+        const x = e.clientX, y = e.clientY;
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+        for (const [id, code] of KV_NAV_ZONES) {
+          const z = document.getElementById(id);
+          if (!z || getComputedStyle(z).display === 'none') continue;
+          const r = z.getBoundingClientRect();
+          if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+          e.preventDefault();
+          e.stopPropagation();
+          e.stopImmediatePropagation();
+          try { document.dispatchEvent(new KeyboardEvent('keydown', { code })); } catch (_) {}
+          return;
+        }
+      } catch (_) {}
+    }, true);
+  }
+  // ---- transport actions (MODULE scope: the visionOS ornament must work in
+  // EVERY mode — the old inside-setup wiring only existed after audio mode
+  // had opened once, which left the ornament dead in card mode) --------------
+  // Audio mode with a loaded engine → our faded toggle (150ms; the native
+  // default 20ms clicks). EVERY other situation → shellTogglePlay, the
+  // mode-aware universal path (loads/starts card+read playback properly —
+  // the raw bg toggle silently no-oped when the app booted into read mode
+  // and the engine wasn't loaded yet).
+  const tpTogglePlay = () => {
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bg) return;
+    bg.getState().then(async (s) => {
+      const inAudio = document.body.classList.contains('mode-audio');
+      if (inAudio && s?.playing) { bg.pause({ fadeMs: 150 }); return; }
+      if (inAudio && s?.ready) { await maybeSmartRewindBeforeResume(bg, s); bg.resume({ fadeMs: 150 }); return; }
+      if (typeof window.shellTogglePlay === 'function') window.shellTogglePlay();
+    }).catch(() => {
+      try { if (typeof window.shellTogglePlay === 'function') window.shellTogglePlay(); } catch (_) {}
+    });
+  };
+  // Cue steps go through the swipe handler's navByDx, which flips for the
+  // "reverse swipe" pref — pre-flip so the BUTTONS always mean prev/next.
+  // No-op until audio mode has initialized (navByDx is cue-based).
+  const tpStepCue = (dir) => {
+    if (!_abNavByDx) return;
+    let dx = dir > 0 ? -100 : 100;              // navByDx: dx<0 = next
+    try { if (window._hSwipeReversed && window._hSwipeReversed()) dx = -dx; } catch (_) {}
+    _abNavByDx(dx);
+  };
+  let _abPaintDictPill = null;   // set by setupAbTransportBar (HTML pill visual)
+  const tpApplyDict = () => {
+    const off = localStorage.getItem('AB_DICT_LOOKUP') === '0';
+    try { if (_abPaintDictPill) _abPaintDictPill(off); } catch (_) {}
+    let st = document.getElementById('abDictModeStyle');
+    if (off && !st) {
+      st = document.createElement('style');
+      st.id = 'abDictModeStyle';
+      // pointer-events does NOT cascade as a block — cover the wrappers and
+      // the frags inside them (both set explicit auto) as well.
+      st.textContent = '#audiobookCueText, #audiobookCueText .kword { pointer-events: none !important; }' +
+        '#audiobookCueText .kword-hit { display: none !important; }' +
+        '.subtitle-text .kv-card-hit { display: none !important; }';
+      document.head.appendChild(st);
+    } else if (!off && st) st.remove();
+    // mirror into the native visionOS ornament (no-op elsewhere)
+    try { window.Capacitor?.Plugins?.BackgroundAudio?.tpState?.({ dictOn: !off }); } catch (_) {}
+  };
+  const tpFlipDict = () => {
+    try {
+      const off = localStorage.getItem('AB_DICT_LOOKUP') === '0';
+      localStorage.setItem('AB_DICT_LOOKUP', off ? '1' : '0');
+    } catch (_) {}
+    tpApplyDict();
+  };
+  // Native visionOS transport ornament: registered at LOAD, not at audio
+  // init. Capacitor's triggerWindowJSEvent copies the data's properties
+  // DIRECTLY onto the event object (no `detail`) — read e.action first.
+  // Hardware keyboard (visionOS): MainViewController takes ← → Space as
+  // UIKeyCommands and replays them here as the same document keydown the
+  // nav zones synthesize, so every existing handler applies unchanged.
+  window.addEventListener('kadokiKey', (e) => {
+    let d = e && e.detail;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) { d = null; } }
+    const code = (e && e.code) || (d && d.code) || '';
+    if (!code) return;
+    const a = document.activeElement;
+    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) return;
+    const key = code === 'Space' ? ' ' : code;
+    try { document.dispatchEvent(new KeyboardEvent('keydown', { code, key, bubbles: true, cancelable: true })); } catch (_) {}
+  });
+  // Tell native when a text field has focus so the key commands stand down.
+  if (window.KADOKI_VISION_NATIVE) {
+    const isField = (el) => !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable));
+    const pushTyping = (on) => { try { window.Capacitor?.Plugins?.BackgroundAudio?.tpState?.({ typing: !!on }); } catch (_) {} };
+    document.addEventListener('focusin', (e) => { if (isField(e.target)) pushTyping(true); }, true);
+    document.addEventListener('focusout', (e) => { if (isField(e.target)) setTimeout(() => pushTyping(isField(document.activeElement)), 50); }, true);
+  }
+  window.addEventListener('kadokiTransport', (e) => {
+    let d = e && e.detail;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) { d = { action: d }; } }
+    const action = (e && e.action) || (d && d.action) || '';
+    if (action === 'toggle') tpTogglePlay();
+    else if (action === 'prev') tpStepCue(-1);
+    else if (action === 'next') tpStepCue(1);
+    else if (action === 'dict') tpFlipDict();
+    else if (action === 'spatial') { try { window.kvSpatial?.toggle?.(); } catch (_) {} }
+    else if (action === 'summary') {
+      // visionOS transport bar: the chapter summary is reachable from EVERY
+      // mode here, not just audio (openCurrentChapter resolves the chapter
+      // from whichever modality is active and opens a self-contained popup).
+      try { window.aiTimeline && window.aiTimeline.openCurrentChapter && window.aiTimeline.openCurrentChapter(window._activeTitleId); } catch (_) {}
+    } else if (action === 'chrome') {
+      try { window.shellToggleChrome && window.shellToggleChrome(); } catch (_) {}
+    } else if (action === 'menu') {
+      // No event → openShellMoreMenu anchors to the header hamburger's rect
+      // (clamped on-screen even while the chrome is hidden).
+      try { window.openShellMoreMenu && window.openShellMoreMenu(); } catch (_) {}
+    } else if (action.indexOf('mode:') === 0) {
+      try { window.setShellMode && window.setShellMode(action.slice(5), { force: true }); } catch (_) {}
+    }
+  });
+
+  function setupAbTransportBar() {
+    if (_abTpBound) return;
+    const bar = document.getElementById('abTransportBar');
+    if (!bar) return;
+    _abTpBound = true;
+    const prev = document.getElementById('abTpPrev');
+    const next = document.getElementById('abTpNext');
+    const play = document.getElementById('abTpPlay');
+    const dict = document.getElementById('abTpDict');
+    const stepCue = tpStepCue, togglePlay = tpTogglePlay;
+    prev?.addEventListener('click', (e) => { e.stopPropagation(); stepCue(-1); });
+    next?.addEventListener('click', (e) => { e.stopPropagation(); stepCue(1); });
+    play?.addEventListener('click', (e) => { e.stopPropagation(); togglePlay(); });
+    // Icon + visibility sync (cheap poll, only while the bar exists on Vision).
+    setInterval(() => {
+      try {
+        if (!play || document.hidden || !document.body.classList.contains('kadoki-vision')) return;
+        const want = window._bgPlaying ? '❚❚' : '▶';
+        if (play.textContent !== want) play.textContent = want;
+        const chromeBtn = document.getElementById('abTpChrome');
+        if (chromeBtn) {
+          const g = document.body.classList.contains('chrome-hidden') ? '⌃' : '⌄';
+          if (chromeBtn.textContent !== g) chromeBtn.textContent = g;
+        }
+        // Movie mode (辞書 off): controls appear when paused, vanish while
+        // playing — the movie-player idiom. Dictionary mode keeps the bar
+        // pinned (it's the only pause control when text taps are lookups).
+        const dictOff = localStorage.getItem('AB_DICT_LOOKUP') === '0';
+        bar.classList.toggle('tp-auto-hidden', dictOff && !!window._bgPlaying);
+      } catch (_) {}
+    }, 800);
+    // Chrome (top bar) toggle lives ON the transport bar now — tap-anywhere
+    // chrome toggling is disabled in audio mode on Vision.
+    document.getElementById('abTpChrome')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      try { window.shellToggleChrome && window.shellToggleChrome(); } catch (_) {}
+    });
+    // Movie mode: a click anywhere on the audio view (not on controls) is
+    // play/pause, faded. In dictionary mode clicks belong to word lookup.
+    document.getElementById('audiobookModeView')?.addEventListener('click', (e) => {
+      if (!window.KADOKI_VISION) return;
+      if (localStorage.getItem('AB_DICT_LOOKUP') !== '0') return;
+      const t = e.target;
+      if (t && t.closest && t.closest('button, input, #abTransportBar, #abRepeatBar, [data-role="scrub"], .transport-row')) return;
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg) return;
+      bg.getState().then(async (s) => {
+        if (s?.playing) bg.pause({ fadeMs: 150 });
+        else if (s?.ready) { await maybeSmartRewindBeforeResume(bg, s); bg.resume({ fadeMs: 150 }); }
+      }).catch(() => {});
+    });
+    // 辞書 pill: ON (default) = words tappable for lookup; OFF = the subtitle
+    // is fully inert (no gaze glow, no accidental lookups; swipes still work
+    // through the parent view). Logic lives in tpApplyDict/tpFlipDict (module
+    // scope, shared with the ornament) — this wires the pill visual.
+    _abPaintDictPill = (off) => { dict?.classList.toggle('dict-off', off); };
+    tpApplyDict();
+    dict?.addEventListener('click', (e) => { e.stopPropagation(); tpFlipDict(); });
+  }
+
+  let _abCueDictBound = false;
   function installAudiobookCueTapHandler() {
-    const cueEl = document.getElementById('audiobookCueText');
-    if (!cueEl || cueEl.dataset.dictBound === '1') return;
-    cueEl.dataset.dictBound = '1';
-    cueEl.style.cursor = 'pointer';
-    cueEl.addEventListener('click', async (e) => {
-      const target = e.target;
-      if (!target || !target.classList || !target.classList.contains('dict-frag')) return;
+    if (_abCueDictBound) return;
+    if (!document.getElementById('audiobookCueText')) return;
+    _abCueDictBound = true;
+    // visionOS gaze-capsule fix, round 2. Moving the container listener to
+    // document root wasn't enough — ancestor touch listeners (the swipe
+    // navigator on the whole audiobook view) still made WebKit emit a
+    // gaze-hover capsule per character span. Definitive fix: the spans are
+    // pointer-events:none, so they CANNOT be hit-test targets (→ no
+    // interaction regions, no capsules); the tap lands on the container and
+    // the tapped character is resolved by COORDINATES instead of by event
+    // target. Identical behavior for finger taps on phones.
+    if (!document.getElementById('abCueDictStyle')) {
+      const st = document.createElement('style');
+      st.id = 'abCueDictStyle';
+      st.textContent = '#audiobookCueText .dict-frag { pointer-events: none; }';
+      document.head.appendChild(st);
+    }
+    document.addEventListener('click', async (e) => {
+      const cueEl = document.getElementById('audiobookCueText');
+      if (!cueEl) return;
+      const t0 = e.target;
+      if (!(t0 === cueEl || (t0 && t0.nodeType === 1 && cueEl.contains(t0)))) return;
+      // Name/place squiggle wrappers own their taps (char/place popup) — with
+      // the frags inert the wrapper IS the target now, so guard explicitly.
+      if (t0.closest && t0.closest('.kchar-name, .kplace-name')) return;
       if (typeof window.performDictLookup !== 'function') return;
       const spans = Array.from(cueEl.querySelectorAll('.dict-frag'));
-      const idx = spans.indexOf(target);
-      if (idx < 0) return;
+      if (!spans.length) return;
+      let idx = -1;
+      if (t0.classList && t0.classList.contains('kword-hit') && Number.isFinite(t0._kwFragStart)) {
+        // Tap landed on a word overlay: look up THAT word (its first char —
+        // the deinflector reproduces the same longest match the chunker
+        // found), regardless of which character the gaze point was over.
+        idx = t0._kwFragStart;
+      } else {
+        // Coordinate hit test (spans are inert): find the char under the tap.
+        // No rect match = tapped the padding — same outcome as the old
+        // target-must-be-a-frag check.
+        const x = e.clientX, y = e.clientY;
+        for (let i = 0; i < spans.length; i++) {
+          const r = spans[i].getBoundingClientRect();
+          if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) { idx = i; break; }
+        }
+      }
+      if (idx < 0 || idx >= spans.length) return;
       const cueIdx = parseInt(cueEl.dataset.cueIdx);
       const cue = Number.isFinite(cueIdx) ? abCues[cueIdx] : null;
       window.lookupContext = {
@@ -2853,6 +3352,49 @@
   // Runs every position event. Nothing here can await — that was the bug
   // where a hung await on titleStore.list() (Preferences plugin slowness)
   // would block the highlight sync forever after the first cue painted.
+  // "Syncing subtitles" indicator for auto-transcribed titles: shown in the
+  // cue area whenever the playhead sits in audio the on-device job hasn't
+  // reached yet (a seek into the middle of the book). findCueAtTime would
+  // otherwise return the LAST transcribed cue, freezing a stale line on screen
+  // with no hint that anything is happening. Bar = the job's progress toward
+  // the playhead; small line = whole-book coverage.
+  let _abSyncShown = false, _abSyncLastPaint = 0;
+  function abRenderSyncIndicator(cueEl, st) {
+    const now = Date.now();
+    if (_abSyncShown && now - _abSyncLastPaint < 250) return;
+    _abSyncLastPaint = now;
+    const pct = Math.round((st.progress || 0) * 100);
+    const cov = st.coveragePct >= 0 ? (window.i18n?.t?.('at.overall', 'overall') || 'overall') + ' ' + st.coveragePct + '%' : '';
+    if (!document.getElementById('abSyncStyle')) {
+      const css = document.createElement('style');
+      css.id = 'abSyncStyle';
+      css.textContent =
+        '.ab-sync{display:flex;flex-direction:column;align-items:center;gap:10px;padding:6px 0;}' +
+        '.ab-sync-label{font-size:.8em;opacity:.85;}' +
+        '.ab-sync-track{width:min(60vw,320px);height:6px;border-radius:3px;background:rgba(255,255,255,.14);overflow:hidden;}' +
+        '.ab-sync-fill{height:100%;width:0;border-radius:3px;background:var(--accent-audio,#b794f6);transition:width .25s linear;}' +
+        '.ab-sync-fill.idle{width:38%;animation:abSyncSlide 1.2s ease-in-out infinite alternate;}' +
+        '@keyframes abSyncSlide{from{transform:translateX(-100%)}to{transform:translateX(260%)}}' +
+        '.ab-sync-sub{font-size:.6em;opacity:.55;}';
+      document.head.appendChild(css);
+    }
+    let box = cueEl.querySelector('.ab-sync');
+    if (!box) {
+      cueEl.textContent = '';
+      box = document.createElement('div');
+      box.className = 'ab-sync';
+      box.innerHTML = '<div class="ab-sync-label"></div><div class="ab-sync-track"><div class="ab-sync-fill"></div></div><div class="ab-sync-sub"></div>';
+      cueEl.appendChild(box);
+    }
+    const label = window.i18n?.t?.('at.syncing', 'Syncing subtitles…') || 'Syncing subtitles…';
+    box.querySelector('.ab-sync-label').textContent = label + (pct > 0 ? ' ' + pct + '%' : '');
+    const fill = box.querySelector('.ab-sync-fill');
+    if (pct > 0) { fill.classList.remove('idle'); fill.style.width = pct + '%'; }
+    else { fill.classList.add('idle'); fill.style.width = ''; }
+    box.querySelector('.ab-sync-sub').textContent = cov;
+    _abSyncShown = true;
+  }
+
   function abUpdateCueDisplay(positionMs) {
     if (!abCues.length) {
       console.log('[abUpdate] abCues empty; pos=' + positionMs);
@@ -2865,7 +3407,24 @@
       if (Date.now() > _abSeekGuardUntil) _abSeekGuardUntil = 0;
       else return;
     }
-    if (idx === abCurrentCueIdx) return;
+    // Untranscribed region (auto-transcribed titles only): show the sync
+    // indicator instead of a stale cue; re-render the real cue as soon as the
+    // job covers the playhead (the _abSyncShown flag defeats the idx memo).
+    // AUDIO MODE ONLY: in read mode this early-return would freeze the paged
+    // reader's cue follow (it sits upstream of __onPagedCueUpdate) every time
+    // the playhead touched uncovered audio — one of the "cursor stops
+    // following" paths. The reader keeps its own frontier behavior.
+    if (!document.hidden && document.body.classList.contains('mode-audio')) {
+      let st = null;
+      try { st = window.autoTranscribe?.syncState?.(positionMs); } catch (_) { st = null; }
+      if (st) {
+        const el = document.getElementById('audiobookCueText');
+        if (el) abRenderSyncIndicator(el, st);
+        return;
+      }
+    }
+    if (idx === abCurrentCueIdx && !_abSyncShown) return;
+    _abSyncShown = false;
     abCurrentCueIdx = idx;
     // SCREEN-OFF FAST PATH: while hidden, skip every in-app DOM write (the
     // per-character token spans were the heaviest per-cue work) and the
@@ -3179,6 +3738,63 @@
       nxt.addEventListener('click', (e) => { e.stopPropagation(); abReturnToNextChapter(); });
     }
     abReflectRepeatUI();
+    abWireSummaryBtn();
+  }
+
+  // "章の要約" — jump to the current chapter's Timeline & Scenes summary
+  // without leaving audio mode's place (openCurrentChapter is a self-
+  // contained overlay; it doesn't touch playback or the audio position).
+  let _abSummaryWired = false;
+  function abWireSummaryBtn() {
+    const btn = document.getElementById('abSummaryBtn');
+    if (!btn || _abSummaryWired) return;
+    _abSummaryWired = true;
+    const stop = (e) => { e.stopPropagation(); };
+    ['touchstart', 'touchend'].forEach((ev) => btn.addEventListener(ev, stop, { passive: true }));
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      btn.classList.remove('has-new');   // don't wait for the next poll tick — opening it IS reading it
+      try { window.aiTimeline && window.aiTimeline.openCurrentChapter && window.aiTimeline.openCurrentChapter(window._activeTitleId); } catch (_) {}
+    });
+  }
+
+  // Badge (dot on abSummaryBtn) + a one-time toast when the CURRENT chapter's
+  // AI summary becomes available and hasn't been read yet. Without this,
+  // crossing into a newly-summarized chapter is silent — the button just sits
+  // there with no signal, and it's usually hidden behind chrome-hidden during
+  // an actual listening session anyway, so the toast is the one moment
+  // that's guaranteed visible regardless of chrome state; the badge is the
+  // quieter persistent cue for whenever chrome IS shown.
+  let _abSummaryPollTimer = null;
+  let _abLastToastedIdx = null;
+  async function abCheckSummaryStatus() {
+    try {
+      if (!document.body.classList.contains('mode-audio') || document.hidden) return;
+      const tid = window._activeTitleId;
+      const btn = document.getElementById('abSummaryBtn');
+      if (!tid || !btn || !window.aiTimeline || typeof window.aiTimeline.currentChapterStatus !== 'function') return;
+      const st = await window.aiTimeline.currentChapterStatus(tid);
+      const show = !!(st && st.hasSummary && st.unread);
+      btn.classList.toggle('has-new', show);
+      if (show && st.idx !== _abLastToastedIdx) {
+        _abLastToastedIdx = st.idx;
+        try {
+          if (window.showToast) {
+            window.showToast(window.i18n.fmt('audio.new_summary_toast', { label: st.label }, st.label + 'の要約が利用可能です'), 3200);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  function abStartSummaryStatusPoll() {
+    if (_abSummaryPollTimer) return;
+    _abSummaryPollTimer = setInterval(abCheckSummaryStatus, 6000);
+    abCheckSummaryStatus();
+  }
+  function abStopSummaryStatusPoll() {
+    if (_abSummaryPollTimer) { clearInterval(_abSummaryPollTimer); _abSummaryPollTimer = null; }
+    _abLastToastedIdx = null;   // fresh session next time audio mode opens
+    try { const btn = document.getElementById('abSummaryBtn'); if (btn) btn.classList.remove('has-new'); } catch (_) {}
   }
 
   async function abInitChapterRepeat() {
@@ -3393,6 +4009,29 @@
   async function maybeSmartRewindBeforeResume(bg, st) {
     try {
       if (!bg) return;
+      // Watch-adopted position: adopted while paused, but iOS may have released
+      // the audio session then (the adoption's paused seek was skipped) — a
+      // plain resume would continue at the STALE native playhead and the 30s
+      // heartbeat would durably overwrite the adopted spot. Land the adopted
+      // position first. One-shot; skipped if the user deliberately seeked after
+      // the adoption (their scrub wins).
+      try {
+        const ad = window._abAdoptResumeMs;
+        if (ad) {
+          window._abAdoptResumeMs = null;
+          const userSeekAfter = Number(window._audioStatsSeekTs) > ad.at;
+          if (ad.titleId === window._activeTitleId && !userSeekAfter &&
+              Date.now() - ad.at < 30 * 60000) {
+            const cur = Number((st && st.positionMs) || 0);
+            if (Math.abs(cur - ad.ms) > 2000) {
+              _lastListenWallMs = Date.now();   // deliberate landing — no smart rewind on top
+              await bg.seek({ ms: Math.max(0, Math.round(ad.ms)) });
+              try { window.debugLog?.('[watch-adopt] resume override → ' + ad.ms + 'ms'); } catch (_) {}
+              return;
+            }
+          }
+        }
+      } catch (_) {}
       if (!(_lastListenWallMs > 0)) {
         // Fresh boot: fall back to the durable per-deck last-listened stamp.
         const deck = abOpenedDeckName || currentDeckName();
@@ -3697,14 +4336,23 @@
   // watch position can never destroy the high-water (never-lose-place).
   window.abAdoptExternalPosition = async function (titleId, ms, ts) {
     try {
-      if (!titleId || !Number.isFinite(ms) || ms <= 0 || !Number.isFinite(ts) || ts <= 0) return;
+      // KADOKI_DEBUG: each rejection logs its reason — the "watch position not
+      // picked up" class is otherwise invisible (guards fail silently).
+      const dbg = (m) => { try { window.debugLog?.('[watch-adopt] ' + m); } catch (_) {} };
+      if (!titleId || !Number.isFinite(ms) || ms <= 0 || !Number.isFinite(ts) || ts <= 0) { dbg('reject: bad args ms=' + ms + ' ts=' + ts); return; }
       const t = await window.titleStore?.get?.(titleId);
       const deck = t?.name;
-      if (!deck) return;
-      if (window._activeTitleId === titleId && window._bgPlaying) return;   // live local playback wins
+      if (!deck) { dbg('reject: no title/deck for ' + titleId); return; }
+      if (window._activeTitleId === titleId && window._bgPlaying) { dbg('reject: phone playing live'); return; }   // live local playback wins
       const curTs = parseInt(await getPref(KEYS.AUDIO_LAST_TS_PREFIX + deck));
-      if (Number.isFinite(curTs) && curTs >= ts) return;                    // local listen is fresher
+      if (Number.isFinite(curTs) && curTs >= ts) { dbg('reject: local listen fresher by ' + Math.round((curTs - ts) / 1000) + 's'); return; }   // local listen is fresher
       await saveAudiobookLastPosition(deck, Math.round(ms), -1, Math.round(ts));
+      // One-shot resume override for the active title: if the paused seek below
+      // can't run (iOS releases the session on pause → st not ready), the next
+      // resume must still land HERE, not at the stale native playhead.
+      if (window._activeTitleId === titleId) {
+        window._abAdoptResumeMs = { ms: Math.round(ms), at: Date.now(), titleId };
+      }
       // LIVE view update: this title is on screen and PAUSED → show the
       // adopted spot immediately (cue text, time label, scrub) and seek the
       // paused native player so a later resume continues THERE instead of at
@@ -3946,7 +4594,10 @@
     abAttachScrubControl();
     installAudiobookCueTapHandler();
     installAudiobookSwipeHandler();
+    detectVisionDevice();
+    setupAbTransportBar();
     abInitChapterRepeat();   // chapter-repeat toggle: load chapter map + restore toggle state + wire buttons
+    abStartSummaryStatusPoll();   // new-chapter-summary badge + toast
     window.audiobookActive = true;
     // Capture the deck that owns this audio session — closeAudiobookMode must
     // save under THIS key even if #deckName has already flipped to a new title.
@@ -4264,6 +4915,7 @@
     // next openAudiobookMode → abInitChapterRepeat. Native resumes if mid-announce.
     try { if (bg && bg.setChapterRepeat) bg.setChapterRepeat({ enabled: false, chapters: [] }); } catch (_) {}
     _abInRepeatPass = -1; try { abReflectRepeatUI(); } catch (_) {}
+    try { abStopSummaryStatusPoll(); } catch (_) {}
     // Card mode can resume normal audio playback now.
     window.audiobookActive = false;
   };

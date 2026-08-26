@@ -35,9 +35,30 @@ public class ArchiveExtractorPlugin: CAPPlugin, CAPBridgedPlugin {
     public let jsName = "ArchiveExtractor"
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "extractTar", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "resolveDir", returnType: CAPPluginReturnPromise),
     ]
 
     private let workQueue = DispatchQueue(label: "ArchiveExtractor.work", qos: .userInitiated)
+
+    // Live container path for Documents/<subdir>. Needed on visionOS, where
+    // the Capacitor Filesystem plugin (getUri) is excluded from the build:
+    // a stored absolute path goes stale whenever the app container UUID
+    // rotates on reinstall, and the webview has no other way to learn the
+    // current one.
+    @objc func resolveDir(_ call: CAPPluginCall) {
+        let subdir = call.getString("subdir") ?? "yomichan-audio"
+        guard let docsURL = try? FileManager.default.url(
+            for: .documentDirectory, in: .userDomainMask,
+            appropriateFor: nil, create: false
+        ) else {
+            call.reject("Could not resolve Documents directory"); return
+        }
+        let dir = docsURL.appendingPathComponent(subdir, isDirectory: true)
+        call.resolve([
+            "path": dir.path,
+            "exists": FileManager.default.fileExists(atPath: dir.path)
+        ])
+    }
 
     @objc func extractTar(_ call: CAPPluginCall) {
         let srcPath = call.getString("srcPath")

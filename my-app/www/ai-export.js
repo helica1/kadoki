@@ -51,12 +51,18 @@
     out.push('▼ 第' + n + '章' + (label ? ' — ' + label : ''));
     if (art && art.shortSummary) out.push(art.shortSummary.trim());
     if (art && art.longSummary) { out.push(''); out.push(art.longSummary.trim()); }
-    const events = (art && Array.isArray(art.events)) ? art.events.filter(e => e && (e.title || e.description)) : [];
+    // events/keyPassages are redundant once summaryBlocks exists — the narrative
+    // above already tells the chapter's events in prose and carries its quotes
+    // inline. Appending the old outline + quote-dump after it was the reported
+    // "disjointed" copy/export text; only pre-blocks (legacy) artifacts still
+    // need them here to avoid an empty-looking export.
+    const hasBlocks = !!(art && Array.isArray(art.summaryBlocks) && art.summaryBlocks.length);
+    const events = (!hasBlocks && art && Array.isArray(art.events)) ? art.events.filter(e => e && (e.title || e.description)) : [];
     if (events.length) {
       out.push(''); out.push('主な出来事:');
       for (const e of events) out.push('・' + (e.title ? e.title + '：' : '') + (e.description || ''));
     }
-    const pas = (art && Array.isArray(art.keyPassages)) ? art.keyPassages.filter(p => p && p.quote) : [];
+    const pas = (!hasBlocks && art && Array.isArray(art.keyPassages)) ? art.keyPassages.filter(p => p && p.quote) : [];
     if (pas.length) {
       out.push(''); out.push('印象的な場面:');
       for (const p of pas) {
@@ -135,6 +141,7 @@
       const a = art[idx];
       if (!a || !(a.longSummary || a.shortSummary)) continue;
       if (a.fp && fp && a.fp !== fp) continue;   // stale boundary generation
+      if (a.ahead) continue;                     // generated ahead — unreached, don't export spoilers
       const ch = chunks.find(c => c && c.idx === idx) || { idx };
       chapBody.push(chapterText(a, ch, idx + 1));
       chapBody.push('');

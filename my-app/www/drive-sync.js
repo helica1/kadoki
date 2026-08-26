@@ -26,6 +26,7 @@
     AICHUNKS_V1: 'AICHUNKS_V1_',
     AICHAR_V2: 'AICHAR_V2_',
     AICHAP_V1: 'AICHAP_V1_',
+    AICHAR_HOLD_V1: 'AICHAR_HOLD_V1_',   // staged ahead-chapter char updates (applied on reach)
     AIDEEP_V1: 'AIDEEP_V1_',
     AISUM_V1: 'AISUM_V1_',
     AICHAR_IMGIDX_V1: 'AICHAR_IMGIDX_V1_',

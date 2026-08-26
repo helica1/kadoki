@@ -64,6 +64,25 @@
       } catch (e) {
         console.warn('[local-audio] Filesystem.getUri probe failed:', e?.message);
       }
+      // 1b) visionOS: the Filesystem plugin is excluded from the xros
+      //    build, so getUri above never runs there — and the stored pref
+      //    path (step 2) goes stale on every reinstall as the container
+      //    UUID rotates, which silently killed ALL word audio on Vision.
+      //    ArchiveExtractor is an in-app plugin (always present) and hands
+      //    back the LIVE Documents path.
+      try {
+        const ax = window.Capacitor?.Plugins?.ArchiveExtractor;
+        if (ax && typeof ax.resolveDir === 'function') {
+          const r = await ax.resolveDir({ subdir: 'yomichan-audio' });
+          if (r?.path && r.exists) {
+            console.log(`[local-audio] base via ArchiveExtractor.resolveDir: ${r.path}`);
+            resolvedBase = r.path;
+            return r.path;
+          }
+        }
+      } catch (e) {
+        console.warn('[local-audio] ArchiveExtractor.resolveDir probe failed:', e?.message);
+      }
       // 2) Fallback: legacy Preferences pref. Note this can be a stale
       //    absolute path from a prior install; only used if getUri above
       //    didn't return anything.

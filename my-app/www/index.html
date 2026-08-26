@@ -709,6 +709,7 @@ body.dimmed .card-image {
 }
 </style>
 <link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css"><!-- place-name map popup (ai-places-ui.js); vendored, no CDN dependency -->
 <script src="ai-perf.js"></script><!-- must load FIRST: wraps setInterval/setTimeout for the perf probe -->
 <script src="i18n-strings.js"></script><!-- UI-chrome string table (before i18n.js) -->
 <script src="i18n-strings-prefs-html.js"></script><!-- Preferences-screen (ph.*) chrome strings -->
@@ -716,6 +717,7 @@ body.dimmed .card-image {
 <script src="i18n-strings-prefs-js.js"></script>
 <script src="i18n-strings-timeline.js"></script>
 <script src="i18n-strings-char-ui.js"></script>
+<script src="i18n-strings-places.js"></script>
 <script src="i18n-strings-char-screen.js"></script>
 <script src="i18n-strings-images.js"></script>
 <script src="i18n-strings-app.js"></script>
@@ -973,6 +975,19 @@ body.dimmed .card-image {
           </div>
           <div class="prefs-row">
             <button id="gdriveConnectBtn" type="button">Connect Google Drive</button>
+          </div>
+        </details>
+        <details class="prefs-section">
+          <summary class="prefs-heading" data-i18n="ph.sec_transfer">Backup &amp; transfer settings</summary>
+          <div style="font-size:.74rem;color:#777;margin:4px 0 8px;line-height:1.5;" data-i18n="ph.transfer_desc">
+            Move all settings to another device or installation: appearance, playback,
+            AI configuration (including API keys), Anki mappings, and dictionary
+            preferences. Positions, stats, and library content are never included.
+            The exported file contains your API keys — keep it private.
+          </div>
+          <div class="prefs-row">
+            <button id="prefsExportSettings" type="button" data-i18n="ph.export_settings">Export settings…</button>
+            <button id="prefsImportSettings" type="button" data-i18n="ph.import_settings">Import settings…</button>
           </div>
         </details>
         <details class="prefs-section">
@@ -1458,12 +1473,27 @@ body.dimmed .card-image {
     <!-- Chapter-repeat controls (audio mode). Sits just above the 80px live
          waveform. Wrapper is pointer-events:none so inter-button taps still
          reach the audio swipe/chrome handlers; each button re-enables pointer
-         events. Wired in reading-mode.js (window-scoped audio engine). -->
+         events. Wired in reading-mode.js (window-scoped audio engine).
+         abSummaryBtn jumps to this chapter's summary in Timeline & Scenes. -->
     <div id="abRepeatBar">
       <button id="abRepeatToggle" type="button" role="switch" aria-checked="false">
         <span data-i18n="audio.repeat_chapter">章をリピート</span><span class="ab-rep-switch"><span class="ab-rep-knob"></span></span>
       </button>
+      <button id="abSummaryBtn" type="button" data-i18n="audio.chapter_summary_btn">章の要約 ›</button>
       <button id="abNextChapterBtn" type="button" data-i18n="audio.next_chapter">次の章へ</button>
+    </div>
+    <!-- Vision Pro transport bar (movie-player-sized gaze targets; shown only
+         when reading-mode.js detects RealityDevice hardware). Deliberately NO
+         seek bar — a scrub strip under gaze+pinch is a place-loss machine.
+         Cue steps are discrete and recoverable. Wired in reading-mode.js. -->
+    <div id="abTransportBar">
+      <div class="ab-tp-pill">
+        <button id="abTpChrome" type="button" title="上部バーの表示切替">⌄</button>
+        <button id="abTpPrev" type="button" title="前の字幕">‹‹</button>
+        <button id="abTpPlay" type="button" title="再生 / 一時停止">▶</button>
+        <button id="abTpNext" type="button" title="次の字幕">››</button>
+        <button id="abTpDict" type="button" title="辞書モード">辞書</button>
+      </div>
     </div>
   </div>
 
@@ -1597,6 +1627,18 @@ body.dimmed .card-image {
           <div class="stat-row stat-row-last">
             <span class="stat-label">Time</span>
             <span id="statsAiTime" class="stat-value">0:00</span>
+          </div>
+        </div>
+        <!-- VOCAB REVIEW — time in the SRS review overlay (vocab-srs.js) -->
+        <div id="statsSrs" class="stats-block" data-mode="srs">
+          <div class="stats-block-header">
+            <span class="stats-block-title">Vocab review</span>
+            <button onclick="window.resetReadingTimerFor && window.resetReadingTimerFor('srs')" title="Reset vocab review stats" style="background:transparent;border:none;color:var(--text-muted,#666);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:2px 6px;">Reset</button>
+            <span class="stats-block-status">●</span>
+          </div>
+          <div class="stat-row stat-row-last">
+            <span class="stat-label">Time</span>
+            <span id="statsSrsTime" class="stat-value">0:00</span>
           </div>
         </div>
         <!-- "Reset All Stats" button removed — too easy to hit by accident.
@@ -1747,6 +1789,7 @@ body.dimmed .card-image {
   <script src="sendToAnkiConnect.js"></script>
   <script src="dict-store.js"></script>
   <script src="preferences.js"></script>
+  <script src="settings-transfer.js"></script>
   <script src="audio-archive.js"></script>
   <script src="dict-cache.js"></script>
   <script src="dict-prefs.js"></script>
@@ -1792,10 +1835,17 @@ body.dimmed .card-image {
   <script src="ai-processor.js"></script>
   <script src="ai-summary.js"></script>
   <script src="ai-timeline.js"></script>
+  <script src="vocab-srs.js"></script><!-- in-app vocab review (SRS over the 語彙 picks) -->
+  <script src="handoff-sync.js"></script><!-- iPhone ⇄ Vision Pro direct LAN state handoff -->
+
   <script src="ai-characters.js"></script>
   <script src="ai-characters-screen.js"></script>
   <script src="ai-characters-read.js"></script>
   <script src="ai-characters-ui.js"></script>
+  <script src="vendor/leaflet/leaflet.js"></script><!-- place-name map popup (ai-places-ui.js) -->
+  <script src="ai-places.js"></script>
+  <script src="ai-places-read.js"></script>
+  <script src="ai-places-ui.js"></script>
   <script src="ai-images.js"></script>
   <script src="ai-openai.js"></script>
   <script src="ai-fal.js"></script>
@@ -1823,6 +1873,13 @@ body.dimmed .card-image {
   <script src="keep-awake.js"></script>
   <script src="shell.js"></script>
   <script src="print-reading.js"></script>
+  <!-- visionOS spatial card pictures — console-driven layering prototype
+       (window.kvSpatial). Inert everywhere else; see spatial-cards.js. -->
+  <script src="spatial-cards.js"></script>
+<!-- visionOS: pop Timeline & Scenes / chapter summary / Characters out into
+     their own system-placeable windows (second webview, same origin). No-op
+     everywhere else — kadokiPanel.available() gates every affordance. -->
+<script src="panel-bridge.js"></script>
 
   <script>
     // Simple debug function that only logs to console
@@ -2843,6 +2900,10 @@ body.dimmed .card-image {
       // already the incoming title, so a background/mode-switch capture would mint
       // a record whose titleId disagrees with its location (History corruption).
       window._titleSwitchInFlight = true;
+      // Stop the Phase B live stream for the OUTGOING title immediately —
+      // shell:title-change (fired once the new title's cues finish loading)
+      // re-arms it for the incoming one.
+      try { window.watchLive?.clear(); } catch (_) {}
       try { return await _loadTitleFromLibraryInner(title); }
       finally { window._titleSwitchInFlight = false; hideTitleOpenOverlay(); }
     }

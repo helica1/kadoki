@@ -51,6 +51,12 @@ final class WatchTitleStore: ObservableObject {
                 audioURL = f
                 size = Int64((try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
             }
+            // Phase C (automatic cues sync) can deliver a title dir that holds
+            // only cues.json — no audio.* — for titles never explicitly sent
+            // to the watch. Those aren't playable here; keep the directory on
+            // disk (a future live-view feature reads it) but leave it out of
+            // the playback list.
+            guard audioURL != nil else { continue }
             let coverURL = dir.appendingPathComponent("cover.jpg")
             let cover = fm.fileExists(atPath: coverURL.path) ? coverURL : nil
             out.append(WatchTitle(id: id, name: name, durMs: durMs, audioURL: audioURL, coverURL: cover, sizeBytes: size))

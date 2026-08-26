@@ -19,13 +19,29 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
     public let identifier = "WatchBridgePlugin"
     public let jsName = "WatchBridge"
     public let pluginMethods: [CAPPluginMethod] = [
-        CAPPluginMethod(name: "getState",      returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "sendTitle",     returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "updateContext", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "flushPending",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getState",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sendTitle",      returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "updateContext",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "flushPending",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setLiveContext", returnType: CAPPluginReturnPromise),
     ]
 
     private var progressTimer: Timer?
+
+    // MARK: - Live subtitle streaming (Phase B)
+    //
+    // NATIVE-to-native by design: iOS suspends the WebView while the phone is
+    // locked, so a JS-side streamer would die in exactly the pocket-listening
+    // case this exists for. BackgroundAudioPlugin posts .kadokiPositionTick on
+    // every position change (periodic tick + pause/resume/seek); this plugin
+    // just relays a throttled subset to the watch over WCSession. The watch
+    // already holds cues + word timings locally (Phase C) and computes the
+    // cue/karaoke display itself off the tiny {ms, ts, playing, rate} frame.
+    private var liveTitleId: String?
+    private var lastFrame: (ms: Int, playing: Bool, rate: Float, ts: Int)?
+    private var lastLiveSendAt: TimeInterval = 0
+    private var lastSentMs: Int?
+    private var positionObserver: NSObjectProtocol?
 
     // Events can arrive (queued userInfo replays, receivedApplicationContext at
     // activation) BEFORE the JS side has attached its listeners — buffer until
@@ -56,6 +72,94 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         let s = WCSession.default
         s.delegate = self
         s.activate()
+        positionObserver = NotificationCenter.default.addObserver(
+            forName: .kadokiPositionTick, object: nil, queue: nil
+        ) { [weak self] note in
+            self?.handlePositionTick(note)
+        }
+    }
+
+    // titleId nil/empty clears the live stream (JS calls this on title
+    // close/switch) — handlePositionTick then simply stops relaying frames.
+    @objc func setLiveContext(_ call: CAPPluginCall) {
+        let tid = call.getString("titleId")
+        liveTitleId = (tid?.isEmpty ?? true) ? nil : tid
+        // Force the next tick through immediately rather than waiting out the
+        // 1 Hz throttle against a PREVIOUS title's send history.
+        lastLiveSendAt = 0
+        lastSentMs = nil
+        call.resolve()
+    }
+
+    private func handlePositionTick(_ note: Notification) {
+        guard let info = note.userInfo,
+              let ms = info["ms"] as? Int,
+              let playing = info["playing"] as? Bool,
+              let rate = info["rate"] as? Float,
+              let ts = info["ts"] as? Int else { return }
+        // A play/pause STATE CHANGE must never be throttled: pause() stops the
+        // position timer right after this tick, so if this particular frame
+        // gets dropped by the 1 Hz gate, no later tick will ever correct the
+        // watch — it would extrapolate "still playing" from the stale frame
+        // forever (this was exactly the reported "keeps going after phone
+        // stopped" bug).
+        let playingChanged = lastFrame?.playing != playing
+        lastFrame = (ms, playing, rate, ts)
+        guard let tid = liveTitleId else { return }
+        let s = WCSession.default
+        guard s.activationState == .activated else { return }
+        // Regular ticks need a reachable watch; a STATE CHANGE is sent
+        // regardless — sendMessage may fail, but the applicationContext copy
+        // below lands whenever the watch app next runs.
+        guard playingChanged || s.isReachable else { return }
+        let now = Date().timeIntervalSince1970
+        let jumped = lastSentMs != nil && abs(ms - lastSentMs!) > 2000
+        guard jumped || playingChanged || now - lastLiveSendAt >= 1.0 else { return }
+        lastLiveSendAt = now
+        lastSentMs = ms
+        sendLiveFrame(titleId: tid, ms: ms, ts: ts, playing: playing, rate: rate,
+                      stateChange: playingChanged)
+    }
+
+    private func sendLiveFrame(titleId: String, ms: Int, ts: Int, playing: Bool, rate: Float,
+                               stateChange: Bool = false, attempt: Int = 0) {
+        let payload: [String: Any] = [
+            "t": "live", "titleId": titleId, "ms": ms, "ts": ts,
+            "playing": playing, "rate": Double(rate),
+        ]
+        let s = WCSession.default
+        if stateChange {
+            // A play/pause flip is the one frame that must not be lost: the
+            // watch extrapolates "still playing" from the last frame it has,
+            // so a dropped pause = subtitles scrolling on forever (reported).
+            // (1) Also publish it as applicationContext — WCSession's
+            // latest-state channel, delivered even when the watch app is
+            // not reachable right now (merge: the context also carries
+            // phonePositions). (2) Retry the live message a couple of times.
+            var ctx = s.applicationContext
+            ctx["live"] = payload
+            try? s.updateApplicationContext(ctx)
+        }
+        guard stateChange || s.isReachable else { return }
+        s.sendMessage(payload, replyHandler: nil, errorHandler: { [weak self] _ in
+            guard stateChange, attempt < 2 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 0.4 : 1.2)) {
+                // Only if this is still the latest state (a resume may have
+                // superseded the pause by now).
+                guard let self = self, let f = self.lastFrame, f.playing == playing, f.ts == ts else { return }
+                self.sendLiveFrame(titleId: titleId, ms: ms, ts: ts, playing: playing, rate: rate,
+                                   stateChange: true, attempt: attempt + 1)
+            }
+        })
+    }
+
+    // The watch app coming to the foreground is exactly when its live view
+    // wants a frame RIGHT NOW rather than waiting up to 1s for the next tick.
+    public func sessionReachabilityDidChange(_ session: WCSession) {
+        guard session.isReachable, let tid = liveTitleId, let f = lastFrame else { return }
+        lastLiveSendAt = Date().timeIntervalSince1970
+        lastSentMs = f.ms
+        sendLiveFrame(titleId: tid, ms: f.ms, ts: f.ts, playing: f.playing, rate: f.rate)
     }
 
     // MARK: - state
@@ -98,7 +202,11 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         let s = WCSession.default
         guard s.activationState == .activated else { call.reject("Session not activated"); return }
         guard s.isPaired else { call.reject("No paired Apple Watch"); return }
-        guard s.isWatchAppInstalled else { call.reject("Kadoki watch app not installed"); return }
+        // isWatchAppInstalled is notoriously STALE-FALSE after a watch-app
+        // update/reinstall until the iPhone app relaunches (sometimes until
+        // re-pair) — while transfers still work fine. Never hard-block on it:
+        // if the app truly isn't there, the file transfer itself reports the
+        // failure through watchTransferDone.
         guard let titleId = call.getString("titleId"), !titleId.isEmpty else { call.reject("titleId required"); return }
         guard let audioPath = call.getString("audioPath"), !audioPath.isEmpty else { call.reject("audioPath required"); return }
         let name = call.getString("name") ?? "Untitled"
@@ -191,6 +299,47 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         session.activate()
     }
 
+    // Watch → phone remote commands (Phase B tap-to-toggle + cue paging).
+    // The watch sends WITH a replyHandler (ack → the with-reply delegate
+    // below); this NO-reply variant stays for older watch builds. Both funnel
+    // into handleLiveCmd.
+    public func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        guard (message["t"] as? String) == "liveCmd" else { return }
+        handleLiveCmd(message)
+    }
+
+    // Dedupe ring for liveCmd retries: the watch retries a failed send with
+    // the SAME id, so a delivered-but-error-reported first attempt must not
+    // double-toggle. WCSession delegate callbacks arrive on a serial queue,
+    // so plain array access is safe here.
+    private var seenLiveCmdIds: [String] = []
+
+    private func handleLiveCmd(_ message: [String: Any]) {
+        NSLog("[WatchBridge] liveCmd received: \(message)")
+        if let id = message["id"] as? String, !id.isEmpty {
+            if seenLiveCmdIds.contains(id) { return }   // retry duplicate — already acted
+            seenLiveCmdIds.append(id)
+            if seenLiveCmdIds.count > 16 { seenLiveCmdIds.removeFirst() }
+        }
+        // Stale guard: these are live gestures — a command that somehow
+        // arrives long after the tap (queued across an unreachable gap) must
+        // not yank playback. Commands without ts (older watch build) pass.
+        if let ts = message["ts"] as? Double, ts > 0,
+           Date().timeIntervalSince1970 * 1000 - ts > 8000 { return }
+        switch message["action"] as? String {
+        case "togglePlayPause":
+            NotificationCenter.default.post(name: .kadokiRemoteToggleRequest, object: nil)
+        case "nextCue":
+            NotificationCenter.default.post(name: .kadokiRemoteCueJumpRequest, object: nil,
+                                            userInfo: ["dir": 1])
+        case "prevCue":
+            NotificationCenter.default.post(name: .kadokiRemoteCueJumpRequest, object: nil,
+                                            userInfo: ["dir": -1])
+        default:
+            break
+        }
+    }
+
     public func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
         let md = fileTransfer.file.metadata ?? [:]
         notifyListeners("watchTransferDone", data: [
@@ -203,12 +352,35 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
 
     // Manual sync request from the watch (reachable round-trip): reply with
     // the last positions we pushed so the watch ingests instantly, and ask JS
-    // to push FRESH positions right behind it.
+    // to push FRESH positions right behind it. Also handles the live-view's
+    // "liveSubStart" request (Phase B): reply with whatever frame we have
+    // RIGHT NOW — even paused, even if playback hasn't ticked since the watch
+    // app came foreground — so the view doesn't sit blank for up to 1s.
     public func session(_ session: WCSession, didReceiveMessage message: [String: Any],
                         replyHandler: @escaping ([String: Any]) -> Void) {
-        guard (message["type"] as? String) == "syncRequest" else { replyHandler([:]); return }
-        emit("watchSyncRequest", [:])
-        replyHandler(["phonePositions": session.applicationContext["phonePositions"] ?? [:]])
+        // Remote command with ack: reply FIRST (the watch only needs delivery
+        // confirmation, and the id-dedupe makes acting after the ack safe).
+        if (message["t"] as? String) == "liveCmd" {
+            replyHandler(["ok": true])
+            handleLiveCmd(message)
+            return
+        }
+        switch message["type"] as? String {
+        case "syncRequest":
+            emit("watchSyncRequest", [:])
+            replyHandler(["phonePositions": session.applicationContext["phonePositions"] ?? [:]])
+        case "liveSubStart":
+            if let tid = liveTitleId, let f = lastFrame {
+                replyHandler([
+                    "t": "live", "titleId": tid, "ms": f.ms, "ts": f.ts,
+                    "playing": f.playing, "rate": Double(f.rate),
+                ])
+            } else {
+                replyHandler([:])
+            }
+        default:
+            replyHandler([:])
+        }
     }
 
     // Reliable queued records from the watch: listen-time deltas (stats) and

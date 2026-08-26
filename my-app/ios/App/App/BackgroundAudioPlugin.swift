@@ -1,8 +1,24 @@
 import Foundation
+import Network
 import Capacitor
 import UIKit
 import AVFoundation
 import MediaPlayer
+
+// Native position tap for the Apple Watch live-subtitle stream (Phase B):
+// WatchBridgePlugin observes this instead of a new timer of its own, so the
+// watch's live view rides the SAME cadence the lock screen / cue tracking
+// already use — no duplicate polling.
+extension Notification.Name {
+    static let kadokiPositionTick = Notification.Name("kadokiPositionTick")
+    // Watch → phone remote play/pause toggle (Phase B tap gesture). Posted by
+    // WatchBridgePlugin when the watch's live view is tapped.
+    static let kadokiRemoteToggleRequest = Notification.Name("kadokiRemoteToggleRequest")
+    // Watch → phone subtitle paging (Phase B left/right swipe). userInfo
+    // ["dir": ±1]. Relayed to JS through the SAME "remoteCommand" channel the
+    // lock-screen ⏮⏭ buttons use — one cue-jump path, one staleness guard.
+    static let kadokiRemoteCueJumpRequest = Notification.Name("kadokiRemoteCueJumpRequest")
+}
 
 /**
  * BackgroundAudioPlugin — iOS port of the Android BackgroundAudio plugin.
@@ -54,7 +70,203 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setKeepAwake", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setChapterRepeat",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "skipToNextChapter", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "deviceModel",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "tpState",           returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "dictPanel",         returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "panelWindow",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "handoffPeers",      returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "handoffGet",        returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "handoffServeResult", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "clearSavedPosition", returnType: CAPPluginReturnPromise),
     ]
+
+    // Handoff apply: the device-local durable floor must not out-vote a
+    // position the user just adopted from another device (it's forward-only
+    // by design — restore would keep THIS device's old spot). Clearing it
+    // lets the freshly-written prefs position rule the next restore.
+    @objc func clearSavedPosition(_ call: CAPPluginCall) {
+        let d = UserDefaults.standard
+        d.removeObject(forKey: Self.posKeyUrl)
+        d.removeObject(forKey: Self.posKeyMs)
+        d.removeObject(forKey: Self.posKeyTs)
+        call.resolve()
+    }
+
+    // MARK: - Handoff (iPhone ⇄ Vision Pro LAN sync)
+
+    // Continuously-running Bonjour browser; results cached for handoffPeers.
+    private static var handoffBrowser: NWBrowser?
+    private static var handoffFound: [String] = []
+    private static let handoffLock = NSLock()
+    private static func ensureBrowser() {
+        guard handoffBrowser == nil else { return }
+        let b = NWBrowser(for: .bonjour(type: "_kadoki._tcp", domain: nil), using: NWParameters())
+        b.browseResultsChangedHandler = { results, _ in
+            var names: [String] = []
+            for r in results {
+                if case let .service(name, _, _, _) = r.endpoint { names.append(name) }
+            }
+            handoffLock.lock(); handoffFound = names; handoffLock.unlock()
+        }
+        b.start(queue: DispatchQueue.global(qos: .utility))
+        handoffBrowser = b
+    }
+
+    @objc func handoffPeers(_ call: CAPPluginCall) {
+        Self.ensureBrowser()
+        // First call after boot: give the browser a beat to find peers.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1.2) {
+            Self.handoffLock.lock()
+            var names = Self.handoffFound
+            Self.handoffLock.unlock()
+            // Never hand back OURSELVES (same-name self-sync loop).
+            #if os(visionOS)
+            names.removeAll { $0 == "Kadoki Vision" }
+            #else
+            names.removeAll { $0 == "Kadoki " + UIDevice.current.name }
+            #endif
+            call.resolve(["peers": names])
+        }
+    }
+
+    // Minimal HTTP GET over NWConnection straight to the Bonjour endpoint —
+    // no name resolution step, no ATS involvement, tiny and dependable.
+    @objc func handoffGet(_ call: CAPPluginCall) {
+        guard let service = call.getString("service"), let path = call.getString("path") else {
+            call.reject("service + path required")
+            return
+        }
+        let endpoint = NWEndpoint.service(name: service, type: "_kadoki._tcp", domain: "local.", interface: nil)
+        let conn = NWConnection(to: endpoint, using: .tcp)
+        var buffer = Data()
+        var done = false
+        let finish: (String?) -> Void = { body in
+            if done { return }
+            done = true
+            conn.cancel()
+            if let body = body { call.resolve(["body": body]) }
+            else { call.reject("handoff fetch failed") }
+        }
+        func readLoop() {
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 512 * 1024) { data, _, isComplete, err in
+                if let d = data { buffer.append(d) }
+                if isComplete || err != nil {
+                    // split headers/body at CRLFCRLF
+                    if let range = buffer.range(of: Data([13, 10, 13, 10])) {
+                        let body = buffer.subdata(in: range.upperBound..<buffer.endIndex)
+                        finish(String(data: body, encoding: .utf8))
+                    } else { finish(nil) }
+                    return
+                }
+                readLoop()
+            }
+        }
+        conn.stateUpdateHandler = { st in
+            switch st {
+            case .ready:
+                let req = "GET \(path) HTTP/1.1\r\nHost: kadoki\r\nConnection: close\r\n\r\n"
+                conn.send(content: req.data(using: .utf8), completion: .contentProcessed { _ in })
+                readLoop()
+            case .failed, .cancelled:
+                finish(nil)
+            default: break
+            }
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15) { finish(nil) }   // hard timeout
+        conn.start(queue: DispatchQueue.global(qos: .userInitiated))
+    }
+
+    // JS → native: the built JSON for a parked handoff-server request.
+    @objc func handoffServeResult(_ call: CAPPluginCall) {
+        let reqId = call.getString("reqId") ?? ""
+        let body = call.getString("body") ?? ""
+        KadokiHandoffServer.shared.fulfill(reqId: reqId, body: body)
+        call.resolve()
+    }
+
+    // JS → native dictionary panel (visionOS): the ghost popup's HTML (and,
+    // once per session, the app's CSS bundle) for the panel's WKWebView.
+    @objc func dictPanel(_ call: CAPPluginCall) {
+        var info: [String: Any] = ["show": call.getBool("show") ?? false]
+        if let html = call.getString("html") { info["html"] = html }
+        if let css = call.getString("css") { info["css"] = css }
+        if let xf = call.getDouble("xf") { info["xf"] = xf }
+        if let yf = call.getDouble("yf") { info["yf"] = yf }
+        NotificationCenter.default.post(name: Notification.Name("KadokiDictPanel"),
+                                        object: nil, userInfo: info)
+        call.resolve()
+    }
+
+    // JS → native detachable panel windows (visionOS): Timeline & Scenes, the
+    // chapter summary and the Characters screen can each be popped OUT of the
+    // main window into a real, system-placeable window. Unlike the dictionary
+    // panel (whose HTML is mirrored into a shared webview), a panel window
+    // hosts its OWN WKWebView on the SAME capacitor://localhost origin, so it
+    // renders the real thing — shared IndexedDB, working images and lookups.
+    //   action "open"  — activate (or focus) the window for `kind`
+    //   action "close" — destroy it; the panel returns to an in-window overlay
+    //   action "post"  — relay `msg` to that window's webview (see KadokiPanelHost)
+    @objc func panelWindow(_ call: CAPPluginCall) {
+        var info: [String: Any] = ["action": call.getString("action") ?? "open"]
+        if let kind = call.getString("kind") { info["kind"] = kind }
+        if let msg = call.getString("msg") { info["msg"] = msg }
+        NotificationCenter.default.post(name: Notification.Name("KadokiPanelWindow"),
+                                        object: nil, userInfo: info)
+        call.resolve()
+    }
+
+    // JS → native transport-UI state (visionOS ornament): dictionary mode +
+    // active app mode. Each field only fires when present, so a mode-only
+    // push can't reset the dictionary flag (and vice versa).
+    @objc func tpState(_ call: CAPPluginCall) {
+        if let typing = call.getBool("typing") {
+            NotificationCenter.default.post(name: Notification.Name("KadokiTyping"),
+                                            object: nil, userInfo: ["on": typing])
+        }
+        if let spatialOn = call.getBool("spatialOn") {
+            NotificationCenter.default.post(name: Notification.Name("KadokiSpatialMode"),
+                                            object: nil, userInfo: ["on": spatialOn])
+        }
+        if let dictOn = call.getBool("dictOn") {
+            NotificationCenter.default.post(name: Notification.Name("KadokiDictMode"),
+                                            object: nil, userInfo: ["on": dictOn])
+        }
+        if let mode = call.getString("mode") {
+            NotificationCenter.default.post(name: Notification.Name("KadokiUiMode"),
+                                            object: nil, userInfo: ["mode": mode])
+        }
+        call.resolve()
+    }
+
+    // Device identity probes for the JS layer's platform adaptations.
+    // "Designed for iPad" compatibility mode on visionOS masquerades hard:
+    // utsname.machine reports a fake iPad (verified on device: "iPad13,4"),
+    // as do UA/idiom/UIDevice. So we return several deeper signals and let
+    // JS match ANY of them: the real system's SystemVersion.plist ProductName
+    // (the file is the host OS's), low-level sysctl targets, and a probe for
+    // a visionOS-only UIKit class.
+    @objc func deviceModel(_ call: CAPPluginCall) {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let machine = withUnsafePointer(to: &systemInfo.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(validatingUTF8: $0) }
+        } ?? "unknown"
+        func sysctlStr(_ name: String) -> String {
+            var size = 0
+            guard sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else { return "" }
+            var buf = [CChar](repeating: 0, count: size)
+            guard sysctlbyname(name, &buf, &size, nil, 0) == 0 else { return "" }
+            return String(cString: buf)
+        }
+        let sv = NSDictionary(contentsOfFile: "/System/Library/CoreServices/SystemVersion.plist")
+        call.resolve([
+            "model": machine,
+            "hwTarget": sysctlStr("hw.target"),
+            "hwProduct": sysctlStr("hw.product"),
+            "productName": (sv?["ProductName"] as? String) ?? "",
+            "visionClass": NSClassFromString("UIWindowSceneGeometryPreferencesVision") != nil,
+        ])
+    }
 
     // MARK: - Durable position store (BookPlayer-style: the player layer owns the
     // save). We persist {url, ms} to UserDefaults from THIS process ~every 5s
@@ -211,6 +423,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private func finishBookAtEof() {
         stopPositionTimer()
         emitState(playing: false)
+        postLiveTick(ms: Int((player?.currentTime ?? 0) * 1000), playing: false)   // watch must stop too
         self.notifyListeners("ended", data: [:])
         updateNowPlaying()
         do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
@@ -246,6 +459,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             p.play()
             self?.startPositionTimer()
             self?.emitState(playing: true)
+            self?.postLiveTick(ms: Int(p.currentTime * 1000), playing: true)
             self?.updateNowPlaying()
             // Tell JS this play came from the lock screen / Control Center, so
             // it can force AUDIO mode (audiobook + audio timer) regardless of
@@ -256,29 +470,41 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return .success
         }
         cmd.pauseCommand.addTarget { [weak self] _ in
+            let ms = Int((self?.player?.currentTime ?? 0) * 1000)
             self?.player?.pause()
             self?.stopPositionTimer()
             self?.saveLastPositionNow()   // durable: a paused suspended app can be jetsam-killed with no further save
             self?.emitState(playing: false)
+            self?.postLiveTick(ms: ms, playing: false)
             self?.updateNowPlaying()
             return .success
         }
         cmd.togglePlayPauseCommand.addTarget { [weak self] _ in
-            guard let p = self?.player else { return .commandFailed }
-            if p.isPlaying {
-                p.pause()
-                self?.stopPositionTimer()
-                self?.saveLastPositionNow()
-                self?.emitState(playing: false)
-            } else {
-                self?.ensureSessionActive()
-                p.play()
-                self?.startPositionTimer()
-                self?.emitState(playing: true)
-                self?.notifyListeners("remoteCommand", data: ["action": "play", "ts": Int(Date().timeIntervalSince1970 * 1000)])
-            }
-            self?.updateNowPlaying()
+            self?.performTogglePlayPause()
             return .success
+        }
+        // Phase B: the watch's "On iPhone" live view taps to remote-toggle
+        // playback — same native path as the lock-screen toggle above, kept
+        // in sync via WatchBridgePlugin posting this notification (mirrors
+        // BackgroundAudio → WatchBridge's own .kadokiPositionTick, just in
+        // the opposite direction).
+        NotificationCenter.default.addObserver(
+            forName: .kadokiRemoteToggleRequest, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.performTogglePlayPause()
+        }
+        // Watch left/right swipe pages subtitles — emit the SAME event the
+        // lock-screen ⏮⏭ buttons emit, so the watch rides the exact JS path
+        // (app.js remoteCommand → lockScreenCueJump) already proven to work
+        // during locked background playback, staleness guard included.
+        NotificationCenter.default.addObserver(
+            forName: .kadokiRemoteCueJumpRequest, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let dir = note.userInfo?["dir"] as? Int, dir != 0 else { return }
+            self?.notifyListeners("remoteCommand", data: [
+                "action": dir > 0 ? "nextCue" : "prevCue",
+                "ts": Int(Date().timeIntervalSince1970 * 1000),
+            ])
         }
         // Prev/next-track (⏮⏭) jump by SUBTITLE CUE. JS owns cue boundaries, so
         // these just notify it; the ±30 s skip buttons are disabled in favor of
@@ -318,6 +544,27 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             self?.updateNowPlaying()
             return .success
         }
+    }
+
+    // Shared by the lock-screen toggle button and the watch's tap-to-toggle
+    // (Phase B) — both are "remote, no context on current state" triggers.
+    private func performTogglePlayPause() {
+        guard let p = player else { NSLog("[BackgroundAudio] performTogglePlayPause: no active player"); return }
+        if p.isPlaying {
+            p.pause()
+            stopPositionTimer()
+            saveLastPositionNow()
+            emitState(playing: false)
+            postLiveTick(ms: Int(p.currentTime * 1000), playing: false)
+        } else {
+            ensureSessionActive()
+            p.play()
+            startPositionTimer()
+            emitState(playing: true)
+            postLiveTick(ms: Int(p.currentTime * 1000), playing: true)
+            notifyListeners("remoteCommand", data: ["action": "play", "ts": Int(Date().timeIntervalSince1970 * 1000)])
+        }
+        updateNowPlaying()
     }
 
     // MARK: - JS methods
@@ -406,6 +653,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.stopPositionTimer()
                 self.saveLastPositionNow()   // durable on every pause (parity with Android ACTION_PAUSE)
                 self.emitState(playing: false)
+                self.postLiveTick(ms: Int((self.player?.currentTime ?? 0) * 1000), playing: false)
                 self.updateNowPlaying()
             }
         } else {
@@ -422,6 +670,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             stopPositionTimer()
             saveLastPositionNow()   // durable on every pause (parity with Android ACTION_PAUSE)
             emitState(playing: false)
+            postLiveTick(ms: Int((player?.currentTime ?? 0) * 1000), playing: false)
             updateNowPlaying()
         }
         call.resolve()
@@ -442,6 +691,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
         startPositionTimer()
         emitState(playing: true)
+        postLiveTick(ms: Int(p.currentTime * 1000), playing: true)
         updateNowPlaying()
         call.resolve()
     }
@@ -449,10 +699,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func stop(_ call: CAPPluginCall) {
         stopPositionTimer()
         saveLastPositionNow()   // before the player/url are cleared (parity with Android ACTION_STOP)
+        let msAtStop = Int((player?.currentTime ?? 0) * 1000)
         player?.stop()
         player = nil
         currentUrlStr = ""
         emitState(playing: false)
+        postLiveTick(ms: msAtStop, playing: false)
         clearNowPlaying()
         // Deactivate the session so iOS can suspend the app when nothing is
         // playing (an always-active .playback session kept the process resident
@@ -488,12 +740,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 guard let self = self, let p = self.player else { return }
                 p.currentTime = target               // always land the seek
                 self.updateNowPlaying()
+                self.postLiveTick(ms: Int(target * 1000), playing: p.isPlaying)
                 guard self.fadeGeneration == gen else { return } // a pause/play raced in — it owns the volume
                 p.setVolume(1.0, fadeDuration: secs)
             }
         } else {
             p.currentTime = target
             updateNowPlaying()
+            postLiveTick(ms: Int(target * 1000), playing: p.isPlaying)
         }
         call.resolve()
     }
@@ -684,20 +938,32 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let renderer = UIGraphicsImageRenderer(size: size, format: fmt)
         let img = renderer.image { ctx in
             let rect = CGRect(origin: .zero, size: size)
-            // Near-black background with a subtle radial vignette — a touch
-            // lighter at the centre, darkening toward the edges — for a soft
-            // shadow/depth effect behind the text.
-            UIColor(white: 0.06, alpha: 1).setFill()
+            // Black base + the book cover aspect-FILLED on top at 35% alpha —
+            // drawing an image at alpha over an opaque black base is exactly
+            // equivalent to a 65%-opaque black scrim over the full image, the
+            // usual "dim a photo for text overlay" technique. Falls back to
+            // the old near-black radial vignette when there's no cover (e.g.
+            // a title with no artwork yet) — a blank cover would otherwise
+            // just render as a flat 35%-black square.
+            UIColor.black.setFill()
             ctx.fill(rect)
-            let colors = [UIColor(red: 0.14, green: 0.14, blue: 0.14, alpha: 1).cgColor,
-                          UIColor(red: 0.02, green: 0.02, blue: 0.02, alpha: 1).cgColor] as CFArray
-            if let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                                     colors: colors, locations: [0, 1]) {
-                let c = CGPoint(x: side / 2, y: side / 2)
-                ctx.cgContext.drawRadialGradient(
-                    grad, startCenter: c, startRadius: 0,
-                    endCenter: c, endRadius: side * 0.70,
-                    options: [.drawsAfterEndLocation])
+            if let cover = nowPlayingCoverImage, cover.size.width > 0, cover.size.height > 0 {
+                let scale = max(side / cover.size.width, side / cover.size.height)
+                let drawW = cover.size.width * scale
+                let drawH = cover.size.height * scale
+                let drawRect = CGRect(x: (side - drawW) / 2, y: (side - drawH) / 2, width: drawW, height: drawH)
+                cover.draw(in: drawRect, blendMode: .normal, alpha: 0.35)
+            } else {
+                let colors = [UIColor(red: 0.14, green: 0.14, blue: 0.14, alpha: 1).cgColor,
+                              UIColor(red: 0.02, green: 0.02, blue: 0.02, alpha: 1).cgColor] as CFArray
+                if let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                         colors: colors, locations: [0, 1]) {
+                    let c = CGPoint(x: side / 2, y: side / 2)
+                    ctx.cgContext.drawRadialGradient(
+                        grad, startCenter: c, startRadius: 0,
+                        endCenter: c, endRadius: side * 0.70,
+                        options: [.drawsAfterEndLocation])
+                }
             }
             guard !clean.isEmpty else { return }
 
@@ -705,10 +971,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             para.alignment = .center
             para.lineBreakMode = .byCharWrapping   // Japanese has no spaces to break on
 
+            // A cover background is far less predictable than the old flat
+            // near-black one (bright/busy art under any given line of text),
+            // so the shadow needs to carry legibility on its own now — bigger
+            // blur + darker + a touch more offset than the old subtle version.
             let shadow = NSShadow()
-            shadow.shadowColor = UIColor(white: 0, alpha: 0.9)
-            shadow.shadowBlurRadius = 4
-            shadow.shadowOffset = CGSize(width: 0, height: 1)
+            shadow.shadowColor = UIColor(white: 0, alpha: 0.95)
+            shadow.shadowBlurRadius = 10
+            shadow.shadowOffset = CGSize(width: 0, height: 2)
 
             // Largest font (80→24 pt) whose wrapped text fits the padded box.
             // Capture the winning wrapped height so we don't re-measure for
@@ -833,6 +1103,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // boundary is the NEXT chapter's start and at EOF is end-of-book — so a kill
         // mid-announce restores to the chapter being repeated, never ahead of it.
         stopPositionTimer(); saveDurablePositionMs(ch.startMs); emitState(playing: false); updateNowPlaying()
+        postLiveTick(ms: ch.startMs, playing: false)   // watch karaoke parks at the chapter start during the announce
         speakAnnounce(ch.announce) { [weak self] in self?.finishRepeat(seekTo: target, passIdx: ch.idx, isFinal: isFinal) }
     }
 
@@ -889,6 +1160,18 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "playing":    playing,
             "ts":         Int(Date().timeIntervalSince1970 * 1000)
         ])
+        postLiveTick(ms: positionMs, playing: playing)
+    }
+
+    // Pure notification post — no playback side effects — safe to call from
+    // any state transition. The position TIMER stops while paused, so
+    // pause()/seek() call this directly too; otherwise the watch's cached
+    // frame would keep showing "playing" from before the pause indefinitely.
+    private func postLiveTick(ms: Int, playing: Bool) {
+        NotificationCenter.default.post(name: .kadokiPositionTick, object: nil, userInfo: [
+            "ms": ms, "playing": playing, "rate": currentRate,
+            "ts": Int(Date().timeIntervalSince1970 * 1000)
+        ])
     }
 
     private func emitState(playing: Bool) {
@@ -896,6 +1179,10 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "playing": playing,
             "ts":      Int(Date().timeIntervalSince1970 * 1000)
         ])
+        // Native transport surfaces (the visionOS ornament) mirror play state
+        // through NotificationCenter — no-op elsewhere (no observers).
+        NotificationCenter.default.post(name: Notification.Name("KadokiAudioState"),
+                                        object: nil, userInfo: ["playing": playing])
     }
 
     // MARK: - Now Playing (lock screen + Control Center)
@@ -958,6 +1245,7 @@ extension BackgroundAudioPlugin: AVAudioPlayerDelegate {
         // Playback is dead: tell JS explicitly so window._bgPlaying can't
         // stay stale-true (the position poll above just stops silently).
         emitState(playing: false)
+        postLiveTick(ms: Int(player.currentTime * 1000), playing: false)
         updateNowPlaying()
     }
 }

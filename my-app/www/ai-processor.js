@@ -85,12 +85,61 @@
     },
     required: ['id', 'importance'], additionalProperties: false,
   };
+  // Real-world place names (places companion to characters). OPTIONAL (never
+  // in `required`) — a weak model omitting it must never fail-validate the
+  // chapter. No id/relationships/presence: places carry none of the
+  // characters' merge complexity, just a verbatim surface + reading.
+  const PLACE_ITEM = {
+    type: 'object',
+    properties: {
+      surface: { type: 'string' },
+      reading: { type: 'string' },
+    },
+    required: ['surface'], additionalProperties: false,
+  };
   const CHAPTER_SCHEMA = {
     type: 'object',
     properties: {
       label: { type: 'string' },
       shortSummary: { type: 'string' },
       longSummary: { type: 'string' },
+      places: { type: 'array', items: PLACE_ITEM },
+      // Narrative block flow (para / quote / subhead) — the new-format chapter
+      // recap. REQUIRED: with schema-enforcing backends this makes the model
+      // actually emit it (weaker models were skipping the optional field and
+      // ALSO obeying "longSummary may be empty" — the artifact then carried
+      // nothing but the 2-3 sentence shortSummary and no quotes). Renderers
+      // still fall back to longSummary for legacy artifacts, and processChunk
+      // fails the chapter (visible, retryable) if BOTH come back empty.
+      summaryBlocks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: ['para', 'quote', 'subhead'] },
+            text: { type: 'string' },
+            quote: { type: 'string' },
+            speaker: { type: 'string' },
+            context: { type: 'string' },
+          },
+          required: ['type'], additionalProperties: false,
+        },
+      },
+      // N1+ vocab picks with a VERBATIM context sentence (audio-linkable,
+      // same exact-match contract as quote blocks). Empty array = none fit.
+      vocab: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            word: { type: 'string' },
+            reading: { type: 'string' },
+            note: { type: 'string' },
+            context: { type: 'string' },
+          },
+          required: ['word', 'context'], additionalProperties: false,
+        },
+      },
       events: {
         type: 'array',
         items: {
@@ -118,8 +167,8 @@
       },
       unresolved: { type: 'array', items: { type: 'string' } },
     },
-    required: ['label', 'shortSummary', 'longSummary', 'events',
-               'keyPassages', 'characters', 'unresolved'],
+    required: ['label', 'shortSummary', 'longSummary', 'summaryBlocks', 'vocab',
+               'events', 'keyPassages', 'characters', 'unresolved'],
     additionalProperties: false,
   };
 
@@ -131,17 +180,58 @@
     '- 与えられた本文と蓄積状態に書かれている事実のみを使う。この作品に関する外部知識' +
     '(学習データに含まれる原作・アニメ・映画などの知識を含む)は一切使用禁止。\n' +
     '- 今後の展開の予測・伏線の解釈・憶測を書かない(「怪しい」などの示唆も禁止)。\n' +
-    '- すべて日本語で、本文の文体・語彙にできるだけ忠実に書く。マークダウン記法は使わない。\n' +
+    '- すべて日本語で書く。マークダウン記法は使わない。あらすじの説明文は本文の文体を真似せず、' +
+    '平易で分かりやすい標準的な日本語で書く(本文の雰囲気・文体は quote で伝える)。\n' +
     '- label: この章の内容を表す12字以内の章タイトル。\n' +
-    '- shortSummary: ざっと振り返るための短い要約(2〜3文)。\n' +
-    '- longSummary: この章の要約(最大2〜3段落、合計400字程度まで)。本文からの短い正確な' +
-    '引用を「」で交えてよい。2〜3文ごとに段落を分け、段落の間に空行を入れる。冗長にしない。\n' +
+    '- shortSummary: この章が何の章なのかが一目で分かる導入(1〜2文)。章全体を圧縮した要約にはせず、' +
+    '章の結末や終盤の展開は書かない(本体は summaryBlocks に書く)。\n' +
+    '- summaryBlocks(必須・これが章のまとめの本体): para / quote / subhead のブロックの配列。' +
+    'まず para(必要なら subhead も)で章のあらすじを書き、その後に quote をまとめて置く' +
+    '(引用を para の間に挟まない)。\n' +
+    '  ・para: 章のあらすじ。最優先事項は「初めて読む人がつまずかずに筋を追えること」。' +
+    '平易で読みやすい標準的な説明文で書く——本文の文体や語彙を模倣しない。一文は短めにし、' +
+    '複雑な構文・凝った言い回しを避ける。筋に関係しない細部(外見や小物の描写など)は省く。' +
+    '2〜3文の段落を4〜6個、合計400〜650字程度を目安にする(目安であって厳密な制限ではない。' +
+    '筋を追うのに必要な説明・文脈は削らない)。次の書き方を必ず守る:\n' +
+    '    (a) 順番: 章の冒頭の場面から始め、出来事が起きた順に一本の線で書く。' +
+    '章全体を先にまとめた段落を頭に置かない(結末を先に書かない)。' +
+    '過去の経緯や前の章の事情に触れる必要があるときは、それが必要になる箇所で' +
+    '「〜という経緯があった」のように一言添えて挿入し、時間を遡ったことが読み手に分かるようにする。' +
+    '断りなく時間を前後させない。\n' +
+    '    (b) 因果: 出来事の羅列にしない。各段落で「誰が」「なぜ」「何をして」「その結果どうなったか」' +
+    'が分かるように書き、行動の狙い・動機を必ず明示する(例:わざと突飛な内容にして相手から' +
+    '別れを切り出させるのが狙いだった)。読み手が「なぜそうなるのか」と迷う箇所を残さない。\n' +
+    '    (c) 初出の説明: 人物・依頼・物事は最初に出てくる場所で「誰なのか/何なのか」を一言で' +
+    '説明してから話を進める。説明のないまま名前や事柄を使わない。\n' +
+    '    (d) 言い換え: 登場人物の理屈・皮肉・遠回しな言い方をそのまま写さず、その意味するところを' +
+    '平易な言葉で説明する(本文どおりの言い回しを残したいときは quote に入れる)。\n' +
+    '    (e) つなぎ: 段落の頭で前の段落とのつながりを示す(そこで/その結果/一方/翌日 など)。' +
+    '別の話題に移るときは、その関係を一言示してから移る。\n' +
+    '    (f) 締め: 最後の段落は、この章で何が変わったか・何が分かったかで締める。' +
+    '関係のない話題で唐突に終わらせない。\n' +
+    '    (g) 組み立ての目安(章の内容に合わないときは無理に当てはめない): ①きっかけ——なぜその' +
+    '出来事が始まったか ②事情——誰が何に困っている/何を望んでいるか ③どうすると決めたか' +
+    ' ④実際に起きたこと ⑤この章で分かったこと・変わったこと。\n' +
+    '  ・quote: para 群の後に、本文からの引用を必ず3〜6件まとめて置く(省略禁止——引用の' +
+    'ない summaryBlocks は不完全とみなされる)。原文の雰囲気・文体はこの引用で伝える。選定基準は「物語の核心となる台詞」「章の鍵となる瞬間」「文章として美しい一節」の' +
+    'いずれか。1件は15〜200字で、数文続けての抜粋でもよい。quote は本文からの一字一句正確な抜粋。' +
+    '改変・省略・繋ぎ合わせは絶対に禁止(本文検索と音声リンクに使うため、本文と完全一致しなければ' +
+    'ならない)。台詞なら speaker に話者名を入れ、context には状況を補う短い一文を入れてよい(任意)。\n' +
+    '  ・subhead: para 部分で場面・時間が大きく転換する箇所にのみ、6〜12字の小見出しを' +
+    '0〜2件まで置いてよい(無くてもよい。見出しだらけの箇条書きにしない)。\n' +
+    '- longSummary: summaryBlocks に本文を書くので、空文字列でよい。\n' +
+    '- vocab: 上級学習者(JLPT N1程度以上)に価値のある語・表現を0〜8件。ありふれた語は入れない。' +
+    'word は本文に現れた表記そのまま、reading はその読み(ひらがな)、note は簡潔な語釈・' +
+    'ニュアンス(20字以内・任意)。context はその語を含む本文からの一字一句正確な抜粋1文' +
+    '(15〜120字。改変禁止——本文検索と音声リンクに使う)。ふさわしい語がなければ空配列でよい。\n' +
     '- events: この章の主な出来事を起きた順に。title は短い見出し、description は1〜2文。\n' +
     '- keyPassages: 印象的・重要な場面を2〜5件。quote は本文からの一字一句正確な抜粋' +
     '(40〜120字)。改変・省略・繋ぎ合わせは絶対に禁止(後で本文検索に使うため)。' +
     'why はその場面が重要な理由(一文)。\n' +
     '- characters.new: この章で初登場した人物のみ。id は既存と重複しない c始まりの連番' +
-    '(既存が c05 までなら c06 から)。description は150字以内・2〜3文で「誰なのか」を優先。' +
+    '(既存が c05 までなら c06 から)。surface は本文に現れる表記を一字一句そのまま使う' +
+    '(同音の別漢字・異体字・略記に置き換えることは絶対に禁止)。' +
+    'description は150字以内・2〜3文で「誰なのか」を優先。' +
     '人間関係は description ではなく relationships に入れる。\n' +
     '- characters.updates: 既存人物に変化があった場合のみ。既存の id を絶対に変更しない。' +
     'newDevelopments はこの章での新しい動き(各1文)。set には変化したフィールドだけを入れる。' +
@@ -154,11 +244,19 @@
     '- standardReading は全ての登場人物に必須。漢字でもカタカナでも、その名前の' +
     '標準的な読みを必ずひらがなで入れる(例: 杉村→すぎむら)。読みが不明でも「なし」「不明」' +
     '等とは絶対に書かず、最も妥当な読みを必ず推定して入れる。別途「本文中のルビ」一覧が' +
-    '与えられた場合、その人物名(またはその一部)の読みがそこにあれば、rubyReading に必ず' +
-    'そのルビをそのまま記録する(rubyReading が最優先で表示される)。\n' +
+    '与えられた場合: 名前【全体】の読みがルビで判明するときのみ、rubyReading にその読みを' +
+    'そのまま記録する(rubyReading が最優先で表示される)。姓だけ・名だけなど部分的なルビしか' +
+    '無い場合は rubyReading を空にし、その部分の読みを standardReading に反映する' +
+    '(部分ルビを名前全体の読みとして記録すると、ふりがなが漢字とずれて表示される)。\n' +
     '- characters.presence: この章に登場・言及された人物全員(新規含む)。importance は' +
     'この章での重要度(0=言及のみ、1=登場、2=重要な役割、3=中心人物)。正体の判明など' +
     '重大な転換があった場合のみ reveal を true にする。\n' +
+    '- places: この章の本文に実際に登場した「実在する」地名(都市・町・有名な通り・山・観光地・' +
+    '建造物など)のみを挙げる。確信が持てるものだけを含め、架空の地名・学校名・店名・施設名や、' +
+    '実在するか判断がつかないものは絶対に含めない(迷ったら省く — 見落としは問題ないが、' +
+    '架空の場所を実在として扱うことは絶対に禁止)。surface は本文の表記を一字一句そのまま使う' +
+    '(同音の別漢字・異体字への置き換えは絶対に禁止)。reading は読みが本文やルビから分かる場合' +
+    'のみひらがなで入れ、不明なら空文字列でよい。\n' +
     '- unresolved: この章の終了時点で未解決の伏線・進行中の話題を短文で列挙' +
     '(リスト全体を置き換える。解決済みは外し、新規を加え、継続中は残す)。';
 
@@ -418,9 +516,38 @@
       const f = map.furthest || {};
       if (c && Number.isFinite(c.jpEnd) && c.jpEnd > 0 &&
           Number.isFinite(f.jp) && f.jp >= c.jpEnd) return true;
-      if (c && c.cueEnd >= 0 && Number.isFinite(f.cue) && f.cue >= c.cueEnd) return true;
+      // Prefer f.ms (generation-agnostic) re-derived against the CURRENT cue
+      // list over the legacy f.cue index — mirrors aiChunks.isComplete's
+      // _furthestCueNow; this branch only runs if that's unavailable.
+      let cue = Number.isFinite(f.cue) ? f.cue : -1;
+      if (map.space === 'cue' && Number.isFinite(f.ms)) {
+        try {
+          const cues = window._srtCues;
+          if (Array.isArray(cues) && cues.length) {
+            let lo = 0, hi = cues.length;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (cues[mid].startMs <= f.ms) lo = mid + 1; else hi = mid; }
+            cue = lo - 1;
+          }
+        } catch (_) {}
+      }
+      if (c && c.cueEnd >= 0 && cue >= c.cueEnd) return true;
     } catch (_) {}
     return false;
+  }
+
+  // Has the reader ENTERED this chapter? This — not completion — is what
+  // reveals an ahead-generated artifact and drains its staged character
+  // updates, so the summary for the chapter you're currently in is available
+  // while you're in it rather than only once you've finished it. Falls back to
+  // the completion gate when aiChunks isn't loaded (strictly more conservative:
+  // it can only delay a reveal, never leak an unreached chapter).
+  function isReached(map, idx) {
+    try {
+      if (window.aiChunks && typeof window.aiChunks.isReached === 'function') {
+        return !!window.aiChunks.isReached(map, idx);
+      }
+    } catch (_) {}
+    return isComplete(map, idx);
   }
 
   // ---- cost model (§12) -----------------------------------------------------------
@@ -449,6 +576,96 @@
   }
   // Complete-but-unready chunks, idx ascending. Chunk 0 is exempt from the
   // completion gate (first-chapter carve-out).
+  // ---- generate-ahead (summaries ready BEFORE the user arrives) ---------------------
+  // Chapters up to AHEAD_N beyond the last COMPLETED one are processed early so
+  // the summary is already there when the user reaches them. The artifact is
+  // stamped ahead:true (the timeline hides it until the chapter is reached) and
+  // the chapter's CHARACTER updates are STAGED in AICHAR_HOLD_V1 — applied only
+  // on reach (drainHeldChars) — so nothing future leaks into the character cards.
+  const AHEAD_N = 2;
+  const HOLD_PREFIX = 'AICHAR_HOLD_V1_';
+  const _forcedUnread = new Set();   // rk keys the user explicitly spoiler-confirmed
+  function maxCompleteIdx(map) {
+    let m = -1;
+    for (const c of map.chunks) { if (c && c.idx > m && isComplete(map, c.idx)) m = c.idx; }
+    return m;
+  }
+  function withinAhead(map, idx) {
+    if (isComplete(map, idx)) return true;
+    // A chapter the reader has ENTERED is always in the window, even if the
+    // ones before it were skipped (a jump forward leaves maxCompleteIdx far
+    // behind, which used to exclude the chapter they're actually sitting in).
+    if (isReached(map, idx)) return true;
+    if (idx === 0 && map.chunks.length > 1) return true;    // chapter-0 carve-out
+    return idx <= maxCompleteIdx(map) + AHEAD_N;
+  }
+  const _holdCache = {};
+  async function readHold(titleId) {
+    if (_holdCache[titleId] !== undefined) return _holdCache[titleId];
+    let o = null;
+    try { const raw = await window.blobStore.get(HOLD_PREFIX + titleId); o = raw ? JSON.parse(raw) : null; } catch (_) {}
+    if (!o || typeof o !== 'object') o = {};
+    _holdCache[titleId] = o;
+    return o;
+  }
+  async function writeHold(titleId, o) {
+    _holdCache[titleId] = o;
+    try { await window.blobStore.set(HOLD_PREFIX + titleId, JSON.stringify(o)); } catch (_) {}
+  }
+  // Wipe a title's staged-ahead state (hold blob + in-memory caches + forced
+  // keys). MUST run on re-detect / reset: idx meanings change with the map, and
+  // applying old-boundary char payloads into a fresh DB corrupts it.
+  async function clearHold(titleId) {
+    try { delete _holdCache[titleId]; } catch (_) {}
+    try { await window.blobStore.remove(HOLD_PREFIX + titleId); } catch (_) {}
+    try { for (const k of Array.from(_forcedUnread)) { if (k.indexOf(titleId + ':') === 0) _forcedUnread.delete(k); } } catch (_) {}
+  }
+  // Apply staged character updates for chapters the user has now REACHED and
+  // unhide their artifacts. Called from the 15s tick — cheap when nothing held.
+  // Entries are {fp, p}: a payload staged under an older map fingerprint is
+  // DROPPED (its idx no longer means the same chapter).
+  async function drainHeldChars(titleId) {
+    if (_inflight) return;   // never race processChunk's artifact read-modify-write
+    try {
+      const hold = await readHold(titleId);
+      const idxs = Object.keys(hold).map(Number).filter(Number.isFinite);
+      if (!idxs.length) return;
+      const map = await readMap(titleId);
+      if (!map) return;
+      let holdDirty = false;
+      const unhide = [];
+      for (const i of idxs) {
+        const ent = hold[i];
+        if (!ent) continue;
+        if (map.fingerprint && ent.fp && ent.fp !== map.fingerprint) {   // stale boundary generation
+          delete hold[i]; holdDirty = true;
+          continue;
+        }
+        if (!isReached(map, i)) continue;   // entered, not finished — see isReached
+        try {
+          const payload = ent.p || ent;   // {fp,p} (current) or bare payload (legacy)
+          if (window.aiCharacters && typeof window.aiCharacters.applyChapterOutput === 'function') {
+            await window.aiCharacters.applyChapterOutput(titleId, i, payload);
+          }
+        } catch (_) {}
+        delete hold[i]; holdDirty = true;
+        unhide.push(i);
+      }
+      if (holdDirty) await writeHold(titleId, hold);
+      if (unhide.length) {
+        // fresh RMW just for the ahead flags — a snapshot from before the async
+        // work above could clobber an artifact the pump wrote meanwhile
+        try {
+          const art2 = await readArtifact(titleId);
+          let d = false;
+          for (const i of unhide) { if (art2[i] && art2[i].ahead) { delete art2[i].ahead; d = true; } }
+          if (d) await window.blobStore.set(CHAP_PREFIX + titleId, JSON.stringify(art2));
+        } catch (_) {}
+      }
+      if (holdDirty) { emitChanged(titleId, 'timeline'); emitChanged(titleId, 'characters'); }
+    } catch (_) {}
+  }
+
   function owedChunks(titleId, map, opts) {
     const incFailedFinal = !!(opts && opts.failedFinal);
     const incQueued = !!(opts && opts.queued);
@@ -464,8 +681,10 @@
       // exhausted ones go through the manual (failedFinal) paths.
       if (st === 'failed' && !incFailedFinal &&
           (!sessRetryOk(titleId, c) || Date.now() < retryDueTs(titleId, c))) continue;
-      // idx 0 is carve-out exempt — except single-chunk titles (whole book)
-      if ((c.idx !== 0 || map.chunks.length === 1) && !isComplete(map, c.idx)) continue;
+      // generate-ahead: unreached chapters within the ahead window still run
+      // (artifact hidden + chars staged); withinAhead also covers complete
+      // chapters and the chapter-0 carve-out.
+      if (!withinAhead(map, c.idx)) continue;
       out.push(c);
     }
     return out;
@@ -547,7 +766,7 @@
       // carve-out would summarize the ending unread — require completion.
       const carveOutOk = map.chunks.length > 1 || isComplete(map, 0);
       if (carveOutOk && (manual || c0.state === 'none' ||
-          (c0.state === 'failed' && sessRetryOk(titleId, c0)))) {
+          (c0.state === 'failed' && sessRetryOk(titleId, c0) && Date.now() >= retryDueTs(titleId, c0)))) {
         toQueue.push(0);
       }
     }
@@ -636,12 +855,17 @@
   // writes visibly jank scrolling and dict lookups (which share IndexedDB).
   // Defer while the user is actively reading AI output (#aiSummaryOverlay /
   // #kchapterView) or has the dict popup open; the 15s tick re-pumps once
-  // they close. Deliberately NOT deferred: #bookmarksOverlay (Dynamic
-  // Timeline) and #kcharsScreen — the user watches progress there.
+  // they close. #bookmarksOverlay (Dynamic Timeline) is now the feed where
+  // full summaries are READ, so it defers too — but only while the user is
+  // actively scrolling it (recent-scroll stamp from ai-timeline); an idle
+  // open panel keeps processing so the footer progress still advances.
+  // Deliberately NOT deferred: #kcharsScreen — the user watches progress there.
   function uiBusy() {
     try {
       if (document.getElementById('aiSummaryOverlay')) return true;
       if (document.getElementById('kchapterView')) return true;
+      if (document.getElementById('bookmarksOverlay') &&
+          Date.now() - (window._kaiTlScrollTs || 0) < 15000) return true;
       const dp = document.getElementById('dictPopup');
       if (dp && dp.style.display === 'block') return true;
     } catch (_) {}
@@ -677,7 +901,7 @@
       if (!c) continue;
       if (c.state === 'ready') continue;
       if (c.state === 'queued') {
-        if (c.idx !== 0 && !isComplete(map, c.idx)) return null;   // spoiler guard
+        if (!withinAhead(map, c.idx) && !_forcedUnread.has(rk(titleId, c.idx))) return null;   // beyond the generate-ahead window
         return c;
       }
       if (c.state === 'failed') {
@@ -709,7 +933,7 @@
       const k = rk(titleId, c.idx);
       if (!_forced.has(k)) continue;
       if (c.state === 'ready') { _forced.delete(k); continue; }
-      if (!isComplete(map, c.idx) && (c.idx !== 0 || map.chunks.length === 1)) continue;   // spoiler guard kept
+      if (!withinAhead(map, c.idx) && !_forcedUnread.has(k)) continue;   // ahead window / explicit spoiler-confirmed force
       if (c.state === 'queued') { if (!best || c.idx < best.idx) best = c; continue; }
       if (c.state === 'failed') {
         if (!sessRetryOk(titleId, c)) { _forced.delete(k); continue; }
@@ -828,6 +1052,18 @@
     if (!Array.isArray(a)) return [];
     return a.filter(x => typeof x === 'string' && x.trim())
       .map(x => x.trim().slice(0, 200)).slice(0, 15);
+  }
+  function sanitizePlaces(a) {
+    const out = [];
+    if (Array.isArray(a)) {
+      for (const p of a) {
+        const surface = s(p && p.surface, 40).trim();
+        if (!surface || surface.length < 2) continue;
+        out.push({ surface, reading: s(p && p.reading, 40).trim() });
+        if (out.length >= 30) break;
+      }
+    }
+    return out;
   }
   // Order scenes chronologically (earliest first, latest last) by where each one's
   // anchorQuote falls in the chapter text. MUST run BEFORE sanitizeScenes assigns the
@@ -989,8 +1225,18 @@
     const out = [];
     if (!Array.isArray(list)) return out;
     const cueSpace = map.source === 'cues';
-    const cues = (window._activeTitleId === titleId && Array.isArray(window._srtCues) && window._srtCues.length)
+    let cues = (window._activeTitleId === titleId && Array.isArray(window._srtCues) && window._srtCues.length)
       ? window._srtCues : null;
+    // Chapter processing often runs before audio mode has loaded _srtCues
+    // (cold boot, reading in card/read mode) — without cues every located
+    // passage stored no audio bounds (the diag toast's gen✕). Same fallback
+    // chain the tap-time resolver uses.
+    if (!cues) {
+      try {
+        const c2 = window.aiChunks && window.aiChunks.cuesForTitle ? await window.aiChunks.cuesForTitle(titleId) : null;
+        if (Array.isArray(c2) && c2.length) cues = c2;
+      } catch (_) {}
+    }
     let align = null;
     if (!cueSpace && cues && window.cueAlignment &&
         typeof window.cueAlignment.loadAlignment === 'function') {
@@ -1047,6 +1293,109 @@
       if (out.length >= 8) break;
     }
     return out;
+  }
+
+  // summaryBlocks: validate + cap the model's narrative blocks, then resolve
+  // each quote block to cue/ms audio anchors with the SAME exact-match machinery
+  // as keyPassages. Prose-less or invalid output → null (renderers fall back to
+  // longSummary, so a weak model degrades to today's behavior, never breaks).
+  function sanitizeBlocks(list) {
+    if (!Array.isArray(list)) return null;
+    const narrative = [], quotes = [];
+    let paras = 0;
+    for (const b of list) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'para') {
+        // Hard length backstop (the prompt asks for ~400-650 total/2-3 sentences
+        // per para as a TARGET, not a strict ceiling — a model that ignores it
+        // must still not be able to produce a wall of text): 380 chars/para is
+        // generous slack over the ask, and capping at 8 paras bounds the worst
+        // case even if every one hits the cap.
+        if (paras >= 8) continue;
+        const t = s(b.text, 380).trim();
+        if (t) { narrative.push({ type: 'para', text: t }); paras++; }
+      } else if (b.type === 'subhead') {
+        const t = s(b.text, 40).trim();
+        if (t && narrative.length < 12) narrative.push({ type: 'subhead', text: t });
+      } else if (b.type === 'quote') {
+        // 320-char cap: the prompt allows multi-sentence excerpts up to ~200.
+        // locatePassages caps at 8 records; keeping quotes at/under 6
+        // preserves the 1:1 order mapping locateBlocks relies on.
+        const q = s(b.quote, 320).trim();
+        if (q && quotes.length < 6) {
+          quotes.push({ type: 'quote', quote: q,
+                        speaker: s(b.speaker, 40).trim(), context: s(b.context, 160).trim() });
+        }
+      }
+    }
+    // Quotes always come AFTER the narrative (2026-08-15 redesign: plain
+    // straight-through summary first, atmosphere lives in the quote section).
+    // Normalizing here — instead of trusting the model's ordering — keeps
+    // rendering deterministic; the renderer keys the sectioned layout on the
+    // artifact's sbv stamp.
+    const out = narrative.concat(quotes);
+    return out.some(b => b.type === 'para') ? out : null;
+  }
+
+  // vocab: N1+ picks with a verbatim context sentence. Same trust model as
+  // quote blocks — cap counts/lengths hard, drop anything without both a word
+  // and a context (the context is what powers text search + the audio chip).
+  function sanitizeVocab(list) {
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const v of list) {
+      if (!v || typeof v !== 'object') continue;
+      const word = s(v.word, 30).trim();
+      const ctx = s(v.context, 240).trim();
+      if (!word || !ctx) continue;
+      out.push({ word, reading: s(v.reading, 40).trim(),
+                 note: s(v.note, 60).trim(), context: ctx });
+      if (out.length >= 8) break;
+    }
+    return out.length ? out : null;
+  }
+  // Resolve each vocab context sentence to raw offsets + cue/ms audio anchors
+  // — the exact machinery quote blocks use (anchorOff disambiguates repeats;
+  // the chapter view re-resolves the full range at tap time).
+  async function locateVocab(titleId, map, chunk, rawText, vocab) {
+    if (!vocab) return null;
+    const recs = vocab.map(v => ({ quote: v.context }));
+    for (let i = 0; i < recs.length; i++) {
+      const off = quoteOffsetIn(rawText, recs[i].quote, 0);
+      if (Number.isFinite(off)) { recs[i].anchorOff = off; vocab[i].anchorOff = off; }
+    }
+    try {
+      const located = await locatePassages(titleId, map, chunk, rawText, recs);
+      for (let i = 0; i < vocab.length && i < located.length; i++) {
+        const r = located[i];
+        vocab[i].rawStart = r.rawStart; vocab[i].rawEnd = r.rawEnd;
+        vocab[i].cueIdx = r.cueIdx; vocab[i].startMs = r.startMs; vocab[i].endMs = r.endMs;
+      }
+    } catch (_) {}
+    return vocab;
+  }
+  async function locateBlocks(titleId, map, chunk, rawText, blocks) {
+    if (!blocks) return null;
+    const quotes = blocks.filter(b => b.type === 'quote');
+    if (quotes.length) {
+      // Chunk-local anchor offsets (monotonic, same convention as scene
+      // anchorQuote): the read-time resolver (cueRangeForQuote) uses them to
+      // pick the right occurrence of a phrase that repeats in the chapter.
+      let prevOff = 0;
+      for (const qb of quotes) {
+        const off = quoteOffsetIn(rawText, qb.quote, prevOff);
+        if (Number.isFinite(off)) { qb.anchorOff = off; prevOff = off + 1; }
+      }
+      try {
+        const located = await locatePassages(titleId, map, chunk, rawText, quotes);
+        for (let i = 0; i < quotes.length && i < located.length; i++) {
+          const r = located[i];
+          quotes[i].rawStart = r.rawStart; quotes[i].rawEnd = r.rawEnd;
+          quotes[i].cueIdx = r.cueIdx; quotes[i].startMs = r.startMs; quotes[i].endMs = r.endMs;
+        }
+      } catch (_) {}
+    }
+    return blocks;
   }
 
   async function processChunk(titleId, idx) {
@@ -1184,9 +1533,32 @@
 
     const label = s(parsed.label, 24).trim();
     const shortSummary = s(parsed.shortSummary, 400);
-    const longSummary = s(parsed.longSummary, 1600);
+    const summaryBlocks = await locateBlocks(titleId, map, chunk, text, sanitizeBlocks(parsed.summaryBlocks));
+    const vocabOut = await locateVocab(titleId, map, chunk, text, sanitizeVocab(parsed.vocab));
+    // The prompt now asks for an empty longSummary (the narrative lives in
+    // summaryBlocks) — derive a flat-text equivalent for legacy consumers
+    // (aiExport.chapterText, pre-blocks renderers, copied summaries).
+    let longSummary = s(parsed.longSummary, 1600);
+    if (!longSummary.trim() && summaryBlocks) {
+      longSummary = s(summaryBlocks.map((b) => {
+        if (b.type === 'quote') {
+          const q = /^[「『]/.test(b.quote) ? b.quote : ('「' + b.quote + '」');
+          return q + (b.speaker ? ('（' + b.speaker + '）') : '');
+        }
+        return b.text;
+      }).join('\n\n'), 1600);
+    }
+    // Neither narrative blocks nor prose came back (a weak model can skip
+    // summaryBlocks AND obey "longSummary may be empty"). Storing that would
+    // stamp the chapter 'ready' with nothing behind it but the 2-3 sentence
+    // shortSummary — the "super short summary, no quotes" bug. Fail instead:
+    // the chapter shows failed-tap-to-retry and the bounded auto-retry runs.
+    if (!longSummary.trim() && !summaryBlocks) {
+      throw new Error('empty summary — model returned no summaryBlocks/longSummary');
+    }
     const events = sanitizeEvents(parsed.events);
     const unresolvedOut = sanitizeUnresolved(parsed.unresolved);
+    const placesOut = sanitizePlaces(parsed.places);
     const ch = (parsed.characters && typeof parsed.characters === 'object') ? parsed.characters : {};
     const presence = sanitizePresence(ch.presence);
     const charactersPayload = {
@@ -1201,28 +1573,65 @@
     // fp stamps the boundary generation: a later map rebuild must not render
     // old-boundary summaries on new chapters.
     const sceneList = sanitizeScenes(sortScenesByAnchor(parsed.scenes, text), sceneTargetN, text, (map && map.space === 'cue'));   // chronological; require a locatable anchor on audiobook+SRT titles
+    // Generated AHEAD of the user's position (and not an explicit spoiler-
+    // confirmed force): hide the artifact until reached, stage the char updates.
+    // "Reached" means entered, not finished — see isReached.
+    const aheadHold = !isReached(map, idx) && !_forcedUnread.has(rk(titleId, idx)) &&
+                      !(idx === 0 && map.chunks.length > 1);
     const art = await readArtifact(titleId);
+    // Regen guard: a re-run that authored NO scenes (scene ideas off, or the
+    // model returned none) must not wipe the chapter's existing scenes — their
+    // generated images live under scene_<idx>_<slot> and would orphan.
+    const prevScenes = (art[idx] && Array.isArray(art[idx].scenes) && art[idx].scenes.length)
+      ? art[idx].scenes : null;
+    const keptScenes = sceneList.length ? sceneList : (prevScenes || sceneList);
     art[idx] = {
       label, shortSummary, longSummary, events, keyPassages, relatedCharIds,
-      scenes: sceneList,
+      ...(summaryBlocks ? { summaryBlocks } : {}),
+      ...(vocabOut ? { vocab: vocabOut } : {}),
+      ...(placesOut.length ? { places: placesOut } : {}),   // chapter-local list for the view's 場所 chips (the aiPlaces DB merge below stays the roster of record)
+      // Block-format version stamp: 2 = plain-narrative-then-quotes layout
+      // (+ vocab). The renderer sections sbv>=2 artifacts; unstamped legacy
+      // artifacts keep their interleaved flow rendering.
+      sbv: 2,
+      scenes: keptScenes,
       model: r.model, costUsd: r.costUsd, ts: Date.now(), fp: map.fingerprint || null,
     };
+    if (aheadHold) art[idx].ahead = true;
     try { await window.blobStore.set(CHAP_PREFIX + titleId, JSON.stringify(art)); } catch (_) {}
 
     // 2) character merge (delegated; a local merge bug must not burn paid
-    // retries — but the gap must be visible for a future repair pass)
+    // retries — but the gap must be visible for a future repair pass).
+    // Ahead-generated chapters STAGE the payload instead — applied by
+    // drainHeldChars when the user reaches the chapter (no card spoilers).
     let merged = false;
-    try {
-      if (window.aiCharacters && typeof window.aiCharacters.applyChapterOutput === 'function') {
-        merged = (await window.aiCharacters.applyChapterOutput(titleId, idx, charactersPayload)) !== false;
+    if (aheadHold) {
+      try { const hold = await readHold(titleId); hold[idx] = { fp: map.fingerprint || null, p: charactersPayload }; await writeHold(titleId, hold); merged = true; } catch (_) {}
+    } else {
+      try {
+        if (window.aiCharacters && typeof window.aiCharacters.applyChapterOutput === 'function') {
+          merged = (await window.aiCharacters.applyChapterOutput(titleId, idx, charactersPayload)) !== false;
+        }
+      } catch (e) {
+        try { console.log('[ai-proc] character merge failed: ' + (e && e.message)); } catch (_) {}
       }
-    } catch (e) {
-      try { console.log('[ai-proc] character merge failed: ' + (e && e.message)); } catch (_) {}
     }
+    _forcedUnread.delete(rk(titleId, idx));
     if (!merged) {
       try {
         art[idx].charMergeFailed = true;
         await window.blobStore.set(CHAP_PREFIX + titleId, JSON.stringify(art));
+      } catch (_) {}
+    }
+
+    // 2b) place merge. Unlike characters, places carry no spoiler risk (a real
+    // place name can't reveal plot), so no ahead-hold staging — merges
+    // immediately even for chapters generated ahead of the reader's position.
+    if (placesOut.length) {
+      try {
+        if (window.aiPlaces && typeof window.aiPlaces.applyChapterOutput === 'function') {
+          await window.aiPlaces.applyChapterOutput(titleId, idx, placesOut);
+        }
       } catch (_) {}
     }
 
@@ -1251,7 +1660,7 @@
     // user tapping ＋シーンを作る. AWAITED (not fire-and-forget) so a multi-chapter
     // catch-up stays sequential and doesn't burst the API into a rate-limit; the
     // chapter is already 'ready', so a failure here leaves the summary intact.
-    if (wantScenes && sceneList.length === 0) {
+    if (wantScenes && keptScenes.length === 0) {
       try { await generateSceneIdeas(titleId, idx); } catch (_) {}   // generateSceneIdeas auto-queues the images itself (if the pref is on)
     } else if (sceneList.length > 0) {
       try { await _autoQueueSceneImages(titleId, idx, sceneList); } catch (_) {}   // pref-gated; renders the scene pictures, paced ~20s
@@ -1343,7 +1752,9 @@
       }
       // boundaries changed → old artifacts + character DB are stale; clear them
       try { if (window.blobStore) await window.blobStore.set(CHAP_PREFIX + id, JSON.stringify({})); } catch (_) {}
+      try { await clearHold(id); } catch (_) {}   // staged ahead-chars keyed by OLD idx — applying them into the fresh DB would corrupt it
       try { if (window.aiCharacters && window.aiCharacters.reset) await window.aiCharacters.reset(id); } catch (_) {}
+      try { if (window.aiPlaces && window.aiPlaces.reset) await window.aiPlaces.reset(id); } catch (_) {}
       if (window.ai && window.ai.setActivated) await window.ai.setActivated(id, 'retro');
       _openedFor = id;
       delete _declined[id];
@@ -1376,7 +1787,9 @@
         await window.blobStore.remove('AISUM_V1_' + id);
         await window.blobStore.remove('AIDEEP_V1_' + id);
       } } catch (_) {}
+      try { await clearHold(id); } catch (_) {}   // staged ahead-chars die with the map
       try { if (window.aiCharacters && window.aiCharacters.reset) await window.aiCharacters.reset(id); } catch (_) {}
+      try { if (window.aiPlaces && window.aiPlaces.reset) await window.aiPlaces.reset(id); } catch (_) {}
       try { if (window.aiChunks && window.aiChunks.clearTitle) await window.aiChunks.clearTitle(id); } catch (_) {}
       try { if (window.ai && window.ai.deactivate) await window.ai.deactivate(id); } catch (_) {}
       _openedFor = null;
@@ -1566,6 +1979,12 @@
       const id = window._activeTitleId;
       if (!id) return;
       if (_openedFor !== id) { await titleOpenSweep(id); return; }   // late-build retry
+      try { await drainHeldChars(id); } catch (_) {}   // reveal reached ahead-chapters + apply staged chars (no-op while the pump is inflight)
+      // Mid-session queueing: catch-up used to run ONLY on title open, so a
+      // chapter finished while reading sat unqueued until the next reopen —
+      // "the AI text lags behind and I have to tap generate". Silent (no
+      // confirm): a batch above the cost threshold waits for a title open.
+      try { await runCatchUp(id, { manual: false, confirmAllowed: false }); } catch (_) {}
       if (!_inflight) {
         // recover a 'processing' stranded by an error path that missed its RMW
         await mutateMap(id, (m) => {
@@ -1581,7 +2000,11 @@
   }
 
   try {
-    setInterval(() => { _tick(); }, TICK_MS);
+    // READ-ONLY PANEL WINDOW (panel-bridge.js): a second webview on the SAME origin
+    // shares this storage, so it must never run a second copy of a writer — that
+    // is how the user's place gets lost. The module still loads (the panel reads
+    // through its public surface); only the crediting/polling clock stands down.
+    if (!window.KADOKI_PANEL) setInterval(() => { _tick(); }, TICK_MS);
     window.addEventListener('shell:title-change', () => {
       try {
         _openedFor = null;
@@ -1706,9 +2129,51 @@
       // idx===0 carve-out matches owedChunks/runCatchUp/activate — but only for a
       // MULTI-chunk book; a single-chunk title IS the whole book, so chunk 0 still
       // requires completion (don't summarize the unread ending).
-      if (!isComplete(map, idx) && (idx !== 0 || map.chunks.length === 1)) {
-        try { if (typeof window.showToast === 'function') window.showToast('まだ読み終えていません', 2500); } catch (_) {}
+      // opts.forceUnread = the user EXPLICITLY confirmed the spoiler dialog
+      // (timeline force-generate — e.g. watch listening advanced the book but
+      // painted no coverage, so the chapter never registers as complete).
+      // Reached (entered), not completed — the same gate that reveals an
+      // ahead-generated summary, so what you can build matches what you can see.
+      if (!isReached(map, idx) && (idx !== 0 || map.chunks.length === 1) && !opts.forceUnread) {
+        try { if (typeof window.showToast === 'function') window.showToast('まだそこまで進んでいません', 2500); } catch (_) {}
         return { ok: false, reason: 'unread' };
+      }
+      // discard: the user explicitly asked to REBUILD an existing good summary
+      // (e.g. into the new summaryBlocks format). Strip the summary fields so
+      // neither the forceUnread reveal below nor processChunk's billing
+      // backstop re-adopts the old artifact. Scenes (and their generated
+      // images) are kept — processChunk's regen guard carries them forward.
+      if (opts.discard) {
+        try {
+          const artD = await readArtifact(id);
+          const aD = artD && artD[idx];
+          if (aD) {
+            artD[idx] = { scenes: Array.isArray(aD.scenes) ? aD.scenes : [] };
+            if (aD.ahead) artD[idx].ahead = true;
+            await window.blobStore.set(CHAP_PREFIX + id, JSON.stringify(artD));
+          }
+        } catch (_) {}
+      }
+      if (opts.forceUnread) {
+        _forcedUnread.add(rk(id, idx));   // pump guards honor the explicit confirm
+        // Already generated ahead? Just REVEAL it — unhide + apply staged chars.
+        try {
+          const artR = await readArtifact(id);
+          const aR = artR && artR[idx];
+          if (aR && aR.shortSummary && (!map.fingerprint || aR.fp === map.fingerprint)) {
+            if (aR.ahead) { delete aR.ahead; await window.blobStore.set(CHAP_PREFIX + id, JSON.stringify(artR)); }
+            const hold = await readHold(id);
+            if (hold[idx]) {
+              const ent = hold[idx];
+              const okFp = !(map.fingerprint && ent.fp && ent.fp !== map.fingerprint);
+              try { if (okFp && window.aiCharacters && window.aiCharacters.applyChapterOutput) await window.aiCharacters.applyChapterOutput(id, idx, ent.p || ent); } catch (_) {}
+              delete hold[idx]; await writeHold(id, hold);
+            }
+            _forcedUnread.delete(rk(id, idx));
+            emitChanged(id, 'timeline'); emitChanged(id, 'characters');
+            return { ok: true, revealed: true };
+          }
+        } catch (_) {}
       }
       // force: discard a summary-less or stale-fp artifact so processChunk's
       // billing backstop regenerates rather than re-adopting a useless one. A

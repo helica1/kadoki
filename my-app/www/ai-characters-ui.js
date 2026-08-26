@@ -419,21 +419,40 @@
   // individual-kanji when the author wrote per-kanji ruby). Returns null unless
   // EVERY kanji got a reading, so a partly-covered name uses the fallback instead
   // of showing some kanji furigana'd and some bare.
+  // Returns { html, reading, segCount, maxSegLen }: the glossary keeps only the
+  // MOST FREQUENT reading per base across the whole book, so a composition
+  // stitched from several short segments can pair a name's kanji with a reading
+  // harvested from a DIFFERENT word (竜=たつ from 竜巻 landing on 竜司). The
+  // caller cross-checks stitched results against the AI reading and falls back
+  // when they disagree.
   function rubyFromGlossary(surface, gloss) {
     try {
       if (!surface || !gloss) return null;
-      let html = '', i = 0, anyMatch = false;
+      let html = '', i = 0, reading = '', segCount = 0, maxSegLen = 0;
       while (i < surface.length) {
         let best = null;
         for (let len = Math.min(surface.length - i, 12); len >= 1; len--) {
           const sub = surface.substr(i, len);
           if (gloss[sub]) { best = { sub, reading: gloss[sub], len }; break; }
         }
-        if (best) { html += '<ruby>' + esc(best.sub) + '<rt>' + esc(best.reading) + '</rt></ruby>'; i += best.len; anyMatch = true; }
-        else { const ch = surface[i]; if (KANJI_RE_NAME.test(ch)) return null; html += esc(ch); i += 1; }
+        if (best) {
+          html += '<ruby>' + esc(best.sub) + '<rt>' + esc(best.reading) + '</rt></ruby>';
+          reading += best.reading;
+          segCount++; if (best.len > maxSegLen) maxSegLen = best.len;
+          i += best.len;
+        } else {
+          const ch = surface[i];
+          if (KANJI_RE_NAME.test(ch)) return null;
+          html += esc(ch); reading += ch; i += 1;
+        }
       }
-      return anyMatch ? html : null;
+      return segCount ? { html, reading, segCount, maxSegLen } : null;
     } catch (_) { return null; }
+  }
+  // Katakana → hiragana for reading comparison (AI readings and harvested ruby
+  // may disagree only in script).
+  function kataToHira(s) {
+    return String(s || '').replace(/[ァ-ヶ]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
   }
   // Per-kanji furigana ruby for a character name — tied to each kanji like the dict
   // popup (window.buildFuriganaRuby → JmdictFurigana with a distribution fallback),
@@ -445,18 +464,29 @@
     try {
       const surface = (rec && rec.surface) || '';
       if (!surface) return '';
+      const clean = (window.aiCharacters && window.aiCharacters.cleanReading) || ((x) => x || '');
       // 1) Author's text ruby (ground truth for THIS book): the harvested glossary,
       //    at the EPUB's granularity. Best for names not in JmdictFurigana + 名乗り
       //    (non-standard) readings. Falls through if the glossary doesn't cover it.
+      //    TRUST RULE: a composition whose longest segment spans ≥2 chars (the
+      //    author ruby'd the name/word as a unit) is authoritative. One stitched
+      //    purely from single-kanji entries is collision-prone (the glossary keeps
+      //    only each base's most frequent reading book-wide), so it must AGREE
+      //    with the AI reading — else fall through to the AI-reading fallback.
       try {
         const gloss = (window.aiChunks && window.aiChunks.rubyGlossarySync) ? window.aiChunks.rubyGlossarySync(window._activeTitleId) : null;
-        if (gloss) { const g = rubyFromGlossary(surface, gloss); if (g) return g; }
+        if (gloss) {
+          const g = rubyFromGlossary(surface, gloss);
+          if (g) {
+            const ai = clean(rec.rubyReading) || clean(rec.standardReading) || '';
+            if (g.maxSegLen >= 2 || !ai || kataToHira(g.reading) === kataToHira(ai)) return g.html;
+          }
+        }
         else if (window.aiChunks && window.aiChunks.rubyGlossary && window._activeTitleId) {
           try { window.aiChunks.rubyGlossary(window._activeTitleId); } catch (_) {}   // warm the cache for the next render
         }
       } catch (_) {}
       // 2) JmdictFurigana / okurigana-distribution fallback, using the AI reading.
-      const clean = (window.aiCharacters && window.aiCharacters.cleanReading) || ((x) => x || '');
       let reading = clean(rec.rubyReading) || clean(rec.standardReading) || '';
       if (reading.length > surface.length * 4 + 4) reading = '';   // giant-ruby guard (model dumped a phrase)
       const hasKanji = /[㐀-鿿豈-﫿々〆ヶ]/.test(surface);

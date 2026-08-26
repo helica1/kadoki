@@ -12,6 +12,16 @@ struct ContentView: View {
     @ObservedObject var conn = WatchConnectivityManager.shared
     @State private var pendingDelete: WatchTitle?
 
+    // Always-visible build stamp. The phone re-syncs the embedded watch app
+    // only when the bundle VERSION changes, so a stale watch build is easy to
+    // hit and otherwise impossible to detect from the UI — this line is how
+    // you know what's actually running on the wrist.
+    private var buildStamp: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "v\(v) (\(b))"
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -23,15 +33,28 @@ struct ContentView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
+                        NavigationLink(destination: LiveView()) {
+                            liveRowLabel
+                        }
+                        .padding(.top, 4)
                         if !conn.lastEvent.isEmpty {
                             Text(conn.lastEvent)
                                 .font(.footnote)
                                 .foregroundStyle(.tertiary)
                         }
+                        Text(buildStamp)
+                            .font(.footnote)
+                            .foregroundStyle(.tertiary)
                     }
                     .padding()
                 } else {
                     List {
+                        // Phase B: always listed (not gated on a recent frame
+                        // arriving) — the view itself shows "nothing playing"
+                        // when there's no live session yet.
+                        NavigationLink(destination: LiveView()) {
+                            liveRowLabel
+                        }
                         ForEach(store.titles) { t in
                             NavigationLink(value: t.id) {
                                 HStack(spacing: 8) {
@@ -67,6 +90,10 @@ struct ContentView: View {
                                 .foregroundStyle(.tertiary)
                                 .listRowBackground(Color.clear)
                         }
+                        Text(buildStamp)
+                            .font(.footnote)
+                            .foregroundStyle(.tertiary)
+                            .listRowBackground(Color.clear)
                     }
                 }
             }
@@ -100,6 +127,20 @@ struct ContentView: View {
             }
         }
         .onAppear { store.reload() }
+    }
+
+    private var liveRowLabel: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "iphone.gen3.radiowaves.left.and.right")
+                .foregroundStyle(Color(red: 0.72, green: 0.58, blue: 0.96))
+                .frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("On iPhone").font(.body)
+                Text("Mirror what's playing on your phone")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     // Resume spot: fresher of the local checkpoint and the phone-sent position

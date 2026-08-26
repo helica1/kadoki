@@ -30,4 +30,56 @@ end
 
 post_install do |installer|
   assertDeploymentTarget(installer)
+  # visionOS: the pods only declare iOS, but their code compiles fine against
+  # the xros SDK — force every pod target to also build for visionOS so the
+  # App target can add a NATIVE Apple Vision destination (not Designed-for-
+  # iPad). Family 7 = Vision. Deployment 1.0 → whatever SDK provides.
+  installer.pods_project.targets.each do |t|
+    t.build_configurations.each do |c|
+      c.build_settings['SUPPORTED_PLATFORMS'] = 'iphoneos iphonesimulator xros xrsimulator'
+      c.build_settings['TARGETED_DEVICE_FAMILY'] = '1,2,7'
+      c.build_settings['XROS_DEPLOYMENT_TARGET'] = '26.0'
+    end
+  end
+  # ---- visionOS: IONFilesystemLib is an iOS-only BINARY xcframework (no xros
+  # slice), so for the xros SDK the Filesystem plugin compiles to an EMPTY
+  # framework and the library is stripped from link + embed. At runtime the
+  # plugin is simply absent on Vision; the JS callers already guard on that.
+  installer.pods_project.targets.each do |t|
+    next unless t.name == 'CapacitorFilesystem'
+    t.build_configurations.each do |c|
+      c.build_settings['EXCLUDED_SOURCE_FILE_NAMES[sdk=xros*]'] = '*.swift'
+      # Target-level conditional beats the xcconfig (where the conditional
+      # append was NOT winning over the unconditional line): xros links only
+      # Capacitor, never the iOS-only binary.
+      c.build_settings['OTHER_LDFLAGS[sdk=xros*]'] = '-framework "Capacitor"'
+    end
+  end
+  fs_target = installer.pods_project.targets.find { |x| x.name == 'CapacitorFilesystem' }
+  if fs_target
+    fs_target.frameworks_build_phase.files.each do |bf|
+      path = (bf.file_ref && bf.file_ref.path).to_s
+      if path.include?('IONFilesystemLib')
+        bf.platform_filter = 'ios'   # keep the auto-link out of the xros build
+      end
+    end
+  end
+  support = File.join(installer.sandbox.root, 'Target Support Files')
+  Dir.glob(File.join(support, '{CapacitorFilesystem,Pods-App}', '*.xcconfig')).each do |f|
+    txt = File.read(f)
+    next if txt.include?('sdk=xros')
+    ld = txt[/^OTHER_LDFLAGS = .*$/]
+    next unless ld
+    stripped = ld.sub('OTHER_LDFLAGS = ', 'OTHER_LDFLAGS[sdk=xros*] = ').gsub(' -framework "IONFilesystemLib"', '')
+    File.write(f, txt + "\n" + stripped + "\n")
+  end
+  xcfsh = File.join(support, 'IONFilesystemLib', 'IONFilesystemLib-xcframeworks.sh')
+  if File.exist?(xcfsh)
+    sh = File.read(xcfsh)
+    unless sh.include?('xros')
+      lines = sh.lines
+      lines.insert(1, "case \"$PLATFORM_NAME\" in xros*) exit 0;; esac\n")
+      File.write(xcfsh, lines.join)
+    end
+  end
 end

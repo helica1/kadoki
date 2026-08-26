@@ -102,24 +102,7 @@ final class WatchPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func pushCheckpointNow() { persistNow() }
 
     private func loadCues(_ title: WatchTitle) {
-        cues = []
-        let url = WatchTitleStore.titleDir(title.id).appendingPathComponent("cues.json")
-        guard let data = try? Data(contentsOf: url),
-              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
-        var out: [WatchCue] = []
-        out.reserveCapacity(arr.count)
-        for o in arr {
-            let s = (o["s"] as? Double) ?? Double((o["s"] as? Int) ?? -1)
-            let e = (o["e"] as? Double) ?? Double((o["e"] as? Int) ?? -1)
-            guard s >= 0, e >= s, let text = o["text"] as? String, !text.isEmpty else { continue }
-            var w: [Double]? = nil
-            if let raw = o["w"] as? [Any], !raw.isEmpty, raw.count % 4 == 0 {
-                w = raw.compactMap { ($0 as? Double) ?? Double(($0 as? Int) ?? 0) }
-            }
-            out.append(WatchCue(s: s, e: e, text: text, w: w))
-        }
-        out.sort { $0.s < $1.s }
-        cues = out
+        cues = WatchKaraoke.loadCues(titleId: title.id)
     }
 
     // Live position straight from the player (finer than the 0.5s tick — the
@@ -128,14 +111,7 @@ final class WatchPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     // Binary search: index of the cue containing (or last starting before) ms.
     func cueIndex(atMs ms: Double) -> Int? {
-        guard !cues.isEmpty else { return nil }
-        var lo = 0, hi = cues.count - 1, best = -1
-        while lo <= hi {
-            let mid = (lo + hi) / 2
-            if cues[mid].s <= ms { best = mid; lo = mid + 1 } else { hi = mid - 1 }
-        }
-        guard best >= 0 else { return nil }
-        return ms <= cues[best].e + 1500 ? best : best   // linger through short gaps
+        WatchKaraoke.cueIndex(atMs: ms, in: cues)
     }
 
     func togglePlay() {

@@ -19,7 +19,7 @@
   // restart — and cleared once logged. Its presence also gates the
   // "Log printed reading…" menu item (only shown when a print is pending).
   const PENDING_KEY = 'PRINTED_READING_PENDING';
-  let _lastPrint = null; // { endCue, chars }
+  let _lastPrint = null; // { endCue, chars, startJp, endJp, titleId }
   function loadPending() {
     try { const v = localStorage.getItem(PENDING_KEY); return v ? JSON.parse(v) : null; } catch (_) { return null; }
   }
@@ -428,7 +428,15 @@ ${flowBox}
     const isIOS = (window.Capacitor?.getPlatform?.() === 'ios');
     const plan = planWindowed(seg.chunks, fontPt, sheets * 2);
     if (!plan) { window.showToast?.('Nothing to print from the current position', 2800); return; }
-    savePending({ endCue: (plan.endCue != null ? plan.endCue : seg.endCue), chars: plan.chars });
+    // titleId is captured now (not read back at log time) because the user
+    // reads the printout away from the app — possibly opening a DIFFERENT
+    // title before they come back to log it — and the coverage credit below
+    // must land on the book that was actually printed, not whatever's active
+    // when "Log it" is tapped.
+    savePending({
+      endCue: (plan.endCue != null ? plan.endCue : seg.endCue), chars: plan.chars,
+      startJp: plan.startJp, endJp: plan.endJp, titleId: window._activeTitleId || null,
+    });
     const fileName = `${title} ${plan.startChar}-${plan.endChar}`.replace(/[\/\\:*?"<>|\x00-\x1f]/g, '').trim().slice(0, 90) || 'reading';
     shareDoc(buildPrintDoc(buildWindowed(plan, title), fontPt, 'windowed', !isIOS), fileName);
   }
@@ -521,6 +529,10 @@ ${flowBox}
       flow: flowHtml(used), wins, totalCols, pitchEm,
       startChar: used[0].charOffset || 0,
       endChar: (lastChunk.charOffset || 0) + (lastChunk.charLen || lastChunk.len || 0),
+      // JP-standard equivalents of startChar/endChar — the coverage-axis unit
+      // (see mode-coverage.js), for "Log printed reading"'s coverage credit.
+      startJp: used[0].jpOff || 0,
+      endJp: (lastChunk.jpOff || 0) + (lastChunk.jpLen || 0),
       endCue: lastChunk.cue,
       chars: used.reduce((s, c) => s + (c.len || 0), 0)
     };
@@ -641,6 +653,17 @@ ${flowBox}
       if (mins <= 0) return;
       const chars = (_lastPrint && _lastPrint.chars) || 0;
       try { window.stats?.addPrintedReading?.(mins * 60, chars); } catch (_) {}
+      // Timeline coverage credit — paper reading never touches the live
+      // pagedGetReadLocation() poll mode-coverage.js's tick() relies on, so
+      // without this the printed pages showed 0 min of listening in stats
+      // (fixed above) but STILL no green fill on the Timeline's coverage axis.
+      try {
+        const tid = _lastPrint && _lastPrint.titleId;
+        const jp0 = _lastPrint && _lastPrint.startJp, jp1 = _lastPrint && _lastPrint.endJp;
+        if (tid && Number.isFinite(jp0) && Number.isFinite(jp1) && jp1 > jp0) {
+          window.modeCoverage?.creditRange?.(tid, jp0, jp1, 'read', 'jp', true, 'print');
+        }
+      } catch (_) {}
       // Advance the playhead to just past the printed segment.
       let advanced = false;
       if (known && typeof window.updateCardIndex === 'function' && Array.isArray(window.allNotes)) {

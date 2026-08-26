@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import GCDWebServer
 
 /**
@@ -202,5 +203,84 @@ final class AnkiMediaServer {
                 try? FileManager.default.removeItem(at: url)
             }
         }
+    }
+}
+
+/**
+ * KadokiHandoffServer — LAN-facing sibling of AnkiMediaServer for direct
+ * iPhone ⇄ Vision Pro state handoff. Advertised over Bonjour (_kadoki._tcp)
+ * so peers discover each other with zero configuration; NOT bound to
+ * localhost (peers must reach it), so it serves nothing but the two
+ * read-only sync endpoints.
+ *
+ * The state lives in the WebView's IndexedDB, which native code can't read —
+ * so each request round-trips through JS: eval `kadokiHandoff.serve(reqId,
+ * what, param)` in the main webview, park the GCDWebServer completion under
+ * reqId, and finish it when BackgroundAudioPlugin.handoffServeResult posts
+ * the JSON back.
+ */
+final class KadokiHandoffServer {
+    static let shared = KadokiHandoffServer()
+    static let port: UInt = 48261
+    private var server: GCDWebServer?
+    private var pending: [String: GCDWebServerCompletionBlock] = [:]
+    private let lock = NSLock()
+    /// Set by MainViewController — evaluates JS in the main webview (main thread).
+    var jsEval: ((String) -> Void)?
+
+    func start() {
+        guard server == nil else { return }
+        let s = GCDWebServer()
+        s.addHandler(forMethod: "GET", pathRegex: "^/kadoki/.*", request: GCDWebServerRequest.self,
+                     asyncProcessBlock: { [weak self] req, completion in
+            guard let self = self, let eval = self.jsEval else {
+                completion(GCDWebServerResponse(statusCode: 503)); return
+            }
+            var what = ""
+            var param = ""
+            if req.path == "/kadoki/manifest" { what = "manifest" }
+            else if req.path == "/kadoki/state" {
+                what = "state"
+                param = (req.query?["key"] as? String) ?? ""
+            } else { completion(GCDWebServerResponse(statusCode: 404)); return }
+            let reqId = UUID().uuidString
+            self.lock.lock(); self.pending[reqId] = completion; self.lock.unlock()
+            // Timeout guard: a dead webview must not hang the peer.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 12) { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock()
+                let cb = self.pending.removeValue(forKey: reqId)
+                self.lock.unlock()
+                cb?(GCDWebServerResponse(statusCode: 504))
+            }
+            let escParam = param.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+            DispatchQueue.main.async {
+                eval("window.kadokiHandoff && window.kadokiHandoff.serve('\(reqId)', '\(what)', '\(escParam)')")
+            }
+        })
+        var name = "Kadoki"
+        #if os(visionOS)
+        name = "Kadoki Vision"
+        #else
+        name = "Kadoki " + UIDevice.current.name
+        #endif
+        let ok = (try? s.start(options: [
+            GCDWebServerOption_Port: NSNumber(value: KadokiHandoffServer.port),
+            GCDWebServerOption_BonjourName: name,
+            GCDWebServerOption_BonjourType: "_kadoki._tcp",
+            GCDWebServerOption_AutomaticallySuspendInBackground: NSNumber(value: true),
+        ])) != nil
+        if ok { server = s; NSLog("[KadokiHandoff] serving on :\(KadokiHandoffServer.port) as '\(name)'") }
+        else { NSLog("[KadokiHandoff] failed to start") }
+    }
+
+    func fulfill(reqId: String, body: String) {
+        lock.lock()
+        let cb = pending.removeValue(forKey: reqId)
+        lock.unlock()
+        guard let cb = cb else { return }
+        let resp = GCDWebServerDataResponse(data: body.data(using: .utf8) ?? Data(), contentType: "application/json")
+        resp.setValue("*", forAdditionalHeader: "Access-Control-Allow-Origin")
+        cb(resp)
     }
 }

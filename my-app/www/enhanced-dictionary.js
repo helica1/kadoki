@@ -401,7 +401,20 @@
         const onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : () => {};
         onProgress({ phase: 'unzip', pct: 0 });
         const zip = await JSZip.loadAsync(arrayBuffer);
-        const indexFile = zip.file('index.json');
+        // Yomitan zips are flat, but a dictionary that was unzipped and then
+        // re-compressed (e.g. Finder's "Compress") wraps everything in a
+        // top-level folder and adds __MACOSX resource-fork junk. Locate
+        // index.json wherever it is and treat its directory as the root.
+        let prefix = '';
+        let indexFile = zip.file('index.json');
+        if (!indexFile) {
+            const cand = Object.keys(zip.files).find((n) =>
+                /(^|\/)index\.json$/.test(n) && !n.startsWith('__MACOSX/') && !/(^|\/)\./.test(n));
+            if (cand) {
+                prefix = cand.slice(0, cand.length - 'index.json'.length);
+                indexFile = zip.file(cand);
+            }
+        }
         if (!indexFile) throw new Error('Not a Yomitan dictionary: index.json missing');
         const indexData = JSON.parse(await indexFile.async('text'));
         const dictName = (indexData.title || opts.fallbackName || 'Imported').trim();
@@ -409,12 +422,83 @@
 
         // Count banks first so we can drive a real progress bar.
         let bankCount = 0;
-        while (zip.file(`term_bank_${bankCount + 1}.json`)) bankCount++;
+        while (zip.file(`${prefix}term_bank_${bankCount + 1}.json`)) bankCount++;
+
+        // Bundled image assets (Jitendex forms-table marks, badges) — store
+        // them so structured-content <img> nodes can render. Capped so a
+        // pathological archive can't balloon the store.
+        async function importDictMedia(dictName) {
+            if (!window.dictStore?.putMedia) return;
+            const MAX_MEDIA_BYTES = 30 * 1024 * 1024;
+            let stored = 0;
+            const names = Object.keys(zip.files).filter((n) =>
+                n.startsWith(prefix) && !zip.files[n].dir &&
+                !n.startsWith('__MACOSX/') && !/(^|\/)\./.test(n) &&
+                /\.(avif|png|jpe?g|gif|webp|svg|bmp)$/i.test(n));
+            for (const n of names) {
+                if (stored > MAX_MEDIA_BYTES) break;
+                try {
+                    const blob = await zip.file(n).async('blob');
+                    stored += blob.size;
+                    await window.dictStore.putMedia(dictName, n.slice(prefix.length), blob);
+                } catch (_) {}
+            }
+            // The dictionary's own stylesheet — Jitendex's badges, boxes, and
+            // forms-table marks (◇/△/▽ circles) are ALL defined here as CSS
+            // on data-sc-* attributes; without it the marks are empty spans.
+            try {
+                const cssFile = zip.file(prefix + 'styles.css');
+                if (cssFile) await window.dictStore.putMedia(dictName, 'styles.css', await cssFile.async('blob'));
+            } catch (_) {}
+        }
+
+        // Streaming path: write each bank into the indexed store as it's
+        // parsed, so the whole dictionary never sits in memory at once. The
+        // full-Map path below OOM-kills the iOS WKWebView on big dictionaries
+        // (Jitendex ≈ 540 MB parsed) — its ceiling is far below desktop's.
+        if (window.dictStore?.importStream) {
+            try {
+                const stream = await window.dictStore.importStream(dictName);
+                let streamedEntries = 0;
+                for (let b = 1; b <= bankCount; b++) {
+                    const bankData = JSON.parse(await zip.file(`${prefix}term_bank_${b}.json`).async('text'));
+                    const records = [];
+                    for (const entry of bankData) {
+                        const [term, reading] = entry;
+                        records.push({ term, entry });
+                        if (reading && reading !== term) records.push({ term: reading, entry });
+                        streamedEntries++;
+                    }
+                    await stream.add(records);
+                    onProgress({ phase: 'parse', pct: b / bankCount, banks: b, totalBanks: bankCount });
+                    // Yield to the UI runloop so the progress text actually paints.
+                    await new Promise(r => setTimeout(r, 0));
+                }
+                if (streamedEntries === 0) throw new Error('Dictionary has no term_bank entries');
+                const metadata = { ...indexData, filename: opts.fallbackName || dictName + '.zip' };
+                await stream.finish(metadata);
+                try { await importDictMedia(dictName); } catch (_) {}
+                dictionaryMetadata.set(dictName, metadata);
+                dictionaries.delete(dictName);
+                dictStoreReadyCache = true; // store is now non-empty → lookups use it at once
+                onProgress({ phase: 'done', pct: 1 });
+                const list = listImportedDicts();
+                if (!list.includes(dictName)) {
+                    list.push(dictName);
+                    persistImportedList(list);
+                }
+                console.log(`✅ Imported "${dictName}" (streamed, ${streamedEntries} entries)`);
+                return dictName;
+            } catch (e) {
+                if (String(e && e.message).includes('no term_bank entries')) throw e;
+                console.warn('[dictStore] streaming import failed, falling back to full-Map path:', e);
+            }
+        }
 
         const termEntries = new Map();
         let totalEntries = 0;
         for (let b = 1; b <= bankCount; b++) {
-            const bankData = JSON.parse(await zip.file(`term_bank_${b}.json`).async('text'));
+            const bankData = JSON.parse(await zip.file(`${prefix}term_bank_${b}.json`).async('text'));
             for (const entry of bankData) {
                 const [term, reading] = entry;
                 if (!termEntries.has(term)) termEntries.set(term, []);
@@ -451,6 +535,7 @@
             // dictStore directly via existsBulk/lookup.
             dictionaries.delete(dictName);
             dictStoreReadyCache = true; // store is now non-empty → lookups use it at once
+            try { await importDictMedia(dictName); } catch (_) {}
         } else {
             // Fallback: the indexed write failed. Keep the in-memory copy AND cache it
             // so the dict still works (legacy path) and survives a reboot.
@@ -630,6 +715,20 @@
         }
     }
 
+    // Katakana → hiragana (U+30A1..U+30F6 shift down 0x60; ー and everything
+    // else pass through). Lets katakana-spelled native words resolve against
+    // the hiragana reading index — used by the lookup fallback below and by
+    // the deinflector's candidate generation.
+    function kataToHira(s) {
+        let out = '';
+        for (const ch of String(s || '')) {
+            const c = ch.codePointAt(0);
+            out += (c >= 0x30A1 && c <= 0x30F6) ? String.fromCodePoint(c - 0x60) : ch;
+        }
+        return out;
+    }
+    const KATA_RE = /[ァ-ヶ]/;
+
     async function multiDictionaryLookup(term) {
         // Query BOTH paths and merge — the previous early-return on the
         // dictStore path meant JMDict (still in the legacy in-memory
@@ -772,6 +871,14 @@
             deduped.push(r);
         }
         console.log(`🔍 Found ${results.length} results for "${term}" → ${deduped.length} after dedup (store+mem) total +${ms()}ms`);
+        // Katakana-spelled native words (kid-speak, emphasis: ズッ友, ハシル):
+        // dicts index the reading in HIRAGANA, so a katakana term misses even
+        // though the word is there. No hits + convertible → one retry with the
+        // hiragana form. Loanwords are unaffected (they hit directly above).
+        if (!deduped.length) {
+            const hira = kataToHira(term);
+            if (hira !== term) return await multiDictionaryLookup(hira);
+        }
         return deduped;
     }
 
@@ -1155,19 +1262,211 @@
         if (Array.isArray(content)) {
             return content.map(item => extractSimpleTextFromStructured(item)).filter(Boolean).join(' ');
         }
-        
+
         if (typeof content === 'string') {
             return content;
         }
-        
+
         if (content && content.content) {
             return extractSimpleTextFromStructured(content.content);
         }
-        
+
         return '';
+    }
+
+    // ---- Yomitan structured-content renderer ----
+    // Dictionaries like Jitendex encode their glossaries as nested
+    // {tag, content, style, data} nodes (badges, numbered senses, furigana
+    // ruby, example boxes, forms tables). Render them as real DOM instead of
+    // flattening to a text blob. Built via DOM APIs (createTextNode escapes),
+    // tag/style whitelisted, then serialized to an HTML string for the popup.
+    const SC_TAGS = new Set([
+        'br', 'ruby', 'rt', 'rp', 'rb', 'table', 'thead', 'tbody', 'tfoot',
+        'tr', 'td', 'th', 'div', 'span', 'ol', 'ul', 'li', 'details', 'summary', 'a',
+    ]);
+    const SC_STYLES = new Set([
+        'fontStyle', 'fontWeight', 'fontSize', 'color', 'background', 'backgroundColor',
+        'textDecorationLine', 'textDecorationStyle', 'textDecorationColor',
+        'verticalAlign', 'textAlign', 'whiteSpace', 'wordBreak', 'cursor',
+        'margin', 'marginTop', 'marginLeft', 'marginRight', 'marginBottom',
+        'padding', 'paddingTop', 'paddingLeft', 'paddingRight', 'paddingBottom',
+        'borderRadius', 'borderStyle', 'borderWidth', 'borderColor',
+        'listStyleType', 'display', 'gap', 'flexDirection', 'alignItems', 'justifyContent',
+    ]);
+
+    function renderStructuredNode(node, dictName) {
+        if (node == null) return null;
+        if (typeof node === 'string') return document.createTextNode(node);
+        if (Array.isArray(node)) {
+            const frag = document.createDocumentFragment();
+            for (const n of node) {
+                const c = renderStructuredNode(n, dictName);
+                if (c) frag.appendChild(c);
+            }
+            return frag;
+        }
+        if (typeof node !== 'object') return document.createTextNode(String(node));
+        const tag = String(node.tag || '').toLowerCase();
+        // Dictionary-bundled image (Jitendex forms-table marks etc.). The
+        // asset blobs are stored at import (dictStore media); src is filled
+        // in asynchronously by hydrateDictImages after the popup renders.
+        if (tag === 'img') {
+            if (!node.path) {
+                const alt0 = node.alt || node.title || '';
+                return alt0 ? document.createTextNode(alt0) : null;
+            }
+            const img = document.createElement('img');
+            img.className = 'dict-sc-img';
+            img.setAttribute('data-dict-img', String(node.path));
+            if (dictName) img.setAttribute('data-dict-name', String(dictName));
+            if (node.alt) img.alt = String(node.alt);
+            if (node.title) img.title = String(node.title);
+            const unit = node.sizeUnits === 'em' ? 'em' : 'px';
+            let sized = false;
+            if (Number.isFinite(node.width))  { img.style.width  = node.width + unit;  sized = true; }
+            if (Number.isFinite(node.height)) { img.style.height = node.height + unit; sized = true; }
+            if (!sized) img.style.height = '1.1em';   // intrinsic size unknown → inline-mark default
+            if (node.verticalAlign) img.style.verticalAlign = String(node.verticalAlign);
+            return img;
+        }
+        if (!SC_TAGS.has(tag)) return renderStructuredNode(node.content, dictName);
+        // Links render as styled text — a real navigation would replace the
+        // whole WebView with an external page and kill the app session.
+        const el = document.createElement(tag === 'a' ? 'span' : tag);
+        if (tag === 'a') el.className = 'dict-sc-link';
+        if (node.title) el.title = String(node.title);
+        if (node.lang) el.setAttribute('lang', String(node.lang));
+        if ((tag === 'td' || tag === 'th')) {
+            if (Number.isFinite(node.colSpan)) el.colSpan = node.colSpan;
+            if (Number.isFinite(node.rowSpan)) el.rowSpan = node.rowSpan;
+        }
+        if (node.data && typeof node.data === 'object') {
+            for (const k of Object.keys(node.data)) {
+                try {
+                    const name = 'data-sc-' + String(k).replace(/[^\w-]/g, '');
+                    if (name.length > 8) el.setAttribute(name, String(node.data[k]));
+                } catch (_) {}
+            }
+        }
+        if (node.style && typeof node.style === 'object') {
+            for (const k of Object.keys(node.style)) {
+                if (!SC_STYLES.has(k)) continue;
+                const v = node.style[k];
+                try { el.style[k] = Array.isArray(v) ? v.join(' ') : String(v); } catch (_) {}
+            }
+        }
+        const child = renderStructuredNode(node.content, dictName);
+        if (child) el.appendChild(child);
+        return el;
+    }
+
+    function renderStructuredContentHtml(content, dictName) {
+        try {
+            const wrap = document.createElement('div');
+            const n = renderStructuredNode(content, dictName);
+            if (n) wrap.appendChild(n);
+            return wrap.innerHTML;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    // Fill in dictionary-bundled assets after the popup's HTML is in the DOM:
+    //   1. the dictionary's OWN stylesheet (Jitendex badges / boxes / forms
+    //      marks are all CSS on data-sc-* attributes), injected once per dict,
+    //      scoped to its .dict-sc blocks via CSS nesting;
+    //   2. src for <img data-dict-img> assets, as data URIs.
+    // Both are cached so repeated lookups cost one Map hit, not IDB reads.
+    const _dictMediaUriCache = new Map();   // "dict path" → dataURI promise
+    const _dictStyleInjected = new Set();   // dictName → <style> already added
+
+    function _mediaDataUri(dictName, path) {
+        const key = dictName + ' ' + path;
+        if (_dictMediaUriCache.has(key)) return _dictMediaUriCache.get(key);
+        const p = (async () => {
+            const blob = await window.dictStore.getMedia(dictName, path);
+            if (!blob) return null;
+            return await new Promise((res, rej) => {
+                const fr = new FileReader();
+                fr.onload = () => res(fr.result);
+                fr.onerror = rej;
+                fr.readAsDataURL(blob);
+            });
+        })().catch(() => null);
+        _dictMediaUriCache.set(key, p);
+        return p;
+    }
+
+    async function _ensureDictStyle(dictName) {
+        if (!dictName || _dictStyleInjected.has(dictName)) return;
+        _dictStyleInjected.add(dictName);
+        try {
+            const blob = await window.dictStore.getMedia(dictName, 'styles.css');
+            if (!blob) return;
+            const css = await blob.text();
+            if (!css) return;
+            // Scope every top-level rule to this dict's popup blocks via the
+            // CSS object model — NOT by wrapping the sheet in a nested rule,
+            // which silently drops rules whose selectors start with an element
+            // name on engines with the original strict nesting parser.
+            const st = document.createElement('style');
+            st.media = 'not all';   // inert while we rewrite the selectors
+            st.textContent = css;
+            document.head.appendChild(st);
+            const scope = '#dictPopup .dict-sc[data-dict-name="' +
+                String(dictName).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]';
+            const sheet = st.sheet;
+            if (!sheet) { st.remove(); return; }
+            for (let i = sheet.cssRules.length - 1; i >= 0; i--) {
+                const rule = sheet.cssRules[i];
+                if (rule.type === 1 && rule.selectorText) {
+                    try {
+                        rule.selectorText = rule.selectorText.split(',')
+                            .map((s) => scope + ' ' + s.trim()).join(', ');
+                    } catch (_) { try { sheet.deleteRule(i); } catch (_) {} }
+                } else {
+                    // @-rules could apply globally once enabled — drop them.
+                    try { sheet.deleteRule(i); } catch (_) {}
+                }
+            }
+            // Theme variables the sheet references (Yomitan-compatible names)
+            // so e.g. Jitendex's form-valid mark renders light-circle/
+            // dark-glyph on our dark popup.
+            try {
+                sheet.insertRule(scope + ' { --text-color:#ddd; --fg:#ddd; ' +
+                    '--background-color:#16181c; --canvas:#16181c; --font-size-no-units:14; }',
+                    sheet.cssRules.length);
+            } catch (_) {}
+            st.media = 'all';
+        } catch (_) {
+            // leave it marked injected — a broken sheet shouldn't retry per tap
+        }
+    }
+
+    async function hydrateDictImages(root) {
+        try {
+            if (!root || !window.dictStore?.getMedia) return;
+            const dictNames = new Set();
+            root.querySelectorAll('.dict-sc[data-dict-name]').forEach((el) =>
+                dictNames.add(el.getAttribute('data-dict-name')));
+            for (const name of dictNames) await _ensureDictStyle(name);
+            const imgs = root.querySelectorAll('img[data-dict-img]:not([src])');
+            for (const img of imgs) {
+                try {
+                    const uri = await _mediaDataUri(
+                        img.getAttribute('data-dict-name') || '',
+                        img.getAttribute('data-dict-img') || '');
+                    if (uri) img.src = uri;
+                } catch (_) {}
+            }
+        } catch (_) {}
     }
     
     function renderPopupContent(results, currentIndex = 0) {
+        // Every caller assigns the returned string to popup.innerHTML
+        // synchronously — schedule the async image fill-in (structured-content
+        // <img> assets) for right after that happens.
+        setTimeout(() => { try { hydrateDictImages(document.getElementById('dictPopup')); } catch (_) {} }, 0);
         // Reader-mode-only "Set playhead" section, above the dictionary
         // header. Tapping it jumps audio playback to the start of the
         // cue containing the looked-up word — same logic the floating
@@ -1799,7 +2098,7 @@
     // can resume audio underneath (racing e.g. key-passage playback). Gestures
     // inside a VISIBLE overlay belong to it; taps on dict text still dismiss
     // via the dict-frag handlers. New modals need the same exclusion.
-    const AI_OVERLAY_IDS = ['kchapterView', 'kcharsScreen', 'kcharPopup', 'aiSummaryOverlay', 'bookmarksOverlay'];
+    const AI_OVERLAY_IDS = ['kchapterView', 'kcharsScreen', 'kcharPopup', 'kplacePopup', 'aiSummaryOverlay', 'bookmarksOverlay', 'kaiLightbox', 'kvocabReview'];
     function _aiOverlayVisible(el) {
         if (!el || !el.getClientRects().length) return false;
         try {
@@ -1901,6 +2200,77 @@
     // resume won the race against the new play call's startMs.
     window._clearLookupPauseFlag = () => { _lookupPausedPlayback = false; };
 
+    // ---- visionOS native dictionary panel (real depth) ---------------------
+    // On the native Vision build the in-window popup is GHOSTED (opacity 0 via
+    // theme.css, DOM fully alive) and its content is mirrored into a native
+    // glass ornament floating beside the window. The panel's native buttons
+    // forward to the ghost popup's REAL buttons, so every interaction (Anki,
+    // navigation, audio) runs the exact same code paths.
+    let _kvPanelDeb = 0;
+    let _kvCssSent = false;
+    // The panel renders the popup's OWN HTML with the app's OWN styles (in a
+    // second WKWebView), so formatting is pixel-identical. The stylesheet
+    // bundle is collected once per session from every loaded sheet.
+    function kvCollectCss() {
+        let out = '';
+        try {
+            for (const sh of Array.from(document.styleSheets)) {
+                try { for (const r of Array.from(sh.cssRules || [])) out += r.cssText + '\n'; } catch (_) {}
+            }
+        } catch (_) {}
+        return out;
+    }
+    function kvMirrorPopupToPanel() {
+        try {
+            if (!window.KADOKI_VISION_NATIVE) return;
+            const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+            if (!bg || typeof bg.dictPanel !== 'function') return;
+            const popup = document.getElementById('dictPopup');
+            if (!popup) return;
+            if (popup.style.display === 'none' || !popup.innerHTML) {
+                bg.dictPanel({ show: false });
+                return;
+            }
+            // Button forwarding maps by DOCUMENT ORDER — panel-side indices
+            // come from the same HTML, so keep the full unfiltered list.
+            window._kvPanelBtns = Array.from(popup.querySelectorAll('button'));
+            const payload = { show: true, html: popup.innerHTML };
+            // Docked-panel placement hint: the ghost popup's own rect IS the
+            // iOS positioning result (beside the word, out of its way), so
+            // forward its center as window fractions — the native panel docks
+            // outside the window at that height / on that side.
+            try {
+                const r = popup.getBoundingClientRect();
+                if (r.width > 0 && window.innerWidth > 0 && window.innerHeight > 0) {
+                    payload.xf = Math.max(0, Math.min(1, (r.left + r.width / 2) / window.innerWidth));
+                    payload.yf = Math.max(0, Math.min(1, (r.top + Math.min(r.height, 340) / 2) / window.innerHeight));
+                }
+            } catch (_) {}
+            if (!_kvCssSent) { payload.css = kvCollectCss(); _kvCssSent = true; }
+            bg.dictPanel(payload);
+        } catch (_) {}
+    }
+    function kvInstallPanelMirror() {
+        try {
+            if (!window.KADOKI_VISION_NATIVE || window._kvPanelObs) return;
+            const popup = document.getElementById('dictPopup');
+            if (!popup) return;
+            window._kvPanelObs = true;
+            new MutationObserver(() => {
+                clearTimeout(_kvPanelDeb);
+                _kvPanelDeb = setTimeout(kvMirrorPopupToPanel, 160);
+            }).observe(popup, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+            window.addEventListener('kadokiDictAction', (e) => {
+                let i = (e && typeof e.i === 'number') ? e.i : (e && e.detail && e.detail.i);
+                if (typeof i === 'string') i = parseInt(i, 10);
+                if (!Number.isFinite(i)) return;
+                if (i === -1) { try { hidePopup(); } catch (_) {} return; }
+                try { const b = window._kvPanelBtns && window._kvPanelBtns[i]; if (b) b.click(); } catch (_) {}
+            });
+        } catch (_) {}
+    }
+    setInterval(() => { try { kvInstallPanelMirror(); } catch (_) {} }, 2500);
+
     function hidePopup() {
         console.log('🚪 Hiding popup...');
         const popup = document.getElementById('dictPopup');
@@ -1908,6 +2278,7 @@
             popup.style.display = 'none';
             popup.innerHTML = '';
         }
+        try { if (window.KADOKI_VISION_NATIVE) window.Capacitor?.Plugins?.BackgroundAudio?.dictPanel?.({ show: false }); } catch (_) {}
         clearHighlight();
         // Clear the reader's CSS Custom Highlight (set by the caret-based
         // lookup path). Safe no-op if not in reader mode.
@@ -1986,7 +2357,15 @@
         const allWords = new Set();
         for (let len = searchLimit; len >= 1; len--) {
             const surface = text.slice(start, start + len);
-            const forms = getDeinflections(surface, 2);
+            let forms = getDeinflections(surface, 2);
+            // Katakana-spelled native word (ハシル, ズッ友): deinflection rules
+            // and the dict term index are hiragana-keyed, so also generate
+            // candidates from the hiragana conversion. The surface (match
+            // length, highlight) stays the original katakana text.
+            if (KATA_RE.test(surface)) {
+                const hira = kataToHira(surface);
+                if (hira !== surface) forms = forms.concat(getDeinflections(hira, 2));
+            }
             perLen.push({ len, surface, forms });
             for (const f of forms) allWords.add(f.word);
         }
@@ -2846,13 +3225,23 @@
             let count = 0;
             for (const def of defs) {
                 if (count >= 5) break;
-                let text = '';
+                let bodyHtml = '';
                 if (def?.type === 'structured-content') {
-                    text = extractSimpleTextFromStructured(def.content);
-                } else if (typeof def === 'string') {
-                    text = def;
+                    // Full structured render (Jitendex badges / senses / example
+                    // boxes / forms tables); text-flatten only as a fallback.
+                    const sc = renderStructuredContentHtml(def.content, dictTag);
+                    if (sc) {
+                        bodyHtml = `<div class="dict-sc" data-dict-name="${_escapeHtml(String(dictTag))}">${sc}</div>`;
+                    } else {
+                        const text = extractSimpleTextFromStructured(def.content);
+                        if (text && text.length >= 2) bodyHtml = `<ul class="dict-popup-glosses"><li>${text}</li></ul>`;
+                    }
+                } else if (def?.type === 'text' && typeof def.text === 'string' && def.text.length >= 2) {
+                    bodyHtml = `<ul class="dict-popup-glosses"><li>${def.text}</li></ul>`;
+                } else if (typeof def === 'string' && def.length >= 2) {
+                    bodyHtml = `<ul class="dict-popup-glosses"><li>${def}</li></ul>`;
                 }
-                if (!text || text.length < 2) continue;
+                if (!bodyHtml) continue;
                 count++;
                 html += `
                     <div class="dict-popup-sense">
@@ -2860,7 +3249,7 @@
                             <span class="dict-popup-sense-num">${count}.</span>
                             <span class="dict-popup-pill dict-popup-pill-dict">${dictTag}</span>
                         </div>
-                        <ul class="dict-popup-glosses"><li>${text}</li></ul>
+                        ${bodyHtml}
                     </div>
                 `;
             }
@@ -3371,9 +3760,37 @@
                 if (touchTimer) { clearTimeout(touchTimer); touchTimer = null; }
                 clearHighlight();
             });
+            // macOS shell: a mouse click is a tap. CMD-click is reserved for
+            // native text selection and never triggers a lookup.
+            if (window.KADOKI_MAC) {
+                span.addEventListener('click', async (e) => {
+                    if (e.metaKey) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const _pop = document.getElementById('dictPopup');
+                    if (_pop && _pop.style.display !== 'none') {
+                        try { window.hideDictPopup?.(); } catch (_) {}
+                        window._dictPopupDismissedTs = Date.now();
+                        return;
+                    }
+                    bindCardLookupContext(span);
+                    const text = spans.map(s => s.textContent).join('');
+                    const charIndex = spans.slice(0, index)
+                        .reduce((sum, s) => sum + s.textContent.length, 0);
+                    const best = await greedyDeinflect(text, charIndex);
+                    highlightSpans(spans, index, best.length);
+                    performLookup(spans, index);
+                });
+            }
         });
-        
+
         console.log('✅ Click handlers attached to all spans');
+        // visionOS card conversion: expose the context binder for the word
+        // overlays' tap handler and start the overlay observer (no-ops off
+        // Vision; the per-span listeners above stay wired but the frags are
+        // inert there, so they simply never fire).
+        window._kvBindCardLookupContext = bindCardLookupContext;
+        try { installVisionCardOverlays(); } catch (_) {}
     }
 
     // ---- Generic lookup enabling for dynamic containers (AI overlay etc.) ----
@@ -3559,7 +3976,282 @@
             } catch (_) {}
         });
         container.addEventListener('touchcancel', () => { clearHighlight(); });
+
+        // macOS shell: a mouse click is a tap (CMD-click = native selection).
+        if (window.KADOKI_MAC) {
+            container.addEventListener('click', (e) => {
+                try {
+                    if (e.metaKey) return;
+                    const _pop = document.getElementById('dictPopup');
+                    if (_pop && _pop.style.display !== 'none') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        try { window.hideDictPopup?.(); } catch (_) {}
+                        window._dictPopupDismissedTs = Date.now();
+                        return;
+                    }
+                    const hit = resolveLazyHit(container, e.clientX, e.clientY);
+                    if (!hit) return;    // off-text click — let it fall through
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearHighlight();
+                    if (container.dataset.dictKeepCtx !== '1') window.lookupContext = null;
+                    performLookup(null, 0, {
+                        text: hit.flatText,
+                        charIndex: hit.charIndex,
+                        applyHighlight: (length) => applyLazyHighlight(hit.segments, hit.charIndex, length),
+                    });
+                } catch (_) {}
+            });
+        }
     }
+
+    // ---- visionOS: word-level gaze targets over LAZY dict containers -------
+    // (chapter summaries, quotes, vocab contexts…). Same proven pattern as
+    // the audio subtitle: text nodes untouched; childless absolutely-
+    // positioned spans are the only hit-testable elements, so the system
+    // draws ONE steady capsule per dictionary word. A tap looks up THAT word
+    // via the lazy path (quantized — never the character under the gaze).
+    async function visionWordOverlays(container) {
+        if (!window.KADOKI_VISION) return;
+        if (!container || container._kvOverlaid || !container.isConnected) return;
+        container._kvOverlaid = true;
+        try {
+            const { flatText, segments } = buildLazyFlatMap(container);
+            if (!flatText || flatText.length < 2 || flatText.length > 4000) return;
+            const isJa = (ch) => /[぀-ヿ一-鿿㐀-䶿々〆]/.test(ch);
+            const hasKk = (s) => /[゠-ヿ一-鿿㐀-䶿々]/.test(s);
+            const words = [];
+            let pos = 0;
+            while (pos < flatText.length) {
+                if (!isJa(flatText[pos])) { pos++; continue; }
+                let r = null;
+                try { r = await greedyDeinflect(flatText, pos); } catch (_) {}
+                if (!container.isConnected) return;
+                const len = (r && r.length >= 1) ? r.length : 1;
+                const surface = flatText.substr(pos, len);
+                if (hasKk(surface) || surface.length >= 3) words.push({ start: pos, len });
+                pos += len;
+            }
+            if (!words.length || !container.isConnected) return;
+            const locate = (ci) => {
+                for (const s of segments) {
+                    if (ci < s.start + s.len) return { node: s.node, off: Math.max(0, ci - s.start) };
+                }
+                return null;
+            };
+            if (!container.style.position) container.style.position = 'relative';
+            const base = container.getBoundingClientRect();
+            const frag = document.createDocumentFragment();
+            for (const wd of words) {
+                const a = locate(wd.start), b = locate(wd.start + wd.len - 1);
+                if (!a || !b) continue;
+                const range = document.createRange();
+                try {
+                    range.setStart(a.node, a.off);
+                    range.setEnd(b.node, Math.min(b.off + 1, (b.node.nodeValue || '').length));
+                } catch (_) { continue; }
+                for (const r of Array.from(range.getClientRects())) {
+                    if (!(r.width > 0 && r.height > 0)) continue;
+                    const h = document.createElement('span');
+                    h.className = 'kv-word-hit';
+                    h.style.cssText = 'position:absolute;left:' + (r.left - base.left) + 'px;top:' +
+                        (r.top - base.top - 2) + 'px;width:' + r.width + 'px;height:' + (r.height + 4) +
+                        'px;pointer-events:auto;cursor:pointer;border-radius:8px;z-index:2;background:transparent;';
+                    const start = wd.start;
+                    h.addEventListener('touchstart', () => {}, { passive: true });
+                    h.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        try {
+                            window.lookupContext = null;
+                            performLookup(null, 0, { text: flatText, charIndex: start, applyHighlight: () => {} });
+                        } catch (_) {}
+                    });
+                    frag.appendChild(h);
+                }
+            }
+            container.appendChild(frag);
+            // Name/place squiggle runs: own capsule, tap → their popup (the
+            // wrapper's handler). Marked async by the squiggle poll → two
+            // passes.
+            const nameOverlays = () => {
+                if (!container.isConnected) return;
+                const nbase = container.getBoundingClientRect();
+                for (const nm of Array.from(container.querySelectorAll('.kchar-name, .kplace-name'))) {
+                    if (nm._kvHit) continue;
+                    nm._kvHit = 1;
+                    for (const r of Array.from(nm.getClientRects())) {
+                        if (!(r.width > 0 && r.height > 0)) continue;
+                        const h = document.createElement('span');
+                        h.className = 'kv-word-hit kv-name-hit';
+                        h.style.cssText = 'position:absolute;left:' + (r.left - nbase.left) + 'px;top:' +
+                            (r.top - nbase.top - 2) + 'px;width:' + r.width + 'px;height:' + (r.height + 4) +
+                            'px;pointer-events:auto;cursor:pointer;border-radius:8px;z-index:3;background:transparent;';
+                        h.addEventListener('touchstart', () => {}, { passive: true });
+                        h.addEventListener('click', (e) => { e.stopPropagation(); try { nm.click(); } catch (_) {} });
+                        container.appendChild(h);
+                    }
+                }
+            };
+            nameOverlays();
+            setTimeout(nameOverlays, 1900);
+        } catch (_) {}
+    }
+    window.dictVisionOverlays = visionWordOverlays;
+
+    // ---- visionOS: CARD-mode word overlays ---------------------------------
+    // Same proven pattern as the audio subtitle: the per-char frags go inert
+    // (CSS below — vision only, iOS untouched), childless positioned strips
+    // are the only hit-testable elements (one steady capsule per word), and a
+    // tap runs the SAME card lookup flow as the per-span handlers, including
+    // the Anki context binding. Rebuilt via MutationObserver when the
+    // subtitle re-renders (cue/card changes).
+    let _kvCardTok = 0;
+    async function rebuildVisionCardOverlays(container) {
+        const tok = ++_kvCardTok;
+        try {
+            for (const o of Array.from(container.querySelectorAll('.kv-card-hit'))) o.remove();
+            const spans = Array.from(container.querySelectorAll('.dict-frag'));
+            if (!spans.length) return;
+            const offs = []; let acc = 0;
+            for (const s of spans) { offs.push(acc); acc += (s.textContent || '').length; }
+            const text = spans.map(s => s.textContent).join('');
+            const isJa = (ch) => /[぀-ヿ一-鿿㐀-䶿々〆]/.test(ch);
+            const hasKk = (s) => /[゠-ヿ一-鿿㐀-䶿々]/.test(s);
+            const words = [];
+            let pos = 0;
+            while (pos < text.length) {
+                if (!isJa(text[pos])) { pos++; continue; }
+                let r = null;
+                try { r = await greedyDeinflect(text, pos); } catch (_) {}
+                if (tok !== _kvCardTok || !container.isConnected) return;
+                const len = (r && r.length >= 1) ? r.length : 1;
+                const surface = text.substr(pos, len);
+                if (hasKk(surface) || surface.length >= 3) {
+                    const fs = offs.indexOf(pos);
+                    if (fs >= 0) {
+                        let fe = fs;
+                        const end = pos + len;
+                        while (fe + 1 < spans.length && offs[fe + 1] < end) fe++;
+                        words.push({ fs, fe });
+                    }
+                }
+                pos += len;
+            }
+            if (tok !== _kvCardTok || !container.isConnected || !words.length) return;
+            const base = container.getBoundingClientRect();
+            const strips = [];
+            for (const wd of words) {
+                let cur = null;
+                for (let k = wd.fs; k <= wd.fe; k++) {
+                    const r = spans[k].getBoundingClientRect();
+                    if (!(r.width > 0 && r.height > 0)) continue;
+                    if (cur && Math.abs(r.top - cur.top) < r.height / 2) {
+                        cur.right = Math.max(cur.right, r.right);
+                    } else {
+                        if (cur) strips.push(cur);
+                        cur = { left: r.left, right: r.right, top: r.top, height: r.height, fs: wd.fs };
+                    }
+                }
+                if (cur) strips.push(cur);
+            }
+            const gaps = [];
+            for (let i = 0; i + 1 < strips.length; i++) {
+                const a = strips[i], b = strips[i + 1];
+                if (Math.abs(a.top - b.top) <= a.height / 2 && b.left > a.right) {
+                    const gap = b.left - a.right;
+                    if (gap > 2 && gap < 140) {
+                        gaps.push({ left: a.right + 1, right: b.left - 1, top: a.top, height: a.height, fs: a.fs });
+                    }
+                }
+            }
+            const mk = (st, cls, onTap) => {
+                const h = document.createElement('span');
+                h.className = 'kv-card-hit' + (cls ? ' ' + cls : '');
+                h.style.left = (st.left - base.left) + 'px';
+                h.style.top = (st.top - base.top - 3) + 'px';
+                h.style.width = Math.max(1, st.right - st.left) + 'px';
+                h.style.height = (st.height + 6) + 'px';
+                h.addEventListener('touchstart', () => {}, { passive: true });
+                h.addEventListener('click', onTap);
+                container.appendChild(h);
+            };
+            const wordTap = (fs) => async (e) => {
+                e.stopPropagation();
+                try {
+                    const _pop = document.getElementById('dictPopup');
+                    if (_pop && _pop.style.display !== 'none') {
+                        try { window.hideDictPopup?.(); } catch (_) {}
+                        window._dictPopupDismissedTs = Date.now();
+                        return;
+                    }
+                    try { window._kvBindCardLookupContext && window._kvBindCardLookupContext(spans[fs]); } catch (_) {}
+                    const best = await greedyDeinflect(text, offs[fs]);
+                    highlightSpans(spans, fs, best.length);
+                    performLookup(spans, fs);
+                } catch (_) {}
+            };
+            for (const st of strips.concat(gaps)) mk(st, '', wordTap(st.fs));
+            // Name/place squiggle runs → their popups (marked async: 2 passes).
+            const nameOverlays = () => {
+                if (tok !== _kvCardTok || !container.isConnected) return;
+                const nb = container.getBoundingClientRect();
+                for (const nm of Array.from(container.querySelectorAll('.kchar-name, .kplace-name'))) {
+                    if (nm._kvHit) continue;
+                    nm._kvHit = 1;
+                    for (const r of Array.from(nm.getClientRects())) {
+                        if (!(r.width > 0 && r.height > 0)) continue;
+                        const h = document.createElement('span');
+                        h.className = 'kv-card-hit kv-name-hit';
+                        h.style.left = (r.left - nb.left) + 'px';
+                        h.style.top = (r.top - nb.top - 3) + 'px';
+                        h.style.width = r.width + 'px';
+                        h.style.height = (r.height + 6) + 'px';
+                        h.addEventListener('touchstart', () => {}, { passive: true });
+                        h.addEventListener('click', (e) => { e.stopPropagation(); try { nm.click(); } catch (_) {} });
+                        container.appendChild(h);
+                    }
+                }
+            };
+            nameOverlays();
+            setTimeout(nameOverlays, 1900);
+        } catch (_) {}
+    }
+    function installVisionCardOverlays() {
+        if (!window.KADOKI_VISION) return;
+        const container = document.querySelector('.subtitle-text');
+        if (!container) return;
+        // Bind PER CONTAINER, not once: deck-card renders replace the whole
+        // .subtitle-text element every card (SRT cards mutate one in place),
+        // so a once-only install left the observer on a disconnected node —
+        // Anki-deck cards never got word overlays. setupLookupHandlers runs
+        // on every card render and re-enters here; a stale observer's
+        // rebuilds no-op on the isConnected check.
+        if (window._kvCardObsEl === container) return;
+        window._kvCardObsEl = container;
+        if (!document.getElementById('kvCardStyle')) {
+            const st = document.createElement('style');
+            st.id = 'kvCardStyle';
+            st.textContent =
+                'body.kadoki-vision-native .subtitle-text .dict-frag { pointer-events: none; }' +
+                '.subtitle-text { position: relative; }' +
+                '.subtitle-text .kv-card-hit { position: absolute; pointer-events: auto; cursor: pointer; border-radius: 8px; z-index: 2; background: transparent; }' +
+                '.subtitle-text .kv-card-hit.kv-name-hit { z-index: 3; }';
+            document.head.appendChild(st);
+        }
+        let deb = 0;
+        const kick = () => { clearTimeout(deb); deb = setTimeout(() => { try { rebuildVisionCardOverlays(container); } catch (_) {} }, 350); };
+        try {
+            new MutationObserver((muts) => {
+                // ignore mutations we caused (overlay add/remove)
+                if (muts.every(m => Array.from(m.addedNodes).concat(Array.from(m.removedNodes))
+                    .every(n => n && n.classList && n.classList.contains('kv-card-hit')))) return;
+                kick();
+            }).observe(container, { childList: true, subtree: true, characterData: true });
+        } catch (_) {}
+        kick();
+    }
+    window.dictVisionCardOverlays = installVisionCardOverlays;
 
     window.dictEnableLookupIn = function (container) {
         try {
@@ -3567,7 +4259,11 @@
             // Lazy path requires caretRangeFromPoint (WebKit/Blink have it; iOS
             // included). Fall back to the per-char spans only if it's missing.
             if (typeof document.caretRangeFromPoint === 'function') {
-                return dictEnableLookupInLazy(container);
+                const r = dictEnableLookupInLazy(container);
+                // Vision: word gaze targets over the same container (async,
+                // no-op elsewhere). Delayed so layout has settled.
+                if (window.KADOKI_VISION) setTimeout(() => { try { visionWordOverlays(container); } catch (_) {} }, 250);
+                return r;
             }
             return dictEnableLookupInSpans(container);
         } catch (e) { console.log('[dict] enableLookupIn failed: ' + (e && e.message)); }
@@ -3905,7 +4601,16 @@
            keeps the pick clearly visible without any metric change. */
         .dict-frag.highlight {
             background: color-mix(in srgb, var(--accent-cyan, #00ffcc) 40%, transparent) !important;
-            border-radius: 3px;
+            border-radius: 0;
+        }
+        /* The pick is a RUN of per-char spans; round only its two ends so it
+           reads as one word, not a row of rounded boxes (visible at large
+           subtitle sizes — Vision Pro — as "a border around each character"). */
+        .dict-frag.highlight:not(.dict-frag.highlight + *) {
+            border-top-left-radius: 3px; border-bottom-left-radius: 3px;
+        }
+        .dict-frag.highlight:not(:has(+ .dict-frag.highlight)) {
+            border-top-right-radius: 3px; border-bottom-right-radius: 3px;
         }
         /* Span-less AI overlays (char popup / Characters screen / chapter view):
            the looked-up run is wrapped in .dict-hl, not .dict-frag. Same lift. */
@@ -4133,6 +4838,61 @@
         .dict-popup-glosses li {
             font-size: 0.95em; margin-bottom: 2px;
         }
+        /* Yomitan structured content (Jitendex et al). Badge/box colors come
+           from the dictionary's own inline styles; these rules supply layout,
+           dark-theme borders, and typography. */
+        .dict-sc { color: #ddd; line-height: 1.55; font-size: 0.95em; }
+        .dict-sc ol, .dict-sc ul { margin: 3px 0 3px 1.5em; padding: 0; }
+        .dict-sc li { margin: 2px 0; }
+        .dict-sc ruby rt { font-size: 0.55em; opacity: 0.85; }
+        .dict-sc table {
+            border-collapse: collapse; margin: 8px 0; font-size: 0.92em;
+        }
+        .dict-sc th, .dict-sc td {
+            border: 1px solid #3a3a3a; padding: 3px 10px; text-align: center;
+        }
+        .dict-sc th { background: rgba(255,255,255,0.06); font-weight: 600; }
+        .dict-sc details { margin: 4px 0; }
+        .dict-sc summary { cursor: pointer; color: #aaa; }
+        .dict-sc [data-sc-content="extra-info"],
+        .dict-sc [data-sc-content="example-sentence"] {
+            border-left: 2px solid #444; margin: 6px 0; padding: 4px 10px;
+            background: rgba(255,255,255,0.03); border-radius: 0 6px 6px 0;
+        }
+        .dict-sc [data-sc-content="example-sentence-a"] { font-size: 1.02em; }
+        .dict-sc [data-sc-content="example-sentence-b"] { color: #aaa; font-size: 0.92em; }
+        .dict-sc [data-sc-content="attribution"],
+        .dict-sc [data-sc-content="sources"] {
+            color: #777; font-size: 0.82em; margin-top: 4px; text-align: right;
+        }
+        .dict-sc-link { color: #9a86c8; text-decoration: none; }
+        .dict-sc-img { max-width: 100%; vertical-align: middle; }
+        /* Jitendex-convention badges + forms-table marks — BUILT-IN fallback
+           (the marks are empty spans + the dict's styles.css; these rules make
+           them render even when that sheet isn't stored). The dictionary's own
+           scoped sheet, when present, overrides via higher specificity. */
+        .dict-sc span[data-sc-class="tag"] {
+            border-radius: 0.3em; font-size: 0.8em; font-weight: bold;
+            margin-right: 0.5em; padding: 0.2em 0.3em; vertical-align: text-bottom;
+            word-break: keep-all; background-color: #565656; color: white;
+        }
+        .dict-sc td[data-sc-class^="form-"] > span {
+            clip-path: circle(); display: block; font-weight: bold;
+            padding: 0 0.5em; width: fit-content; margin: 0 auto; color: white;
+        }
+        .dict-sc td[data-sc-class="form-valid"] > span { color: #16181c; background: radial-gradient(#ddd 50%, white 100%); }
+        .dict-sc td[data-sc-class="form-valid"] > span::before { content: "◇"; }
+        .dict-sc td[data-sc-class="form-pri"]  > span { background: radial-gradient(green 50%, white 100%); }
+        .dict-sc td[data-sc-class="form-pri"]  > span::before { content: "△"; }
+        .dict-sc td[data-sc-class="form-irr"]  > span { background: radial-gradient(crimson 50%, white 100%); }
+        .dict-sc td[data-sc-class="form-irr"]  > span::before { content: "✕"; }
+        .dict-sc td[data-sc-class="form-out"]  > span { background: radial-gradient(blue 50%, white 100%); }
+        .dict-sc td[data-sc-class="form-out"]  > span::before { content: "古"; }
+        .dict-sc td[data-sc-class="form-old"]  > span { background: radial-gradient(blue 50%, white 100%); }
+        .dict-sc td[data-sc-class="form-old"]  > span::before { content: "旧"; }
+        .dict-sc td[data-sc-class="form-rare"] > span { background: radial-gradient(purple 50%, white 100%); }
+        .dict-sc td[data-sc-class="form-rare"] > span::before { content: "▽"; }
+        .dict-sc span[data-sc-class="form-special"] { color: crimson; }
         .dict-popup-empty {
             font-size: 1em; color: #ccc; text-align: center; padding: 8px 0;
         }

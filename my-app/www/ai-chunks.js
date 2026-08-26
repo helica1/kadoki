@@ -284,6 +284,57 @@
     return result;
   }
 
+  // ---- fuzzy text↔cue matching (scene audio, on-device transcription) -------------
+  // Cue text and book text disagree on punctuation (aligned cues drop 「」/。 at
+  // seams) and raw-ASR cues disagree on everything — matching is done on a
+  // punctuation- and whitespace-stripped view with an index map back. ー (chōonpu)
+  // is part of words and is NOT stripped.
+  const _MATCH_PUNCT = /[\s、。，．,.・･「」『』（）()［］\[\]｛｝{}〈〉《》【】！？!?…‥―—–〜～：；:;"'“”‘’·※]/;
+  function _stripMatch(s) {
+    const flat = [], idxMap = [];
+    for (let k = 0; k < s.length; k++) { if (!_MATCH_PUNCT.test(s[k])) { flat.push(s[k]); idxMap.push(k); } }
+    return { flat: flat.join(''), idxMap };
+  }
+  let _cueStripCache = null;   // keyed by the concat string ref (new concat → new strip)
+  function _stripCueText(ccText) {
+    if (_cueStripCache && _cueStripCache.src === ccText) return _cueStripCache.res;
+    const res = _stripMatch(ccText);
+    _cueStripCache = { src: ccText, res };
+    return res;
+  }
+  let _rawStripCache = null;   // keyed by the raw book-text string ref
+  function _stripRaw(raw) {
+    if (_rawStripCache && _rawStripCache.raw === raw) return _rawStripCache.res;
+    const res = _stripMatch(raw);
+    _rawStripCache = { raw, res };
+    return res;
+  }
+  // Global cue↔book anchors: forward-only monotonic pass matching each cue's
+  // text into the stripped book text. Auto-align writes the book's own text into
+  // aligned cues, so those match; raw-ASR cues just miss. Re-built when the cue
+  // list grows (transcription is progressive).
+  let _anchorCache = null;
+  function _cueAnchors(cues, rawR) {
+    if (_anchorCache && _anchorCache.cues === cues && _anchorCache.raw === rawR && _anchorCache.n === cues.length) return _anchorCache.anchors;
+    const flat = rawR.flat, anchors = [];
+    let pos = 0, missRun = 0;
+    for (let i = 0; i < cues.length; i++) {
+      if (missRun > 24 && (i % 4) !== 0) continue;   // deep ASR stretch → sample every 4th
+      const t = (cues[i] && cues[i].text) ? String(cues[i].text) : '';
+      if (!t) continue;
+      const n = _stripMatch(t).flat;
+      if (n.length < 8) continue;
+      const needle = n.length > 20 ? n.slice(0, 20) : n;
+      const k = flat.indexOf(needle, pos);
+      if (k < 0) { missRun++; continue; }
+      anchors.push({ c: i, p: k });
+      pos = k + needle.length;
+      missRun = 0;
+    }
+    _anchorCache = { cues, raw: rawR, n: cues.length, anchors };
+    return anchors;
+  }
+
   // ---- store reads ---------------------------------------------------------------
   async function getText(titleId) {
     if (!titleId) return null;
@@ -337,7 +388,7 @@
         _mapMiss.add(titleId);
         return null;
       }
-      if (!m.furthest) m.furthest = { jp: 0, cue: -1 };
+      if (!m.furthest) m.furthest = { jp: 0, ms: null, cue: -1 };
       if (!m.totals) m.totals = { raw: 0, jp: 0, cues: 0 };
       _cacheMap(titleId, m);
       return m;
@@ -806,10 +857,15 @@
       source,
       space,                                               // 'raw' | 'cue' (gating axis)
       totals: { raw: totalRaw, jp: totalJp, cues: 0 },
-      // User progress survives a same-space rebuild (renamed file etc.).
+      // User progress survives a same-space rebuild (renamed file etc.). `ms`
+      // is the durable field — a physical quantity that stays correct across
+      // ANY cue-list regeneration; `cue` is a legacy fallback only trusted
+      // when `ms` isn't available (see _furthestCueNow). Carrying `cue`
+      // forward blindly across a rebuild was the completion-detection half
+      // of the same bug mode-coverage.js's cue-index storage had.
       furthest: (old && old.space === space && old.furthest)
-        ? { jp: old.furthest.jp || 0, cue: Number.isFinite(old.furthest.cue) ? old.furthest.cue : -1 }
-        : { jp: 0, cue: -1 },
+        ? { jp: old.furthest.jp || 0, ms: Number.isFinite(old.furthest.ms) ? old.furthest.ms : null, cue: Number.isFinite(old.furthest.cue) ? old.furthest.cue : -1 }
+        : { jp: 0, ms: null, cue: -1 },
       synopsis: '',
       unresolved: [],
       chunks: chunksOut,
@@ -823,6 +879,15 @@
     let lo = 0, hi = cues.length;
     while (lo < hi) { const mid = (lo + hi) >> 1; if (cues[mid].startMs < ms) lo = mid + 1; else hi = mid; }
     return lo;
+  }
+
+  // Last cue index whose startMs <= ms (-1 if ms is before every cue) — the
+  // "which cue are we currently on/past" reading, as opposed to _cueIdxAtMs's
+  // boundary-construction "first cue at or after" reading.
+  function _cueIdxAtOrBeforeMs(cues, ms) {
+    let lo = 0, hi = cues.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (cues[mid].startMs <= ms) lo = mid + 1; else hi = mid; }
+    return lo - 1;
   }
 
   // TIME-anchored cue maps (chunks carry msStart): derive every per-chunk
@@ -1074,11 +1139,79 @@
     return false;
   }
 
+  // The cue index to compare against THIS map's ch.cueStart/cueEnd (which are
+  // always derived fresh from the CURRENT cue list). Deriving fresh from
+  // furthest.ms on every call — rather than trusting a stored furthest.cue —
+  // is what keeps this correct across a cue-list regeneration (re-
+  // transcription, SRT→whisper swap, or even live backfill mid-session all
+  // shift cue indices; ms is immune). Falls back to the legacy stored cue
+  // index only when ms isn't available (deck-card titles, or before cues load).
+  function _furthestCueNow(map) {
+    try {
+      const f = map && map.furthest;
+      if (!f) return -1;
+      if (map.space === 'cue' && Number.isFinite(f.ms)) {
+        const cues = window._srtCues;
+        if (Array.isArray(cues) && cues.length) return _cueIdxAtOrBeforeMs(cues, f.ms);
+      }
+      return Number.isFinite(f.cue) ? f.cue : -1;
+    } catch (_) { return -1; }
+  }
+
   function isComplete(map, idx) {
     try {
       if (!map || !Array.isArray(map.chunks) || !map.chunks[idx]) return false;
       const f = map.furthest || { jp: 0, cue: -1 };
-      return _completeAt(map, map.chunks[idx], f.jp || 0, Number.isFinite(f.cue) ? f.cue : -1);
+      return _completeAt(map, map.chunks[idx], f.jp || 0, _furthestCueNow(map));
+    } catch (_) { return false; }
+  }
+
+  // Has the reader ENTERED this chapter? Same one-space rule as _completeAt,
+  // compared against the chapter's START instead of its end. This is the gate
+  // for revealing a chapter's AI summary: a summary generated ahead of the
+  // reader becomes visible the moment they arrive in that chapter, rather than
+  // waiting until they finish it (which made the audio-mode 章の要約 button
+  // useless for the chapter you're actually in). Chapter 0 is always reached.
+  function isReached(map, idx) {
+    try {
+      if (!map || !Array.isArray(map.chunks) || !map.chunks[idx]) return false;
+      const ch = map.chunks[idx];
+      if (idx === 0) return true;
+      const f = map.furthest || { jp: 0, cue: -1 };
+      // A time-anchored chapter past the transcribed frontier has an empty cue
+      // range — its text isn't there yet, so it can't be reached.
+      if (map.space === 'cue' && ch.cueStart > ch.cueEnd) return false;
+      if (map.space !== 'cue' && Number.isFinite(ch.jpStart) && (f.jp || 0) >= ch.jpStart) return true;
+      if (ch.cueStart >= 0 && _furthestCueNow(map) >= ch.cueStart) return true;
+      return false;
+    } catch (_) { return false; }
+  }
+
+  // External furthest-reached credit for a title that may not be the one
+  // open on the phone at all — e.g. Apple Watch listening. _pollTick can only
+  // advance map.furthest from LIVE phone globals (_lastAudioCueIdx etc.), so
+  // watch-only sessions never reach it. Only advances `ms` (a durable,
+  // cue-list-independent quantity) — deliberately does NOT try to derive/
+  // advance `jp` or fire kai:chunk-completed here: doing that correctly needs
+  // the RIGHT cue list for THIS title, which window._srtCues may not be if a
+  // different title is active on the phone right now (unlike mode-coverage's
+  // ms-only credit, jp/completion derivation is genuinely cue-list-dependent
+  // — see project_watch_stats_chars_fix memory). Advancing `ms` alone still
+  // improves the Timeline's "furthest reached" marker immediately (it prefers
+  // f.ms via axis.msToChars since the Round-18 coverage-axis fix) and is
+  // forward-safe: completion naturally re-derives correctly, cues and all,
+  // the next time this title is actually opened on the phone.
+  async function creditFurthestMs(titleId, ms) {
+    try {
+      if (!titleId || !Number.isFinite(ms)) return false;
+      const map = await getMap(titleId);
+      if (!map) return false;
+      if (!map.furthest) map.furthest = { jp: 0, ms: null, cue: -1 };
+      const f = map.furthest;
+      if (Number.isFinite(f.ms) && ms <= f.ms) return true;   // not forward — no-op, not an error
+      f.ms = ms;
+      persistMap(titleId, map, false);
+      return true;
     } catch (_) { return false; }
   }
 
@@ -1104,10 +1237,16 @@
         }
         return;
       }
-      if (!map.furthest) map.furthest = { jp: 0, cue: -1 };
+      if (!map.furthest) map.furthest = { jp: 0, ms: null, cue: -1 };
       const f = map.furthest;
       const prevJp = f.jp || 0;
-      const prevCue = Number.isFinite(f.cue) ? f.cue : -1;
+      // Derived against the CURRENT cue list, before this tick's update — see
+      // _furthestCueNow. Using this (rather than the raw stored f.cue) for the
+      // "before" side of the completion comparison below also fixes a latent
+      // in-session version of the same bug: live whisper backfill can shift
+      // cue indices BETWEEN two polls, which would otherwise compare a
+      // pre-backfill index against a post-backfill ch.cueEnd.
+      const prevCueNow = _furthestCueNow(map);
 
       let jp = -1;
       // jp progress is only trustworthy when the reader DOM holds THIS
@@ -1153,7 +1292,13 @@
 
       let changed = false, jpAdvanced = false;
       if (jp > prevJp) { f.jp = jp; changed = true; jpAdvanced = true; }
-      if (cue > prevCue) { f.cue = cue; changed = true; }
+      if (cue > (Number.isFinite(f.cue) ? f.cue : -1)) { f.cue = cue; changed = true; }   // legacy field, kept for the deck-card fallback
+      if (cue >= 0) {
+        try {
+          const ms = (typeof window._srtAnchorMsFor === 'function') ? window._srtAnchorMsFor(cue) : null;
+          if (Number.isFinite(ms) && (!Number.isFinite(f.ms) || ms > f.ms)) { f.ms = ms; changed = true; }
+        } catch (_) {}
+      }
 
       // Lazy cue-bound re-check (~60s) while an alignment may still be missing.
       if (map.space !== 'cue' && (_pollTicks % 12) === 0 &&
@@ -1163,10 +1308,11 @@
       }
       if (!changed) return;
 
+      const newCueNow = _furthestCueNow(map);   // derived against the CURRENT cue list, after this tick's update
       const fired = [];
       for (let k = 0; k < map.chunks.length; k++) {
         const ch = map.chunks[k];
-        if (!_completeAt(map, ch, prevJp, prevCue) && _completeAt(map, ch, f.jp, f.cue)) fired.push(k);
+        if (!_completeAt(map, ch, prevJp, prevCueNow) && _completeAt(map, ch, f.jp, newCueNow)) fired.push(k);
       }
       persistMap(titleId, map, fired.length > 0);
       for (const k of fired) {
@@ -1178,7 +1324,11 @@
       if (jpAdvanced) { try { window.dispatchEvent(new CustomEvent('kai:read-frontier', { detail: { titleId, jp: f.jp } })); } catch (_) {} }
     } catch (_) {}
   }
-  setInterval(_pollTick, POLL_MS);
+  // READ-ONLY PANEL WINDOW (panel-bridge.js): a second webview on the SAME origin
+  // shares this storage, so it must never run a second copy of a writer — that
+  // is how the user's place gets lost. The module still loads (the panel reads
+  // through its public surface); only the crediting/polling clock stands down.
+  if (!window.KADOKI_PANEL) setInterval(_pollTick, POLL_MS);
 
   document.addEventListener('visibilitychange', () => {
     try { if (document.hidden) _flushDirty(); } catch (_) {}
@@ -1445,6 +1595,130 @@
   // title has an aligned audiobook) resolve the matching audio ms range. Returns
   // { expression, startMs?, endMs? } or null. Audio only when titleId is the active
   // title (window._srtCues/alignment describe THIS title) and a quote is located.
+  // ---- sub-cue trimming ------------------------------------------------------
+  // Cue bounds are the floor of quote-clip precision: a quote sitting in the
+  // middle of a long cue plays that whole cue, which is what the user hears as
+  // "starts a phrase early and ends a phrase late" (it survived the earlier
+  // sentence→quote fix because the padding comes from the cue boundary, not
+  // from the sentence expansion). SRT carries no sub-cue timing, so interpolate
+  // linearly by character position inside the boundary cue — over a single cue
+  // Japanese speech is close enough to a constant chars/sec — and keep a margin
+  // so onsets and decays aren't clipped.
+  //
+  // Guarded deliberately: only long cues are touched (short ones are already
+  // tight, and interpolation error there is a larger share of the clip), and
+  // only when there's a worthwhile amount to cut. Anything else keeps the exact
+  // old behaviour, so this can only tighten clips, never truncate a quote that
+  // was previously intact by more than the margins.
+  const SUBCUE_MIN_CUE_MS  = 1500;   // leave short cues alone
+  const SUBCUE_MIN_TRIM_MS = 350;    // below this the interpolation error isn't worth it
+  const SUBCUE_HEAD_PAD_MS = 150;    // a beat before the first syllable
+  const SUBCUE_TAIL_PAD_MS = 300;    // …and room for the last one to finish
+  // opts.tight (quote/vocab clip chips): interpolate aggressively — almost any
+  // cue, almost any trim, smaller pads. Callers that snap the result to the
+  // actual audio energy afterwards (the chapter-view waveform pass) correct
+  // the interpolation error the conservative defaults exist to hide.
+  // Quote/vocab clips ("tight"): the START pad stays generous (a cut-in mid
+  // onset is jarring) but the TAIL is short — quotes were consistently ending
+  // late. The slice fades out over 20 ms, so the tail needs no decay room.
+  const SUBCUE_TIGHT = { minCue: 600, minTrim: 80, headPad: 120, tailPad: 90 };
+  function trimCueStart(cue, cueCharOff, cueCharLen, charPos, cfg) {
+    const minCue = cfg ? cfg.minCue : SUBCUE_MIN_CUE_MS;
+    const minTrim = cfg ? cfg.minTrim : SUBCUE_MIN_TRIM_MS;
+    const headPad = cfg ? cfg.headPad : SUBCUE_HEAD_PAD_MS;
+    const s = Number(cue && cue.startMs), e = Number(cue && cue.endMs);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || (e - s) < minCue) return s;
+    if (!(cueCharLen > 0)) return s;
+    const frac = Math.min(1, Math.max(0, (charPos - cueCharOff) / cueCharLen));
+    const ms = s + frac * (e - s) - headPad;
+    if ((ms - s) < minTrim) return s;
+    return Math.min(ms, e - 200);
+  }
+  function trimCueEnd(cue, cueCharOff, cueCharLen, charPosEndExcl, cfg) {
+    const minCue = cfg ? cfg.minCue : SUBCUE_MIN_CUE_MS;
+    const minTrim = cfg ? cfg.minTrim : SUBCUE_MIN_TRIM_MS;
+    const tailPad = cfg ? cfg.tailPad : SUBCUE_TAIL_PAD_MS;
+    const s = Number(cue && cue.startMs), e = Number(cue && cue.endMs);
+    if (!Number.isFinite(s) || !Number.isFinite(e) || (e - s) < minCue) return e;
+    if (!(cueCharLen > 0)) return e;
+    const frac = Math.min(1, Math.max(0, (charPosEndExcl - cueCharOff) / cueCharLen));
+    const ms = s + frac * (e - s) + tailPad;
+    if ((e - ms) < minTrim) return e;
+    return Math.max(ms, s + 200);
+  }
+
+  // ---- word-level timing --------------------------------------------------
+  // Auto-transcribed cues carry `w`: flat [off, len, relStartMs, relEndMs]
+  // recognizer-token quads (offsets UTF-16 into cue.text — the same space as
+  // cueConcat offsets, times relative to cue.startMs). When present these give
+  // EXACT boundary times, superseding linear interpolation entirely (this is
+  // the same data the karaoke highlight runs on). Small pads for onset/decay.
+  function wordStartAt(cue, charOff) {
+    const w = cue && cue.w;
+    if (!Array.isArray(w) || w.length < 4) return null;
+    const s = Number(cue.startMs);
+    if (!Number.isFinite(s)) return null;
+    // First token whose span ends past charOff (charOff on punctuation
+    // between tokens → the next spoken token is the real start).
+    for (let i = 0; i + 3 < w.length; i += 4) {
+      if (w[i] + w[i + 1] > charOff) return Math.max(s, s + w[i + 2] - 120);
+    }
+    return null;
+  }
+  function wordEndAt(cue, charEndExcl) {
+    const w = cue && cue.w;
+    if (!Array.isArray(w) || w.length < 4) return null;
+    const s = Number(cue.startMs), e = Number(cue.endMs);
+    if (!Number.isFinite(s)) return null;
+    // Last token that starts before charEndExcl.
+    for (let i = w.length - 4; i >= 0; i -= 4) {
+      if (w[i] < charEndExcl) {
+        // Word END times are exact and the clip fades out over 20 ms: a
+        // short pad, not the old +160 (quotes were ending late).
+        const t = s + w[i + 3] + 50;
+        return Number.isFinite(e) ? Math.min(t, e + 60) : t;
+      }
+    }
+    return null;
+  }
+
+  // Cues for quote/scene resolution WITHOUT requiring audio mode to have run:
+  // window._srtCues only populates when the audio surface initializes a title,
+  // so on a cold boot every chapter-view ▶ said 音声なし until the user played
+  // something. Fallbacks: the auto-transcriber's snapshot (live session or its
+  // persistent store — includes the word quads), then the parsed-SRT reopen
+  // cache. Cached per title; the live array always wins once it exists.
+  let _resolveCues = null;   // { titleId, cues }
+  async function cuesForTitle(titleId) {
+    const live = window._srtCues;
+    if (window._activeTitleId === titleId && Array.isArray(live) && live.length) return live;
+    if (_resolveCues && _resolveCues.titleId === titleId) return _resolveCues.cues;
+    let cues = null;
+    try {
+      if (window.autoTranscribe && window.autoTranscribe.getCuesSnapshot && window.titleStore && window.titleStore.get) {
+        const t = await window.titleStore.get(titleId);
+        const ab = t && t.attachments && t.attachments.audiobook;
+        if (ab && ab.cachePath) {
+          const got = await window.autoTranscribe.getCuesSnapshot(titleId, ab.cachePath, ab.name);
+          if (got && Array.isArray(got.cues) && got.cues.length) cues = got.cues;
+        }
+      }
+    } catch (_) {}
+    if (!cues) {
+      try {
+        const raw = window.blobStore ? await window.blobStore.get('SRT_CUES_V1_' + titleId) : null;
+        const obj = raw ? JSON.parse(raw) : null;
+        if (obj && Array.isArray(obj.cues) && obj.cues.length) cues = obj.cues;
+      } catch (_) {}
+    }
+    if (cues) {
+      cues.forEach((c, k) => { if (c && c.index == null) c.index = k; });
+      _resolveCues = { titleId, cues };
+      return cues;
+    }
+    return null;
+  }
+
   async function cueRangeForQuote(titleId, chapterIdx, quote, opts) {
     try {
       const q = String(quote || '').trim();
@@ -1459,6 +1733,7 @@
       // a duplicate/similar passage otherwise resolved to the wrong (usually first)
       // occurrence → audio bounds far off even though the cues are accurate.
       const anchorOff = (opts && Number.isFinite(opts.anchorOff)) ? opts.anchorOff : null;
+      const tcfg = (opts && opts.tight) ? SUBCUE_TIGHT : null;
       const qS0 = q.replace(/\s+/g, '');
       const hits = [];
       { let from = 0, k; while ((k = chTxt.indexOf(q, from)) >= 0) { hits.push({ i: k, qlen: q.length }); from = k + 1; } }
@@ -1469,36 +1744,72 @@
         let from = 0, j;
         while ((j = flatS.indexOf(qS0, from)) >= 0) { const ci = idxMap[j]; hits.push({ i: ci, qlen: (idxMap[j + qS0.length - 1] - ci) + 1 }); from = j + 1; }
       }
-      if (!hits.length) return null;   // not found → caller falls back to caption, no audio
-      let best = hits[0];
-      if (anchorOff != null && hits.length > 1) best = hits.reduce((a, b) => Math.abs(b.i - anchorOff) < Math.abs(a.i - anchorOff) ? b : a, hits[0]);
-      const i = best.i, qlen = best.qlen;
-      // Ambiguous → DON'T trust the audio window (a wrong clip is worse than none —
-      // the expression text still shows). Omit bounds when there are multiple matches
-      // AND either the quote is too short to be distinctive or there's no anchorOff
-      // hint to disambiguate. A single match keeps full behavior.
-      const audioAmbiguous = (hits.length > 1) && (anchorOff == null || qS0.length < 8);
-      // expand to the containing sentence (cap ~180 chars so it stays card-sized)
-      const TERM = '。！？!?\n';
-      let sStart = i;
-      while (sStart > 0 && TERM.indexOf(chTxt[sStart - 1]) < 0 && (i - sStart) < 180) sStart--;
-      let sEnd = i + qlen;
-      while (sEnd < chTxt.length && TERM.indexOf(chTxt[sEnd - 1]) < 0 && (sEnd - i) < 180) sEnd++;
-      if (sEnd < chTxt.length && TERM.indexOf(chTxt[sEnd]) >= 0) sEnd++;   // include the terminator
-      const out = { expression: chTxt.slice(sStart, sEnd).trim() };
+      // A quote that is NOT in the chapter text (models normalize kanji↔kana
+      // despite the verbatim rule — generation-time locate failed those the
+      // same way, hence gen✕) can STILL be findable in the AUDIO's cue text.
+      // So a text miss no longer bails: it skips the text-anchored paths
+      // (0/1/3) and lets Path 2 match the quote against the cues directly.
+      const textHit = hits.length > 0;
+      let i = -1, qlen = 0, audioAmbiguous = false, sStart = 0, sEnd = 0;
+      let out;
+      if (textHit) {
+        let best = hits[0];
+        if (anchorOff != null && hits.length > 1) best = hits.reduce((a, b) => Math.abs(b.i - anchorOff) < Math.abs(a.i - anchorOff) ? b : a, hits[0]);
+        i = best.i; qlen = best.qlen;
+        // Ambiguous → refuse the audio window ONLY for short quotes with no
+        // anchorOff hint (a wrong 6-char clip is worse than none). A LONG quote
+        // repeated verbatim plays the same words at every occurrence, so
+        // refusing served nobody — worse, the caller then fell back to stale
+        // generation-time first-cue bounds ("clip is off") or nothing at all
+        // ("音声なし"). No hint + long → first occurrence; hint → nearest.
+        audioAmbiguous = (hits.length > 1) && (anchorOff == null) && (qS0.length < 12);
+        // expand to the containing sentence (cap ~180 chars so it stays card-sized)
+        const TERM = '。！？!?\n';
+        sStart = i;
+        while (sStart > 0 && TERM.indexOf(chTxt[sStart - 1]) < 0 && (i - sStart) < 180) sStart--;
+        sEnd = i + qlen;
+        while (sEnd < chTxt.length && TERM.indexOf(chTxt[sEnd - 1]) < 0 && (sEnd - i) < 180) sEnd++;
+        if (sEnd < chTxt.length && TERM.indexOf(chTxt[sEnd]) >= 0) sEnd++;   // include the terminator
+        out = { expression: chTxt.slice(sStart, sEnd).trim() };
+      } else {
+        out = { expression: q };
+      }
       if (audioAmbiguous) return out;   // expression only — ambiguous anchor, no reliable audio window
       // ---- audio ms (best-effort; skipped gracefully) ----
-      if (titleId !== window._activeTitleId) return out;   // globals describe the active read title only
-      const cues = window._srtCues;
+      if (titleId !== window._activeTitleId) return out;   // chunk map/caches describe the active title only
+      const cues = await cuesForTitle(titleId);
       if (!Array.isArray(cues) || !cues.length) return out;
       // Cue-space map (audiobook+SRT): the chunk text IS cueConcat(cues).text sliced
-      // by rawStart/rawEnd, so the sentence's char range maps DIRECTLY to cue indices
-      // through the cueConcat offsets — no cueAlignment needed (that path is for
-      // raw/jp text). Without this branch audiobook titles never get scene audio.
-      if (map.space === 'cue') {
+      // by rawStart/rawEnd, so the QUOTE's own char range (i..i+qlen, NOT the
+      // sentence-expanded sStart..sEnd — a sentence routinely spans several SRT
+      // cues, which was the confirmed cause of clips starting a phrase early and
+      // ending a phrase late) maps DIRECTLY to cue indices through the cueConcat
+      // offsets — no cueAlignment needed (that path is for raw/jp text). Without
+      // this branch audiobook titles never get scene audio. Still cue-granularity
+      // (a quote sharing a cue with surrounding narration keeps that cue's full
+      // span — SRT gives no sub-cue timing), but no longer sentence-granularity.
+      if (map.space === 'cue' && textHit) {
         const cc = cueConcat(cues);
         const off = cc.offsets;
-        const gStart = chunk.rawStart + sStart, gEnd1 = Math.max(chunk.rawStart + sStart, chunk.rawStart + sEnd - 1);
+        let gStart = chunk.rawStart + i, gEnd1 = Math.max(chunk.rawStart + i, chunk.rawStart + i + qlen - 1);
+        // Drift guard: chunkText comes from a per-title cache while `cues` is
+        // the LIVE array — auto-transcription keeps refining cues after the
+        // chapter map was built, so the mapped offset can land off-target
+        // (clips "a phrase off" even with exact word timing). Verify the quote
+        // head actually sits at gStart in cue space; if not, re-find the quote
+        // in cc.text (near the expected spot first, then anywhere).
+        const headLen = Math.min(8, qlen);
+        if (headLen >= 4 && cc.text.substr(gStart, headLen) !== chTxt.substr(i, headLen)) {
+          const probe = chTxt.substr(i, Math.min(qlen, 24));
+          // Search inside this chapter's cue span only. Start near the
+          // expected offset (drift is small — this preserves which occurrence
+          // the hit picked); fall back to the chapter start.
+          const chLo = (Number.isFinite(chunk.cueStart) && chunk.cueStart >= 0 && chunk.cueStart < off.length) ? off[chunk.cueStart] : 0;
+          const chHi = (Number.isFinite(chunk.cueEnd) && chunk.cueEnd >= 0 && chunk.cueEnd + 1 < off.length) ? off[chunk.cueEnd + 1] : cc.text.length;
+          let k = cc.text.indexOf(probe, Math.max(chLo, gStart - 3000));
+          if (k < 0 || k >= chHi) { const k2 = cc.text.indexOf(probe, chLo); k = (k2 >= 0 && k2 < chHi) ? k2 : -1; }
+          if (k >= 0) { gStart = k; gEnd1 = Math.max(k, k + qlen - 1); }
+        }
         let lo = 0, hi = off.length - 1, cs = 0;   // start cue = last whose offset ≤ gStart
         while (lo <= hi) { const m = (lo + hi) >> 1; if (off[m] <= gStart) { cs = m; lo = m + 1; } else hi = m - 1; }
         let ce = cs; lo = 0; hi = off.length - 1;   // end cue = last whose offset ≤ the last char
@@ -1506,31 +1817,330 @@
         if (Number.isFinite(chunk.cueStart) && chunk.cueStart >= 0 && cs < chunk.cueStart) cs = chunk.cueStart;   // never bleed past the chapter
         if (Number.isFinite(chunk.cueEnd) && chunk.cueEnd >= 0 && ce > chunk.cueEnd) ce = chunk.cueEnd;
         if (cs <= ce && cues[cs] && cues[ce]) {
-          const startMs = cues[cs].startMs, endMs = cues[ce].endMs;
-          if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) { out.startMs = startMs; out.endMs = endMs; out.cueStart = cs; out.cueEnd = ce; }
+          // Cue char length: cueConcat appends '\n' after each cue's text, so
+          // the text itself is (next offset − this offset − 1).
+          const cueCharLen = (k) => (k + 1 < off.length ? off[k + 1] - off[k] - 1
+                                                       : Math.max(0, cc.text.length - off[k] - 1));
+          let startMs = trimCueStart(cues[cs], off[cs], cueCharLen(cs), gStart, tcfg);
+          let endMs   = trimCueEnd(cues[ce], off[ce], cueCharLen(ce), gEnd1 + 1, tcfg);
+          // Word-level token times (auto-transcribed cues) beat interpolation.
+          const ws = wordStartAt(cues[cs], gStart - off[cs]);
+          const we = wordEndAt(cues[ce], gEnd1 + 1 - off[ce]);
+          if (ws != null) startMs = ws;
+          if (we != null) endMs = we;
+          if (!(Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs)) {
+            startMs = cues[cs].startMs; endMs = cues[ce].endMs;   // degenerate → whole cues
+          }
+          if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+            out.startMs = startMs; out.endMs = endMs; out.cueStart = cs; out.cueEnd = ce;
+            if (ws != null && we != null) out.wordTimed = true;   // callers skip energy-snapping — these are exact
+            out.path = out.wordTimed ? 'cue-word' : 'cue-interp';
+          }
         }
         return out;
       }
-      if (!window.cueAlignment || !window.cueAlignment.loadAlignment) return out;
-      const a = await window.cueAlignment.loadAlignment(titleId, null);
-      if (!a || !a.cueCount || !a.ranges) return out;
-      if (map.totals && map.totals.raw && a.totalChars && a.totalChars !== map.totals.raw) return out;   // alignment ≠ this text
-      const rawStart = chunk.rawStart + sStart, rawEnd = chunk.rawStart + sEnd;
-      const ms = [];
-      for (let k = 0; k < a.cueCount; k++) { const rs = a.ranges[2 * k]; if (rs >= 0) ms.push({ i: k, rs, re: a.ranges[2 * k + 1] }); }
-      if (!ms.length) return out;
-      let lo = 0, hi = ms.length - 1, sp = -1;   // start cue = last matched with rs ≤ rawStart (covers the sentence start)
-      while (lo <= hi) { const m = (lo + hi) >> 1; if (ms[m].rs <= rawStart) { sp = m; lo = m + 1; } else hi = m - 1; }
-      if (sp < 0) sp = 0;
-      lo = 0; hi = ms.length - 1; let ep = -1;   // end cue = first matched with re ≥ rawEnd (covers the sentence end)
-      while (lo <= hi) { const m = (lo + hi) >> 1; if (ms[m].re >= rawEnd) { ep = m; hi = m - 1; } else lo = m + 1; }
-      if (ep < 0) ep = ms.length - 1;
-      let cs = ms[sp].i, ce = ms[ep].i;
-      if (Number.isFinite(chunk.cueStart) && chunk.cueStart >= 0 && cs < chunk.cueStart) cs = chunk.cueStart;   // never bleed past the chapter
-      if (Number.isFinite(chunk.cueEnd) && chunk.cueEnd >= 0 && ce > chunk.cueEnd) ce = chunk.cueEnd;
-      if (cs > ce || !cues[cs] || !cues[ce]) return out;
-      const startMs = cues[cs].startMs, endMs = cues[ce].endMs;
-      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) { out.startMs = startMs; out.endMs = endMs; out.cueStart = cs; out.cueEnd = ce; }
+      // Path 1: the cueAlignment record (SubPlz-SRT era pipeline artifact).
+      try {
+        if (textHit && window.cueAlignment && window.cueAlignment.loadAlignment) {
+          const a = await window.cueAlignment.loadAlignment(titleId, null);
+          if (a && a.cueCount && a.ranges &&
+              !(map.totals && map.totals.raw && a.totalChars && a.totalChars !== map.totals.raw)) {   // alignment ≠ this text → skip
+            // QUOTE's own bounds (see Path 0 comment above) — not the sentence.
+            const rawStart = chunk.rawStart + i, rawEnd = chunk.rawStart + i + qlen;
+            const ms = [];
+            for (let k = 0; k < a.cueCount; k++) { const rs = a.ranges[2 * k]; if (rs >= 0) ms.push({ i: k, rs, re: a.ranges[2 * k + 1] }); }
+            if (ms.length) {
+              let lo = 0, hi = ms.length - 1, sp = -1;   // start cue = last matched with rs ≤ the quote's start
+              while (lo <= hi) { const m = (lo + hi) >> 1; if (ms[m].rs <= rawStart) { sp = m; lo = m + 1; } else hi = m - 1; }
+              if (sp < 0) sp = 0;
+              lo = 0; hi = ms.length - 1; let ep = -1;   // end cue = first matched with re ≥ the quote's end
+              while (lo <= hi) { const m = (lo + hi) >> 1; if (ms[m].re >= rawEnd) { ep = m; hi = m - 1; } else lo = m + 1; }
+              if (ep < 0) ep = ms.length - 1;
+              let cs = ms[sp].i, ce = ms[ep].i;
+              if (Number.isFinite(chunk.cueStart) && chunk.cueStart >= 0 && cs < chunk.cueStart) cs = chunk.cueStart;   // never bleed past the chapter
+              if (Number.isFinite(chunk.cueEnd) && chunk.cueEnd >= 0 && ce > chunk.cueEnd) ce = chunk.cueEnd;
+              if (cs <= ce && cues[cs] && cues[ce]) {
+                // Sub-cue trim (see trimCueStart). The alignment record gives
+                // each cue's raw char range directly — but only apply it when
+                // the chapter clamp above didn't move us off that cue, since
+                // then the char range no longer describes the cue we're using.
+                let startMs = (cs === ms[sp].i)
+                  ? trimCueStart(cues[cs], ms[sp].rs, ms[sp].re - ms[sp].rs, rawStart, tcfg) : cues[cs].startMs;
+                let endMs = (ce === ms[ep].i)
+                  ? trimCueEnd(cues[ce], ms[ep].rs, ms[ep].re - ms[ep].rs, rawEnd, tcfg) : cues[ce].endMs;
+                // Token snap when the cue carries word timing: map the raw-char
+                // position proportionally into the cue's own text and take the
+                // containing token's boundary. Approximate (raw text ≠ cue text
+                // char-for-char) so wordTimed is NOT set — the waveform pass
+                // may still energy-snap the result.
+                const propOff = (cue, rs2, re2, pos) => {
+                  const L = (cue.text || '').length;
+                  if (!(re2 > rs2) || !L) return null;
+                  return Math.round(Math.max(0, Math.min(1, (pos - rs2) / (re2 - rs2))) * L);
+                };
+                if (cs === ms[sp].i) {
+                  const o = propOff(cues[cs], ms[sp].rs, ms[sp].re, rawStart);
+                  if (o != null) { const ws2 = wordStartAt(cues[cs], o); if (ws2 != null) startMs = ws2; }
+                }
+                if (ce === ms[ep].i) {
+                  const o = propOff(cues[ce], ms[ep].rs, ms[ep].re, rawEnd);
+                  if (o != null) { const we2 = wordEndAt(cues[ce], o); if (we2 != null) endMs = we2; }
+                }
+                if (!(Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs)) {
+                  startMs = cues[cs].startMs; endMs = cues[ce].endMs;
+                }
+                if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) { out.startMs = startMs; out.endMs = endMs; out.cueStart = cs; out.cueEnd = ce; out.path = 'align'; }
+              }
+            }
+          }
+        }
+      } catch (_) {}
+      if (Number.isFinite(out.startMs)) return out;
+      // Path 2 (on-device transcription): auto-aligned cues carry the BOOK'S OWN
+      // text but no cueAlignment record exists — find the passage directly in
+      // the concatenated cue text. Punctuation-INSENSITIVE both sides (aligned
+      // cue text drops 「」/。 at seams). The QUOTE itself is matched FIRST:
+      // exact stripped-text hit → exact char offsets in cue space → word-level
+      // token times from cue.w (this was the "no change in the audio" bug —
+      // this path used to match only the sentence-expanded expression and
+      // return WHOLE-CUE bounds, so every word-timing improvement upstream was
+      // invisible on auto-transcribed titles). The sentence expression + its
+      // head + an n-gram vote (exact 10-char runs survive scattered ASR
+      // errors) remain as fallbacks at cue granularity.
+      try {
+        const cc = cueConcat(cues);
+        const off = cc.offsets;
+        const sR = _stripCueText(cc.text);
+        const flat = sR.flat, idxMap = sR.idxMap;
+        const findAll = (needle) => { const hs = []; let from = 0, k; while ((k = flat.indexOf(needle, from)) >= 0 && hs.length < 16) { hs.push(k); from = k + 1; } return hs; };
+        const cueAt = (g) => { let lo = 0, hi = off.length - 1, c = 0; while (lo <= hi) { const m = (lo + hi) >> 1; if (off[m] <= g) { c = m; lo = m + 1; } else hi = m - 1; } return c; };
+        // Resolve a stripped-space match run [j, j+len) into cue bounds.
+        // mode 'exact' (verbatim quote hit): token boundary times + wordTimed.
+        // mode 'voted' (n-gram cluster on the quote): token times too — the
+        //   start may be a few chars off, so wordTimed is NOT set and the
+        //   waveform pass may still energy-snap.
+        // mode 'sent' (sentence fallback): cue-granularity, no token snap.
+        const resolveAt = (j, len, mode) => {
+          const g0 = idxMap[Math.min(j, idxMap.length - 1)];
+          const g1 = idxMap[Math.min(j + len - 1, idxMap.length - 1)];
+          let lo = 0, hi = off.length - 1, cs = 0;   // start cue = last whose offset ≤ g0
+          while (lo <= hi) { const m = (lo + hi) >> 1; if (off[m] <= g0) { cs = m; lo = m + 1; } else hi = m - 1; }
+          let ce = cs; lo = 0; hi = off.length - 1;
+          while (lo <= hi) { const m = (lo + hi) >> 1; if (off[m] <= g1) { ce = m; lo = m + 1; } else hi = m - 1; }
+          if (Number.isFinite(chunk.cueStart) && chunk.cueStart >= 0 && cs < chunk.cueStart) cs = chunk.cueStart;
+          if (Number.isFinite(chunk.cueEnd) && chunk.cueEnd >= 0 && ce > chunk.cueEnd) ce = chunk.cueEnd;
+          if (!(cs <= ce && cues[cs] && cues[ce])) return false;
+          let startMs = cues[cs].startMs, endMs = cues[ce].endMs;
+          let ws = null, we = null;
+          if (mode !== 'sent') {
+            ws = wordStartAt(cues[cs], g0 - off[cs]);
+            we = wordEndAt(cues[ce], g1 + 1 - off[ce]);
+            if (ws != null) startMs = ws;
+            if (we != null) endMs = we;
+          }
+          if (!(Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs)) return false;
+          out.startMs = startMs; out.endMs = endMs; out.cueStart = cs; out.cueEnd = ce;
+          if (mode === 'exact' && ws != null && we != null) out.wordTimed = true;
+          out.path = mode === 'exact' ? (out.wordTimed ? 'asr-quote-word' : 'asr-quote')
+                   : mode === 'voted' ? 'asr-quote-vote'
+                   : mode === 'sentq' ? 'asr-sent-quote' : 'asr-sent';
+          return true;
+        };
+        const pickHit = (hits2) => {
+          let j = hits2.length ? hits2[0] : -1;
+          if (hits2.length > 1 && Number.isFinite(chunk.cueStart) && chunk.cueStart >= 0 && Number.isFinite(chunk.cueEnd)) {
+            for (const h of hits2) { const c = cueAt(idxMap[h]); if (c >= chunk.cueStart && c <= chunk.cueEnd) { j = h; break; } }
+          }
+          return j;
+        };
+        // n-gram cluster vote in stripped cue space: exact G-char runs survive
+        // scattered ASR/kana differences that break a full exact match. Each
+        // hit votes for an implied passage start; the densest cluster wins,
+        // needing minSup supporting grams and no equally-supported rival
+        // cluster elsewhere (ambiguity → -1, let the next tier try).
+        const gramVote = (needle, G, STEP, minSup) => {
+          if (needle.length < G) return -1;
+          const starts = [];
+          for (let o = 0; o + G <= needle.length; o += STEP) {
+            const g = needle.substr(o, G);
+            let from = 0, k, c = 0;
+            while ((k = flat.indexOf(g, from)) >= 0 && c < 8) { starts.push(k - o); from = k + 1; c++; }
+          }
+          if (!starts.length) return -1;
+          starts.sort((a, b) => a - b);
+          let bn = 0, bi = 0, i0 = 0;
+          for (let i1 = 0; i1 < starts.length; i1++) {
+            while (starts[i1] - starts[i0] > 12) i0++;
+            if (i1 - i0 + 1 > bn) { bn = i1 - i0 + 1; bi = i0; }
+          }
+          let rival = false;
+          { let r0 = 0;
+            for (let i1 = 0; i1 < starts.length; i1++) {
+              while (starts[i1] - starts[r0] > 12) r0++;
+              if (i1 - r0 + 1 >= bn && Math.abs(starts[r0] - starts[bi]) > 40) { rival = true; break; }
+            } }
+          const grams = Math.max(1, Math.floor((needle.length - G) / STEP) + 1);
+          if (bn >= Math.min(minSup, grams) && !rival) return Math.max(0, starts[bi]);
+          return -1;
+        };
+        // 1) The quote, verbatim (stripped) — word-exact when it lands.
+        // 2) The quote, fuzzy 8-char-gram vote — kana/ASR variants (べつべつ vs
+        //    別々) break exact matching but leave plenty of exact 8-char runs.
+        //    Token-snapped, so still far tighter than sentence/cue bounds.
+        let done = false;
+        const qN = _stripMatch(q).flat;
+        if (qN.length >= 6) {
+          const jq = pickHit(findAll(qN));
+          if (jq >= 0) done = resolveAt(jq, qN.length, 'exact');
+          if (!done) {
+            const jv = gramVote(qN, 8, 4, 2);
+            if (jv >= 0) done = resolveAt(jv, qN.length, 'voted');
+          }
+        }
+        // 3) Sentence expression → head → 10-gram vote (cue granularity).
+        const eN = _stripMatch(out.expression).flat;
+        if (!done && eN.length >= 6 && eN !== qN) {
+          let hits2 = findAll(eN);
+          if (!hits2.length) hits2 = findAll(eN.slice(0, Math.min(eN.length, 24)));
+          let j = pickHit(hits2);
+          if (j < 0) j = gramVote(eN, 10, 5, 2);
+          if (j >= 0) {
+            // The sentence is found; now find the QUOTE inside it. Sentence
+            // bounds alone ran 1-2 cues past the quote's end whenever the quote
+            // was a fragment of a longer sentence (user: "quotes end a subtitle
+            // or two late"). Inside this small window even short head/tail
+            // grams (8→4 chars) are unambiguous, so: head gram → start, tail
+            // gram → end, token-snapped ('sentq'); a one-sided hit projects
+            // the other end by the quote's length; nothing → whole sentence.
+            let refined = false;
+            try {
+              if (qN.length >= 4 && eN !== qN) {
+                const win = flat.slice(j, Math.min(flat.length, j + eN.length + 12));
+                let hs = -1, he = -1;
+                for (let L = Math.min(8, qN.length); L >= 4 && hs < 0; L--) {
+                  const k = win.indexOf(qN.slice(0, L)); if (k >= 0) hs = k;
+                }
+                for (let L = Math.min(8, qN.length); L >= 4 && he < 0; L--) {
+                  const k = win.lastIndexOf(qN.slice(-L)); if (k >= 0 && (hs < 0 || k + L > hs)) he = k + L;
+                }
+                if (hs >= 0 || he >= 0) {
+                  const s0 = hs >= 0 ? hs : Math.max(0, he - qN.length - 4);
+                  const e0 = he >= 0 ? he : Math.min(win.length, s0 + qN.length + 4);
+                  if (e0 > s0) refined = resolveAt(j + s0, e0 - s0, 'sentq');
+                }
+              }
+            } catch (_) { refined = false; }
+            if (!refined) resolveAt(j, eN.length, 'sent');
+          }
+        }
+      } catch (_) {}
+      if (Number.isFinite(out.startMs)) return out;
+      // Path 3 (raw-ASR gaps): the sentence never appears in cue text at all —
+      // interpolate its TIME between the nearest cues whose text DOES match the
+      // book (the global anchor pass). Linear char→ms within the bracket, then
+      // snapped to real cue edges (whisper timestamps are true speech bounds).
+      // Declined when the bracket is too wide to trust — a wrong clip is worse
+      // than none. Bounds land ±a few seconds; the trim waveform handles the rest.
+      try {
+        const text = textHit ? await getText(titleId) : null;
+        if (text && typeof text.raw === 'string' && text.raw) {
+          const rawR = _stripRaw(text.raw);
+          const anchors = _cueAnchors(cues, rawR);
+          if (anchors.length >= 2) {
+            const posOf = (orig) => { const m = rawR.idxMap; let lo = 0, hi = m.length - 1, r = m.length; while (lo <= hi) { const mid = (lo + hi) >> 1; if (m[mid] >= orig) { r = mid; hi = mid - 1; } else lo = mid + 1; } return r; };
+            const p0 = posOf(chunk.rawStart + sStart);
+            const p1 = Math.max(p0 + 1, posOf(chunk.rawStart + sEnd));
+            let lo = 0, hi = anchors.length - 1, ai = -1;   // last anchor at/before the sentence
+            while (lo <= hi) { const m = (lo + hi) >> 1; if (anchors[m].p <= p0) { ai = m; lo = m + 1; } else hi = m - 1; }
+            lo = 0; hi = anchors.length - 1; let bi = -1;   // first anchor at/after its end
+            while (lo <= hi) { const m = (lo + hi) >> 1; if (anchors[m].p >= p1) { bi = m; hi = m - 1; } else lo = m + 1; }
+            if (ai >= 0 && bi >= 0 && anchors[bi].p > anchors[ai].p) {
+              const A = anchors[ai], B = anchors[bi];
+              const t0 = cues[A.c] && cues[A.c].startMs, t1 = cues[B.c] && cues[B.c].endMs;
+              const gapC = B.p - A.p, gapMs = (Number.isFinite(t0) && Number.isFinite(t1)) ? (t1 - t0) : -1;
+              // LOCAL FUZZY MATCH FIRST: the global tiers found no 8-gram of
+              // the quote anywhere, but inside this anchor bracket (a few
+              // cues) the quote's 4-grams are unambiguous even when the ASR
+              // differs every few characters (kana folded katakana→hiragana).
+              // Cluster the implied starts → start; tail gram → end; token
+              // snap. Interpolation (whole cues, ±800 ms — "a subtitle or two
+              // late") stays as the fallback only.
+              let local = false;
+              try {
+                const fold = (str) => str.replace(/[\u30a1-\u30f6]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0x60));
+                const cc3 = cueConcat(cues), off3 = cc3.offsets;
+                const sR3 = _stripCueText(cc3.text), flat3 = sR3.flat, idxMap3 = sR3.idxMap;
+                const lower = (arr, v) => { let lo2 = 0, hi2 = arr.length; while (lo2 < hi2) { const m = (lo2 + hi2) >> 1; if (arr[m] < v) lo2 = m + 1; else hi2 = m; } return lo2; };
+                const rawLo = off3[A.c], rawHi = (B.c + 1 < off3.length) ? off3[B.c + 1] : cc3.text.length;
+                const w0 = lower(idxMap3, rawLo), w1 = lower(idxMap3, rawHi);
+                const win = fold(flat3.slice(w0, w1));
+                const qF = fold(_stripMatch(q).flat);
+                const G = 4;
+                if (qF.length >= 6 && win.length >= qF.length && gapMs > 0 && gapMs <= 240000) {
+                  const starts = [];
+                  for (let o = 0; o + G <= qF.length; o++) {
+                    const g = qF.substr(o, G);
+                    let from = 0, k, c = 0;
+                    while ((k = win.indexOf(g, from)) >= 0 && c < 12) { starts.push(k - o); from = k + 1; c++; }
+                  }
+                  const grams = qF.length - G + 1;
+                  if (starts.length) {
+                    starts.sort((a, b) => a - b);
+                    let bn = 0, bi2 = 0, i0 = 0;
+                    for (let i1 = 0; i1 < starts.length; i1++) {
+                      while (starts[i1] - starts[i0] > 10) i0++;
+                      if (i1 - i0 + 1 > bn) { bn = i1 - i0 + 1; bi2 = i0; }
+                    }
+                    let rival = false;
+                    { let r0 = 0;
+                      for (let i1 = 0; i1 < starts.length; i1++) {
+                        while (starts[i1] - starts[r0] > 10) r0++;
+                        if (i1 - r0 + 1 >= bn && Math.abs(starts[r0] - starts[bi2]) > 30) { rival = true; break; }
+                      } }
+                    if (bn >= Math.max(3, Math.ceil(grams * 0.2)) && !rival) {
+                      // median of the winning cluster = the start
+                      const cl = starts.slice(bi2, bi2 + bn);
+                      const st = Math.max(0, cl[Math.floor(cl.length / 2)]);
+                      let en = -1;
+                      for (let L = Math.min(8, qF.length); L >= 4 && en < 0; L--) {
+                        const k = win.lastIndexOf(qF.slice(-L));
+                        if (k >= 0 && k + L > st + Math.floor(qF.length * 0.4) && k + L <= st + qF.length + 12) en = k + L;
+                      }
+                      if (en < 0) en = Math.min(win.length, st + qF.length);
+                      const g0 = idxMap3[Math.min(w0 + st, idxMap3.length - 1)];
+                      const g1 = idxMap3[Math.min(w0 + en - 1, idxMap3.length - 1)];
+                      const cueOf = (g) => { let lo2 = 0, hi2 = off3.length - 1, c = 0; while (lo2 <= hi2) { const m = (lo2 + hi2) >> 1; if (off3[m] <= g) { c = m; lo2 = m + 1; } else hi2 = m - 1; } return c; };
+                      const cs = cueOf(g0), ce = Math.max(cs, cueOf(g1));
+                      if (cues[cs] && cues[ce]) {
+                        let startMs = cues[cs].startMs, endMs = cues[ce].endMs;
+                        const ws = wordStartAt(cues[cs], g0 - off3[cs]);
+                        const we = wordEndAt(cues[ce], g1 + 1 - off3[ce]);
+                        if (ws != null) startMs = ws;
+                        if (we != null) endMs = we;
+                        if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs > startMs) {
+                          out.startMs = startMs; out.endMs = endMs; out.cueStart = cs; out.cueEnd = ce;
+                          out.approx = false; out.path = 'asr-local-vote';
+                          local = true;
+                        }
+                      }
+                    }
+                  }
+                }
+              } catch (_) { local = false; }
+              if (!local && gapMs > 0 && gapC <= 4000 && gapMs <= 240000) {
+                let sMs = t0 + ((p0 - A.p) / gapC) * gapMs - 800;
+                let eMs = t0 + ((p1 - A.p) / gapC) * gapMs + 800;
+                sMs = Math.max(t0, sMs); eMs = Math.min(t1, Math.max(eMs, sMs + 1200));
+                const cueByMs = (ms) => { let lo2 = 0, hi2 = cues.length - 1, c = 0; while (lo2 <= hi2) { const m = (lo2 + hi2) >> 1; if ((cues[m].startMs || 0) <= ms) { c = m; lo2 = m + 1; } else hi2 = m - 1; } return c; };
+                const cs = Math.max(A.c, cueByMs(sMs)), ce = Math.min(B.c, Math.max(cueByMs(eMs), Math.max(A.c, cueByMs(sMs))));
+                if (cues[cs] && cues[ce] && Number.isFinite(cues[cs].startMs) && Number.isFinite(cues[ce].endMs) && cues[ce].endMs > cues[cs].startMs) {
+                  out.startMs = cues[cs].startMs; out.endMs = cues[ce].endMs; out.cueStart = cs; out.cueEnd = ce; out.approx = true; out.path = 'asr-interp';
+                }
+              }
+            }
+          }
+        }
+      } catch (_) {}
       return out;
     } catch (_) { return null; }
   }
@@ -1539,6 +2149,7 @@
   window.aiChunks = {
     chunkTextUpToJp,
     cueRangeForQuote,
+    cuesForTitle,
     ensure,
     getMap,
     mutate,
@@ -1546,6 +2157,8 @@
     rubyGlossary,
     rubyGlossarySync,
     isComplete,
+    isReached,
+    creditFurthestMs,
     refreshCueBounds,
     refreshCueMap,
     markerCount,

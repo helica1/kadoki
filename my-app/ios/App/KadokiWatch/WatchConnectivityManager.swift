@@ -61,9 +61,13 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
                 self.lastEvent = "received \(role) for \(name)"
                 WatchTitleStore.shared.reload()
                 // A cues refresh for the CURRENTLY LOADED title applies live
-                // (karaoke word timings appear without relaunching).
+                // (karaoke word timings appear without relaunching) — for
+                // BOTH local playback and the Phase B live-mirror view.
                 if role == "cues", WatchPlayer.shared.current?.id == titleId {
                     WatchPlayer.shared.refreshCues()
+                }
+                if role == "cues" {
+                    LiveSessionModel.shared.refreshCuesIfNeeded(titleId: titleId)
                 }
             }
         } catch {
@@ -75,6 +79,12 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
         ingestPhonePositions(applicationContext)
+        // Latest play/pause state published by the phone (see
+        // WatchBridgePlugin.sendLiveFrame) — lands even when the live message
+        // itself was dropped, so a pause can never be missed for good.
+        if let live = applicationContext["live"] as? [String: Any] {
+            DispatchQueue.main.async { LiveSessionModel.shared.ingest(live) }
+        }
     }
 
     private func ingestPhonePositions(_ applicationContext: [String: Any]) {
@@ -120,6 +130,68 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
                 self?.lastEvent = "phone unreachable (\(err.localizedDescription)) — queued; will apply when in range"
             }
         })
+    }
+
+    // Phase B: ask the phone for an immediate live frame (even while paused)
+    // on live-view appear, instead of waiting out the ~1s tick.
+    func requestLiveSubStart() {
+        let s = WCSession.default
+        guard s.activationState == .activated else { return }
+        s.sendMessage(["type": "liveSubStart"], replyHandler: { reply in
+            DispatchQueue.main.async { LiveSessionModel.shared.ingest(reply) }
+        }, errorHandler: { _ in })
+    }
+
+    // Phase B: tap on the live view remote-toggles playback on the phone;
+    // left/right swipes page subtitles. Via sendMessage (not transferUserInfo)
+    // — a queued/delayed toggle firing minutes later when connectivity resumes
+    // would be actively wrong, not just late.
+    //
+    // NO isReachable pre-check: it's a documented false-negative source (see
+    // manualSync above — it reported "not reachable" with both devices
+    // unlocked side by side), and sendMessage itself wakes the phone app in
+    // the background. This gate was exactly why remote tap/swipe "didn't
+    // work" while the flag gesture (ungated transferUserInfo) did.
+    //
+    // Reliability: send WITH a replyHandler so the phone's ack confirms
+    // delivery; on error retry ONCE with the same command id — the phone
+    // dedupes by id, so a delivered-but-error-reported first attempt can
+    // never double-toggle. `ts` lets the phone drop a stale command that
+    // somehow arrives long after the gesture. onFailure (main thread) fires
+    // only after both attempts fail, with the real reason.
+    func sendLiveCommand(_ action: String, onFailure: ((String) -> Void)? = nil) {
+        let s = WCSession.default
+        guard s.activationState == .activated else {
+            activate()
+            DispatchQueue.main.async { onFailure?("session not active — try again") }
+            return
+        }
+        let payload: [String: Any] = [
+            "t": "liveCmd", "action": action, "id": UUID().uuidString,
+            "ts": Date().timeIntervalSince1970 * 1000,
+        ]
+        func attempt(_ retriesLeft: Int) {
+            s.sendMessage(payload, replyHandler: { reply in
+                // ok:true = the phone's NEW with-reply handler acted on it.
+                // An EMPTY reply means an OLD phone build: its with-reply
+                // delegate doesn't know liveCmd (default branch acks blindly
+                // and does nothing). Resend as a NO-reply message — the old
+                // build's didReceiveMessage path DID handle that — and tell
+                // the user the phone app needs a rebuild. Safe against a new
+                // phone too: its id-dedupe ignores the duplicate.
+                if (reply["ok"] as? Bool) != true {
+                    s.sendMessage(payload, replyHandler: nil, errorHandler: { _ in })
+                    DispatchQueue.main.async { onFailure?("phone app is an old build — reinstall the iPhone app") }
+                }
+            }, errorHandler: { err in
+                if retriesLeft > 0 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { attempt(retriesLeft - 1) }
+                } else {
+                    DispatchQueue.main.async { onFailure?(err.localizedDescription) }
+                }
+            })
+        }
+        attempt(1)
     }
 
     // MARK: - watch → phone
@@ -171,5 +243,15 @@ final class WatchConnectivityManager: NSObject, ObservableObject, WCSessionDeleg
         // didReceive callback — ingest the stored copy at activation.
         guard activationState == .activated else { return }
         ingestPhonePositions(session.receivedApplicationContext)
+    }
+
+    // Phase B: live-frame push from the phone ({t:"live",...}, sent via
+    // sendMessage with replyHandler: nil — this is the NO-reply delegate
+    // variant, distinct from the syncRequest/liveSubStart round-trips above).
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        guard (message["t"] as? String) == "live" else { return }
+        DispatchQueue.main.async {
+            LiveSessionModel.shared.ingest(message)
+        }
     }
 }

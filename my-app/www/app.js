@@ -662,17 +662,24 @@ async function clearDeckState() {
 // Enhanced auto-restore function with extensive debugging
 async function tryAutoRestoreFile(maybeUri, savedFileName) {
   debugLog(`🔄 Auto-restore attempt: file="${savedFileName}", arg="${maybeUri}"`);
+  // Vision-only diagnostic: every silent failure branch here reads as "the
+  // deck just didn't load" on device. Lines accumulate and ride along on the
+  // single boot-summary toast (individual toasts stomped each other).
+  const kvTrace = (m) => {
+    try { (window._kvTrace = window._kvTrace || []).push(m); } catch (_) {}
+  };
 
   if (!savedFileName) {
     debugLog("❌ No saved file name provided");
+    kvTrace('no saved file name');
     return false;
   }
-  if (!isCapacitorEnvironment()) {
-    debugLog("🌐 Web environment - cannot auto-restore");
-    return false;
-  }
+  // FileAccess is what this function actually needs — the macOS shell has it
+  // without the full Capacitor plugin set (isCapacitorEnvironment() is false
+  // there by design). Plain web has neither and still bails.
   if (!window.Capacitor?.Plugins?.FileAccess) {
     debugLog("❌ FileAccess plugin not available - cannot auto-restore");
+    kvTrace('FileAccess plugin unavailable');
     return false;
   }
 
@@ -692,9 +699,18 @@ async function tryAutoRestoreFile(maybeUri, savedFileName) {
       debugLog(`Could not read saved URI from Preferences: ${e.message}`);
     }
   }
+  // visionOS: the Filesystem plugin is excluded from the xros build, so
+  // isCapacitorEnvironment() is false there and every SAVE of FILE_URI goes
+  // to localStorage — but this read only consulted Preferences. That store
+  // mismatch was the "deck doesn't reload at launch" bug (boot trace:
+  // "no saved URI"). Read both.
+  if (!savedUri) {
+    try { savedUri = localStorage.getItem(PERSISTENCE_KEYS.FILE_URI); } catch (_) {}
+  }
 
   if (!savedUri) {
     debugLog("❌ No saved URI to restore from");
+    kvTrace('no saved URI');
     return false;
   }
 
@@ -703,11 +719,14 @@ async function tryAutoRestoreFile(maybeUri, savedFileName) {
     const { uris } = await window.Capacitor.Plugins.FileAccess.getPersistedUriPermissions();
     if (!uris.includes(savedUri)) {
       debugLog(`⚠️ No persisted permission for ${savedUri}; cleaning up`);
+      kvTrace('permission lost for deck file');
       await Preferences.remove({ key: PERSISTENCE_KEYS.FILE_URI });
+      try { localStorage.removeItem(PERSISTENCE_KEYS.FILE_URI); } catch (_) {}
       return false;
     }
   } catch (e) {
     debugLog(`getPersistedUriPermissions failed: ${e.message}`);
+    kvTrace('permission check failed: ' + (e?.message || e));
     return false;
   }
 
@@ -717,6 +736,7 @@ async function tryAutoRestoreFile(maybeUri, savedFileName) {
     return true;
   } catch (e) {
     debugLog(`❌ loadDeckFromUri failed: ${e.message}`);
+    kvTrace('deck read failed: ' + (e?.message || e));
     // URI grant exists but read still failed — keep the URI; next attempt may succeed.
     return false;
   }
@@ -952,10 +972,15 @@ async function openFilePicker() {
   debugLog("🔄 Opening file picker...");
   debugLog(`Current validation state: pendingCardIndex=${window.pendingCardIndex}, expectedDeckName="${window.expectedDeckName}"`);
 
-  if (isCapacitorEnvironment() && window.Capacitor?.Plugins?.FileAccess) {
+  // Gate on FileAccess presence, not isCapacitorEnvironment() — the macOS
+  // shell provides FileAccess without Preferences, and its native picker is
+  // the only reliable path there (a programmatic input.click() outside a
+  // user gesture is ignored by WKWebView).
+  if (window.Capacitor?.Plugins?.FileAccess?.pickFileWithUri) {
     try {
       const { uri, name } = await window.Capacitor.Plugins.FileAccess.pickFileWithUri();
       debugLog(`Picker returned uri=${uri} name=${name}`);
+      if (!uri) { debugLog('Picker cancelled (no uri)'); return; }
       await loadDeckFromUri(uri, name);
       return;
     } catch (e) {
@@ -1220,6 +1245,19 @@ window.cacheFileToDataUri = async function (absPath, mime) {
     }
   } catch (e) {
     console.warn('[cacheFileToDataUri] Filesystem fallback: ' + (e?.message || e));
+  }
+  // Path 3 (native visionOS): the Filesystem plugin is excluded there
+  // (iOS-only binary dependency) and the fetch path fails for tmp slices —
+  // read through our own AudioSlicer.readBase64 instead.
+  try {
+    const sl = window.Capacitor?.Plugins?.AudioSlicer;
+    if (sl && typeof sl.readBase64 === 'function') {
+      const r = await sl.readBase64({ path: absPath });
+      if (r && r.b64) return 'data:' + (mime || 'application/octet-stream') + ';base64,' + r.b64;
+      console.warn('[cacheFileToDataUri] AudioSlicer.readBase64 returned no data');
+    }
+  } catch (e) {
+    console.warn('[cacheFileToDataUri] AudioSlicer fallback: ' + (e?.message || e));
   }
   return '';
 };
@@ -2766,6 +2804,18 @@ if (window.currentFieldMappings) {
           let mime = "application/octet-stream";
           if (["mp3", "m4a", "aac", "wav", "ogg"].includes(ext)) mime = `audio/${ext}`;
           if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) mime = `image/${ext === "jpg" ? "jpeg" : ext}`;
+          // macOS shell: blob URLs instead of data URIs. Re-parsing a multi-MB
+          // base64 string through innerHTML on EVERY card advance (and fully
+          // re-decoding the bitmap) was the desktop lag; a blob: URL is a
+          // short stable key WebKit's decoded-image cache can actually hit.
+          // Mobile keeps the data-URI shape unchanged. (The Anki send path
+          // converts blob: back to a data URI at send time.)
+          if (window.KADOKI_MAC) {
+            const raw = newFormat
+              ? window.ApkgReader.maybeZstd(await window.ApkgReader.entryBytes(entry))
+              : await window.ApkgReader.entryBytes(entry);
+            return URL.createObjectURL(new Blob([raw], { type: window.ApkgReader.sniffMime(raw, mime) }));
+          }
           if (newFormat) {
             // Blob bytes are a zstd frame — decompress, then base64 ourselves
             // (zip.js's Data64URIWriter would encode the still-compressed bytes).
@@ -3084,7 +3134,21 @@ async function displayCard() {
       debugLog(`❌ Error loading audio ${card.audioFilename}: ${error.message}`);
     }
   }
-  
+
+  // Idle-prefetch the NEXT card's media into the cache so a first visit's
+  // archive inflate never lands on the swipe itself.
+  try {
+    const _nx = allNotes[capturedIndex + 1];
+    if (_nx && window.mediaPromises && (_nx.imageFilename || _nx.audioFilename)) {
+      setTimeout(() => {
+        try {
+          if (_nx.imageFilename && !_nx.imageHtml) loadMediaFile(_nx.imageFilename, window.mediaPromises);
+          if (_nx.audioFilename && !_nx.audioSrc) loadMediaFile(_nx.audioFilename, window.mediaPromises);
+        } catch (_) {}
+      }, 150);
+    }
+  } catch (_) {}
+
   // Re-read the card before rendering. The async awaits above may have
   // yielded long enough for the restore-pendingCardIndex path (or a swipe)
   // to update currentCardIndex. If so, recompute media for the new card
@@ -3312,6 +3376,12 @@ async function displayCard() {
     <div class="subtitle-text">${card.expression}</div>
     ${nextHtml}
   `;
+  // Movie-style subtitles (Appearance -> Card) overlay the line on the card
+  // picture, so they only apply when this card HAS one — a subs2srs frame does,
+  // a plain vocabulary card doesn't. CSS gates on this class; see theme.css.
+  // Only the deck path sets it: SRT cards return above and are excluded from
+  // the rule by :not(.card-srt) regardless of what this class says.
+  document.body.classList.toggle('card-has-image', !!imageHtml);
 
   if (window.wrapSubtitleTokens) window.wrapSubtitleTokens();
   requestAnimationFrame(_positionCardNextSub);
@@ -3568,6 +3638,10 @@ function setupSwipe() {
               // (Bottom-edge up-swipes — the app-switcher gesture — are already
               // filtered by the _inSystemGestureZone guard at the top of this
               // branch.)
+              // Vision: swipe-up send-to-Anki disabled — a gaze pinch-drag
+              // read as an up-swipe and fired Anki sends accidentally.
+              // (Future: a dedicated send zone instead.)
+              if (window.KADOKI_VISION) return;
               const card = allNotes[currentCardIndex];
               if (card && window.sendToAnki) {
                 // Combined card: default the Anki send to the SINGLE currently-
@@ -3577,6 +3651,21 @@ function setupSwipe() {
                 const expression = (_comboAC && _comboAC.sentence) ? _comboAC.sentence : card.expression;
                 let imageData = card.imageHtml?.match(/src="([^"]+)"/)?.[1] || "";
                 let audioData = card.audioSrc || "";
+                // macOS blob-URL media → materialize to data URIs; the Anki
+                // payload builders base64-split these strings.
+                const _blobToDataUri = async (u) => {
+                  const blob = await (await fetch(u)).blob();
+                  return await new Promise((res, rej) => {
+                    const fr = new FileReader();
+                    fr.onload = () => res(fr.result);
+                    fr.onerror = rej;
+                    fr.readAsDataURL(blob);
+                  });
+                };
+                try {
+                  if (imageData.startsWith('blob:')) imageData = await _blobToDataUri(imageData);
+                  if (audioData.startsWith('blob:')) audioData = await _blobToDataUri(audioData);
+                } catch (_) {}
                 // Fall back to the active Title's cover image for SRT-cards
                 // (no card image of their own).
                 if (!imageData && window._activeTitleId && window.titleStore?.list) {
@@ -3912,6 +4001,33 @@ async function init() {
       restored = await loadDeckState();
       debugLog(`Legacy deck restore: ${restored}`);
     }
+  }
+  // (Vision boot-trace toast removed after diagnosis: the failure was the
+  // FILE_URI store mismatch fixed in tryAutoRestoreFile — kvTrace lines still
+  // accumulate silently in window._kvTrace for future debugging.)
+  const _isVisionBoot = (() => { try { return localStorage.getItem('KADOKI_IS_VISION') === '1'; } catch (_) { return false; } })();
+  // visionOS fallback: the legacy restore chain can come up empty there (the
+  // Filesystem plugin is excluded from the xros build, which flips every
+  // isCapacitorEnvironment() branch) even though a Library tap loads the very
+  // same title fine. So when NOTHING restored, run that proven path
+  // automatically — the same function the Library tap calls. Delayed so the
+  // inline-script world (loadTitleFromLibrary, titleStore) has settled.
+  if (_isVisionBoot && !restored && !boot.safe) {
+    setTimeout(async () => {
+      try {
+        if (window.allNotes && window.allNotes.length) return;   // something loaded after all
+        const titles = (await window.titleStore?.list?.()) || [];
+        const t = titles
+          .filter(x => x && !x.cloudOnly && x.attachments &&
+                       (x.attachments.deck || x.attachments.audiobook || x.attachments.epub))
+          .filter(x => !(window.isDeckQuarantined && window.isDeckQuarantined(x.id)))
+          .sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0))[0];
+        if (t && typeof window.loadTitleFromLibrary === 'function') {
+          debugLog('[visionBoot] restore chain empty — opening via library path: ' + t.name);
+          window.loadTitleFromLibrary(t);
+        }
+      } catch (e) { debugLog('[visionBoot] fallback failed: ' + (e?.message || e)); }
+    }, 900);
   }
 
   // Boot content has SETTLED (auto-restore + any deck/card render are done).

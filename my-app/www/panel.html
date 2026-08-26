@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Kadoki panel</title>
+  <!--
+    Second-window entry point (visionOS). Loaded by KadokiPanelHost into its own
+    WKWebView at capacitor://localhost/panel.html?kvpanel=<kind> — the SAME origin
+    as index.html, so IndexedDB (blobStore, the dictionary store, AI artifacts)
+    and localStorage are literally the same storage the main window is using.
+    That is the whole point: this renders the REAL panel off the REAL data,
+    rather than a mirrored HTML ghost of it.
+
+    It is deliberately NOT index.html. Booting the whole app a second time would
+    run a second copy of every writer — position saves, stats timers, the AI
+    processor pump, coverage crediting — against shared storage. That is exactly
+    how you lose the user's place. This document loads the READ side only, and
+    panel-bridge.js sets window.KADOKI_PANEL before anything else runs so the few
+    included modules that do own writes/timers stand down (see their guards).
+  -->
+  <script>
+    // FIRST, before any module IIFE runs — the read-only flag every guard reads.
+    (function () {
+      try {
+        var m = /[?&]kvpanel=([a-z]+)/i.exec(location.search || '');
+        window.KADOKI_PANEL = (m && m[1]) || 'timeline';
+      } catch (_) { window.KADOKI_PANEL = 'timeline'; }
+      window.KADOKI_PANEL_WINDOW = true;
+      window.KADOKI_VISION = true;      // the panels' vision layout branches
+    })();
+  </script>
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      background: transparent; color: #eee;
+      font-family: sans-serif; overflow: hidden;
+    }
+    /* The panels normally float as a centered card over a dimmed backdrop of the
+       book. In a window OF THEIR OWN there is nothing to dim and nothing to
+       inset from — fill the glass. */
+    body.kadoki-panel-window #bookmarksOverlay,
+    body.kadoki-panel-window #kchapterView,
+    body.kadoki-panel-window #kcharsScreen {
+      background: transparent !important;
+      padding: 0 !important;
+      inset: 0 !important;
+    }
+    body.kadoki-panel-window #bookmarksOverlay > div,
+    body.kadoki-panel-window #kchapterView > div,
+    body.kadoki-panel-window #kcharsScreen > div {
+      width: 100% !important; max-width: none !important;
+      height: 100% !important; max-height: none !important;
+      border: none !important; border-radius: 0 !important;
+    }
+    /* Boot / empty state, replaced the moment the panel mounts. */
+    #panelBoot {
+      position: fixed; inset: 0; display: flex; align-items: center;
+      justify-content: center; text-align: center; padding: 24px;
+      color: #8b8b96; font-size: .9rem; line-height: 1.7;
+    }
+  </style>
+</head>
+<body>
+  <div id="panelBoot">…</div>
+
+  <script src="ai-perf.js"></script>
+  <script src="i18n-strings.js"></script>
+  <script src="i18n-strings-prefs-html.js"></script>
+  <script src="i18n-strings-shell.js"></script>
+  <script src="i18n-strings-prefs-js.js"></script>
+  <script src="i18n-strings-timeline.js"></script>
+  <script src="i18n-strings-char-ui.js"></script>
+  <script src="i18n-strings-places.js"></script>
+  <script src="i18n-strings-char-screen.js"></script>
+  <script src="i18n-strings-images.js"></script>
+  <script src="i18n-strings-app.js"></script>
+  <script src="i18n-strings-dict.js"></script>
+  <script src="i18n-strings-prefs-html2.js"></script>
+  <script src="i18n-strings-openrouter.js"></script>
+  <script src="i18n.js"></script>
+  <script src="mode-colors.js"></script>
+  <script src="fonts.js"></script>
+  <script src="appearance.js"></script>
+  <script src="blob-store.js"></script>
+  <script src="title-store.js"></script>
+  <script src="dict-store.js"></script>
+  <script src="dict-cache.js"></script>
+  <script src="dict-prefs.js"></script>
+  <script src="stats.js"></script>
+  <script src="event-log.js"></script>
+  <script src="mode-coverage.js"></script>
+  <script src="srt-parser.js"></script>
+  <script src="cue-alignment.js"></script>
+  <script src="ai.js"></script>
+  <script src="ai-chunks.js"></script>
+  <script src="ai-processor.js"></script>
+  <script src="ai-summary.js"></script>
+  <script src="ai-timeline.js"></script>
+  <script src="vocab-srs.js"></script>
+  <script src="ai-characters.js"></script>
+  <script src="ai-characters-screen.js"></script>
+  <script src="ai-characters-ui.js"></script>
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <script src="ai-places.js"></script>
+  <script src="ai-places-ui.js"></script>
+  <script src="ai-images.js"></script>
+  <script src="ai-openai.js"></script>
+  <script src="ai-fal.js"></script>
+  <script src="ai-image-openai.js"></script>
+  <script src="ai-scenes.js"></script>
+  <script src="ai-export.js"></script>
+  <script src="sendToAnkiConnect.js"></script>
+  <script src="waveform.js"></script>
+  <script src="enhanced-dictionary.js"></script>
+  <script src="lookup-log.js"></script>
+  <script src="word-highlight.js"></script>
+  <!-- last: installs the shims, pulls live state from the main window, mounts -->
+  <script src="panel-bridge.js"></script>
+</body>
+</html>

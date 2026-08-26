@@ -47,13 +47,28 @@
   }
   function familyFor(id) { return 'kfont-' + id; }
 
+  // A pathological/corrupt font can make WebKit's font-loading machinery
+  // spin indefinitely (observed on the macOS shell: the WebContent renderer
+  // pinned at 100% CPU with memory climbing, ff.load() never settling —
+  // looked like a full app "crash" from the outside). Race it against a
+  // timeout so one bad font can never hang settings import or boot.
+  function withTimeout(promise, ms, label) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error((label || 'operation') + ' timed out')), ms);
+      promise.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e); }
+      );
+    });
+  }
+
   const _registered = new Set();
   async function register(id, blob) {
     if (_registered.has(id) || !blob || typeof FontFace === 'undefined') return;
     try {
       const buf = await blob.arrayBuffer();
       const ff = new FontFace(familyFor(id), buf);
-      await ff.load();
+      await withTimeout(ff.load(), 8000, 'font load');
       document.fonts.add(ff);
       _registered.add(id);
     } catch (e) { console.warn('[fonts] register failed', id, e && e.message || e); }
@@ -90,11 +105,30 @@
     // simply stops being referenced and is gone after the next reload.
   }
 
+  // Restore a font under a KNOWN id (settings-transfer import). Id-idempotent:
+  // if the id is already present, only (re)registers/refreshes — never
+  // duplicates the picker entry. This is what lets APPEARANCE_V1's
+  // `custom:<id>` picks keep working untouched on the new device.
+  async function restore(id, name, blob) {
+    if (!id || !blob) throw new Error('restore needs id + blob');
+    await idbPut(id, blob);
+    const meta = loadMeta();
+    if (!meta.some(f => f.id === id)) {
+      meta.push({ id, name: (name || 'Font').slice(0, 60), family: familyFor(id) });
+      saveMeta(meta);
+    }
+    await register(id, blob);
+    try { window.appearance && window.appearance.refresh && window.appearance.refresh(); } catch (_) {}
+    return { id, name, family: familyFor(id) };
+  }
+
   window.fonts = {
     list: loadMeta,
     familyFor,
     importFile,
     remove,
+    restore,
+    getBlob: idbGet,
     loadAll,
     isRegistered: (id) => _registered.has(id)
   };

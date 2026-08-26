@@ -473,6 +473,14 @@
       });
       head.appendChild(sortSel);
 
+      // visionOS: pop this panel out into its own window (panel-bridge.js).
+      // Null off Vision, so the header is unchanged everywhere else. Popping
+      // out tears the in-window copy down — the window IS the panel now.
+      try {
+        const po = window.kadokiPanel && window.kadokiPanel.makeButton
+          ? window.kadokiPanel.makeButton('characters', () => close()) : null;
+        if (po) head.appendChild(po);
+      } catch (_) {}
       head.appendChild(closeBtn);
 
       const listEl = document.createElement('div');

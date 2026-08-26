@@ -38,9 +38,29 @@
              // Toggles (default = preserve current behavior): show the SRT-card
              // waveform + the blurred ambient cover backdrop; show the upcoming
              // subtitle (grayed) is opt-in OFF.
-             showWaveform: true, showNextSub: false, showBgImage: true },
+             showWaveform: true, showNextSub: false, showBgImage: true,
+             // Movie-style subtitles: overlay the line on the lower part of the
+             // card picture in a translucent black box (subs2srs decks) instead
+             // of stacking it above the frame. Opt-in OFF — it changes the card
+             // layout for every image deck, not just subs2srs ones.
+             movieSubs: false,
+             // Vision Pro only: draw the card picture as a RealityKit spatial
+             // scene (generative depth) behind the transparent webview. Opt-in
+             // OFF — it costs a multi-second on-device generative pass per new
+             // picture. See spatial-cards.js.
+             spatialPics: false },
     read:  { fontSize: '1.75rem', align: 'left',   fontFamily: 'serif',
              imageDisplay: 'none',  imageOpacity: 1, imageAlign: 'flex-start',
+             // Audio-follow indicator style in the paged reader (word-highlight.js):
+             // 'glow' A = soft glow + phrase pill (default) · 'underline' B =
+             // progress line beside the text · 'dot' C = marker dot ·
+             // 'ruler' D = full-line band. All are overlays — text paint is
+             // never touched (the ::highlight jiggle rule).
+             karaokeStyle: 'glow',
+             // Audio-follow resolver: 'cursor' (sequential lock, default) or
+             // 'classic' (per-cue search) — the revert switch for the 2026-08-26
+             // sequential-cursor engine (reading-mode-paged.js _fcAdvance).
+             followEngine: 'cursor',
              // 'bg' = current behavior (translucent fill + underline);
              // 'text' = recolor the cue text only (less artifact-prone).
              highlightStyle: 'text',
@@ -146,6 +166,7 @@
     document.body.classList.toggle('pref-card-waveform-off',  cardS.showWaveform === false);
     document.body.classList.toggle('pref-card-bgimage-off',   cardS.showBgImage === false);
     document.body.classList.toggle('pref-card-nextsub-on',    cardS.showNextSub === true);
+    document.body.classList.toggle('pref-card-moviesubs-on', cardS.movieSubs === true);
     document.body.classList.toggle('pref-audio-waveform-off', audioS.showWaveform === false);
     document.body.classList.toggle('pref-audio-nextsub-on',   audioS.showNextSub === true);
     try { window._liveWaveformApplyVisibility && window._liveWaveformApplyVisibility(); } catch (_) {}

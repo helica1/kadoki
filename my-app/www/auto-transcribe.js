@@ -44,9 +44,11 @@
   const plugin = () => window.Capacitor?.Plugins?.AutoTranscribe;
   // Native transcription exists on BOTH platforms now: iOS = SpeechAnalyzer,
   // Android = whisper.cpp (AutoTranscribePlugin.java). Same plugin contract.
+  // Any other shell (macOS) that installs an AutoTranscribe plugin with this
+  // contract qualifies by presence.
   const hasNativeTranscribe = () => {
     const p = window.Capacitor?.getPlatform?.();
-    return p === 'ios' || p === 'android';
+    return p === 'ios' || p === 'android' || !!plugin();
   };
   const t = (k, fb, v) => (window.i18n?.t ? window.i18n.t(k, fb, v) : fb);
   const log = (m) => { try { console.log('[autoTrans] ' + m); } catch (_) {} };
@@ -1118,7 +1120,37 @@
     lastPosMs = -1;   // a stale cross-title playhead must not seed the next job
   }
 
+  // Is position `ms` transcribed yet, and if not, how close is the job to
+  // it? Drives the audio-mode "syncing subtitles" indicator (reading-mode.js
+  // abUpdateCueDisplay) after a seek into untranscribed audio — before this,
+  // the view froze on the LAST transcribed cue with no feedback while the job
+  // silently restarted at the playhead. Returns null when nothing is owed
+  // (no active transcription for the title, finished, or `ms` is covered).
+  function syncState(ms) {
+    const a = active;
+    if (!a || a.done || !Number.isFinite(ms)) return null;
+    const cov = a.cov || [];
+    if (coveringRange(cov, ms)) return null;
+    const j = job;
+    let progress = 0;
+    if (j && ms >= j.startMs - 1000) {
+      const span = Math.max(1, (ms + 1500) - j.startMs);
+      progress = Math.max(0, Math.min(0.98, (j.fedThroughMs - j.startMs) / span));
+    }
+    let coveredMs = 0;
+    for (const r of cov) coveredMs += Math.max(0, r[1] - r[0]);
+    const dur = a.durationMs || 0;
+    return {
+      covered: false,
+      progress,
+      jobRunning: !!j,
+      frontierMs: j ? j.fedThroughMs : -1,
+      coveragePct: dur > 0 ? Math.max(0, Math.min(100, Math.round(100 * coveredMs / dur))) : -1,
+    };
+  }
+
   window.autoTranscribe = {
+    syncState,          // (ms) → null if transcribed/inactive, else {progress, coveragePct, ...}
     available,          // async: device supports on-device ja transcription
     activate,           // ({audioPath, audioName}) → begin/resume for the active title
     deactivate,

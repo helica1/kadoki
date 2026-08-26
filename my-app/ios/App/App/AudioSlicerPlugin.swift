@@ -36,6 +36,7 @@ public class AudioSlicerPlugin: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "slice",       returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getWaveform", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "readBase64",  returnType: CAPPluginReturnPromise),
     ]
 
     // MARK: - precise-timing asset cache (VBR MP3 fix)
@@ -82,6 +83,11 @@ public class AudioSlicerPlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("endMs must be > startMs")
             return
         }
+        // Optional fade ramps, baked into the exported clip. The JS side plays
+        // slices through an <audio> element whose .volume iOS ignores, so a
+        // fade has to live in the file itself. Clamped to half the clip.
+        let fadeInMs  = max(0, call.getDouble("fadeInMs")  ?? 0)
+        let fadeOutMs = max(0, call.getDouble("fadeOutMs") ?? 0)
 
         let url = URL(fileURLWithPath: stripFileScheme(srcPath))
         let asset = Self.preciseAsset(for: url)   // precise frame index → accurate VBR seek
@@ -105,6 +111,29 @@ public class AudioSlicerPlugin: CAPPlugin, CAPBridgedPlugin {
         let startTime = CMTime(seconds: startMs / 1000.0, preferredTimescale: 1000)
         let duration  = CMTime(seconds: (endMs - startMs) / 1000.0, preferredTimescale: 1000)
         exporter.timeRange = CMTimeRange(start: startTime, duration: duration)
+        // visionOS has no sync track loading (tracks(withMediaType:) is
+        // unavailable, not merely deprecated) — clips there ship unfaded.
+        #if !os(visionOS)
+        if (fadeInMs > 0 || fadeOutMs > 0), let track = asset.tracks(withMediaType: .audio).first {
+            let clipMs = endMs - startMs
+            let params = AVMutableAudioMixInputParameters(track: track)
+            if fadeInMs > 0 {
+                let fi = min(fadeInMs, clipMs / 2)
+                params.setVolumeRamp(fromStartVolume: 0, toEndVolume: 1,
+                    timeRange: CMTimeRange(start: startTime,
+                                           duration: CMTime(seconds: fi / 1000.0, preferredTimescale: 1000)))
+            }
+            if fadeOutMs > 0 {
+                let fo = min(fadeOutMs, clipMs / 2)
+                params.setVolumeRamp(fromStartVolume: 1, toEndVolume: 0,
+                    timeRange: CMTimeRange(start: CMTime(seconds: (endMs - fo) / 1000.0, preferredTimescale: 1000),
+                                           duration: CMTime(seconds: fo / 1000.0, preferredTimescale: 1000)))
+            }
+            let mix = AVMutableAudioMix()
+            mix.inputParameters = [params]
+            exporter.audioMix = mix
+        }
+        #endif
 
         exporter.exportAsynchronously {
             DispatchQueue.main.async { [weak self] in
@@ -132,6 +161,26 @@ public class AudioSlicerPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    // MARK: - readBase64
+    // File → base64 for the JS cacheFileToDataUri fallback chain. Needed on
+    // native visionOS where the Capacitor Filesystem plugin is excluded
+    // (iOS-only binary dependency) and the convertFileSrc fetch path fails —
+    // without this, quote-clip playback and Anki audio reads came back empty.
+    @objc func readBase64(_ call: CAPPluginCall) {
+        guard let path = call.getString("path"), !path.isEmpty else {
+            call.reject("path required")
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let clean = path.hasPrefix("file://") ? String(path.dropFirst(7)) : path
+            guard let data = FileManager.default.contents(atPath: clean) else {
+                call.reject("read failed: \(clean)")
+                return
+            }
+            call.resolve(["b64": data.base64EncodedString(), "sizeBytes": data.count])
+        }
+    }
+
     // MARK: - getWaveform
 
     @objc func getWaveform(_ call: CAPPluginCall) {
@@ -153,10 +202,30 @@ public class AudioSlicerPlugin: CAPPlugin, CAPBridgedPlugin {
 
         let url = URL(fileURLWithPath: stripFileScheme(srcPath))
         let asset = Self.preciseAsset(for: url)   // precise frame index → accurate VBR seek
+        #if os(visionOS)
+        // Synchronous AVAsset.tracks is removed on visionOS — bridge the async
+        // loader. We're on Capacitor's plugin queue (not main), so blocking on
+        // the semaphore is safe; the Task runs on the global executor.
+        let track: AVAssetTrack? = {
+            let sem = DispatchSemaphore(value: 0)
+            var out: AVAssetTrack?
+            Task {
+                out = (try? await asset.loadTracks(withMediaType: .audio))?.first
+                sem.signal()
+            }
+            sem.wait()
+            return out
+        }()
+        guard let track = track else {
+            call.reject("no audio track in source")
+            return
+        }
+        #else
         guard let track = asset.tracks(withMediaType: .audio).first else {
             call.reject("no audio track in source")
             return
         }
+        #endif
 
         // Decode in the background — for a 30 s clip at 22 kHz this is ~10 ms
         // on M-series and ~50 ms on older iPhones. Either way too long to

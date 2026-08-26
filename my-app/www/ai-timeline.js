@@ -1,20 +1,18 @@
-// ai-timeline.js — Dynamic Timeline v2 (AI plan §8): per-chapter plot cards
-// on a mode-colored reading spine.
+// ai-timeline.js — Dynamic Timeline v3: one continuous scrollable feed.
 //
-// LEFT: a rounded vertical spine (book start → end; axis = jp chars from the
-// chunk map, so it renders cold without the reader DOM) FILLED with the
-// persistent mode-coverage colors from modeCoverage (green read / orange card
-// / purple audio; unconsumed or pre-tracker stays gray). Chapter nodes sit ON
-// the spine:
-// ✓ processed+read, pulsing number while processing, ⚠ tap-to-retry on fail.
-// RIGHT: one card per chapter anchored near its node (pushed down on
-// overlap): bold label, 2-line short summary, positional multi-segment
-// progress bar (coverage pieces at their place within the chapter's own
-// range), bookmark flag when a bookmark falls in range.
-// Pinch (or − / +) zooms; below a density threshold cards collapse to
-// label-only rows. Tap a ready card → chapter view (#kchapterView): long
-// summary (dict-tappable), 主な出来事, character chips, key passages with
-// place-guarded audio playback.
+// The panel is a single scroller: every summarized chapter renders as a feed
+// section — chapter header, the FULL summary text (dict-tappable), and its
+// scene images inline at full width. Nothing opens a separate window from the
+// feed; tapping a scene image stacks the scene card OVER the still-open panel
+// (Anki send / trim / regenerate live there), so closing it never rebuilds or
+// re-scrolls the list. Unsummarized chapters stay compact rows (processing /
+// queued / failed / tap-to-generate). A chapter is marked read by SCROLLING
+// past it (sentinel + IntersectionObserver), not by opening anything.
+// LEFT: a thin decorative coverage axis (green read / orange card / purple
+// audio) with a live glowing current-place marker.
+// The subtler chapter analysis (主な出来事, key passages, character chips)
+// stays out of the feed for now — #kchapterView still renders it for the
+// Characters-screen deep link.
 //
 // NEVER-LOSE-PLACE: this module is read-only against the position pipeline.
 // Key-passage playback snapshots the native playhead BEFORE the first seek
@@ -29,12 +27,6 @@
     read:  'var(--accent-read, #4caf50)',
     audio: 'var(--accent-audio, #b794f6)',
   };
-  const MAX_ZOOM = 12;
-  const SPINE_X = 44;            // spine left edge (gutter to its left = char ruler)
-  const SPINE_W = 10;
-  const NODE_R = 13;             // chapter node radius
-  const COL_X = 76;              // card column left edge
-  const FULL_CARD_SLOT_PX = 72;  // px per chapter below which cards collapse
   const ART_PREFIX = 'AICHAP_V1_';
 
   function BG() {
@@ -78,6 +70,16 @@
   }
 
   // Pulsing glow for the LIVE current-place marker on the timeline axis.
+  // Panel-level CSS for the pictures show/hide toggle: frames vanish, captions
+  // and quotes stay (the "captions only" mode).
+  function ensureTlPicsStyle() {
+    if (document.getElementById('kaiTlPicsStyle')) return;
+    const st = document.createElement('style');
+    st.id = 'kaiTlPicsStyle';
+    st.textContent = '#bookmarksOverlay.tl-nopics .tl-imgframe{display:none !important;}' +
+      '#bookmarksOverlay.tl-nopics .tl-legacyfig{display:none !important;}';   // legacy figs have no standalone caption
+    document.head.appendChild(st);
+  }
   function ensureAxisMarkerStyle() {
     if (document.getElementById('kaiAxisMarkStyle')) return;
     try {
@@ -121,6 +123,28 @@
   }
 
   // ---- axis ---------------------------------------------------------------
+  // ms → axis-chars via the raw cue-text cumulative scale, binary-searched
+  // over cues[].startMs (cues are chronological) then linearly interpolated
+  // — the ms equivalent of the idx-indexed cueCum lookup below. Shared by
+  // both the jp-map axis's fallback and the probe axis.
+  function msCumLookup(cues, cueCum, cueScale, ms) {
+    if (!cueCum || !Array.isArray(cues) || !cues.length || !Number.isFinite(ms)) return null;
+    const n = cues.length;
+    const m0start = cues[0].startMs || 0, mLstart = cues[n - 1].startMs || 0;
+    if (ms <= m0start) return cueCum[0] * cueScale;
+    if (ms >= mLstart) return cueCum[n] * cueScale;
+    let lo = 0, hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if ((cues[mid].startMs || 0) <= ms) lo = mid; else hi = mid - 1;
+    }
+    const i0 = lo, i1 = Math.min(n - 1, lo + 1);
+    const m0 = cues[i0].startMs || 0, m1 = cues[i1].startMs || 0;
+    const c0 = cueCum[i0], c1 = cueCum[i1];
+    const frac = (m1 > m0) ? (ms - m0) / (m1 - m0) : 0;
+    return (c0 + frac * (c1 - c0)) * cueScale;
+  }
+
   // Map axis: total = chunk-map totals.jp; cue→jp is piecewise-linear per
   // chunk through the (cueStart,jpStart)→(cueEnd+1,jpEnd) anchor pairs.
   function buildMapAxis(map) {
@@ -137,7 +161,7 @@
       if (!durMs) durMs = Math.max(lastCueEnd, (lastCh.msStart || 0) + 60000);
       const chunks = map.chunks;
       return {
-        total: durMs, useJp: false, isTime: true, cueCum: null,
+        total: durMs, useJp: false, isTime: true, cueCum: null, canMapCues: true,
         chStart(ch) { return Number.isFinite(ch.msStart) ? ch.msStart : 0; },
         chEnd(ch) {
           const i = chunks.indexOf(ch);
@@ -149,6 +173,10 @@
           if (!Number.isFinite(idx) || !Array.isArray(cues) || !cues.length) return null;
           if (idx >= cues.length) return cues[cues.length - 1].endMs || durMs;
           return cues[Math.max(0, idx)].startMs;
+        },
+        msToChars(ms) {   // this axis's native unit already IS ms — identity
+          if (!Number.isFinite(ms)) return null;
+          return Math.max(0, Math.min(durMs, ms));
         },
         pos(p) {
           if (!p) return null;
@@ -170,12 +198,23 @@
       };
     }
     const total = map.totals.jp;
-    const an = [];
+    const cues = window._srtCues;
+    const an = [], anMs = [];
     for (const ch of map.chunks) {
       if (Number.isFinite(ch.cueStart) && ch.cueStart >= 0 &&
           Number.isFinite(ch.cueEnd) && ch.cueEnd >= ch.cueStart &&
           Number.isFinite(ch.jpStart) && Number.isFinite(ch.jpEnd)) {
         an.push([ch.cueStart, ch.jpStart], [ch.cueEnd + 1, ch.jpEnd]);
+        // ms-anchors mirror the SAME chunk boundaries, keyed by the live cue
+        // list's own startMs — a physical quantity, so this stays correct
+        // even after the cue list is later regenerated (unlike a raw index).
+        if (Array.isArray(cues) && cues.length) {
+          const i0 = Math.min(ch.cueStart, cues.length - 1);
+          const i1 = Math.min(ch.cueEnd + 1, cues.length - 1);
+          const m0 = cues[i0] && cues[i0].startMs, m1 = cues[i1] && cues[i1].startMs;
+          if (Number.isFinite(m0)) anMs.push([m0, ch.jpStart]);
+          if (Number.isFinite(m1)) anMs.push([m1, ch.jpEnd]);
+        }
       }
     }
     an.sort((a, b) => a[0] - b[0]);
@@ -185,9 +224,15 @@
       if (last && (a[0] <= last[0] || a[1] < last[1])) continue;   // keep monotonic
       anchors.push(a);
     }
+    anMs.sort((a, b) => a[0] - b[0]);
+    const anchorsMs = [];
+    for (const a of anMs) {
+      const last = anchorsMs[anchorsMs.length - 1];
+      if (last && (a[0] <= last[0] || a[1] < last[1])) continue;   // keep monotonic
+      anchorsMs.push(a);
+    }
     // raw cue-text scale as the fallback when no chunk carries cue bounds
     let cueCum = null, cueTotal = 0;
-    const cues = window._srtCues;
     if (Array.isArray(cues) && cues.length) {
       cueCum = new Array(cues.length + 1);
       cueCum[0] = 0;
@@ -199,6 +244,10 @@
     const cueScale = cueTotal ? (total / cueTotal) : 1;
     return {
       total, useJp: true, cueCum,
+      // false when NEITHER chunk cue-anchors nor a live cue list exist — a
+      // transient state while transcription churns; such an axis drops every
+      // audio coverage segment, so refreshes must not adopt it over a good one
+      canMapCues: (anchors.length >= 2 || !!cueCum),
       chStart(ch) { return ch.jpStart || 0; },
       chEnd(ch) { return Number.isFinite(ch.jpEnd) ? ch.jpEnd : (ch.jpStart || 0); },
       cueToChars(idx) {
@@ -222,6 +271,24 @@
           return cueCum[i] * cueScale;
         }
         return null;
+      },
+      msToChars(ms) {
+        if (!Number.isFinite(ms)) return null;
+        if (anchorsMs.length >= 2) {
+          const A = anchorsMs;
+          if (ms <= A[0][0]) return A[0][0] > 0 ? (ms / A[0][0]) * A[0][1] : A[0][1];
+          const last = A[A.length - 1];
+          if (ms >= last[0]) return last[1];
+          for (let i = 1; i < A.length; i++) {
+            if (ms <= A[i][0]) {
+              const m0 = A[i - 1][0], j0 = A[i - 1][1];
+              const m1 = A[i][0], j1 = A[i][1];
+              return m1 > m0 ? j0 + ((ms - m0) / (m1 - m0)) * (j1 - j0) : j0;
+            }
+          }
+          return last[1];
+        }
+        return msCumLookup(cues, cueCum, cueScale, ms);
       },
       pos(p) {
         if (!p) return null;
@@ -275,6 +342,7 @@
         const i = Math.max(0, Math.min(cueCum.length - 1, idx));
         return cueCum[i] * cueScale;
       },
+      msToChars(ms) { return msCumLookup(cues, cueCum, cueScale, ms); },
       pos(p) {
         if (!p) return null;
         if (p.k === 'read') return (useJp && Number.isFinite(p.jpOff)) ? p.jpOff : null;
@@ -329,17 +397,31 @@
     arr.splice.apply(arr, [i, j - i].concat(repl));
   }
 
+  // ms is the modern, cue-list-generation-agnostic space; cue is a legacy
+  // fallback still written for titles where ms can't be resolved (deck-card
+  // titles with no linked audio timeline) — both can hold real data at once,
+  // so both always render, never either/or.
   async function coverageSegments(titleId, axis) {
     try {
       if (!window.modeCoverage || typeof window.modeCoverage.get !== 'function') return [];
       const cov = await window.modeCoverage.get(titleId);
       if (!cov) return [];
       const segs = [];
+      let msDropped = 0, msUsed = 0, cueUsed = 0;
+      if (typeof axis.msToChars === 'function') {
+        for (const iv of (cov.ms || [])) {
+          if (!Array.isArray(iv)) continue;
+          const c0 = axis.msToChars(iv[0]), c1 = axis.msToChars(iv[1]);
+          if (c0 !== null && c1 !== null && c1 > c0) { covInsert(segs, c0, c1, MODE_NAME[iv[2]] || 'audio'); msUsed++; }
+          else msDropped++;
+        }
+      }
       for (const iv of (cov.cue || [])) {
         if (!Array.isArray(iv)) continue;
         const c0 = axis.cueToChars(iv[0]), c1 = axis.cueToChars(iv[1]);
         if (c0 !== null && c1 !== null && c1 > c0) {
           covInsert(segs, c0, c1, MODE_NAME[iv[2]] || 'audio');
+          cueUsed++;
         }
       }
       if (axis.useJp) {
@@ -348,6 +430,14 @@
           covInsert(segs, iv[0], iv[1], MODE_NAME[iv[2]] || 'read');
         }
       }
+      try {
+        const coveredChars = segs.reduce((s, sg) => s + Math.max(0, sg.c1 - sg.c0), 0);
+        console.log('[KAI-COVDBG] coverageSegments', {
+          titleId, msIvsIn: (cov.ms || []).length, msUsed, msDropped, cueIvsIn: (cov.cue || []).length, cueUsed,
+          jpIvsIn: axis.useJp ? (cov.jp || []).length : 'n/a', axisTotal: axis.total, axisUseJp: axis.useJp, axisIsTime: !!axis.isTime,
+          finalSegs: segs.length, coveredChars, pct: axis.total ? Math.round(1000 * coveredChars / axis.total) / 10 : null,
+        });
+      } catch (_) {}
       return segs;
     } catch (_) { return []; }
   }
@@ -361,6 +451,13 @@
       const cov = await window.modeCoverage.get(titleId);
       if (!cov) return [];
       const segs = [];
+      if (typeof axis.msToChars === 'function') {
+        for (const iv of (cov.rms || [])) {
+          if (!Array.isArray(iv)) continue;
+          const c0 = axis.msToChars(iv[0]), c1 = axis.msToChars(iv[1]);
+          if (c0 !== null && c1 !== null && c1 > c0) covInsert(segs, c0, c1, MODE_NAME[iv[2]] || 'audio');
+        }
+      }
       for (const iv of (cov.rcue || [])) {
         if (!Array.isArray(iv)) continue;
         const c0 = axis.cueToChars(iv[0]), c1 = axis.cueToChars(iv[1]);
@@ -389,19 +486,27 @@
       mode = cl.contains('mode-read') ? 'read' : (cl.contains('mode-audio') ? 'audio' : (cl.contains('mode-card') ? 'card' : null));
     } catch (_) {}
     const audioPos = () => {
-      // Time axis: the live playhead is finer than cue granularity.
-      if (ax.isTime) {
-        try {
-          const ms = window.getAudioProgress && window.getAudioProgress().ms;
-          if (Number.isFinite(ms) && ms > 0) return ms;
-        } catch (_) {}
-      }
+      // The live playhead is finer than cue granularity AND immune to cue-list
+      // regeneration — prefer it on every axis flavor now that msToChars maps
+      // ms uniformly (identity on the time axis, interpolated elsewhere).
+      try {
+        const ms = window.getAudioProgress && window.getAudioProgress().ms;
+        if (Number.isFinite(ms) && ms > 0 && typeof ax.msToChars === 'function') {
+          const v = ax.msToChars(ms);
+          if (v !== null && Number.isFinite(v)) return v;
+        }
+      } catch (_) {}
       return (Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) ? ax.cueToChars(window._lastAudioCueIdx) : null;
     };
     const cardPos = () => {
       if (!Number.isFinite(window.currentCardIndex)) return null;
       try {
         const c = (typeof window._srtCardToCueAnchor === 'function') ? window._srtCardToCueAnchor(window.currentCardIndex) : window.currentCardIndex;
+        const ms = (typeof window._srtAnchorMsFor === 'function') ? window._srtAnchorMsFor(c) : null;
+        if (Number.isFinite(ms) && typeof ax.msToChars === 'function') {
+          const v = ax.msToChars(ms);
+          if (v !== null && Number.isFinite(v)) return v;
+        }
         return ax.cueToChars(c);
       } catch (_) { return null; }
     };
@@ -461,6 +566,20 @@
     } catch (_) { return arts || {}; }
   }
 
+  // Has the reader ENTERED this chapter? This is the reveal gate for
+  // ahead-generated summaries: a summary shows up when you arrive in its
+  // chapter, not when you finish it. Falls back to the completion gate when
+  // aiChunks isn't loaded — strictly more conservative, so a fallback can only
+  // delay a reveal, never leak an unreached chapter.
+  function chapterReached(map, ch) {
+    try {
+      if (ch && window.aiChunks && typeof window.aiChunks.isReached === 'function') {
+        return !!window.aiChunks.isReached(map, ch.idx);
+      }
+    } catch (_) {}
+    return chapterComplete(map, ch);
+  }
+
   // Completion is compared within ONE coordinate space (jp/jp or cue/cue).
   function chapterComplete(map, ch) {
     try {
@@ -470,8 +589,21 @@
     } catch (_) {}
     const f = (map && map.furthest) || {};
     if (Number.isFinite(f.jp) && Number.isFinite(ch.jpEnd) && f.jp >= ch.jpEnd) return true;
-    if (Number.isFinite(ch.cueEnd) && ch.cueEnd >= 0 &&
-        Number.isFinite(f.cue) && f.cue >= ch.cueEnd) return true;
+    // Prefer f.ms (generation-agnostic) re-derived against the CURRENT cue
+    // list over the legacy f.cue index; this branch only runs when
+    // aiChunks.isComplete itself is unavailable.
+    let cue = Number.isFinite(f.cue) ? f.cue : -1;
+    if (map && map.space === 'cue' && Number.isFinite(f.ms)) {
+      try {
+        const cues = window._srtCues;
+        if (Array.isArray(cues) && cues.length) {
+          let lo = 0, hi = cues.length;
+          while (lo < hi) { const mid = (lo + hi) >> 1; if (cues[mid].startMs <= f.ms) lo = mid + 1; else hi = mid; }
+          cue = lo - 1;
+        }
+      } catch (_) {}
+    }
+    if (Number.isFinite(ch.cueEnd) && ch.cueEnd >= 0 && cue >= ch.cueEnd) return true;
     return false;
   }
 
@@ -617,12 +749,10 @@
       // single shared playhead forward, so not restoring = a forward place change.
       window._audioStatsSeekTs = Date.now();   // jumped-over span wasn't heard — stats anchor, don't credit
       try { await bg.seek({ ms: Math.max(0, sn.ms), fadeMs: 40 }); } catch (_) {}
-      // Mid-dict-lookup the pause belongs to the lookup; resuming here would
-      // override it — its dismiss resumes at the restored spot. Resume ONLY if
-      // the user was actually listening before the excerpt.
-      if (sn.playing && !dictLookupPauseActive()) {
-        try { await bg.resume({ fadeMs: 120 }); } catch (_) {}
-      }
+      // Leave the book PAUSED at the restored spot — never auto-resume, even if
+      // the user was listening before the excerpt. Resuming here read as "the
+      // quote never stops" (the book seamlessly continued after the excerpt);
+      // an excerpt should end in silence, with the user resuming when ready.
     } catch (_) {} finally {
       window._kaiPassageActive = false;
     }
@@ -673,6 +803,471 @@
     } catch (_) { try { await stopPassage(); } catch (_) {} }
   }
 
+  // ---- summaryBlocks renderer (new-format chapter narrative) ------------------
+  // para / quote / subhead blocks authored by the model (ai-processor sanitizes
+  // them and resolves each quote's audio bounds at build time). `prose` is the
+  // call site's OWN leaf-text builder so font scale + dict/squiggle class stay
+  // site-local; dict-enabled divs remain leaf-only (the chapter-view invariant)
+  // — attribution and the ▶ chip live in sibling elements, never inside one.
+  // Quote audio plays through the SLICED-CLIP player (clipPlay), NEVER the
+  // book's shared playhead: seeking the single bg engine for an excerpt moved
+  // the user's amber place marker and resumed the book afterwards — the clip
+  // player is structurally detached (dedicated <audio>, book paused in place).
+  // Returns null when the artifact has no usable blocks (caller falls back to
+  // the longSummary prose path, so legacy artifacts render exactly as before).
+  // ---- mini-waveform helpers (quote/vocab cards) ------------------------------
+  // Amplitude buckets come from the native AudioSlicer.getWaveform (no slicing,
+  // no WebAudio decode). The same buckets serve double duty: they DRAW the
+  // little waveform and they SNAP the interpolated clip bounds to the actual
+  // speech energy — cue interpolation says roughly where the quote starts;
+  // the nearest silence trough says exactly where.
+  function waveEnergySnap(samples, w0, w1, b) {
+    const n = samples.length;
+    if (!n || !(w1 > w0)) return null;
+    const step = (w1 - w0) / n;
+    const amp = samples.map(v => Math.abs(Number(v) || 0));
+    const max = Math.max.apply(null, amp);
+    if (!(max > 0)) return null;
+    const th = max * 0.14;
+    const idxOf = (ms) => Math.max(0, Math.min(n - 1, Math.round((ms - w0) / step)));
+    // START: mid-speech → back off to the nearest quiet trough (≤600ms);
+    // in silence → advance to the last quiet bucket before the onset (≤800ms).
+    let si = idxOf(b.startMs);
+    if (amp[si] >= th) {
+      let k = si, moved = 0; const lim = Math.round(600 / step);
+      while (k > 0 && moved < lim && amp[k] >= th) { k--; moved++; }
+      if (amp[k] < th) si = k;
+    } else {
+      let k = si, moved = 0; const lim = Math.round(800 / step);
+      while (k < n - 1 && moved < lim && amp[k + 1] < th) { k++; moved++; }
+      si = k;
+    }
+    // END: mirror.
+    let ei = idxOf(b.endMs);
+    if (amp[ei] >= th) {
+      let k = ei, moved = 0; const lim = Math.round(500 / step);
+      while (k < n - 1 && moved < lim && amp[k] >= th) { k++; moved++; }
+      if (amp[k] < th) ei = k;
+    } else {
+      let k = ei, moved = 0; const lim = Math.round(800 / step);
+      while (k > 0 && moved < lim && amp[k - 1] < th) { k--; moved++; }
+      ei = k;
+    }
+    let sMs = w0 + si * step - 60;      // a breath before the onset
+    let eMs = w0 + ei * step + 70;      // a short decay — the clip fades out over 20 ms anyway
+    if (!(eMs - sMs >= 400)) { sMs = b.startMs; eMs = b.endMs; }   // degenerate snap → keep interpolation
+    const s2 = idxOf(sMs), e2 = Math.max(idxOf(eMs), s2 + 1);
+    return { bounds: { startMs: Math.max(0, Math.round(sMs)), endMs: Math.round(eMs) },
+             peaks: amp.slice(s2, e2 + 1) };
+  }
+  function waveDrawPeaks(cv, peaks, bounds, absMs) {
+    try {
+      const dpr = window.devicePixelRatio || 1;
+      const w = cv.clientWidth || (cv.parentElement && cv.parentElement.clientWidth) || 300;
+      const h = 26;
+      const pw = Math.max(1, Math.round(w * dpr)), ph = Math.round(h * dpr);
+      if (cv.width !== pw) { cv.width = pw; cv.height = ph; }
+      const ctx = cv.getContext('2d');
+      ctx.clearRect(0, 0, cv.width, cv.height);
+      const n = peaks.length;
+      if (!n) return;
+      let max = 0; for (let k = 0; k < n; k++) if (peaks[k] > max) max = peaks[k];
+      if (!(max > 0)) max = 1;
+      const playedFrac = (absMs == null) ? -1 :
+        Math.max(0, Math.min(1, (absMs - bounds.startMs) / Math.max(1, bounds.endMs - bounds.startMs)));
+      const bw = cv.width / n;
+      for (let k = 0; k < n; k++) {
+        const v = Math.max(0.07, peaks[k] / max);
+        const bh = v * cv.height * 0.92;
+        ctx.fillStyle = (playedFrac >= 0 && (k + 0.5) / n <= playedFrac) ? '#8f7ddb' : '#3d3654';
+        ctx.fillRect(k * bw + bw * 0.18, (cv.height - bh) / 2, bw * 0.64, bh);
+      }
+    } catch (_) {}
+  }
+
+  function buildSummaryBlocks(art, prose, titleId, chIdx, chObj) {
+    const blocks = (art && Array.isArray(art.summaryBlocks)) ? art.summaryBlocks : null;
+    if (!blocks || !blocks.some(b => b && b.type === 'para' && b.text)) return null;
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;gap:13px;';
+
+    const sectionHead = (txt) => {
+      const h = document.createElement('div');
+      h.style.cssText = 'margin-top:12px;color:#8a7fb8;font-size:.9rem;font-weight:700;letter-spacing:.14em;';
+      h.textContent = txt;
+      return h;
+    };
+
+    // ---- shared clip/waveform state for THIS build ---------------------------
+    const wave = { srcPath: undefined, activeDraw: null, queue: [], running: false };
+    const resolveSrc = async () => {
+      if (wave.srcPath !== undefined) return wave.srcPath;
+      // Same source resolution as sceneClipInfo: live audio path first, else
+      // the title's cached audiobook attachment.
+      let p = window._srtAbPath || window._pagedAudioPath || '';
+      if (!p && titleId) {
+        try {
+          const t = await window.titleStore.get(titleId);
+          p = (t && t.attachments && t.attachments.audiobook && t.attachments.audiobook.cachePath) || '';
+        } catch (_) {}
+      }
+      wave.srcPath = p || '';
+      return wave.srcPath;
+    };
+    // Resolve an excerpt to its FULL cue range at need (the scene path —
+    // sentence-expanded, anchorOff-disambiguated), with tight sub-cue
+    // interpolation; generation-time bounds are the fallback. The waveform
+    // pass below REFINES q._resolvedBounds again via energy snapping.
+    const resolveBounds = async (q) => {
+      if (q._resolvedBounds) return q._resolvedBounds;
+      let b = null;
+      try {
+        if (window.aiChunks && window.aiChunks.cueRangeForQuote) {
+          const loc = await window.aiChunks.cueRangeForQuote(titleId, chIdx, q.quote, { anchorOff: q.anchorOff, tight: true });
+          if (loc && Number.isFinite(loc.startMs) && Number.isFinite(loc.endMs) && loc.endMs > loc.startMs) {
+            b = { startMs: loc.startMs, endMs: loc.endMs };
+            if (loc.wordTimed) q._wordTimed = true;   // exact token times — don't energy-snap
+          }
+        }
+      } catch (_) {}
+      if (!b && Number.isFinite(q.startMs) && Number.isFinite(q.endMs) && q.endMs > q.startMs) {
+        b = { startMs: q.startMs, endMs: q.endMs };
+      }
+      if (b) q._resolvedBounds = b;
+      return b;
+    };
+    const pumpWave = () => {
+      if (wave.running) return;
+      const job = wave.queue.shift();
+      if (!job) return;
+      wave.running = true;
+      Promise.resolve().then(job).catch(() => {}).then(() => { wave.running = false; pumpWave(); });
+    };
+    // Mini waveform under an excerpt: fetch amplitude buckets over the bounds
+    // (+margins), energy-snap the bounds, draw. Jobs run one at a time, and
+    // only once the card actually scrolls near the viewport — the timeline
+    // feed renders these blocks for EVERY summarized chapter, and decoding
+    // every quote's audio on panel open would hammer the native decoder.
+    const attachWave = (q, host) => {
+      const cv = document.createElement('canvas');
+      cv.style.cssText = 'display:none;width:100%;height:26px;margin-top:7px;';
+      host.appendChild(cv);
+      const job = async () => {
+        try {
+          const slicer = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.AudioSlicer;
+          if (!slicer || !slicer.getWaveform) return;
+          const src = await resolveSrc();
+          if (!src) return;
+          const b = await resolveBounds(q);
+          if (!b) return;
+          // Word-timed bounds (auto-transcribed titles) are already exact —
+          // fetch buckets for the clip itself and draw. Otherwise fetch with
+          // margins and energy-snap the interpolated bounds to the audio.
+          const precise = !!q._wordTimed;
+          const w0 = Math.max(0, b.startMs - (precise ? 0 : 700)), w1 = b.endMs + (precise ? 0 : 500);
+          let samples = [];
+          try {
+            const r = await slicer.getWaveform({ srcPath: src, startMs: Math.round(w0), endMs: Math.round(w1), samples: 220 });
+            samples = (r && Array.isArray(r.samples)) ? r.samples : [];
+          } catch (_) {}
+          if (!samples.length) return;
+          let snap;
+          if (precise) {
+            snap = { bounds: b, peaks: samples.map(v => Math.abs(Number(v) || 0)) };
+          } else {
+            snap = waveEnergySnap(samples, w0, w1, b);
+            if (!snap) return;
+          }
+          q._resolvedBounds = snap.bounds;   // the ▶ chip plays the SNAPPED clip
+          if (!document.body.contains(cv)) return;
+          cv.style.display = 'block';
+          q._waveDraw = (absMs) => waveDrawPeaks(cv, snap.peaks, snap.bounds, absMs);
+          q._waveDraw(null);
+        } catch (_) {}
+      };
+      if ('IntersectionObserver' in window) {
+        if (!wave.io) {
+          wave.io = new IntersectionObserver((entries) => {
+            for (const en of entries) {
+              if (!en.isIntersecting) continue;
+              wave.io.unobserve(en.target);
+              const j = en.target._waveJob;
+              if (j) { en.target._waveJob = null; wave.queue.push(j); pumpWave(); }
+            }
+          }, { rootMargin: '250px' });
+        }
+        cv._waveJob = job;
+        wave.io.observe(cv);
+      } else {
+        wave.queue.push(job);
+        pumpWave();
+      }
+    };
+
+    // ▶ clip chip for any verbatim-excerpt record `q` ({quote, anchorOff,
+    // startMs, endMs}) — quote blocks and vocab context sentences share it.
+    // Chip always renders: bounds resolve at TAP time via cueRangeForQuote,
+    // so audio can work even when generation ran without cues loaded; an
+    // unresolvable excerpt just toasts 音声なし. Playback drives the card's
+    // mini-waveform progress (and clears the previously active one).
+    const clipChip = (q) => {
+      const pb = document.createElement('button');
+      pb.textContent = '▶';
+      pb.title = window.i18n.t('tl.listen_scene', '▶ この場面を聴く');
+      pb.style.cssText = 'flex:none;background:#1d1830;border:1px solid #463a6b;border-radius:8px;color:#cbbfee;font-size:.78rem;padding:4px 13px;cursor:pointer;';
+      // Long-press: resolution diagnostic toast (path / bounds / failure
+      // stage) — tells us in one tap which resolver tier produced a clip
+      // instead of inferring it from symptoms. "r4" doubles as a build stamp.
+      let _lpTimer = 0, _lpFired = false;
+      const diag = async () => {
+        _lpFired = true;
+        let msg = 'r6';
+        try {
+          const src = await resolveSrc();
+          msg += src ? ' src✓' : ' src✕';
+          let loc = null;
+          try {
+            loc = await window.aiChunks?.cueRangeForQuote?.(titleId, chIdx, q.quote, { anchorOff: q.anchorOff, tight: true });
+          } catch (e2) { msg += ' resolveERR:' + ((e2 && e2.message) || e2); }
+          if (!loc) msg += ' loc:null';
+          else {
+            msg += ' path:' + (loc.path || '?');
+            msg += Number.isFinite(loc.startMs)
+              ? (' ' + (loc.startMs / 1000).toFixed(1) + '→' + (loc.endMs / 1000).toFixed(1) + 's' + (loc.wordTimed ? ' word' : ''))
+              : ' noMs';
+          }
+          if (!loc || !Number.isFinite(loc && loc.startMs)) {
+            msg += Number.isFinite(q.startMs) ? ' gen✓' : ' gen✕';
+          }
+        } catch (e3) { msg += ' ERR:' + ((e3 && e3.message) || e3); }
+        try { window.showToast && window.showToast(msg, 7000); } catch (_) {}
+      };
+      pb.addEventListener('touchstart', () => { _lpFired = false; clearTimeout(_lpTimer); _lpTimer = setTimeout(diag, 600); }, { passive: true });
+      pb.addEventListener('touchend', () => clearTimeout(_lpTimer), { passive: true });
+      pb.addEventListener('touchmove', () => clearTimeout(_lpTimer), { passive: true });
+      pb.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (_lpFired) { _lpFired = false; return; }   // long-press showed the diagnostic — don't also play
+        try {
+          const srcPath = await resolveSrc();
+          if (!srcPath) {
+            try { window.showToast && window.showToast(window.i18n.t('tl.no_audio', '音声なし') + ' (src)', 2500); } catch (_) {}
+            return;
+          }
+          const bounds = await resolveBounds(q);
+          if (!bounds) {
+            try { window.showToast && window.showToast(window.i18n.t('tl.no_audio', '音声なし') + ' (loc)', 2500); } catch (_) {}
+            return;
+          }
+          if (wave.activeDraw && wave.activeDraw !== q._waveDraw) {
+            try { wave.activeDraw(null); } catch (_) {}
+          }
+          wave.activeDraw = q._waveDraw || null;
+          clipPlay(bounds, pb, srcPath, q._waveDraw || null);
+        } catch (_) {}
+      });
+      return pb;
+    };
+
+    const quoteCard = (b) => {
+      // The fill/accent live on an OPAQUE non-text wrapper — styling bg
+      // directly on scrolled dict-enabled text is the iOS re-raster trigger.
+      const box = document.createElement('div');
+      box.style.cssText = 'background:#191722;border-radius:10px;box-shadow:inset 3px 0 0 #6f5fc0;padding:11px 14px 10px;';
+      box.appendChild(prose(b.quote, 'color:#e4dff2;'));
+      const attText = (b.speaker ? ('— ' + b.speaker) : '') +
+                      (b.speaker && b.context ? '　' : '') + (b.context || '');
+      const foot = document.createElement('div');
+      foot.style.cssText = 'margin-top:7px;display:flex;align-items:flex-end;gap:10px;';
+      const att = document.createElement('div');
+      att.style.cssText = 'flex:1;min-width:0;font-size:calc(var(--font-size-card, 1rem) * .82);color:#9d96b8;line-height:1.5;';
+      att.textContent = attText;
+      foot.appendChild(att);
+      foot.appendChild(clipChip(b));
+      box.appendChild(foot);
+      attachWave(b, box);
+      return box;
+    };
+
+    // sbv>=2 artifacts are authored (and sanitize-normalized) as narrative
+    // first, quotes last — give the quote run its own section heading.
+    // Legacy artifacts interleave quotes into the flow; no heading there.
+    const sectioned = ((art.sbv | 0) >= 2);
+    let quoteHeadDone = false;
+    for (const b of blocks) {
+      if (!b) continue;
+      if (b.type === 'para' && b.text) {
+        wrap.appendChild(prose(b.text));
+      } else if (b.type === 'subhead' && b.text) {
+        wrap.appendChild(sectionHead(b.text));
+      } else if (b.type === 'quote' && b.quote) {
+        if (sectioned && !quoteHeadDone) {
+          quoteHeadDone = true;
+          wrap.appendChild(sectionHead(window.i18n.t('tl.quotes_heading', '引用')));
+        }
+        wrap.appendChild(quoteCard(b));
+      }
+    }
+
+    // No quote blocks came back (a model can under-deliver them even though
+    // the prompt demands 3-6) — the quotes section must not just vanish: fall
+    // back to keyPassages, which the schema REQUIRES (2-5 verbatim quotes)
+    // and which already carry located audio bounds. Attribution shows the
+    // passage's "why" line.
+    if (sectioned && !quoteHeadDone) {
+      const kps = Array.isArray(art.keyPassages) ? art.keyPassages.filter(p => p && p.quote) : [];
+      if (kps.length) {
+        wrap.appendChild(sectionHead(window.i18n.t('tl.quotes_heading', '引用')));
+        for (const p of kps) {
+          // keyPassages' rawStart is GLOBAL text space; cueRangeForQuote's
+          // hint is chunk-local — convert through the chunk's own rawStart
+          // when both are known (cue-space passages carry no rawStart; the
+          // relaxed long-quote ambiguity rule covers them).
+          if (!p._qb) {
+            const aoff = (Number.isFinite(p.rawStart) && chObj && Number.isFinite(chObj.rawStart) &&
+                          p.rawStart >= chObj.rawStart) ? (p.rawStart - chObj.rawStart) : undefined;
+            p._qb = { quote: p.quote, context: p.why || '', anchorOff: aoff,
+                      startMs: p.startMs, endMs: p.endMs };
+          }
+          wrap.appendChild(quoteCard(p._qb));
+        }
+      }
+    }
+
+    // Vocab section (N1+ picks with verbatim context) — new-format artifacts
+    // only. Word div is dict-enabled (leaf-only invariant: reading/note and
+    // the ▶ chip are siblings, never inside the dict leaf).
+    const vocab = Array.isArray(art.vocab)
+      ? art.vocab.filter(v => v && v.word && v.context) : [];
+    if (vocab.length) {
+      wrap.appendChild(sectionHead(window.i18n.t('tl.vocab_heading', '語彙')));
+      for (const v of vocab) {
+        const row = document.createElement('div');
+        row.style.cssText = 'background:#161522;border-radius:10px;padding:10px 14px 9px;display:flex;flex-direction:column;gap:6px;';
+        // Word with per-kanji furigana (JmdictFurigana via buildFuriganaRuby,
+        // okurigana-distribution fallback) — replaces the old （ひらがな）
+        // paren reading. NOT dict-enabled: ruby markup confuses the lazy
+        // char-index dict path, and the bolded word in the context sentence
+        // below is already tappable.
+        if (!document.getElementById('kaiVocabStyles')) {
+          const st = document.createElement('style');
+          st.id = 'kaiVocabStyles';
+          // Furigana starts HIDDEN (self-test first — tap the word to check
+          // yourself); visibility (not display) so the ruby space is reserved
+          // and toggling never reflows the card.
+          st.textContent =
+            '.kai-vocab-word ruby rt { color:var(--accent-card, #ff9550); font-size:.5em; font-weight:600; visibility:hidden; }' +
+            '.kai-vocab-word.kai-furi-show ruby rt { visibility:visible; }';
+          document.head.appendChild(st);
+        }
+        const wordEl = document.createElement('div');
+        wordEl.className = 'kai-vocab-word';
+        wordEl.style.cssText = 'font-weight:700;color:#e2d9f5;font-family:var(--font-family-card);' +
+          'font-size:calc(var(--font-size-card, 1rem) * 1.12);line-height:1.9;';
+        let rubyOk = false;
+        try {
+          const rb = (typeof window.buildFuriganaRuby === 'function')
+            ? window.buildFuriganaRuby(v.word, v.reading || '') : null;
+          if (rb && rb.html) { wordEl.innerHTML = rb.html; rubyOk = rb.hasRuby; }
+        } catch (_) {}
+        if (!wordEl.innerHTML) wordEl.textContent = v.word;
+        // Ruby present → the word is a BUTTON that toggles the furigana.
+        if (rubyOk) {
+          wordEl.style.cssText += 'display:inline-block;background:#221d33;' +
+            'border:1px solid #463a6b;border-radius:10px;padding:3px 14px 4px;cursor:pointer;';
+          wordEl.addEventListener('click', (e) => {
+            e.stopPropagation();
+            wordEl.classList.toggle('kai-furi-show');
+          });
+        }
+        // Word line: word on the left, ＋ save-to-review pinned to the RIGHT
+        // edge (fat thumb target; in-app SRS — deliberately distinct from any
+        // Anki send). Resolved audio bounds are stored AT ADD TIME while this
+        // title is active, so review can play the clip from any book later.
+        const wordRow = document.createElement('div');
+        wordRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;';
+        const wordWrap = document.createElement('div');
+        wordWrap.style.cssText = 'flex:1;min-width:0;';
+        wordWrap.appendChild(wordEl);
+        wordRow.appendChild(wordWrap);
+        const srsBtn = document.createElement('button');
+        srsBtn.style.cssText = 'flex:none;background:#1d1830;border:1px solid #463a6b;border-radius:10px;' +
+          'color:#cbbfee;font-size:1.05rem;padding:9px 20px;cursor:pointer;line-height:1.1;';
+        let srsIn = false;
+        const paintSrs = () => {
+          srsBtn.textContent = srsIn ? '✓' : '＋';
+          srsBtn.title = srsIn ? window.i18n.t('vs.remove', '復習から削除') : window.i18n.t('vs.add', '復習に追加');
+          srsBtn.style.color = srsIn ? '#8fd8b0' : '#cbbfee';
+          srsBtn.style.borderColor = srsIn ? '#2e5b47' : '#463a6b';
+        };
+        paintSrs();
+        (async () => { try { srsIn = !!(await window.vocabSrs?.has?.(titleId, chIdx, v.word)); paintSrs(); } catch (_) {} })();
+        srsBtn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          try {
+            if (!window.vocabSrs) return;
+            if (srsIn) {
+              await window.vocabSrs.remove(titleId, chIdx, v.word);
+              srsIn = false; paintSrs();
+              try { window.showToast && window.showToast(window.i18n.t('vs.removed', '復習から削除しました'), 1600); } catch (_) {}
+              return;
+            }
+            let b = v._chip && v._chip._resolvedBounds || null;
+            if (!b && v._chip) { try { b = await resolveBounds(v._chip); } catch (_) {} }
+            await window.vocabSrs.add({
+              titleId, chapterIdx: chIdx, word: v.word, reading: v.reading || '',
+              note: v.note || '', context: v.context, anchorOff: v.anchorOff,
+              startMs: b ? b.startMs : v.startMs, endMs: b ? b.endMs : v.endMs,
+            });
+            srsIn = true; paintSrs();
+            try { window.showToast && window.showToast(window.i18n.t('vs.added', '復習に追加しました'), 1600); } catch (_) {}
+          } catch (_) {}
+        });
+        wordRow.appendChild(srsBtn);
+        row.appendChild(wordRow);
+        // Definition as an inset block (accent bar, like key-event rows) —
+        // reading text only reappears here if the ruby build had nothing to
+        // attach (kana-only word carries no ruby and needs no reading).
+        const noteTxt = (v.note || '') +
+          (!rubyOk && v.reading && v.reading !== v.word ? (v.note ? '（' + v.reading + '）' : v.reading) : '');
+        if (noteTxt) {
+          const noteEl = document.createElement('div');
+          noteEl.style.cssText = 'margin:2px 0 2px 2px;padding:5px 11px;background:#1c1930;border-radius:8px;' +
+            'box-shadow:inset 2px 0 0 #6f5fc0;color:#aea7c9;' +
+            'font-size:calc(var(--font-size-card, 1rem) * .85);line-height:1.5;';
+          noteEl.textContent = noteTxt;
+          row.appendChild(noteEl);
+        }
+        const ctxRow = document.createElement('div');
+        ctxRow.style.cssText = 'display:flex;align-items:flex-end;gap:10px;';
+        const ctx = prose(v.context, 'color:#b9b2cf;');
+        // Bold the vocab word inside its context sentence — bold (not a color
+        // highlight) so it can't be confused with the dictionary tap
+        // highlight. Longest-prefix fallback catches conjugated forms (拾い続け
+        // for 拾い続ける). Inline markup is safe here: the squiggle marker
+        // already wraps runs inside these dict-enabled divs.
+        try {
+          const t = ctx.textContent, w = String(v.word || '');
+          let hit = '';
+          for (let L = w.length; L >= 2; L--) { const p = w.slice(0, L); if (t.indexOf(p) >= 0) { hit = p; break; } }
+          if (hit) {
+            const escH = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+            ctx.innerHTML = t.split(hit).map(escH)
+              .join('<b style="font-weight:800;color:#efe9fb;">' + escH(hit) + '</b>');
+          }
+        } catch (_) {}
+        ctx.style.flex = '1'; ctx.style.minWidth = '0';
+        ctxRow.appendChild(ctx);
+        if (!v._chip) v._chip = { quote: v.context, anchorOff: v.anchorOff, startMs: v.startMs, endMs: v.endMs };
+        ctxRow.appendChild(clipChip(v._chip));
+        row.appendChild(ctxRow);
+        attachWave(v._chip, row);
+        wrap.appendChild(row);
+      }
+    }
+    return wrap;
+  }
+
   // ---- scene-card clip player (audition the Anki clip) ------------------------
   // Plays the trimmed selection through a DEDICATED <audio> element fed the SAME
   // sliced clip used for Anki. This never seeks the book's shared playhead (so the
@@ -690,15 +1285,21 @@
   function _clipDetach(a) { if (!a) return; try { a.onended = a.onpause = a.onplay = a.onerror = null; } catch (_) {} }
   // Sweep the inline waveform cursor from the clip's own currentTime (absolute
   // source-ms = clip start + elapsed); the book engine isn't driving playback.
+  // Optional per-clip progress sink (the quote/vocab mini-waveforms): called
+  // with the absolute source-ms while playing, and with null on reset-to-start.
+  let _clipTimeCb = null;
   function _clipPlayheadTick() {
     if (!_clipAudio || _clipAudio.paused) { _clipRaf = null; return; }
-    try { const ms = _clipStartMs + (_clipAudio.currentTime || 0) * 1000; if (window.waveform && window.waveform.setPlayheadMs) window.waveform.setPlayheadMs(ms); } catch (_) {}
+    try { const ms = _clipStartMs + (_clipAudio.currentTime || 0) * 1000; if (window.waveform && window.waveform.setPlayheadMs) window.waveform.setPlayheadMs(ms); if (_clipTimeCb) _clipTimeCb(ms); } catch (_) {}
     _clipRaf = requestAnimationFrame(_clipPlayheadTick);
   }
   function _clipPlayheadStart() { if (_clipRaf == null) _clipRaf = requestAnimationFrame(_clipPlayheadTick); }
   function _clipPlayheadStop(resetToStart) {
     if (_clipRaf != null) { try { cancelAnimationFrame(_clipRaf); } catch (_) {} _clipRaf = null; }
-    if (resetToStart) { try { if (window.waveform && window.waveform.setPlayheadMs) window.waveform.setPlayheadMs(_clipStartMs); } catch (_) {} }
+    if (resetToStart) {
+      try { if (window.waveform && window.waveform.setPlayheadMs) window.waveform.setPlayheadMs(_clipStartMs); } catch (_) {}
+      try { if (_clipTimeCb) _clipTimeCb(null); } catch (_) {}
+    }
   }
   async function _clipResumeBook() {
     if (!_clipBookWasPlaying) return; _clipBookWasPlaying = false;
@@ -713,7 +1314,9 @@
       if (!slicer) { _lastSliceErr = window.i18n.t('tl.slice_no_plugin', 'AudioSlicerプラグインなし'); return ''; }
       if (!srcPath) { _lastSliceErr = window.i18n.t('tl.slice_no_src', '音源パスなし'); return ''; }
       if (!window.cacheFileToDataUri) { _lastSliceErr = window.i18n.t('tl.slice_no_cachefn', 'cacheFileToDataUriなし'); return ''; }
-      const slice = await slicer.slice({ srcPath, startMs: Math.round(startMs), endMs: Math.round(endMs) });
+      // 20 ms fade in/out baked into the slice (iOS ignores <audio>.volume,
+      // so the ramp has to be in the file): no click at the cut points.
+      const slice = await slicer.slice({ srcPath, startMs: Math.round(startMs), endMs: Math.round(endMs), fadeInMs: 20, fadeOutMs: 20 });
       if (!slice || !slice.path) { _lastSliceErr = window.i18n.t('tl.slice_no_result_path', 'スライス結果にパスなし'); return ''; }
       const uri = await window.cacheFileToDataUri(slice.path, slice.mime || 'audio/mp4');
       if (!uri) _lastSliceErr = window.i18n.fmt('tl.slice_empty', { size: (slice.sizeBytes != null ? slice.sizeBytes : '?'), mime: (slice.mime || '?') }, 'ファイル読込が空（サイズ ' + (slice.sizeBytes != null ? slice.sizeBytes : '?') + 'B, mime ' + (slice.mime || '?') + '）');
@@ -727,10 +1330,11 @@
   }
   function clipStop() { _clipPlayheadStop(false); try { if (_clipAudio) _clipAudio.pause(); } catch (_) {} _clipIcon(false); _clipResumeBook(); }
   function clipDispose() { _clipPlayheadStop(false); try { if (_clipAudio) { _clipDetach(_clipAudio); _clipAudio.pause(); _clipAudio.src = ''; } } catch (_) {} _clipAudio = null; _clipKey = ''; _clipBtn = null; _clipResumeBook(); }
-  async function clipPlay(bounds, btn, srcPath) {
+  async function clipPlay(bounds, btn, srcPath, onTime) {
     _clipBtn = btn;
     try {
       if (_clipAudio && !_clipAudio.paused) { clipStop(); return; }   // toggle → pause
+      _clipTimeCb = (typeof onTime === 'function') ? onTime : null;
       if (!bounds || !Number.isFinite(bounds.startMs) || !Number.isFinite(bounds.endMs) || bounds.endMs <= bounds.startMs || !srcPath) return;
       const key = srcPath + '|' + Math.round(bounds.startMs) + '-' + Math.round(bounds.endMs);
       _clipStartMs = Math.round(bounds.startMs);   // absolute source-ms for the playhead sweep
@@ -742,7 +1346,7 @@
       if (_clipBtn) { try { _clipBtn.textContent = '…'; } catch (_) {} }
       const uri = await _sliceToUri(srcPath, bounds.startMs, bounds.endMs);
       _clipBusy = false;
-      if (!uri) { _clipIcon(false); _clipResumeBook(); try { window.showToast && window.showToast(window.i18n.t('tl.cannot_play_audio', 'この音声を再生できませんでした'), 3500); } catch (_) {} return; }
+      if (!uri) { _clipIcon(false); _clipResumeBook(); try { window.showToast && window.showToast(window.i18n.t('tl.cannot_play_audio', 'この音声を再生できませんでした') + (_lastSliceErr ? ' — ' + _lastSliceErr : ''), 4500); } catch (_) {} return; }
       if (_clipAudio) { try { _clipDetach(_clipAudio); _clipAudio.pause(); _clipAudio.src = ''; } catch (_) {} }
       _clipAudio = new Audio(uri); _clipKey = key;
       _clipAudio.onended = () => { _clipPlayheadStop(true); _clipIcon(false); _clipResumeBook(); };   // ends on its own → STOP, cursor back to start
@@ -751,6 +1355,44 @@
       _clipAudio.onerror = () => { _clipPlayheadStop(false); _clipIcon(false); _clipResumeBook(); try { window.showToast && window.showToast(window.i18n.t('tl.cannot_play_preview', 'プレビューを再生できません'), 3500); } catch (_) {} };
       try { await _clipAudio.play(); } catch (_) { _clipIcon(false); _clipResumeBook(); }
     } catch (_) { _clipBusy = false; _clipIcon(false); _clipResumeBook(); }
+  }
+
+  // ---- feed scene clip (▶ straight from the timeline feed) ---------------------
+  // Locate the scene's book passage (expression + cue-range bounds) once and
+  // cache SUCCESS only — a transient miss (cues still loading) must retry, not
+  // stick as "no audio". Shared by the feed ▶, the book-text display, and Anki.
+  const _locCache = {};
+  async function sceneLoc(titleId, ch, sc, sCharId) {
+    const ck = titleId + '|' + sCharId;
+    if (_locCache[ck]) return _locCache[ck];
+    let loc = null;
+    try {
+      if (sc.anchorQuote && window.aiChunks && window.aiChunks.cueRangeForQuote) {
+        loc = await window.aiChunks.cueRangeForQuote(titleId, ch.idx, sc.anchorQuote, { anchorOff: sc.anchorOff });
+      }
+    } catch (_) {}
+    if (loc) _locCache[ck] = loc;
+    return loc;
+  }
+  // Bounds: the user's saved trim wins, else the located range. Same clipPlay/
+  // slice path as the scene card, so place-safety is identical (no seek, book
+  // paused/resumed).
+  async function sceneClipInfo(titleId, ch, sc, sCharId) {
+    let bounds = null;
+    try { const tr = sceneTrimGet(titleId, sCharId); if (tr) bounds = { startMs: tr.startMs, endMs: tr.endMs }; } catch (_) {}
+    if (!bounds) {
+      let loc = await sceneLoc(titleId, ch, sc, sCharId);
+      if (loc && !(Number.isFinite(loc.startMs) && Number.isFinite(loc.endMs))) {
+        // expression-only may be stale — cues/transcription can arrive after the
+        // first locate. Drop the cached entry and try once more, fresh.
+        try { delete _locCache[titleId + '|' + sCharId]; } catch (_) {}
+        loc = await sceneLoc(titleId, ch, sc, sCharId);
+      }
+      if (loc && Number.isFinite(loc.startMs) && Number.isFinite(loc.endMs) && loc.endMs > loc.startMs) bounds = { startMs: loc.startMs, endMs: loc.endMs };
+    }
+    let srcPath = window._srtAbPath || window._pagedAudioPath || '';
+    if (!srcPath) { try { const t = await window.titleStore.get(titleId); srcPath = (t && t.attachments && t.attachments.audiobook && t.attachments.audiobook.cachePath) || ''; } catch (_) {} }
+    return { bounds, srcPath };
   }
 
   // Lookup-resume regression guard for the chapter view (ai-summary pattern):
@@ -830,8 +1472,79 @@
   }
 
   // ---- chapter view -----------------------------------------------------------
-  // z 9000 (below dict 9999 / toast 9500). The timeline panel is CLOSED before
-  // this opens (z-order rule) and reopened via `reopen` on close.
+  // z 9000 (below dict 9999 / toast 9500). No longer reachable from the feed
+  // (the panel inlines everything); still the Characters-screen deep link
+  // (aiTimeline.openChapterView), where `reopen` is null.
+  // Is this artifact showable as a summary right now? (exists, has a summary,
+  // and isn't an ahead generation for a chapter the reader hasn't arrived in)
+  function showableArt(map, ch, a) {
+    if (!a || !a.shortSummary) return null;
+    if (a.ahead && !chapterReached(map, ch)) return null;
+    return a;
+  }
+
+  // The chapters immediately either side, whether or not they have a summary —
+  // a neighbour WITHOUT one turns its arrow into a generate action rather than
+  // vanishing, so paging never dead-ends.
+  // Returns { prev, next }, each { ch, art (may be null), complete, reached } or null.
+  async function chapterNeighbors(titleId, idx) {
+    const out = { prev: null, next: null };
+    try {
+      const map = await getMapSafe(titleId);
+      if (!map || !Array.isArray(map.chunks)) return out;
+      const arts = filterArtifacts(await loadArtifacts(titleId), map);
+      const list = map.chunks.filter(c => c && Number.isFinite(c.idx)).slice().sort((a, b) => a.idx - b.idx);
+      const at = list.findIndex(c => c.idx === idx);
+      if (at < 0) return out;
+      const wrap = (c) => c ? {
+        ch: c,
+        art: showableArt(map, c, arts[c.idx]),
+        complete: chapterComplete(map, c),
+        reached: chapterReached(map, c),
+      } : null;
+      out.prev = wrap(list[at - 1]);
+      out.next = wrap(list[at + 1]);
+    } catch (_) {}
+    return out;
+  }
+
+  // Open chapter `idx` in the standalone view, resolving its chapter + artifact
+  // fresh. Returns false when it still has no showable summary.
+  async function openChapterViewByIdx(titleId, idx, reopen, opts) {
+    try {
+      const map = await getMapSafe(titleId);
+      const arts = filterArtifacts(await loadArtifacts(titleId), map);
+      const ch = (map && Array.isArray(map.chunks) && map.chunks.find(c => c && c.idx === idx)) || { idx, label: null };
+      const art = showableArt(map, ch, arts[idx]);
+      // allowEmpty: open the chapter view anyway with a BLANK body — an empty
+      // state carrying its own "generate this summary" button plus the usual
+      // ‹ › footer, so paging never dead-ends on an unsummarized chapter.
+      if (!art && !(opts && opts.allowEmpty)) return false;
+      await openChapterView(titleId, ch, art || null, reopen);
+      return true;
+    } catch (_) { return false; }
+  }
+
+  // Generate a chapter's summary on demand — the arrows' fallback, and what the
+  // audio-mode button offers when the chapter you're in has none yet. Mirrors
+  // the feed row's ✦ 生成 flow (spoiler confirm when the chapter isn't finished,
+  // then an awaited forced processChapter).
+  async function generateChapterSummary(titleId, ch, complete) {
+    try {
+      if (!window.ai || !window.ai.isEnabled || !window.ai.isEnabled()) {
+        try { window.showToast && window.showToast(window.i18n.t('tl.enable_ai_first', 'Enable AI in Preferences → AI assistant first'), 3000); } catch (_) {}
+        return false;
+      }
+      if (!window.aiProcessor || typeof window.aiProcessor.processChapter !== 'function') return false;
+      const msg = complete
+        ? window.i18n.t('tl.gen_summary_confirm', 'この章の要約をAIで生成しますか？（API利用料がかかります）')
+        : window.i18n.t('tl.spoiler_confirm', 'この章はまだ読み終えていません。要約にはネタバレが含まれる可能性があります。生成しますか？');
+      if (!window.confirm(msg)) return false;
+      const r = await window.aiProcessor.processChapter(titleId, ch.idx, { force: true, forceUnread: true });
+      return !!(r && r.ok !== false);
+    } catch (_) { return false; }
+  }
+
   async function openChapterView(titleId, ch, art, reopen) {
     try {
       const prev = document.getElementById('kchapterView');
@@ -849,6 +1562,7 @@
         prev._dead = true;
         prev.remove();
         try { await stopPassage(); } catch (_) {}
+        try { clipDispose(); } catch (_) {}   // a quote clip must not outlive the view it was started from
       }
       armLookGuard();
       // Opening a chapter WITH a summary counts as reading its AI content.
@@ -860,13 +1574,15 @@
       overlay.style.cssText =
         'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9000;' +
         'display:flex;align-items:center;justify-content:center;box-sizing:border-box;' +
-        'padding:calc(8px + env(safe-area-inset-top, 0px)) 0 calc(8px + env(safe-area-inset-bottom, 0px));';
+        'padding:calc(5px + env(safe-area-inset-top, 0px)) 0 calc(5px + env(safe-area-inset-bottom, 0px));';
 
       let closed = false;
       function onVis() {
         // Backgrounded mid-passage: restore at once so the app's own durable
         // position saves capture the user's real place, not the passage spot.
-        if (document.hidden) { try { stopPassage(); } catch (_) {} }
+        // Quote clips (dedicated <audio>) are disposed too so they don't keep
+        // sounding over whatever the user backgrounds into.
+        if (document.hidden) { try { stopPassage(); } catch (_) {} try { clipDispose(); } catch (_) {} }
       }
       async function close() {
         if (closed) return;
@@ -874,6 +1590,7 @@
         overlay._dead = true;
         if (overlay._scenePoll) { try { clearInterval(overlay._scenePoll); } catch (_) {} overlay._scenePoll = null; }
         try { await stopPassage(); } catch (_) {}
+        try { clipDispose(); } catch (_) {}   // a quote clip must not outlive the view
         checkLookGuard();
         try { document.removeEventListener('visibilitychange', onVis); } catch (_) {}
         // restore the live waveform canvas we idled while open
@@ -889,9 +1606,15 @@
       overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
       const card = document.createElement('div');
+      // Fill the overlay's whole content box (its padding already carries the
+      // safe-area insets) instead of 86vh — the leftover 14 % was showing up as
+      // dead black bands above and below the card on a phone.
       card.style.cssText =
         'background:#141414;border:1px solid #2a2a2a;border-radius:14px;' +
-        'width:min(94vw,720px);height:86vh;max-height:100%;display:flex;flex-direction:column;overflow:hidden;';
+        'width:min(96vw,720px);height:100%;max-height:100%;display:flex;flex-direction:column;overflow:hidden;';
+      // Vision: the window is generously sized by the user — let the chapter
+      // view use ALL of it instead of the phone-tuned 720px column.
+      if (window.KADOKI_VISION) { card.style.width = '100%'; card.style.maxWidth = 'none'; }
 
       const label = (art && art.label) || ch.label || window.i18n.fmt('tl.chapter_n', { n: ch.idx + 1 }, '第' + (ch.idx + 1) + '章');
       const chIsTime = Number.isFinite(ch.msStart);
@@ -901,20 +1624,23 @@
       const head = document.createElement('div');
       head.id = 'kchapterViewHead';   // dict popup positions itself below this
       head.style.cssText =
-        'display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #242424;';
+        'display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #242424;';
       const ht = document.createElement('div');
       ht.style.cssText = 'flex:1;min-width:0;';
+      // Sub-line kept to ONE line (the short "from {n}" form, then the total) —
+      // in English the long form wrapped and cost a whole extra header row.
       ht.innerHTML =
-        '<div style="font-weight:600;color:#eee;font-size:1rem;">' + esc(label) + '</div>' +
-        '<div style="color:#888;font-size:.72rem;margin-top:2px;">' + esc(window.i18n.fmt('tl.chapter_n', { n: ch.idx + 1 }, '第' + (ch.idx + 1) + '章')) +
+        '<div style="font-weight:600;color:#eee;font-size:.98rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(label) + '</div>' +
+        '<div style="color:#999;font-size:.78rem;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + esc(window.i18n.fmt('tl.chapter_n', { n: ch.idx + 1 }, '第' + (ch.idx + 1) + '章')) +
         (chIsTime ? (' · ' + esc(window.i18n.fmt('tl.time_from', { t: fmtDur(ch.msStart) }, fmtDur(ch.msStart) + '〜')))
-                  : (lenJp > 0 ? (' · ' + window.i18n.fmt('tl.chars', { n: lenJp.toLocaleString() }, lenJp.toLocaleString() + '字')) : '')) + '</div>';
+                  : (lenJp > 0 ? (' · ' + esc(window.i18n.fmt('tl.chars_from_short', { n: ch.jpStart.toLocaleString() }, ch.jpStart.toLocaleString() + '字〜')) +
+                                  ' · ' + esc(window.i18n.fmt('tl.chars', { n: lenJp.toLocaleString() }, lenJp.toLocaleString() + '字'))) : '')) + '</div>';
       const cp = document.createElement('button');
       cp.textContent = '⧉';
       cp.title = window.i18n.t('tl.copy_chapter_summary', 'Copy chapter summary');
       cp.style.cssText =
         'background:none;border:1px solid #333;border-radius:8px;color:#aab4dd;' +
-        'font-size:1rem;padding:4px 12px;cursor:pointer;';
+        'font-size:.95rem;padding:6px 12px;cursor:pointer;line-height:1.1;';
       cp.addEventListener('click', async (e) => {
         e.stopPropagation();
         try {
@@ -924,21 +1650,61 @@
           }
         } catch (_) {}
       });
+      // Rebuild — same forceUnread/discard/force flow as the feed row's ⟲.
+      // processChapter is awaited (not fire-and-forget), so on success the
+      // artifact is already updated by the time we get here: close this view
+      // and reopen it fresh rather than trying to patch the built DOM in place.
+      let rb = null;
+      if (art) {
+        rb = document.createElement('button');
+        rb.textContent = '⟲';
+        rb.title = window.i18n.t('tl.regen_summary', 'Rebuild this chapter summary');
+        rb.style.cssText =
+          'background:none;border:1px solid #333;border-radius:8px;color:#aab4dd;' +
+          'font-size:1.25rem;padding:8px 15px;cursor:pointer;line-height:1.1;';
+        rb.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!window.confirm(window.i18n.t('tl.regen_summary_confirm', 'この章の要約をAIで作り直しますか？（API利用料がかかります）'))) return;
+          rb.disabled = true;
+          try {
+            if (window.aiProcessor && typeof window.aiProcessor.processChapter === 'function') {
+              const r = await window.aiProcessor.processChapter(titleId, ch.idx, { force: true, discard: true, forceUnread: true });
+              if (r && r.ok !== false) { await close(); await openChapter(titleId, ch.idx); }
+              else rb.disabled = false;
+            }
+          } catch (_) { rb.disabled = false; }
+        });
+      }
       const xb = document.createElement('button');
       xb.textContent = '✕';
       xb.style.cssText =
         'background:none;border:1px solid #333;border-radius:8px;color:#ccc;' +
-        'font-size:1.4rem;padding:6px 14px;cursor:pointer;';
+        'font-size:1.25rem;padding:8px 15px;cursor:pointer;line-height:1.1;';
       xb.addEventListener('click', (e) => { e.stopPropagation(); close(); });
       head.appendChild(ht);
-      head.appendChild(cp);
+      // visionOS: pop this panel out into its own window (panel-bridge.js).
+      // Null off Vision, so the header is unchanged everywhere else. Popping
+      // out tears the in-window copy down — the window IS the panel now.
+      try {
+        const po = window.kadokiPanel && window.kadokiPanel.makeButton
+          ? window.kadokiPanel.makeButton('summary', () => close()) : null;
+        if (po) head.appendChild(po);
+      } catch (_) {}
+      if (art) head.appendChild(cp);   // nothing to copy on a blank (unsummarized) page
+      if (rb) head.appendChild(rb);
       head.appendChild(xb);
 
       const content = document.createElement('div');
       // Opaque background so the momentum-scroll tiles are solid (iOS caches
       // opaque tiles; a transparent scroll layer over content is costlier).
+      // overflow-x:hidden is NOT redundant here: `overflow-y:auto` alone makes
+      // overflow-x compute to AUTO, so a single too-wide child (a long quote, a
+      // wide chip row) lets the whole summary pan sideways. Barely noticeable
+      // with a thumb, blatant with a Vision Pro trackpad. Same fix the
+      // Characters list already carries.
       content.style.cssText =
-        'flex:1;overflow-y:auto;padding:16px 18px;background:#141414;';   // no -webkit-overflow-scrolling:touch (deprecated; forces iOS legacy re-rastering scroll layer = summary lag)
+        'flex:1;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;touch-action:pan-y;' +
+        'padding:12px 14px;background:#141414;';   // no -webkit-overflow-scrolling:touch (deprecated; forces iOS legacy re-rastering scroll layer = summary lag)
 
       // Dict enablement leaves text nodes intact on iOS (lazy caretRangeFromPoint
       // path); the squiggle marker may wrap matched name runs only. So it
@@ -957,15 +1723,19 @@
       const heading = (txt) => {
         const h = document.createElement('div');
         h.style.cssText =
-          'margin:20px 0 8px;color:#8a7fb8;font-size:.78rem;font-weight:700;letter-spacing:.06em;';
+          'margin:20px 0 8px;color:#8a7fb8;font-size:.92rem;font-weight:700;letter-spacing:.06em;';
         h.textContent = txt;
         return h;
       };
 
-      // Summary: longSummary is now just 2-3 short paragraphs — show it directly.
-      // LEGACY artifacts (old 600-1500字 long + mediumSummary) stay behind a
-      // 「全文を表示」 expander so they don't dump a wall of text.
-      const longText = art ? paragraphize(art.longSummary || '') : '';   // art may be null (scene-only chapter)
+      // Summary: new-format artifacts render the summaryBlocks narrative flow
+      // (paragraphs + pull-quotes with audio + optional subheads); pre-blocks
+      // artifacts fall back to the flat longSummary prose. LEGACY artifacts
+      // (old 600-1500字 long + mediumSummary) stay behind a 「全文を表示」
+      // expander so they don't dump a wall of text.
+      const blocksEl = art ? buildSummaryBlocks(art, prose, titleId, ch.idx, ch) : null;
+      if (blocksEl) content.appendChild(blocksEl);
+      const longText = (art && !blocksEl) ? paragraphize(art.longSummary || '') : '';   // art may be null (scene-only chapter)
       if (longText) {
         if (longText.length > 700 && art.mediumSummary) {
           // legacy long: medium teaser + expander to the full old long text
@@ -987,19 +1757,61 @@
         } else {
           content.appendChild(prose(longText));
         }
-        // Model attribution: a small dim line at the END of the summary text showing
-        // which model produced it (claude-* or an OpenRouter id). Hidden when empty.
-        if (art && art.model) {
-          const mb = document.createElement('div');
-          mb.style.cssText = 'margin-top:8px;font-size:.62rem;color:#667;';
-          mb.textContent = window.i18n.fmt('or.model_by', { id: art.model }, 'model: ' + art.model);
-          content.appendChild(mb);
-        }
+      }
+      // Model attribution: a small dim line at the END of the summary text showing
+      // which model produced it (claude-* or an OpenRouter id). Hidden when empty.
+      if ((blocksEl || longText) && art && art.model) {
+        const mb = document.createElement('div');
+        mb.style.cssText = 'margin-top:8px;font-size:.62rem;color:#667;';
+        mb.textContent = window.i18n.fmt('or.model_by', { id: art.model }, 'model: ' + art.model);
+        content.appendChild(mb);
       }
 
-      // Scene-only chapter (opened to view 新着 images before its summary exists).
+      // No summary yet: a real, navigable BLANK page rather than a refusal —
+      // its own "generate this chapter's summary" call to action, with the
+      // ‹ › footer below still paging to the neighbouring chapters. Any scene
+      // images the chapter already has still render underneath.
       if (!art) {
-        content.appendChild(prose(window.i18n.t('tl.chapter_no_summary', 'この章の要約はまだ生成されていません。下に場面画像を表示します。'), 'color:#888;font-size:.82rem;line-height:1.6;'));
+        const empty = document.createElement('div');
+        empty.style.cssText =
+          'display:flex;flex-direction:column;align-items:center;gap:14px;' +
+          'padding:44px 18px 26px;text-align:center;';
+        const msg = document.createElement('div');
+        msg.style.cssText = 'color:#8b8b96;font-size:.92rem;line-height:1.7;';
+        msg.textContent = window.i18n.t('tl.chapter_no_summary_yet', 'この章の要約はまだ生成されていません');
+        empty.appendChild(msg);
+        const genLabel = window.i18n.t('tl.gen_summary_cta', '✦ 要約を生成');
+        const gen = document.createElement('button');
+        gen.textContent = genLabel;
+        gen.style.cssText =
+          'background:#1d1830;border:1px solid #463a6b;border-radius:11px;color:#cbbfee;' +
+          'font-size:.98rem;font-weight:700;padding:13px 26px;cursor:pointer;line-height:1.2;';
+        gen.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (gen.disabled) return;
+          gen.disabled = true;
+          gen.textContent = window.i18n.t('tl.thinking', '考え中…');
+          try {
+            // Spoiler confirm keys off whether the chapter is finished, exactly
+            // like the feed row's ✦ 生成 and the footer arrows.
+            let complete = true;
+            try { const m2 = await getMapSafe(titleId); complete = chapterComplete(m2, ch); } catch (_) {}
+            const ok = await generateChapterSummary(titleId, ch, complete);
+            // Success REPLACES this view in place (openChapterView tears down an
+            // existing #kchapterView) and carries `reopen` forward, so closing
+            // afterwards still returns wherever the user came from.
+            if (ok && !overlay._dead && !closed &&
+                await openChapterViewByIdx(titleId, ch.idx, reopen)) return;
+          } catch (_) {}
+          gen.textContent = genLabel;
+          gen.disabled = false;
+        });
+        empty.appendChild(gen);
+        const hint = document.createElement('div');
+        hint.style.cssText = 'color:#5f5f6a;font-size:.72rem;line-height:1.6;max-width:26em;';
+        hint.textContent = window.i18n.t('tl.blank_page_hint', '下の ‹ › で他の章の要約に移動できます。');
+        empty.appendChild(hint);
+        content.appendChild(empty);
       }
 
       // Continuity: jump from the summary straight to this chapter's scenes (opens the first).
@@ -1046,10 +1858,12 @@
           // can't tile-cache on iOS → per-frame re-raster (the summary jitter).
           row.style.cssText = 'margin:0 0 10px;padding-left:10px;box-shadow:inset 2px 0 0 #2e2e3a;';
           if (ev.title) {
-            row.appendChild(prose(ev.title, 'font-weight:700;font-size:.86rem;line-height:1.5;'));
+            // Full card font size (same as the summary paragraphs) — fixed-rem
+            // sizes here read tiny next to the user's scaled prose.
+            row.appendChild(prose(ev.title, 'font-weight:700;line-height:1.5;'));
           }
           if (ev.description) {
-            row.appendChild(prose(ev.description, 'font-size:.8rem;color:#999;line-height:1.6;margin-top:2px;'));
+            row.appendChild(prose(ev.description, 'font-size:calc(var(--font-size-card, 1rem) * .92);color:#aaa;line-height:1.6;margin-top:2px;'));
           }
           content.appendChild(row);
         }
@@ -1064,7 +1878,55 @@
       charsSec.appendChild(chipRow);
       content.appendChild(charsSec);
 
-      const passages = (art && Array.isArray(art.keyPassages))
+      // Real-world places (chips like Characters; tap opens the map popup —
+      // aiPlacesUi sits at z 9400, above this view). New artifacts carry the
+      // chapter's own model-extracted list (art.places); older ones fall back
+      // to place-DB records whose chapter span covers this chapter.
+      const placesSec = document.createElement('div');
+      placesSec.style.display = 'none';
+      const placeRow = document.createElement('div');
+      placeRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;';
+      placesSec.appendChild(heading(window.i18n.t('tl.places', '場所')));
+      placesSec.appendChild(placeRow);
+      content.appendChild(placesSec);
+      (async () => {
+        try {
+          let names = (art && Array.isArray(art.places))
+            ? art.places.map(p => p && p.surface).filter(Boolean) : [];
+          if (!names.length && window.aiPlaces && window.aiPlaces.getStore) {
+            const st = await window.aiPlaces.getStore(titleId);
+            if (st && st.places) {
+              names = Object.values(st.places)
+                .filter(r => r && Number.isFinite(r.firstChunkIdx) &&
+                        r.firstChunkIdx <= ch.idx && ch.idx <= (r.lastChunkIdx ?? r.firstChunkIdx))
+                .map(r => r.surface).filter(Boolean);
+            }
+          }
+          names = Array.from(new Set(names)).slice(0, 12);
+          if (!names.length || !document.body.contains(overlay)) return;
+          for (const surface of names) {
+            const chip = document.createElement('button');
+            chip.textContent = surface;
+            chip.style.cssText =
+              'background:#16241f;border:1px solid #2e5b47;border-radius:999px;' +
+              'color:#a9dcc3;font-size:.92rem;padding:7px 15px;cursor:pointer;';
+            chip.addEventListener('click', (e) => {
+              e.stopPropagation();
+              try {
+                const ok = window.aiPlacesUi && window.aiPlacesUi.openPopupFor &&
+                           window.aiPlacesUi.openPopupFor(surface);
+                if (!ok && window.showToast) window.showToast(surface, 1600);
+              } catch (_) {}
+            });
+            placeRow.appendChild(chip);
+          }
+          placesSec.style.display = '';
+        } catch (_) {}
+      })();
+
+      // 印象的な場面: redundant when the blocks narrative already carries its
+      // quotes inline — shown only for pre-blocks artifacts.
+      const passages = (art && !blocksEl && Array.isArray(art.keyPassages))
         ? art.keyPassages.filter(p => p && p.quote) : [];
       const passBtns = [];
       if (passages.length) {
@@ -1091,7 +1953,36 @@
             pb.style.cssText =
               'display:none;margin-top:6px;background:#1d1830;border:1px solid #463a6b;' +
               'border-radius:8px;color:#cbbfee;font-size:.78rem;padding:5px 12px;cursor:pointer;';
-            pb.addEventListener('click', (e) => { e.stopPropagation(); playPassage(p, pb); });
+            // Sliced-clip player, same as the quote chips — never seek the
+            // book's shared playhead for an excerpt.
+            pb.addEventListener('click', async (e) => {
+              e.stopPropagation();
+              try {
+                let srcPath = window._srtAbPath || window._pagedAudioPath || '';
+                if (!srcPath) {
+                  try {
+                    const t = await window.titleStore.get(titleId);
+                    srcPath = (t && t.attachments && t.attachments.audiobook && t.attachments.audiobook.cachePath) || '';
+                  } catch (_) {}
+                }
+                if (!srcPath) {
+                  try { window.showToast && window.showToast(window.i18n.t('tl.no_audio', '音声なし'), 2500); } catch (_) {}
+                  return;
+                }
+                // Full-range resolve at tap time (stored bounds = first cue only).
+                let bounds = null;
+                try {
+                  if (window.aiChunks && window.aiChunks.cueRangeForQuote) {
+                    const loc = await window.aiChunks.cueRangeForQuote(titleId, ch.idx, p.quote, {});
+                    if (loc && Number.isFinite(loc.startMs) && Number.isFinite(loc.endMs) && loc.endMs > loc.startMs) {
+                      bounds = { startMs: loc.startMs, endMs: loc.endMs };
+                    }
+                  }
+                } catch (_) {}
+                if (!bounds) bounds = { startMs: p.startMs, endMs: p.endMs };
+                clipPlay(bounds, pb, srcPath);
+              } catch (_) {}
+            });
             box.appendChild(pb);
             passBtns.push(pb);
           }
@@ -1099,19 +1990,87 @@
         }
       }
 
+      // Cost/date line — shares the footer row with the nav arrows rather than
+      // owning a band of its own.
       const meta = document.createElement('div');
       meta.style.cssText =
-        'padding:8px 14px;border-top:1px solid #242424;color:#666;font-size:.7rem;min-height:1em;';
+        'flex:1;min-width:0;color:#666;font-size:.64rem;text-align:center;' +
+        'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
       try {
         const bits = [];   // model id is shown inline at the end of the summary, not here
-        if (Number.isFinite(art.costUsd)) bits.push('~$' + art.costUsd.toFixed(3));
-        if (art.ts) bits.push(new Date(art.ts).toLocaleString());
+        if (art && Number.isFinite(art.costUsd)) bits.push('~$' + art.costUsd.toFixed(3));
+        if (art && art.ts) bits.push(new Date(art.ts).toLocaleString());
         meta.textContent = bits.join(' · ');
       } catch (_) {}
 
+      // ---- prev / next chapter nav ----
+      // Big footer arrows, so paging between chapters never has to go through
+      // the Timeline panel — this view is deliberately self-contained (routing
+      // through the panel throws away the user's scroll place in Timeline and
+      // Scenes, which is the whole reason the audio-mode button opens a popup).
+      // A pinned footer rather than more header buttons: the header already
+      // carries ⧉ / ⟲ / ✕ and a chapter label. Buttons render disabled and fill
+      // in once the neighbour lookup resolves, so opening is never blocked on
+      // it. Navigation REPLACES the view in place (openChapterView handles an
+      // existing #kchapterView) and carries `reopen` forward, so closing after
+      // paging still returns wherever you came from.
+      const nav = document.createElement('div');
+      nav.style.cssText =
+        'display:flex;align-items:center;gap:8px;padding:6px 10px;' +
+        'border-top:1px solid #242424;background:#141414;';
+      const mkNav = () => {
+        const b = document.createElement('button');
+        b.disabled = true;
+        b.style.cssText =
+          'flex:0 1 auto;min-width:0;background:#191425;border:1px solid #2e2e2e;border-radius:9px;' +
+          'color:#aab4dd;font-size:.86rem;padding:10px 14px;cursor:pointer;line-height:1.2;' +
+          'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;opacity:.3;';
+        return b;
+      };
+      const navPrev = mkNav(), navNext = mkNav();
+      // Both arrows always NAVIGATE, whether or not the neighbour has a summary:
+      // a neighbour without one opens as the blank page above, which carries its
+      // own ✦ generate button. (Generating straight from the arrow was the old
+      // behavior; it put a confirm dialog on a plain navigation control and made
+      // an unsummarized chapter feel like a dead end.) The ✦ on the label marks
+      // the destination as still empty. No neighbour at all (start/end of the
+      // book) hides the button.
+      const wireNav = (btn, target, isPrev) => {
+        const arrow = isPrev ? '‹ ' : ' ›';
+        const chapLabel = window.i18n.t(isPrev ? 'tl.prev_chapter' : 'tl.next_chapter', isPrev ? '前の章' : '次の章');
+        if (!target) { btn.style.display = 'none'; return; }
+        const hasSum = !!target.art;
+        const label = hasSum
+          ? (isPrev ? arrow + chapLabel : chapLabel + arrow)
+          : (isPrev ? arrow + '✦ ' + chapLabel : '✦ ' + chapLabel + arrow);
+        btn.textContent = label;
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        if (!hasSum) { btn.style.borderColor = '#463a6b'; btn.style.color = '#d6c8ff'; }
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (btn.disabled) return;
+          btn.disabled = true;
+          try {
+            await openChapterView(titleId, target.ch, target.art || null, reopen);
+            return;
+          } catch (_) {}
+          btn.textContent = label;
+          btn.disabled = false;
+        });
+      };
+      nav.appendChild(navPrev);
+      nav.appendChild(meta);
+      nav.appendChild(navNext);
+      chapterNeighbors(titleId, ch.idx).then((n) => {
+        if (overlay._dead || closed) return;
+        wireNav(navPrev, n.prev, true);
+        wireNav(navNext, n.next, false);
+      }).catch(() => {});
+
       card.appendChild(head);
       card.appendChild(content);
-      card.appendChild(meta);
+      card.appendChild(nav);
       overlay.appendChild(card);
       document.body.appendChild(overlay);
 
@@ -1146,6 +2105,7 @@
 
       (async () => {
         try {
+          if (!art) return;   // blank page — no artifact, no related-character chips
           const found = await resolveChars(titleId, art.relatedCharIds);
           if (!found.length || !document.body.contains(overlay)) return;
           for (const c of found) {
@@ -1153,7 +2113,7 @@
             chip.textContent = c.surface;
             chip.style.cssText =
               'background:#221d33;border:1px solid #463a6b;border-radius:999px;' +
-              'color:#cbbfee;font-size:.78rem;padding:4px 12px;cursor:pointer;';
+              'color:#cbbfee;font-size:.92rem;padding:7px 15px;cursor:pointer;';
             chip.addEventListener('click', (e) => {
               e.stopPropagation();
               try {
@@ -1181,9 +2141,11 @@
   //   • the Japanese caption
   //   • "Ankiに送る" — composite image + the book sentence + the sliced book audio.
   // ▲/▼ navigate to the prev/next scene without closing. z 9000 like the chapter
-  // view (shares #kchapterView; only one open at a time). The timeline panel is
-  // CLOSED while open and reopened via `reopen`. preEnum/preIdx thread the flat
-  // scene list through ▲/▼ nav so it isn't rebuilt each hop.
+  // view (shares #kchapterView; only one open at a time). The timeline panel now
+  // STAYS OPEN underneath (this card is a later body child at the same z, so it
+  // stacks above); `reopen` is just a light status refresh, never a rebuild.
+  // preEnum/preIdx thread the flat scene list through ▲/▼ nav so it isn't
+  // rebuilt each hop.
   async function openSceneCard(titleId, ch, art, s, reopen, preEnum, preIdx, animDir) {
     // Viewing a scene card counts as reading that scene's AI content.
     try { aiReadMarkScene(titleId, ch.idx, s); } catch (_) {}
@@ -1203,7 +2165,7 @@
           const m = await getMapSafe(titleId);
           const aa = filterArtifacts(await loadArtifacts(titleId), m);
           const chs = (m && Array.isArray(m.chunks)) ? m.chunks : [];
-          for (const c of chs) { const a = aa ? (aa[c.idx] || null) : null; const sl = (a && Array.isArray(a.scenes)) ? a.scenes : []; for (let k = 0; k < sl.length; k++) allScenes.push({ ch: c, art: a, s: k }); }
+          for (const c of chs) { const a = aa ? (aa[c.idx] || null) : null; if (a && a.ahead && m && !chapterReached(m, c)) continue; const sl = (a && Array.isArray(a.scenes)) ? a.scenes : []; for (let k = 0; k < sl.length; k++) allScenes.push({ ch: c, art: a, s: k }); }
         } catch (_) {}
       }
       const curSceneIdx = Number.isFinite(preIdx) ? preIdx : allScenes.findIndex(x => x.ch && x.ch.idx === ch.idx && x.s === s);
@@ -1287,7 +2249,8 @@
       head.appendChild(xb);
 
       const content = document.createElement('div');
-      content.style.cssText = 'flex:1;overflow-y:auto;padding:16px 18px;background:#141414;';   // no -webkit-overflow-scrolling:touch (see chapter-view note)
+      content.style.cssText = 'flex:1;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;' +
+        'touch-action:pan-y;padding:16px 18px;background:#141414;';   // overflow-x: see the chapter-view note
 
       const dictTargets = [];
       const prose = (text, extra) => {
@@ -1517,16 +2480,106 @@
     }
   }
 
+  // Resolve the CURRENT chapter idx — same "いま" position logic the feed uses
+  // to pick curIdx (currentAxisPos against each chapter's axis bounds). Shared
+  // by openCurrentChapter (audio-mode button tap) and currentChapterStatus
+  // (audio-mode badge/toast poll) so the two never disagree on "which chapter".
+  // Returns { map, idx } or null (no chunk map yet).
+  async function resolveCurrentChapter(titleId) {
+    const map = await getMapSafe(titleId);
+    if (!map || !Array.isArray(map.chunks) || !map.chunks.length) return null;
+    const axis = buildMapAxis(map);
+    const furthestJp = axis.isTime
+      ? ((map.furthest && Number.isFinite(map.furthest.ms) && typeof axis.msToChars === 'function')
+          ? axis.msToChars(map.furthest.ms)
+          : ((map.furthest && Number.isFinite(map.furthest.cue) && map.furthest.cue >= 0) ? axis.cueToChars(map.furthest.cue) : null))
+      : ((map.furthest && Number.isFinite(map.furthest.jp)) ? map.furthest.jp : null);
+    const curP = currentAxisPos(axis);
+    const pos = (curP !== null && Number.isFinite(curP)) ? curP : (furthestJp || 0);
+    let idx = -1;
+    for (const ch of map.chunks) {
+      const a = axis.chStart(ch), b = axis.chEnd(ch);
+      if (pos >= a && pos < (b > a ? b : Infinity)) { idx = ch.idx; break; }
+    }
+    // pos landed exactly on a boundary/gap the range check above didn't catch
+    // (e.g. right at the book's end) — fall back to the closest preceding
+    // chapter rather than giving up.
+    if (idx < 0) {
+      for (const ch of map.chunks) { if (axis.chStart(ch) <= pos) idx = ch.idx; }
+    }
+    if (idx < 0) idx = 0;
+    return { map, idx };
+  }
+
+  // Open the current chapter's view directly. Entry point for the audio-mode
+  // (and visionOS transport-bar) "go to this chapter's summary" button. A
+  // chapter with no summary yet opens BLANK rather than complaining — see
+  // openChapter's allowEmpty.
+  async function openCurrentChapter(titleId) {
+    try {
+      titleId = titleId || window._activeTitleId;
+      if (!titleId) return false;
+      // visionOS: the summary opens in its OWN window by default rather than as
+      // an overlay covering the book — that is the whole point of having it
+      // beside you while you listen. popOut focuses the window if it already
+      // exists. Guarded on !KADOKI_PANEL so the panel window's own mount (which
+      // calls straight through to here) doesn't ask for a window recursively.
+      if (!window.KADOKI_PANEL && window.kadokiPanel && window.kadokiPanel.available()) {
+        if (window.kadokiPanel.popOut('summary')) return true;
+      }
+      const r = await resolveCurrentChapter(titleId);
+      if (!r) {
+        try { if (window.showToast) window.showToast(window.i18n.t('tl.no_chapters_yet', 'チャプターはまだありません。読み進めると章ごとのカードが表示されます。'), 2500); } catch (_) {}
+        return false;
+      }
+      // allowEmpty: a chapter with no summary yet opens as the BLANK page —
+      // the empty state carries its own ✦ generate button and the ‹ › footer
+      // pages to the neighbouring chapters' summaries. Never a bare complaint,
+      // and never a fall back to the Timeline panel: this button's whole point
+      // is a self-contained popup, and routing through the panel discards the
+      // user's scroll place in Timeline and Scenes.
+      return await openChapter(titleId, r.idx, { allowEmpty: true });
+    } catch (_) { return false; }
+  }
+
+  // Status of the CURRENT chapter's AI summary, for the audio-mode button's
+  // badge/toast (reading-mode.js polls this — see abCheckSummaryStatus).
+  // Returns { idx, label, hasSummary, unread } or null. `unread` reuses the
+  // SAME AIREAD_V1 state the ✓/●/続きから feed markers are driven by — opening
+  // the chapter view (openChapterView → aiReadMarkChapter) is what clears it,
+  // so the badge/toast and the feed's own markers can never disagree.
+  async function currentChapterStatus(titleId) {
+    try {
+      titleId = titleId || window._activeTitleId;
+      if (!titleId) return null;
+      const r = await resolveCurrentChapter(titleId);
+      if (!r) return null;
+      const ch = r.map.chunks.find(c => c && c.idx === r.idx) || { idx: r.idx };
+      const arts = filterArtifacts(await loadArtifacts(titleId), r.map);
+      let art = arts[r.idx] || null;
+      if (art && art.ahead && !chapterReached(r.map, ch)) art = null;   // generated ahead — not arrived at yet
+      const hasSum = !!(art && art.shortSummary);
+      const label = (art && art.label) || ch.label || window.i18n.fmt('tl.chapter_n', { n: r.idx + 1 }, '第' + (r.idx + 1) + '章');
+      if (!hasSum) return { idx: r.idx, label, hasSummary: false, unread: false };
+      const readState = await aiReadLoad(titleId);
+      const unread = !readState.ch[r.idx];
+      return { idx: r.idx, label, hasSummary: true, unread };
+    } catch (_) { return null; }
+  }
+
   // Open a chapter view directly (Characters screen links etc.).
-  async function openChapter(titleId, idx) {
+  async function openChapter(titleId, idx, opts) {
     try {
       titleId = titleId || window._activeTitleId;
       if (!titleId || !Number.isFinite(idx)) return false;
       const map = await getMapSafe(titleId);
       const arts = filterArtifacts(await loadArtifacts(titleId), map);
-      const art = arts[idx];
-      if (!art) return false;
       const ch = (map && map.chunks.find(c => c && c.idx === idx)) || { idx, label: null };
+      let art = arts[idx] || null;
+      if (art && art.ahead && map && !chapterReached(map, ch)) art = null;   // generated ahead — not arrived at yet, keep hidden
+      // allowEmpty: open the blank page (its own ✦ generate button + the ‹ ›
+      // footer) instead of refusing, so the caller's tap always lands somewhere.
+      if (!art && !(opts && opts.allowEmpty)) return false;
       await openChapterView(titleId, ch, art, null);
       return true;
     } catch (_) { return false; }
@@ -1540,6 +2593,34 @@
       const titleId = window._activeTitleId;
       if (!titleId) return false;
 
+      // window._srtCues (the cue list this panel's axis/coverage math is built
+      // on — buildMapAxis, coverageSegments/revisitSegments, migrateLegacyCue)
+      // is populated ONLY by loadTitleAsSrtCards at title-open, or by live
+      // auto-transcription while it's actively running. loadTitleAsSrtCards
+      // has several silent bail points (a stale cache-path signature, a fetch/
+      // parse failure) that can leave it permanently empty for the rest of the
+      // session — with NO retry unless the user enters card mode (shell.js
+      // calls window.ensureCardRenderedForActiveTitle "on every entry into
+      // card mode"). Audio/read mode have their OWN separate cue arrays
+      // (pagedCues/abCues) and work fine regardless, so an audio-primary
+      // listener who rarely visits card mode would see NO symptom there while
+      // this panel's coverage axis silently degrades to near-empty (every
+      // cueToChars/msToChars call returns null with no cue list to map
+      // against) — confirmed live on-device: title open, _activeTitleId set,
+      // yet window._srtCues undefined. Run the SAME self-heal card-mode entry
+      // already relies on, so opening the Timeline recovers it too.
+      try {
+        if ((!Array.isArray(window._srtCues) || !window._srtCues.length) &&
+            typeof window.ensureCardRenderedForActiveTitle === 'function') {
+          window.ensureCardRenderedForActiveTitle();
+          // the heal is fire-and-forget async (file/transcription I/O) — give
+          // it a moment, then let the normal refresh path pick up fresh cues
+          // (scheduleRefresh's own axis rebuild re-derives everything from
+          // whatever window._srtCues is AT THAT TIME; a no-op if still empty).
+          setTimeout(() => { try { if (document.body.contains(overlay)) scheduleRefresh(60); } catch (_) {} }, 2200);
+        }
+      } catch (_) {}
+
       let map = await getMapSafe(titleId);
       let axis = map ? buildMapAxis(map) : buildProbeAxis();
       if (!axis) return false;
@@ -1547,15 +2628,36 @@
       let arts = map ? filterArtifacts(await loadArtifacts(titleId), map) : {};
       let segs = await coverageSegments(titleId, axis);
       let rsegs = await revisitSegments(titleId, axis);
-      let bms = (window.bookmarks && window.bookmarks.list)
-        ? window.bookmarks.list().filter(b => b.titleId === titleId) : [];
-      let saved = [];
+      // TEMP diagnostic (2026-08 spine investigation: "coverage reaches further
+      // than I've listened / there's a gap in a continuous listen"). Prints the
+      // spine EXACTLY as drawn — every band and hole as a % of the axis, the
+      // live marker's %, and the raw store extents it was mapped from — so a
+      // wrong band can be traced to either the stored intervals or the ms→char
+      // mapping. Always on (no KADOKI_DEBUG gate) so it shows in the Xcode /
+      // chrome://inspect console with no setup. Remove once resolved.
       try {
-        saved = (window.aiSummary && window.aiSummary.listSaved)
-          ? await window.aiSummary.listSaved(titleId) : [];
+        const T = axis.total || 0;
+        const pctOf = (v) => (T ? Math.round(1000 * Math.max(0, Math.min(T, v)) / T) / 10 : null);
+        const band = (a) => (a || []).map(sg => pctOf(sg.c0) + '–' + pctOf(sg.c1) + '%' + (sg.mode ? (' ' + sg.mode) : ''));
+        const holes = [];
+        let cur = 0;
+        for (const sg of (segs || [])) { if (sg.c0 > cur + T * 0.005) holes.push(pctOf(cur) + '–' + pctOf(sg.c0) + '%'); cur = Math.max(cur, sg.c1); }
+        const cov = await window.modeCoverage.get(titleId);
+        const ext = (arr) => (arr && arr.length) ? [arr[0][0], arr[arr.length - 1][1]] : null;
+        console.log('[KAI-SPINEDBG]', {
+          titleId,
+          axis: { total: T, useJp: !!axis.useJp, isTime: !!axis.isTime, canMapCues: !!axis.canMapCues },
+          nowPct: pctOf(currentAxisPos(axis)),
+          furthest: (map && map.furthest) || null,
+          coverBands: band(segs), coverHoles: holes,
+          revisitBands: band(rsegs),
+          storeV: cov && cov.v,
+          storeIvs: cov ? { ms: (cov.ms || []).length, cue: (cov.cue || []).length, jp: (cov.jp || []).length,
+                            rms: (cov.rms || []).length, rcue: (cov.rcue || []).length, rjp: (cov.rjp || []).length } : null,
+          storeExtent: cov ? { ms: ext(cov.ms), cue: ext(cov.cue), jp: ext(cov.jp) } : null,
+          msIvs: cov ? (cov.ms || []).slice(0, 40) : null,
+        });
       } catch (_) {}
-      const furthest = (window.bookmarks && window.bookmarks.getFurthest)
-        ? window.bookmarks.getFurthest(titleId) : null;
       // Read-state of the AI content (✓ / ○ / ▸続きから markers).
       let _aiRead = await aiReadLoad(titleId);
 
@@ -1564,10 +2666,8 @@
       } catch (_) {}
 
       const prev = document.getElementById('bookmarksOverlay');
-      if (prev) prev.remove();
+      if (prev) { try { if (prev._kaiDestroy) prev._kaiDestroy(); else prev.remove(); } catch (_) { try { prev.remove(); } catch (_) {} } }
 
-      let zoom = 1;
-      let lastSpineH = 0;
       let refreshTimer = null;
       let _imgPoll = null;   // while open: pull finished scene renders from the server
       let _posTimer = null;  // while open: keep the live current-place marker tracking
@@ -1584,6 +2684,9 @@
           if (window.aiImages && window.aiImages.statusBatch) {
             const ids = [];
             try { for (const [k, a] of Object.entries(arts || {})) { const scns = (a && Array.isArray(a.scenes)) ? a.scenes : []; for (let s = 0; s < scns.length; s++) ids.push('scene_' + k + '_' + s); } } catch (_) {}
+            // bare per-chapter buckets too (legacy auto-illustrate images): the
+            // feed needs their COUNT up front to reserve fixed-size figures
+            try { const chs = (map && Array.isArray(map.chunks)) ? map.chunks : []; for (const c of chs) if (c && Number.isFinite(c.idx)) ids.push('scene_' + c.idx); } catch (_) {}
             _sceneSlotStat = ids.length ? (await window.aiImages.statusBatch(titleId, ids) || {}) : {};
           }
           scheduleRefresh(60);
@@ -1596,8 +2699,11 @@
       // Match the Characters screen: a centered card over a dimmed backdrop, inset from
       // the safe area, so on Android it sits BELOW the status bar instead of full-bleed
       // over it (a top-anchored full-screen panel put its header under the status bar).
+      // z 9000 (NOT higher): the feed's summary text is dict-tappable and the dict
+      // popup sits at 9999 — the panel must stay below it. The scene card
+      // (#kchapterView, also 9000) stacks above as a later body child.
       overlay.style.cssText =
-        'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100000;' +
+        'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9000;' +
         'display:flex;align-items:center;justify-content:center;box-sizing:border-box;' +
         'padding:calc(8px + env(safe-area-inset-top, 0px)) 0 calc(8px + env(safe-area-inset-bottom, 0px));';
       const panel = document.createElement('div');
@@ -1605,27 +2711,58 @@
         'background:#0d0d12;border:1px solid #2a2a2a;border-radius:14px;' +
         'width:min(96vw,860px);height:96vh;max-height:100%;display:flex;flex-direction:column;overflow:hidden;';
 
+      const tlScrollKey = 'TL_SCROLL_V1_' + titleId;   // per-title reopen spot
       function destroy() {
+        // Remember the spot for next open (row idx + offset within it) — the
+        // panel used to reopen centered on the CURRENT chapter, dumping the
+        // user far from where they were reading the feed.
+        try {
+          const a = captureScrollAnchor();
+          if (a) localStorage.setItem(tlScrollKey, JSON.stringify(a));
+          else localStorage.removeItem(tlScrollKey);
+        } catch (_) {}
         if (refreshTimer) { clearTimeout(refreshTimer); refreshTimer = null; }
         if (_imgPoll) { clearInterval(_imgPoll); _imgPoll = null; }
         if (_posTimer) { clearInterval(_posTimer); _posTimer = null; }
+        try { if (_readObs) { _readObs.disconnect(); _readObs = null; } } catch (_) {}
+        try { if (_imgObs) { _imgObs.disconnect(); _imgObs = null; } } catch (_) {}
+        try { if (_smRaf != null) { cancelAnimationFrame(_smRaf); _smRaf = null; } } catch (_) {}
+        // a feed-started scene clip must not outlive the panel (stops + resumes the book)
+        try { clipDispose(); } catch (_) {}
+        // a feed-started quote passage must not outlive the panel either — it
+        // moved the SHARED playhead, so skipping its snapshot restore here
+        // would strand the book at the quote's position (place loss).
+        try { stopPassage(); } catch (_) {}
+        // release the shared trim waveform if a feed scene holds it (never touch
+        // a scene card's — _feedWfHost is null whenever the card owns it)
+        try { if (_feedWfHost && !document.getElementById('kchapterView')) { window.waveform && window.waveform.hide && window.waveform.hide(); } _feedWfHost = null; } catch (_) {}
+        try { document.removeEventListener('visibilitychange', onPanelVis); } catch (_) {}
         try { window.removeEventListener('kai:ai-data', onData); } catch (_) {}
         try { window.removeEventListener('kai:scenes-changed', onData); } catch (_) {}
         try { window.removeEventListener('kai:img-data', refreshSceneHave); } catch (_) {}
-        try { window.removeEventListener('kai:proc-status', onProc); } catch (_) {}
         try { const wf = document.getElementById('liveWaveform'); if (wf && overlay._kaiWfHidden) wf.style.display = overlay._kaiWfPrev || ''; } catch (_) {}
         try { overlay.remove(); } catch (_) {}
       }
+
+      // Feed summary font scale (persisted, global): multiplies the card font
+      // size. Default slightly smaller than card mode; − / + in the header.
+      let _fontScale = parseFloat(localStorage.getItem('TL_FONT_SCALE_V1'));
+      if (!Number.isFinite(_fontScale) || _fontScale <= 0) _fontScale = 0.85;
+      // Pictures show/hide (persisted, global). Hidden = frames display:none via
+      // CSS (captions/quotes stay) AND image bytes aren't fetched — pending
+      // loads run when toggled back on.
+      let _picsHidden = false;
+      try { _picsHidden = localStorage.getItem('TL_PICS_HIDDEN_V1') === '1'; } catch (_) {}
+      ensureTlPicsStyle();
 
       // header
       const head = document.createElement('div');
       head.style.cssText =
         'display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid #222;';   // card is already inset below the safe area
       const title = document.createElement('div');
-      title.style.cssText = 'flex:1;font-weight:600;color:#eee;font-size:1rem;';
-      title.innerHTML = esc(window.i18n.t('tl.title', 'Timeline & Scenes')) + ' <span style="color:#666;font-size:.68rem;font-weight:400;">' +
-                        (axis.isTime ? esc(fmtDur(axis.total))
-                                     : window.i18n.fmt('tl.chars', { n: Math.round(axis.total).toLocaleString() }, Math.round(axis.total).toLocaleString() + '字')) + '</span>';
+      title.style.cssText = 'flex:1;min-width:0;font-weight:600;color:#eee;font-size:1rem;' +
+        'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      title.textContent = window.i18n.t('tl.title', 'Timeline & Scenes');
       const mkBtn = (txt, fn, dim) => {
         const b = document.createElement('button');
         b.textContent = txt;
@@ -1635,6 +2772,67 @@
         return b;
       };
       head.appendChild(title);
+      // pictures on/off (dimmed label = hidden)
+      const picsBtn = document.createElement('button');
+      const paintPicsBtn = () => {
+        picsBtn.textContent = window.i18n.t('tl.pics', '画像');
+        picsBtn.style.cssText = 'background:#1c1c24;border:1px solid #333;border-radius:8px;' +
+          'color:' + (_picsHidden ? '#666' : '#ccc') + ';font-size:.9rem;padding:11px 12px;cursor:pointer;line-height:1.2;' +
+          (_picsHidden ? 'text-decoration:line-through;' : '');
+      };
+      paintPicsBtn();
+      picsBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _picsHidden = !_picsHidden;
+        try { localStorage.setItem('TL_PICS_HIDDEN_V1', _picsHidden ? '1' : '0'); } catch (_) {}
+        overlay.classList.toggle('tl-nopics', _picsHidden);
+        paintPicsBtn();
+        if (!_picsHidden) {
+          // frames are visible again — fetch the bytes deferred while hidden
+          try {
+            for (const f of inner.querySelectorAll('.kai-img-lazy')) {
+              if (f._kaiImgPending) { const fn = f._kaiImgPending; f._kaiImgPending = null; try { fn(); } catch (_) {} }
+            }
+          } catch (_) {}
+        }
+      });
+      head.appendChild(picsBtn);
+      // Vocab review (in-app SRS) — label carries the due count when > 0.
+      const srsHdrBtn = document.createElement('button');
+      srsHdrBtn.style.cssText = 'background:#1c1c24;border:1px solid #333;border-radius:8px;' +
+        'color:#cbbfee;font-size:.9rem;padding:11px 12px;cursor:pointer;line-height:1.2;';
+      srsHdrBtn.textContent = window.i18n.t('vs.review_btn', '語彙');
+      srsHdrBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        try { window.vocabSrs && window.vocabSrs.openHub(); } catch (_) {}
+      });
+      (async () => {
+        try {
+          const c = await window.vocabSrs?.counts?.();
+          if (c && c.due > 0) {
+            srsHdrBtn.textContent = window.i18n.t('vs.review_btn', '語彙') + ' ' + c.due;
+            srsHdrBtn.style.borderColor = '#463a6b';
+          }
+        } catch (_) {}
+      })();
+      head.appendChild(srsHdrBtn);
+      // − / + adjust the summary text size (anchor-preserving re-render)
+      const setScale = (d) => {
+        _fontScale = Math.max(0.6, Math.min(1.3, Math.round((_fontScale + d) * 100) / 100));
+        try { localStorage.setItem('TL_FONT_SCALE_V1', String(_fontScale)); } catch (_) {}
+        render();
+      };
+      const mkSmBtn = (txt, fn) => { const b = mkBtn(txt, fn); b.style.padding = '6px 11px'; return b; };
+      head.appendChild(mkSmBtn('−', () => setScale(-0.08)));
+      head.appendChild(mkSmBtn('+', () => setScale(0.08)));
+      // visionOS: pop this panel out into its own window (panel-bridge.js).
+      // Null off Vision, so the header is unchanged everywhere else. Popping
+      // out tears the in-window copy down — the window IS the panel now.
+      try {
+        const po = window.kadokiPanel && window.kadokiPanel.makeButton
+          ? window.kadokiPanel.makeButton('timeline', () => destroy()) : null;
+        if (po) head.appendChild(po);
+      } catch (_) {}
       head.appendChild(mkBtn('✕', () => destroy()));
       panel.appendChild(head);
 
@@ -1662,21 +2860,37 @@
       // must not force a synchronous layout read while the finger is moving — on
       // iOS that stalls the separate momentum-scroll thread = a hitch every tick.
       let _lastScrollTs = 0;
-      main.addEventListener('scroll', () => { _lastScrollTs = Date.now(); }, { passive: true });
+      // _kaiTlScrollTs: ai-processor's uiBusy() reads this to defer the chapter
+      // pump while the user is actively reading/scrolling the feed. TOUCH-driven
+      // (not scroll events) so programmatic scrolls don't count as user activity.
+      let _userTouchTs = 0;
+      let _smRaf = null;
+      main.addEventListener('scroll', () => {
+        _lastScrollTs = Date.now();
+        // live axis marker follows the feed scroll (one rAF-throttled style write)
+        if (_smRaf == null) _smRaf = requestAnimationFrame(() => { _smRaf = null; updateScrollMarker(); });
+      }, { passive: true });
+      main.addEventListener('touchstart', () => { _userTouchTs = Date.now(); window._kaiTlScrollTs = _userTouchTs; }, { passive: true });
+      main.addEventListener('touchmove', () => { _userTouchTs = Date.now(); window._kaiTlScrollTs = _userTouchTs; }, { passive: true });
       const inner = document.createElement('div');
       inner.style.cssText = 'position:relative;width:100%;';
       main.appendChild(inner);
       bodyRow.appendChild(main);
       panel.appendChild(bodyRow);
 
-      const foot = document.createElement('div');
-      foot.style.cssText =
-        'padding:10px 14px;border-top:1px solid #222;display:flex;flex-direction:column;gap:8px;';   // card already clears the home indicator
-      panel.appendChild(foot);
 
       overlay.appendChild(panel);
       overlay.addEventListener('click', (e) => { if (e.target === overlay) destroy(); });   // tap outside the card closes (like Characters)
+      overlay._kaiDestroy = destroy;   // replace-path teardown (openPanel over an open panel)
+      overlay.classList.toggle('tl-nopics', _picsHidden);
       document.body.appendChild(overlay);
+
+      // Backgrounded mid-clip (feed ▶): dispose at once so the durable position
+      // saves capture the user's real place, not a dangling clip player.
+      // Backgrounded mid-clip/mid-passage: restore at once so the app's durable
+      // position saves capture the user's real place, not the excerpt spot.
+      function onPanelVis() { if (document.hidden) { try { clipDispose(); } catch (_) {} try { stopPassage(); } catch (_) {} } }
+      document.addEventListener('visibilitychange', onPanelVis);
 
       // Idle the live audio waveform canvas while this list is open — SAME iOS jank
       // fix the chapter view and scene card already use: it keeps redrawing behind
@@ -1716,7 +2930,13 @@
         try {
           const idxs = Object.keys(arts || {}).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
           for (const i of idxs) {
-            if (hasSummary(arts[i]) && !_aiRead.ch[i]) return i;
+            const a = arts[i];
+            if (!hasSummary(a)) continue;
+            if (a.ahead) {   // generated ahead — hidden until reached, never "unread"
+              const ch = (map && Array.isArray(map.chunks)) ? map.chunks.find(c => c && c.idx === i) : null;
+              if (ch && !chapterReached(map, ch)) continue;
+            }
+            if (!_aiRead.ch[i]) return i;
           }
         } catch (_) {}
         return -1;
@@ -1770,30 +2990,18 @@
         } catch (_) {}
       }
 
-      function makeChapterTap(ch, art, complete) {
-        if (hasSummary(art)) {
-          return () => {
-            destroy();
-            openChapterView(titleId, ch, art, () => { try { openPanel(); } catch (_) {} });
-          };
-        }
-        // No usable summary yet.
-        const hasScenes = !!_sceneStat[ch.idx] ||
-          !!(window.aiScenes && window.aiScenes.deferredChapters && window.aiScenes.deferredChapters(titleId).has(ch.idx));
+      // Feed model: a summarized chapter shows EVERYTHING inline (full summary +
+      // scene images), so its row has no tap at all — nothing opens, nothing
+      // destroys the panel. The only remaining tap is generate/retry on a fully
+      // read (or failed) chapter that lacks a summary.
+      function makeChapterTap(ch, art, complete, reached) {
+        if (hasSummary(art)) return null;
         const state = ch.state || 'none';
-        // Fully read (or a failed attempt) → the tap GENERATES the missing summary.
-        // (Scene rows below carry their own taps, so scenes stay viewable.) This is
-        // the fix: the tap used to open an empty view or hit the global in-order
-        // pump that could never reach a stranded chapter.
-        if (complete || state === 'failed') {
+        // Generatable once ARRIVED at, matching processChapter's own gate. The
+        // spoiler confirm inside the row still keys off `complete`, so building
+        // a summary for the chapter you're mid-way through asks first.
+        if (complete || reached || state === 'failed') {
           return () => regenChapter(ch);
-        }
-        // Not yet read, but it already has scene images → open the card to view them.
-        if (hasScenes) {
-          return () => {
-            destroy();
-            openChapterView(titleId, ch, null, () => { try { openPanel(); } catch (_) {} });
-          };
         }
         return null;
       }
@@ -1803,6 +3011,8 @@
       // user navigation, so a deliberate position change is fine.
       async function jumpToChapter(ch) {
         try {
+          // reused rows capture an old chunk object — resolve the live one
+          try { const live = _chById && _chById.get(String(ch.idx)); if (live) ch = live; } catch (_) {}
           // NEVER-LOSE-PLACE: record where the user is NOW (any mode) into
           // History BEFORE navigating, so this jump is always recoverable.
           try { if (window.bookmarks && window.bookmarks.captureCurrent) window.bookmarks.captureCurrent({ force: true }); } catch (_) {}
@@ -1826,271 +3036,26 @@
         } catch (_) {}
       }
 
-      function buildChapterCard(ch, art, complete, prog, full, onTap) {
-        const idx = ch.idx;
-        // A "✦" in the gutter = this chapter HAS scene illustration(s) — OR an unlocked
-        // scene awaiting generation (auto-render capped/offline). Tap the chapter to
-        // view its 場面 section (or generate). This is how scenes are FOUND.
-        const sceneMark = !!_sceneStat[idx] ||
-          !!(window.aiScenes && window.aiScenes.deferredChapters && window.aiScenes.deferredChapters(titleId).has(idx));
-        const state = ch.state || 'none';
-        const unread = !complete && !art && state === 'none';
-        const label = (art && art.label) || ch.label || window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章');
-        const card = document.createElement('div');
-        card.className = 'menu-item';
-        let css =
-          'position:absolute;left:' + COL_X + 'px;right:10px;background:#16161d;' +
-          'border:1px solid #26262e;border-radius:10px;touch-action:pan-y;' +   // a vertical drag on a card scrolls (Android), tap still works
-          (onTap ? 'cursor:pointer;' : '') + (unread ? 'opacity:.55;' : '');
-        if (!full) {
-          // semantic zoom: label-only row
-          css += 'padding:6px 10px;display:flex;align-items:center;gap:8px;';
-          card.style.cssText = css;
-          const n = document.createElement('span');
-          n.style.cssText = 'color:#888;font-size:.9rem;font-weight:700;';
-          n.textContent = String(idx + 1);
-          const _zMark = aiReadMarkFor(idx, art);
-          const l = document.createElement('span');
-          l.style.cssText = 'flex:1;min-width:0;color:' +
-            (aiUnreadMark(_zMark) ? '#fff' : (_zMark === 'read' ? '#a9a9b5' : (unread ? '#999' : '#e6e6e6'))) +
-            ';font-size:1.02rem;font-weight:' + (aiUnreadMark(_zMark) ? 800 : 600) +
-            ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-          l.textContent = unread ? ((ch.label || window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章')) + ' · ' + window.i18n.t('tl.unread', '未読')) : label;
-          card.appendChild(n);
-          card.appendChild(l);
-          const _rmz = aiReadMarkEl(_zMark);
-          if (_rmz) card.appendChild(_rmz);
-          if (prog.pct > 0) {
-            const pc = document.createElement('span');
-            pc.style.cssText = 'color:#777;font-size:.72rem;';
-            pc.textContent = Math.round(prog.pct * 100) + '%';
-            card.appendChild(pc);
-          }
-        } else {
-          css += 'padding:9px 30px 10px 12px;';
-          card.style.cssText = css;
-          const titleRow = document.createElement('div');
-          titleRow.style.cssText = 'display:flex;align-items:flex-start;gap:8px;';
-          const _cMark = aiReadMarkFor(idx, art);
-          const titleEl = document.createElement('div');
-          titleEl.style.cssText =
-            'flex:1;min-width:0;font-weight:' + (aiUnreadMark(_cMark) ? 800 : (_cMark === 'read' ? 600 : 700)) +
-            ';font-size:1.12rem;line-height:1.3;color:' +
-            (aiUnreadMark(_cMark) ? '#ffffff' : (_cMark === 'read' ? '#b4b4c0' : (unread ? '#aaa' : '#f0f0f0'))) + ';';
-          // chapter NAME: AI label → EPUB chapter name (ch.label) → 第N章
-          titleEl.textContent = (art && art.label) || ch.label || window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章');
-          titleRow.appendChild(titleEl);
-          const _rmc = aiReadMarkEl(_cMark);
-          if (_rmc) { _rmc.style.marginTop = '3px'; titleRow.appendChild(_rmc); }
-          // jump-to-chapter arrow (navigate the book to this chapter's start)
-          const jb = document.createElement('button');
-          jb.textContent = '➤';
-          jb.title = window.i18n.t('tl.go_to_chapter', 'Go to this chapter in the book');
-          jb.style.cssText =
-            'flex:none;background:none;border:1px solid #3a3450;border-radius:7px;color:#aab4dd;' +
-            'font-size:.82rem;padding:2px 9px;cursor:pointer;line-height:1.2;';
-          jb.addEventListener('click', (e) => { e.stopPropagation(); jumpToChapter(ch); });
-          titleRow.appendChild(jb);
-          card.appendChild(titleRow);
-          const sub = document.createElement('div');
-          if (art && art.shortSummary) {
-            sub.style.cssText =
-              'margin-top:4px;color:#b8b8b8;font-size:.95rem;line-height:1.5;' +
-              'display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;';
-            sub.textContent = art.shortSummary;
-          } else if (state === 'processing') {
-            sub.style.cssText = 'margin-top:3px;color:#cbbfee;font-size:.8rem;';
-            sub.textContent = window.i18n.t('tl.processing', '処理中…');
-          } else if (state === 'queued') {
-            sub.style.cssText = 'margin-top:3px;color:#888;font-size:.8rem;';
-            sub.textContent = window.i18n.t('tl.queued_waiting', '待機中…');
-          } else if (state === 'failed') {
-            sub.style.cssText = 'margin-top:3px;color:#e08a8a;font-size:.8rem;';
-            // Honest status: while the bounded auto-retry is still armed for this
-            // transient failure, say so — "tap to retry" only when it's manual-only.
-            const autoRetrying = !!(window.aiProcessor && window.aiProcessor.autoRetryState &&
-                                    window.aiProcessor.autoRetryState(titleId, ch) === 'retrying');
-            sub.textContent = autoRetrying
-              ? window.i18n.t('tl.failed_retrying', '失敗 — 自動再試行中')
-              : window.i18n.t('tl.failed_tap_retry', '失敗 — タップで再試行');
-          } else if (complete) {
-            sub.style.cssText = 'margin-top:3px;color:#8a7fb8;font-size:.8rem;';
-            sub.textContent = window.i18n.t('tl.tap_to_generate', 'タップして要約を生成');
-          } else {
-            sub.style.cssText = 'margin-top:3px;color:#666;font-size:.8rem;';
-            sub.textContent = prog.pct > 0.02 ? (Math.round(prog.pct * 100) + '%') : window.i18n.t('tl.unread', '未読');
-          }
-          card.appendChild(sub);
-          if (prog.pct > 0) {
-            // positional multi-segment bar: each coverage piece sits at its
-            // place within the chapter's own [jpStart, jpEnd] range
-            const bar = document.createElement('div');
-            bar.style.cssText =
-              'margin-top:8px;height:3px;background:#26262e;border-radius:2px;' +
-              'overflow:hidden;position:relative;';
-            const a = axis.chStart(ch), b = axis.chEnd(ch);
-            const len = (Number.isFinite(a) && Number.isFinite(b) && b > a) ? (b - a) : 0;
-            const pieces = len > 0 ? barSegments(segs, a, b) : [];
-            if (pieces.length) {
-              for (const pc of pieces) {
-                const d = document.createElement('div');
-                d.style.cssText =
-                  'position:absolute;top:0;bottom:0;' +
-                  'left:' + (((pc[0] - a) / len) * 100).toFixed(2) + '%;' +
-                  'width:' + (((pc[1] - pc[0]) / len) * 100).toFixed(2) + '%;' +
-                  'background:' + (COLORS[pc[2]] || '#555') + ';';
-                bar.appendChild(d);
-              }
-            } else {
-              // pre-tracker progress (furthest watermark only): gray fill
-              const fill = document.createElement('div');
-              fill.style.cssText =
-                'height:100%;width:' + Math.round(prog.pct * 100) + '%;' +
-                'border-radius:2px;background:#3a3a46;';
-              bar.appendChild(fill);
-            }
-            card.appendChild(bar);
-          }
-        }
-        if (sceneMark) {
-          const sb = document.createElement('div');
-          sb.textContent = '✦';
-          sb.title = window.i18n.t('tl.scene_marker_title', 'この章の場面（タップで表示）');
-          sb.style.cssText = 'position:absolute;top:50%;left:-15px;transform:translateY(-50%);color:#c8a23a;font-size:.85rem;line-height:1;pointer-events:none;';
-          card.appendChild(sb);
-        }
-        if (onTap) card.addEventListener('click', (e) => { e.stopPropagation(); onTap(); });
-        return card;
-      }
-
-      function renderChapters(chapters, innerH, Y, cx, furthestJp) {
-        const full = (innerH / chapters.length) >= FULL_CARD_SLOT_PX;
-        let cursor = 0;
-        for (const ch of chapters) {
-          const idx = ch.idx;
-          const art = arts ? (arts[idx] || null) : null;
-          const state = ch.state || 'none';
-          const complete = chapterComplete(map, ch);
-          const prog = chapterProgress(axis, ch, segs, furthestJp);
-          const anchor = Math.max(0, Math.min(innerH, Y(axis.chStart(ch))));
-          const nodeY = Math.max(NODE_R, Math.min(innerH - NODE_R, anchor));
-          const onTap = makeChapterTap(ch, art, complete);
-
-          // node on the spine
-          const node = document.createElement('div');
-          let ns =
-            'position:absolute;left:' + (cx - NODE_R) + 'px;top:' + (nodeY - NODE_R) + 'px;' +
-            'width:' + (NODE_R * 2) + 'px;height:' + (NODE_R * 2) + 'px;border-radius:50%;' +
-            'display:flex;align-items:center;justify-content:center;z-index:5;' +
-            'font-size:.72rem;font-weight:700;box-sizing:border-box;' +
-            (onTap ? 'cursor:pointer;' : '');
-          if (art && complete) {
-            // done = filled/shaded number (keep the chapter number visible)
-            ns += 'background:#6f5fc0;border:2px solid #8d7ee0;color:#fff;';
-            node.textContent = String(idx + 1);
-          } else if (state === 'failed') {
-            ns += 'background:#241317;border:2px solid #7c3a42;color:#e08a8a;font-size:.8rem;';
-            node.textContent = '⚠';
-          } else if (state === 'processing') {
-            ns += 'background:#1d1830;border:2px solid #6a5ca8;color:#cbbfee;';
-            node.textContent = String(idx + 1);
-            node.classList.add('kai-glow');
-          } else if (art) {
-            ns += 'background:#1d1830;border:2px solid #6f5fc0;color:#cbbfee;';
-            node.textContent = String(idx + 1);
-          } else {
-            ns += 'background:#15151c;border:2px solid #3a3a44;color:#777;';
-            node.textContent = String(idx + 1);
-          }
-          node.style.cssText = ns;
-          if (onTap) node.addEventListener('click', (e) => { e.stopPropagation(); onTap(); });
-          inner.appendChild(node);
-
-          const card = buildChapterCard(ch, art, complete, prog, full, onTap);
-          if (full) {
-            // EXACT axis alignment: the card spans the chapter's own char range
-            // (top = Y(jpStart), bottom = Y(jpEnd)). Chapters are contiguous, so
-            // cards tile the axis perfectly — a long chapter is a tall card, a
-            // short one a short card. Content clips (overflow) when the span is
-            // tight; a small floor keeps at least the title legible.
-            const bot = Y(axis.chEnd(ch));
-            const spanH = Math.max(0, bot - anchor);
-            card.style.top = anchor + 'px';
-            // Floor at ~one title line + padding so a short / zoomed-out chapter never
-            // clips its TITLE (the "text cut off / compressed" artifact). Short cards
-            // may slightly overlap the next — legible beats clipped.
-            card.style.height = Math.max(46, spanH - 5) + 'px';
-            card.style.overflow = 'hidden';
-            inner.appendChild(card);
-            cursor = Math.max(cursor, anchor + spanH);
-          } else {
-            // label-only (zoomed out): keep the push-down rows + connector tick
-            const tick = document.createElement('div');
-            tick.style.cssText =
-              'position:absolute;left:' + (cx + NODE_R) + 'px;width:' + (COL_X - cx - NODE_R - 4) + 'px;' +
-              'height:1px;background:#2c2c36;top:' + nodeY + 'px;pointer-events:none;';
-            inner.appendChild(tick);
-            const top = Math.max(anchor - 4, cursor);
-            card.style.top = top + 'px';
-            inner.appendChild(card);
-            cursor = top + (card.offsetHeight || 28) + 8;
-          }
-        }
-        return cursor;
-      }
-
-      // No chunk map yet: spine fill + bookmark cards only (legacy-ish view).
-      function renderFallback(innerH, Y) {
-        const items = [];
-        for (const bm of bms) {
-          const p = axis.pos(bm.mode === 'read'
-            ? { k: 'read', jpOff: bm.location && bm.location.jpOff }
-            : { k: 'card', cardIndex: bm.location && bm.location.cardIndex });
-          if (p === null || !Number.isFinite(p)) continue;
-          items.push({ bm, anchor: Y(p) });
-        }
-        items.sort((a, b) => a.anchor - b.anchor);
-        let cursor = 0;
-        for (const it of items) {
-          const top = Math.max(it.anchor, cursor);
-          const card = document.createElement('div');
-          card.className = 'menu-item';
-          card.style.cssText =
-            'position:absolute;left:' + COL_X + 'px;right:10px;top:' + top + 'px;' +
-            'background:#16161d;border:1px solid #26262e;border-left:3px solid #caa84a;' +
-            'border-radius:8px;padding:7px 10px;cursor:pointer;';
-          card.innerHTML =
-            '<div style="font-size:.74rem;color:#caa84a;">◆ ' +
-            esc(it.bm.mode === 'read' ? window.i18n.t('tl.read_bookmark', 'Read bookmark') : window.i18n.t('tl.card_bookmark', 'Card bookmark')) + '</div>' +
-            '<div style="color:#8a7c4e;font-size:.64rem;margin-top:1px;">' +
-            hm(it.bm.ts) + ' · ' + esc(window.i18n.t('tl.tap_to_jump', 'tap to jump')) + '</div>';
-          card.addEventListener('click', (e) => {
-            e.stopPropagation();
-            destroy();
-            try { window.bookmarks.jumpTo(it.bm); } catch (_) {}
-          });
-          inner.appendChild(card);
-          cursor = top + (card.offsetHeight || 40) + 6;
-        }
-        if (!items.length && !segs.length) {
-          const empty = document.createElement('div');
-          empty.style.cssText =
-            'position:absolute;left:' + COL_X + 'px;right:10px;top:14px;color:#666;' +
-            'font-size:.78rem;line-height:1.5;';
-          empty.textContent = window.i18n.t('tl.empty_help',
-            'Reading sessions paint the spine as you read and listen. ' +
-            'Chapter cards appear once the book has been processed (AI assistant).');
-          inner.appendChild(empty);
-        }
-        return cursor;
-      }
-
       // ---- Chapter LIST (redesign) -------------------------------------------------
       // A flat, scrollable list — one row per chapter (number + start-char + title +
       // 1-line summary + 新着/✦ scene badge + jump). Tap → the chapter card (which
       // holds the scene images). No proportional spine / pinch-zoom (those clipped
       // text + were awkward); the char-count is printed per row instead of as a scale.
       let _curRowEl = null;
+      let _chById = null;          // chIdx (string) → chunk, for the axis scroll marker
+      let _scrollMarkerEl = null;  // amber viewport marker on the coverage axis
+      let _feedWfHost = null;      // the ONE feed scene currently holding the shared trim waveform
+      // Per-title collapsed chapters (▸/▾ triangle). A collapsed section hides
+      // its body AND its read sentinel — scrolling past it never marks it read.
+      const collKey = 'TL_COLLAPSED_V1_' + titleId;
+      let _collapsed = new Set();
+      try { const a = JSON.parse(localStorage.getItem(collKey) || '[]'); if (Array.isArray(a)) _collapsed = new Set(a.map(Number)); } catch (_) {}
+      const saveCollapsed = () => { try { localStorage.setItem(collKey, JSON.stringify(Array.from(_collapsed))); } catch (_) {} };
+      // Row reconciliation cache: idx → {sig, el}. Background refreshes rebuild
+      // ONLY rows whose data changed; reused rows keep their decoded images,
+      // filled quote boxes and expander state — the fix for the feed "flowing
+      // in"/shifting under the reader on every kai:ai-data / img event.
+      const _rowCache = new Map();
       // Decorative whole-book coverage axis (left column) — modality-colored,
       // proportional to total book length, with a current-position marker. Pure
       // decoration (the list itself is not to scale).
@@ -2138,6 +3103,7 @@
           try {
             const f = (map && map.furthest) || {};
             if (axis.useJp && Number.isFinite(f.jp)) furthestP = f.jp;
+            else if (Number.isFinite(f.ms) && typeof axis.msToChars === 'function') furthestP = axis.msToChars(f.ms);
             else if (Number.isFinite(f.cue)) furthestP = axis.cueToChars(f.cue);
           } catch (_) {}
           if (furthestP !== null && Number.isFinite(furthestP) &&
@@ -2160,37 +3126,92 @@
             axisWrap.appendChild(wrap);
             _nowMarkerEl = wrap;
           }
+          // amber viewport marker: where the feed section you're LOOKING AT
+          // sits in the book — tracks the scroll live (updateScrollMarker)
+          const sm = document.createElement('div');
+          sm.className = 'kai-axis-marker';
+          sm.style.cssText =
+            'position:absolute;left:-3px;right:-3px;height:11px;margin-top:-5.5px;' +
+            'border:1.5px solid rgba(200,162,58,.95);border-radius:4px;background:rgba(200,162,58,.16);' +
+            'z-index:4;pointer-events:none;top:0;display:none;box-sizing:border-box;';
+          axisWrap.appendChild(sm);
+          _scrollMarkerEl = sm;
+          updateScrollMarker();
+        } catch (_) {}
+      }
+
+      // Map the row under the viewport's upper focus point (plus the fraction
+      // scrolled through it) to book-axis units and move the amber marker there.
+      // One style write per scroll frame; offsetTop reads are cheap mid-scroll
+      // (layout is clean).
+      function updateScrollMarker() {
+        try {
+          if (!_scrollMarkerEl || !axis || !axis.total) return;
+          const focusY = main.scrollTop + Math.min(140, main.clientHeight * 0.3);
+          let row = null;
+          for (const r of inner.children) {
+            if (!r.dataset || r.dataset.chIdx == null) continue;
+            if (r.offsetTop + r.offsetHeight > focusY) { row = r; break; }
+          }
+          const ch = (row && _chById) ? _chById.get(row.dataset.chIdx) : null;
+          if (!ch) { _scrollMarkerEl.style.display = 'none'; return; }
+          const a = axis.chStart(ch), b = axis.chEnd(ch);
+          const frac = Math.max(0, Math.min(1, (focusY - row.offsetTop) / Math.max(1, row.offsetHeight)));
+          const p = (Number.isFinite(a) && Number.isFinite(b) && b > a) ? (a + frac * (b - a)) : a;
+          if (!Number.isFinite(p)) { _scrollMarkerEl.style.display = 'none'; return; }
+          const pct = (Math.max(0, Math.min(axis.total, p)) / axis.total) * 100;
+          _scrollMarkerEl.style.display = 'block';
+          _scrollMarkerEl.style.top = pct.toFixed(2) + '%';
         } catch (_) {}
       }
       function buildChapterRow(ch, art, complete, prog, onTap, isCur, pos) {
         const idx = ch.idx;
         const state = ch.state || 'none';
         const unread = !complete && !art && state === 'none';
+        const hasSum = hasSummary(art);
         const label = (art && art.label) || ch.label || window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章');
         const stat = _sceneStat[idx] || null;
         const row = document.createElement('div');
         row.className = 'menu-item';
+        row.dataset.chIdx = String(idx);   // scroll-anchor + read-sentinel key
         row.style.cssText =
-          'position:relative;margin:0 0 8px;padding:11px 13px;border-radius:10px;box-sizing:border-box;' +
+          'position:relative;margin:0 0 ' + (hasSum ? '18px' : '8px') + ';padding:11px 13px;border-radius:10px;box-sizing:border-box;' +
           'background:' + (isCur ? '#1c1830' : '#16161d') + ';' +
           'border:1px solid ' + (isCur ? '#5a4f8c' : '#26262e') + ';' +
-          // Offscreen rows skip layout/paint (and their thumbnails skip decode)
-          // — the chapter list is fully rendered with no virtualization, and on
-          // iOS the decode-cache pressure showed up as scroll lag. `auto`
-          // intrinsic-size keeps the last measured height once seen.
-          'content-visibility:auto;contain-intrinsic-size:auto 88px;' +
+          // NO content-visibility on feed sections OR any row carrying images:
+          // their real height dwarfs any estimate, and the late materialization
+          // was the scroll jitter + reopen jump around pictures. Layout cost is
+          // one-time at open; image DECODE stays lazy via the feed image
+          // observer. Plain compact rows keep the cheap skip (they match their
+          // estimate).
+          ((hasSum || ((_sceneSlotStat['scene_' + idx] || {}).images || 0) > 0) ? '' : 'content-visibility:auto;contain-intrinsic-size:auto 88px;') +
           'touch-action:pan-y;' + (onTap ? 'cursor:pointer;' : '') + (unread ? 'opacity:.6;' : '');
+        const isColl = hasSum && _collapsed.has(idx);
+        // IN-PLACE collapse: assigned at the end of this builder (needs body/
+        // preview). No re-render and no scroll writes — the tapped point
+        // physically cannot move; only content BELOW the card reflows.
+        let toggleColl = () => {};
         // meta line (wraps so the current-chapter summary button never overflows)
         const meta = document.createElement('div');
         meta.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:3px;';
+        let tri = null;
+        if (hasSum) {
+          // collapse triangle — collapsed sections show only their header and
+          // are exempt from scroll-to-read marking
+          tri = document.createElement('button');
+          tri.textContent = isColl ? '▸' : '▾';
+          tri.style.cssText = 'flex:none;background:none;border:none;color:#b0aacb;font-size:1.9rem;padding:8px 18px 8px 4px;cursor:pointer;line-height:1;';
+          tri.addEventListener('click', (e) => { e.stopPropagation(); toggleColl(); });
+          meta.appendChild(tri);
+        }
         const num = document.createElement('span');
-        num.style.cssText = 'flex:none;color:' + (art && complete ? '#a594e6' : '#888') + ';font-size:.74rem;font-weight:700;';
+        num.style.cssText = 'flex:none;color:' + (art && complete ? '#a594e6' : '#888') + ';font-size:' + (hasSum ? '.86rem' : '.74rem') + ';font-weight:800;';
         num.textContent = window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章');
         meta.appendChild(num);
         // AI-content read state: ✓ read / ● unread (blue) / ●続きから first-unread.
         const _aiMark = aiReadMarkFor(idx, art);
         const _rm = aiReadMarkEl(_aiMark);
-        if (_rm) meta.appendChild(_rm);
+        if (_rm) { meta.appendChild(_rm); row._kaiMarkEl = _rm; }   // swapped in place when the read sentinel fires
         const cc = document.createElement('span');
         cc.style.cssText = 'flex:1;min-width:0;color:#6a6a76;font-size:.68rem;';
         cc.textContent = (axis && axis.isTime)
@@ -2203,11 +3224,78 @@
           now.textContent = window.i18n.t('tl.now', 'いま');
           meta.appendChild(now);
         }
-        if (stat && stat.images > 0) {
+        if (!hasSum && stat && stat.images > 0) {
           const b = document.createElement('span');
           b.style.cssText = 'flex:none;color:#c8a23a;font-size:.82rem;line-height:1;';
           b.textContent = '✦';
           meta.appendChild(b);
+        }
+        if (hasSum && window.aiExport && window.aiExport.chapterText) {
+          const cp = document.createElement('button');
+          cp.textContent = '⧉';
+          cp.title = window.i18n.t('tl.copy_chapter_summary', 'Copy chapter summary');
+          cp.style.cssText = 'flex:none;background:none;border:1px solid #3a3450;border-radius:8px;color:#aab4dd;font-size:1.05rem;padding:6px 13px;cursor:pointer;line-height:1.2;';
+          cp.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            try {
+              const ok = await window.aiExport.copyText(window.aiExport.chapterText(art, ch, idx + 1));
+              window.aiExport.toast(ok ? window.i18n.t('tl.copied', 'Copied') : window.i18n.t('tl.copy_failed', 'Copy failed'));
+            } catch (_) {}
+          });
+          meta.appendChild(cp);
+        }
+        // Rebuild: regenerate an EXISTING summary (e.g. into the new narrative-
+        // blocks format). Explicit confirm — it re-bills the chapter. discard
+        // strips the old summary so the billing backstop can't re-adopt it;
+        // scenes + their images are preserved (processChunk regen guard).
+        if (hasSum && window.aiProcessor && typeof window.aiProcessor.processChapter === 'function') {
+          const rb = document.createElement('button');
+          rb.textContent = '⟲';
+          rb.title = window.i18n.t('tl.regen_summary', 'Rebuild this chapter summary');
+          rb.style.cssText = 'flex:none;background:none;border:1px solid #3a3450;border-radius:8px;color:#aab4dd;font-size:1.05rem;padding:6px 13px;cursor:pointer;line-height:1.2;';
+          rb.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!window.confirm(window.i18n.t('tl.regen_summary_confirm', 'この章の要約をAIで作り直しますか？（API利用料がかかります）'))) return;
+            rb.disabled = true;
+            try {
+              // forceUnread: the spoiler was accepted when this summary was first
+              // generated; without it a previously force-generated chapter would
+              // bounce off the completeness guard.
+              const r = await window.aiProcessor.processChapter(titleId, ch.idx, { force: true, discard: true, forceUnread: true });
+              if (r && r.ok !== false) {
+                try { window.showToast && window.showToast(window.i18n.t('tl.generating_summary', '要約を生成中…'), 2500); } catch (_) {}
+                scheduleRefresh(600);
+              } else rb.disabled = false;
+            } catch (_) { rb.disabled = false; }
+          });
+          meta.appendChild(rb);
+        }
+        // Force-generate: summarize this chapter NOW even if it doesn't register
+        // as read (watch listening advances the book without painting coverage).
+        // Explicit spoiler confirm when the tracker says it's unfinished.
+        if (!hasSum && state !== 'processing' && state !== 'queued' &&
+            window.aiProcessor && typeof window.aiProcessor.processChapter === 'function') {
+          const gb = document.createElement('button');
+          const gbLabel = '✦ ' + window.i18n.t('common.generate', '生成');
+          gb.textContent = gbLabel;
+          gb.style.cssText = 'flex:none;background:#191425;border:1px solid #463a6b;border-radius:7px;color:#d6c8ff;font-size:.68rem;padding:2px 9px;cursor:pointer;line-height:1.2;';
+          gb.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (!complete && !window.confirm(window.i18n.t('tl.spoiler_confirm', 'この章はまだ読み終えていません。要約にはネタバレが含まれる可能性があります。生成しますか？'))) return;
+            gb.disabled = true;
+            gb.textContent = window.i18n.t('tl.thinking', '考え中…');
+            try {
+              const r = await window.aiProcessor.processChapter(titleId, ch.idx, { force: true, forceUnread: true });
+              if (r && r.ok !== false) {
+                try { window.showToast && window.showToast(window.i18n.t('tl.generating_summary', '要約を生成中…'), 2500); } catch (_) {}
+                scheduleRefresh(600);
+              } else {
+                gb.disabled = false;
+                gb.textContent = gbLabel;
+              }
+            } catch (_) { gb.disabled = false; gb.textContent = gbLabel; }
+          });
+          meta.appendChild(gb);
         }
         const jb = document.createElement('button');
         jb.textContent = '➤';
@@ -2227,6 +3315,8 @@
             destroy();
             const space = (map && map.space === 'cue') ? 'cue' : 'jp';
             const a = (space === 'cue') ? (Number.isFinite(ch.cueStart) ? ch.cueStart : 0) : (ch.jpStart || 0);
+            // live position — a reused row's closure `pos` can be stale
+            try { const lp = currentAxisPos(axis); if (lp !== null && Number.isFinite(lp)) pos = lp; } catch (_) {}
             // Cue space: b must be a CUE INDEX like a — derive it from the
             // live cue cursor, never from the axis position (axis units are
             // chars/ms, not indices).
@@ -2244,50 +3334,115 @@
         }
         row.appendChild(meta);
         // title — email-style weight: unread AI content bold+bright, read dimmed.
+        // Feed sections get a LARGE title (the chapter boundary must read at a
+        // glance while scrolling one continuous feed).
         const titleEl = document.createElement('div');
         const _tw = aiUnreadMark(_aiMark) ? 800 : (_aiMark === 'read' ? 600 : 700);
         const _tc = aiUnreadMark(_aiMark) ? '#ffffff' : (_aiMark === 'read' ? '#b4b4c0' : (unread ? '#aaa' : '#f0f0f0'));
-        titleEl.style.cssText = 'font-weight:' + _tw + ';font-size:1.08rem;line-height:1.3;color:' + _tc + ';';
+        titleEl.style.cssText = 'font-weight:' + _tw + ';font-size:' + (hasSum ? '1.34rem' : '1.08rem') + ';line-height:1.28;color:' + _tc + ';' +
+          (hasSum ? 'margin-top:2px;' : '');   // underline/padding applied by applyColl (expanded only)
         titleEl.textContent = label;
-        row.appendChild(titleEl);
-        // 1-line (2-clamped) summary / state
-        let sc = '#b0b0b8', stext = '';
-        if (art && art.shortSummary) { stext = art.shortSummary; }
-        else if (state === 'processing') { stext = window.i18n.t('tl.creating_ai_summary', 'AI要約を作成中…'); sc = '#cbbfee'; }
-        else if (state === 'queued') { stext = window.i18n.t('tl.queued_waiting', '待機中…'); sc = '#888'; }
-        else if (state === 'failed') {
-          // While the bounded auto-retry is still armed for this transient
-          // failure, say so honestly instead of asking for a tap.
-          const autoRetrying = !!(window.aiProcessor && window.aiProcessor.autoRetryState &&
-                                  window.aiProcessor.autoRetryState(titleId, ch) === 'retrying');
-          if (autoRetrying) {
-            stext = window.i18n.t('tl.failed_retrying', '失敗 — 自動再試行中');
-          } else {
-            // Surface WHY it failed (the request path captures it on the chunk) so a
-            // transient API hiccup (rate limit / overload / network) reads clearly
-            // instead of a bare "失敗".
-            const er = (ch && ch.error) ? String(ch.error) : '';
-            let why = '';
-            if (/\b429\b|rate.?limit/i.test(er)) why = window.i18n.t('tl.fail_rate_limit', '混雑（429）');
-            else if (/\b529\b|overload/i.test(er)) why = window.i18n.t('tl.fail_overload', 'サーバー混雑');
-            else if (/network|connection|timeout|timed out/i.test(er)) why = window.i18n.t('tl.fail_network', '接続エラー');
-            else if (/\b401\b|api key/i.test(er)) why = window.i18n.t('tl.fail_api_key', 'APIキー要確認');
-            else if (/credit|billing|quota|insufficient|balance/i.test(er)) why = window.i18n.t('tl.fail_credit', 'クレジット不足');
-            else if (/refus/i.test(er)) why = window.i18n.t('tl.fail_refused', 'モデルが拒否');
-            else if (er) why = er.slice(0, 36);
-            stext = why ? window.i18n.fmt('tl.failed_reason_tap_retry', { why: why }, '失敗（' + why + '）— タップで再試行') : window.i18n.t('tl.failed_tap_retry', '失敗 — タップで再試行');
-          }
-          sc = '#e08a8a';
+        if (hasSum) {
+          // the TITLE toggles collapse in BOTH directions (triangle works too)
+          titleEl.style.cursor = 'pointer';
+          titleEl.addEventListener('click', (e) => { e.stopPropagation(); toggleColl(); });
         }
-        else if (complete) { stext = window.i18n.t('tl.tap_to_generate', 'タップして要約を生成'); sc = '#8a7fb8'; }
-        else { stext = (prog.pct > 0.02 ? window.i18n.fmt('tl.pct_read', { n: Math.round(prog.pct * 100) }, Math.round(prog.pct * 100) + '% 読了') : window.i18n.t('tl.unread', '未読')); sc = '#666'; }
-        const sub = document.createElement('div');
-        sub.style.cssText = 'margin-top:3px;font-size:.86rem;line-height:1.45;color:' + sc + ';' +
-          'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;';
-        sub.textContent = stext;
-        row.appendChild(sub);
-        // chapter progress bar — coverage within [jpStart,jpEnd], colored by modality
-        if (prog && prog.pct > 0) {
+        row.appendChild(titleEl);
+        // hasSum rows render BOTH forms and toggle visibility in place:
+        // preview = the collapsed 2-line teaser; body = the full feed section.
+        let body = null, preview = null;
+        if (hasSum) {
+          preview = document.createElement('div');
+          preview.style.cssText = 'margin-top:3px;font-size:.86rem;line-height:1.45;color:#b0b0b8;' +
+            'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;';
+          preview.textContent = (art && art.shortSummary) || '';
+          row.appendChild(preview);
+          body = document.createElement('div');
+          row.appendChild(body);
+        }
+        if (hasSum) {
+          // FULL summary text — the feed IS the chapter view now. Dict enablement
+          // happens in render() and is applied ONLY to these leaf text divs (the
+          // chapter-view invariant: never containers with buttons).
+          const prose = (text, extra) => {
+            const d = document.createElement('div');
+            d.className = 'kai-summary-text';   // squiggle-marking + dict target
+            d.style.cssText =
+              'color:#d6d6de;font-family:var(--font-family-card);' +
+              'font-size:calc(var(--font-size-card) * ' + _fontScale + ');' +
+              'line-height:1.7;white-space:pre-wrap;' + (extra || '');
+            d.textContent = text || '';
+            return d;
+          };
+          const blocksEl = buildSummaryBlocks(art, prose, titleId, ch.idx, ch);
+          const longText = blocksEl ? '' : (paragraphize(art.longSummary || '') || art.shortSummary || '');
+          if (blocksEl) {
+            blocksEl.style.marginTop = '10px';
+            body.appendChild(blocksEl);
+          } else if (longText.length > 700 && art.mediumSummary) {
+            // legacy artifact (old 600-1500字 long): medium teaser + expander so
+            // one chapter doesn't dump a wall of text into the feed
+            body.appendChild(prose(paragraphize(art.mediumSummary), 'margin-top:6px;'));
+            const fullEl = prose(longText, 'display:none;margin-top:10px;');
+            const btn = document.createElement('button');
+            btn.textContent = window.i18n.t('tl.show_full_text', '全文を表示');
+            btn.style.cssText =
+              'display:block;margin:8px 0 0;background:#1c1c24;border:1px solid #333;' +
+              'border-radius:8px;color:#aab4dd;font-size:.78rem;padding:6px 14px;cursor:pointer;';
+            btn.addEventListener('click', (e) => {
+              e.stopPropagation();
+              const open = fullEl.style.display === 'none';
+              fullEl.style.display = open ? '' : 'none';
+              btn.textContent = open ? window.i18n.t('tl.hide_full_text', '全文を閉じる') : window.i18n.t('tl.show_full_text', '全文を表示');
+            });
+            body.appendChild(btn);
+            body.appendChild(fullEl);
+          } else {
+            body.appendChild(prose(longText, 'margin-top:6px;'));
+          }
+        } else {
+          // compact row (unsummarized chapter, or a COLLAPSED section): 2-line clamp.
+          // A collapsed section previews its own summary — never a state prompt.
+          let sc = '#b0b0b8', stext = '';
+          if (art && art.shortSummary) { stext = art.shortSummary; }
+          else if (state === 'processing') { stext = window.i18n.t('tl.creating_ai_summary', 'AI要約を作成中…'); sc = '#cbbfee'; }
+          else if (state === 'queued') { stext = window.i18n.t('tl.queued_waiting', '待機中…'); sc = '#888'; }
+          else if (state === 'failed') {
+            // While the bounded auto-retry is still armed for this transient
+            // failure, say so honestly instead of asking for a tap.
+            const autoRetrying = !!(window.aiProcessor && window.aiProcessor.autoRetryState &&
+                                    window.aiProcessor.autoRetryState(titleId, ch) === 'retrying');
+            if (autoRetrying) {
+              stext = window.i18n.t('tl.failed_retrying', '失敗 — 自動再試行中');
+            } else {
+              // Surface WHY it failed (the request path captures it on the chunk) so a
+              // transient API hiccup (rate limit / overload / network) reads clearly
+              // instead of a bare "失敗".
+              const er = (ch && ch.error) ? String(ch.error) : '';
+              let why = '';
+              if (/\b429\b|rate.?limit/i.test(er)) why = window.i18n.t('tl.fail_rate_limit', '混雑（429）');
+              else if (/\b529\b|overload/i.test(er)) why = window.i18n.t('tl.fail_overload', 'サーバー混雑');
+              else if (/network|connection|timeout|timed out/i.test(er)) why = window.i18n.t('tl.fail_network', '接続エラー');
+              else if (/\b401\b|api key/i.test(er)) why = window.i18n.t('tl.fail_api_key', 'APIキー要確認');
+              else if (/credit|billing|quota|insufficient|balance/i.test(er)) why = window.i18n.t('tl.fail_credit', 'クレジット不足');
+              else if (/refus/i.test(er)) why = window.i18n.t('tl.fail_refused', 'モデルが拒否');
+              else if (er) why = er.slice(0, 36);
+              stext = why ? window.i18n.fmt('tl.failed_reason_tap_retry', { why: why }, '失敗（' + why + '）— タップで再試行') : window.i18n.t('tl.failed_tap_retry', '失敗 — タップで再試行');
+            }
+            sc = '#e08a8a';
+          }
+          else if (complete) { stext = window.i18n.t('tl.tap_to_generate', 'タップして要約を生成'); sc = '#8a7fb8'; }
+          else { stext = (prog.pct > 0.02 ? window.i18n.fmt('tl.pct_read', { n: Math.round(prog.pct * 100) }, Math.round(prog.pct * 100) + '% 読了') : window.i18n.t('tl.unread', '未読')); sc = '#666'; }
+          const sub = document.createElement('div');
+          sub.style.cssText = 'margin-top:3px;font-size:.86rem;line-height:1.45;color:' + sc + ';' +
+            'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;';
+          sub.textContent = stext;
+          row.appendChild(sub);
+        }
+        // chapter progress bar — coverage within [jpStart,jpEnd], colored by
+        // modality. COMPACT rows only: inside a full feed section it read as a
+        // stray "fragmented dashed line" floating between text and pictures.
+        if (!hasSum && prog && prog.pct > 0) {
           const bar = document.createElement('div');
           bar.style.cssText = 'margin-top:7px;height:3px;background:#26262e;border-radius:2px;overflow:hidden;position:relative;';
           const a = axis.chStart(ch), b = axis.chEnd(ch);
@@ -2306,60 +3461,320 @@
           }
           row.appendChild(bar);
         }
-        // ---- scenes (Instagram-style feed under the chapter summary) ----------------
-        // Each Claude-authored scene = a 1-line description + a tiny thumbnail (if an
-        // image exists) or a 生成 badge; tap → the dedicated scene card. Chapter
-        // description stays ABOVE — same layout as before, just inlined here.
+        // ---- scenes: full-width images inline in the feed ---------------------------
+        // A rendered scene shows as a full-width image + caption; tap stacks the
+        // scene card OVER the still-open panel (Anki send / trim / regenerate),
+        // so closing it lands back on the untouched, un-scrolled feed. A scene
+        // without an image stays a compact 生成 row.
         const scenes = (art && Array.isArray(art.scenes)) ? art.scenes : [];
         if (scenes.length) {
           const sceneBox = document.createElement('div');
-          sceneBox.style.cssText = 'margin-top:9px;display:flex;flex-direction:column;gap:6px;';
+          sceneBox.style.cssText = 'margin-top:10px;display:flex;flex-direction:column;gap:10px;';
           scenes.forEach((scn, s) => {
             const sCharId = 'scene_' + idx + '_' + s;
             const sst = _sceneSlotStat[sCharId] || null;
             const has = !!(sst && sst.images > 0);
             const pending = !!(sst && sst.pending > 0);
-            const sr = document.createElement('div');
-            sr.style.cssText = 'display:flex;align-items:center;gap:9px;padding:6px;border-radius:8px;background:#13131a;border:1px solid #20202c;touch-action:pan-y;cursor:pointer;';
-            const thumb = document.createElement('div');
-            thumb.style.cssText = 'flex:none;width:46px;height:46px;border-radius:7px;overflow:hidden;background:#0c0c12;display:flex;align-items:center;justify-content:center;font-size:.58rem;text-align:center;line-height:1.2;';
+            const capText = scn.caption || scn.title || window.i18n.fmt('tl.scene_n', { n: s + 1 }, 'シーン ' + (s + 1));
+            // Everything scene-related lives inline now — tapping the image
+            // opens the full-screen VIEWER (pinch-zoom lightbox) with delete /
+            // regenerate / OpenRouter model picker, not the old scene card.
+            const buildViewerFooter = (ctx, commitRef) => {
+              const bar = document.createElement('div');
+              bar.style.cssText = 'display:flex;flex-direction:column;gap:8px;align-items:center;width:min(94vw,660px);max-height:34vh;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 6px 2px;';
+              // ---- book passage + trim waveform + ▶ / Send-to-Anki ----------
+              // Moved INTO the viewer (feed rows are caption-only now): the
+              // passage is the actual book text the scene's audio plays.
+              const qwrap = document.createElement('div');
+              qwrap.style.cssText = 'display:none;width:100%;box-sizing:border-box;background:#191722;border-radius:8px;box-shadow:inset 3px 0 0 #6f5fc0;padding:9px 12px;max-height:16vh;overflow-y:auto;-webkit-overflow-scrolling:touch;';
+              qwrap.addEventListener('click', (e2) => { e2.stopPropagation(); });
+              const qt = document.createElement('div');
+              qt.className = 'kai-summary-text';
+              qt.style.cssText = 'color:#cfcbdd;font-family:var(--font-family-card);' +
+                'font-size:calc(var(--font-size-card) * ' + (_fontScale * 0.95) + ');line-height:1.7;white-space:pre-wrap;text-align:left;';
+              qwrap.appendChild(qt);
+              bar.appendChild(qwrap);
+              (async () => {
+                try {
+                  const loc = await sceneLoc(titleId, ch, scn, sCharId);
+                  if (loc && loc.expression && qt.isConnected) {
+                    qt.textContent = loc.expression;
+                    qwrap.style.display = '';
+                    try { if (typeof window.dictEnableLookupIn === 'function') window.dictEnableLookupIn(qt); } catch (_) {}
+                  }
+                } catch (_) {}
+              })();
+              const wfHost = document.createElement('div');
+              wfHost.style.cssText = 'display:none;width:100%;';
+              wfHost.addEventListener('click', (e2) => { e2.stopPropagation(); });
+              bar.appendChild(wfHost);
+              const showWf = async () => {
+                const info = await sceneClipInfo(titleId, ch, scn, sCharId);
+                if (!info.bounds || !info.srcPath || !(window.waveform && window.waveform.show)) return info;
+                if (_feedWfHost === wfHost) return info;   // already ours
+                try { window.waveform.hide(); } catch (_) {}
+                if (_feedWfHost) { try { _feedWfHost.style.display = 'none'; } catch (_) {} }
+                window.waveform.show({
+                  container: wfHost, srcPath: info.srcPath, startMs: info.bounds.startMs, endMs: info.bounds.endMs,
+                  onChange: (nb) => { try { if (nb && Number.isFinite(nb.startMs) && Number.isFinite(nb.endMs) && nb.endMs > nb.startMs) sceneTrimSet(titleId, sCharId, nb.startMs, nb.endMs); } catch (_) {} },
+                });
+                try { const pp = wfHost.querySelector('[data-role="playpause"]'); if (pp) pp.style.display = 'none'; } catch (_) {}   // ▶ below drives playback
+                wfHost.style.display = '';
+                _feedWfHost = wfHost;
+                return info;
+              };
+              // live handle drags win over the persisted trim / located range
+              const liveBounds = (info) => {
+                try { if (_feedWfHost === wfHost && window.waveform && window.waveform.current) { const c = window.waveform.current(); if (c && Number.isFinite(c.startMs) && Number.isFinite(c.endMs) && c.endMs > c.startMs) return { startMs: c.startMs, endMs: c.endMs }; } } catch (_) {}
+                return info && info.bounds;
+              };
+              showWf().catch(() => {});   // trim waveform visible on open (no audio → stays hidden)
+              const act = document.createElement('div');
+              act.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;';
+              const pb = document.createElement('button');
+              pb.textContent = '▶';
+              pb.title = window.i18n.t('tl.listen_scene', '▶ この場面を聴く');
+              pb.style.cssText = 'flex:none;background:#1d1830;border:1px solid #463a6b;border-radius:8px;color:#cbbfee;font-size:.84rem;padding:6px 13px;cursor:pointer;';
+              pb.addEventListener('click', async (e2) => {
+                e2.stopPropagation();
+                try {
+                  const info = await showWf();
+                  if (!info.bounds || !info.srcPath) {
+                    const msg = !scn.anchorQuote
+                      ? window.i18n.t('tl.scene_no_quote', 'この場面には本文の引用がありません（シーン案を作り直すと付きます）。')
+                      : window.i18n.t('tl.no_audio', '音声なし');
+                    try { window.showToast && window.showToast(msg, 3000); } catch (_) {}
+                    return;
+                  }
+                  clipPlay(liveBounds(info), pb, info.srcPath);
+                } catch (_) {}
+              });
+              act.appendChild(pb);
+              const ab = document.createElement('button');
+              ab.textContent = window.i18n.t('tl.send_to_anki', 'Ankiに送る');
+              ab.style.cssText = 'flex:none;background:#16221a;border:1px solid #2f5a3a;border-radius:8px;color:#9fe0b0;font-size:.8rem;padding:6px 12px;cursor:pointer;';
+              ab.addEventListener('click', async (e2) => {
+                e2.stopPropagation();
+                if (ab.disabled) return;
+                ab.disabled = true;
+                const orig = ab.textContent;
+                ab.textContent = window.i18n.t('tl.anki_preparing', 'Anki準備中…');
+                try {
+                  // send the image being VIEWED, not blindly the latest one
+                  const cur = ctx.current();
+                  const sceneUri = (cur && cur.row && cur.row.dataUri) || '';
+                  if (!sceneUri) { try { window.showToast && window.showToast(window.i18n.t('tl.generate_image_first', 'まず画像を生成してください'), 3000); } catch (_) {} return; }
+                  let t = null; try { t = await window.titleStore.get(titleId); } catch (_) {}
+                  const cover = (t && t.attachments && t.attachments.cover && t.attachments.cover.dataUri) || '';
+                  let imageData = '';
+                  try { imageData = await window.aiImages.compositeScene(sceneUri, cover, (t && t.name) || ''); }
+                  catch (_) { try { window.showToast && window.showToast(window.i18n.t('tl.composite_failed', '画像の合成に失敗'), 3000); } catch (_) {} return; }
+                  const loc = await sceneLoc(titleId, ch, scn, sCharId);
+                  const expression = (loc && loc.expression) || scn.caption || (window.i18n.fmt('tl.scene_n', { n: s + 1 }, 'シーン ' + (s + 1)));
+                  let audioData = '', audioNote = '';
+                  const info = await sceneClipInfo(titleId, ch, scn, sCharId);
+                  const bounds = liveBounds(info);
+                  if (!bounds || !info.srcPath) audioNote = window.i18n.t('tl.no_audio', '音声なし');
+                  else {
+                    audioData = await _sliceToUri(info.srcPath, bounds.startMs, bounds.endMs);
+                    if (!audioData) audioNote = window.i18n.t('tl.no_audio', '音声なし');
+                  }
+                  if (!window.sendToAnki) { try { window.showToast && window.showToast(window.i18n.t('tl.anki_unsupported', 'Anki未対応'), 3000); } catch (_) {} return; }
+                  await window.sendToAnki({ expression, imageData, audioData });   // shows its own ✓ Added toast
+                  if (!audioData && audioNote) { try { window.showToast && window.showToast(window.i18n.t('tl.anki_sent', 'Ankiに送信しました') + '（' + audioNote + '）', 3000); } catch (_) {} }
+                } catch (_) {
+                  try { window.showToast && window.showToast(window.i18n.t('tl.anki_send_failed', 'Anki送信に失敗'), 3000); } catch (_) {}
+                } finally { ab.disabled = false; ab.textContent = orig; }
+              });
+              act.appendChild(ab);
+              bar.appendChild(act);
+              // Delete / Regenerate render as small overlay buttons in the image's
+              // own TOP corners (see openLightbox's `corner` return) — kept out of
+              // the scrollable footer, and out of the picture's bottom (where the
+              // actual scene content usually sits) so they don't obscure it.
+              const isOR = !!(window.aiImages.backend && window.aiImages.backend() === 'openrouter');
+              let sel = null, alwaysCb = null;
+              const prevDefault = (isOR && window.aiImages.openrouterImageModel) ? window.aiImages.openrouterImageModel() : null;
+              // "always use this model" → persist as the default. Committed on
+              // regenerate AND on viewer close (opts.onClose → commitRef).
+              const commitModelPref = () => {
+                try {
+                  if (!isOR || !sel || !sel.value || !alwaysCb || !alwaysCb.checked) return;
+                  const m = (sel._models || []).find(x => x.id === sel.value);
+                  if (!prevDefault || prevDefault.id !== sel.value || m) {
+                    window.aiImages.setOpenrouterImageModel(m || { id: sel.value, name: sel.value });
+                  }
+                } catch (_) {}
+              };
+              commitRef.fn = commitModelPref;
+              const del = document.createElement('button');
+              del.textContent = window.i18n.t('common.delete', 'Delete');
+              del.style.cssText = 'background:rgba(36,19,23,.88);border:1px solid #7c3a42;border-radius:7px;color:#e08a8a;font-size:.7rem;padding:5px 10px;cursor:pointer;';
+              del.addEventListener('click', async (e2) => {
+                e2.stopPropagation();
+                try {
+                  const cur = ctx.current();
+                  if (!cur || !cur.row) return;
+                  if (!window.confirm(window.i18n.t('tl.delete_image_confirm', 'この画像を削除しますか？'))) return;
+                  await window.aiImages.deleteImage(titleId, sCharId, cur.row.imgId);
+                  ctx.close();
+                  scheduleRefresh(120);
+                } catch (_) {}
+              });
+              const rg = document.createElement('button');
+              rg.textContent = window.i18n.t('tl.regenerate_image', '再生成');
+              rg.style.cssText = 'background:rgba(29,24,48,.88);border:1px solid #463a6b;border-radius:7px;color:#cbbfee;font-size:.7rem;padding:5px 10px;cursor:pointer;';
+              rg.addEventListener('click', async (e2) => {
+                e2.stopPropagation();
+                if (rg.disabled) return;
+                rg.disabled = true;
+                try {
+                  commitModelPref();
+                  const r = await window.aiImages.queueSceneFromPrompt(titleId, ch.idx, s, {
+                    prompt: scn.prompt, caption: capText, style: scn.style || '', sceneId: scn.id, label: label, force: true,
+                    orModel: (isOR && sel && sel.value) ? sel.value : null,
+                  });
+                  if (r && r.ok) {
+                    try { window.aiImages.sync(titleId); } catch (_) {}
+                    try { window.showToast && window.showToast(window.i18n.t('tl.generating', '生成中'), 2500); } catch (_) {}
+                    ctx.close();
+                    scheduleRefresh(200);
+                  } else rg.disabled = false;
+                } catch (_) { rg.disabled = false; }
+              });
+              // Model picker groups with Delete/Regenerate (all "regenerate"
+              // controls) — rendered as a compact overlay bar centered just
+              // above them, not down in the scrollable footer.
+              let mrow = null;
+              if (isOR) {
+                mrow = document.createElement('div');
+                mrow.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px 8px;align-items:center;justify-content:center;background:rgba(10,9,16,.78);border:1px solid rgba(255,255,255,.14);border-radius:9px;padding:6px 8px;box-sizing:border-box;';
+                mrow.addEventListener('click', (e2) => e2.stopPropagation());
+                sel = document.createElement('select');
+                sel.style.cssText = 'flex:1;min-width:120px;background:#15151d;border:1px solid #333;border-radius:7px;color:#ddd;font-size:.72rem;padding:5px 6px;';
+                const opt0 = document.createElement('option');
+                opt0.value = prevDefault ? prevDefault.id : '';
+                opt0.textContent = prevDefault ? (prevDefault.name || prevDefault.id) : window.i18n.t('tl.loading_models', 'モデルを読み込み中…');
+                sel.appendChild(opt0);
+                (async () => {
+                  try {
+                    const models = await window.aiImages.fetchOpenRouterImageModels();
+                    if (!Array.isArray(models) || !models.length || !sel.isConnected) return;
+                    sel.innerHTML = '';
+                    sel._models = models;
+                    for (const m of models) {
+                      const o = document.createElement('option');
+                      o.value = m.id; o.textContent = m.name || m.id;
+                      sel.appendChild(o);
+                    }
+                    if (prevDefault && models.some(m => m.id === prevDefault.id)) sel.value = prevDefault.id;
+                  } catch (_) {}
+                })();
+                sel.addEventListener('click', (e2) => e2.stopPropagation());
+                // Opening/dismissing the native <select> picker sheet can bounce a
+                // real tap back onto the image underneath (a genuine tap-to-dismiss-
+                // the-sheet that also lands on the page) — suppress the viewer's
+                // close-on-tap for a moment around that interaction, the same way
+                // the dictionary popup ignores taps that originate from its own
+                // pickers, so choosing a model doesn't also close the image window.
+                const guardSel = () => { try { ctx.suppressClose && ctx.suppressClose(900); } catch (_) {} };
+                sel.addEventListener('pointerdown', guardSel);
+                sel.addEventListener('focus', guardSel);
+                sel.addEventListener('change', guardSel);
+                const lab = document.createElement('label');
+                lab.style.cssText = 'display:flex;align-items:center;gap:5px;color:#aab;font-size:.66rem;cursor:pointer;white-space:nowrap;';
+                lab.addEventListener('click', (e2) => e2.stopPropagation());
+                alwaysCb = document.createElement('input');
+                alwaysCb.type = 'checkbox';
+                alwaysCb.checked = true;
+                alwaysCb.addEventListener('pointerdown', guardSel);
+                lab.appendChild(alwaysCb);
+                const lt = document.createElement('span');
+                lt.textContent = window.i18n.t('tl.always_use_model', 'Always use this model');
+                lab.appendChild(lt);
+                mrow.appendChild(sel);
+                mrow.appendChild(lab);
+              }
+              return { footer: bar, corner: { left: del, right: rg, below: mrow } };
+            };
+            const openViewer = async (e) => {
+              e.stopPropagation();
+              try {
+                const rows = await window.aiImages.getImages(titleId, sCharId);
+                if (!rows || !rows.length) return;
+                const commitRef = { fn: null };
+                window.aiImages.openLightbox(rows, rows.length - 1, {
+                  titleId, charId: sCharId, interactive: true, fitH: 0.42,
+                  onChange: () => { try { scheduleRefresh(150); } catch (_) {} },
+                  onClose: () => {
+                    try { if (commitRef.fn) commitRef.fn(); } catch (_) {}
+                    try { clipStop(); } catch (_) {}
+                    // the viewer's waveform host left the DOM with the overlay
+                    try { if (_feedWfHost && !_feedWfHost.isConnected) { window.waveform && window.waveform.hide && window.waveform.hide(); _feedWfHost = null; } } catch (_) {}
+                  },
+                  buildFooter: (ctx) => buildViewerFooter(ctx, commitRef),
+                });
+              } catch (_) {}
+            };
             if (has) {
+              const fig = document.createElement('div');
+              fig.style.cssText = 'touch-action:pan-y;';
+              // fixed aspect frame: the image popping in never reflows the feed
+              const frame = document.createElement('div');
+              frame.style.cssText = 'width:100%;aspect-ratio:3/2;border-radius:10px;overflow:hidden;background:#0c0c12;border:1px solid #20202c;cursor:pointer;';
               const im = document.createElement('img');
               im.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
-              // iOS scroll-jank guards: decode off the main thread, don't decode
-              // offscreen rows at all, and fetch ONLY the newest image's bytes
-              // (getImages loaded every multi-MB data URI in the slot to show one).
               im.decoding = 'async';
-              im.loading = 'lazy';
-              thumb.appendChild(im);
-              (async () => { try { const row = await window.aiImages.getLatestImage(titleId, sCharId); if (row) im.src = row.dataUri; } catch (_) {} })();
+              frame.appendChild(im);
+              frame.addEventListener('click', openViewer);   // full-screen viewer (pinch-zoom / delete / regenerate / model)
+              fig.appendChild(frame);
+              // caption directly under the image
+              const cap = document.createElement('div');
+              cap.style.cssText = 'margin-top:5px;font-size:.9rem;line-height:1.55;color:#8f88ab;cursor:pointer;';
+              cap.textContent = capText;
+              cap.addEventListener('click', openViewer);
+              fig.appendChild(cap);
+              // Quote / waveform / ▶ / Anki live in the full-screen VIEWER now
+              // (buildViewerFooter) — the feed row is just frame + caption, and
+              // the caption stays clickable even with pictures hidden. Observed
+              // on the FIG (it keeps geometry when the pics toggle hides the
+              // frame); image bytes are deferred while pictures are hidden.
+              frame.classList.add('tl-imgframe');
+              fig.classList.add('kai-img-lazy');
+              fig._kaiLoad = async () => {
+                const loadImg = async () => { try { const r = await window.aiImages.getLatestImage(titleId, sCharId); if (r) im.src = r.dataUri; } catch (_) {} };
+                if (_picsHidden) fig._kaiImgPending = loadImg; else loadImg();
+              };
+              sceneBox.appendChild(fig);
             } else {
-              thumb.style.border = '1px dashed #463a6b'; thumb.style.color = '#9b8fd0';
+              const sr = document.createElement('div');
+              sr.style.cssText = 'display:flex;align-items:center;gap:9px;padding:6px;border-radius:8px;background:#13131a;border:1px solid #20202c;touch-action:pan-y;cursor:pointer;';
+              const thumb = document.createElement('div');
+              thumb.style.cssText = 'flex:none;width:46px;height:46px;border-radius:7px;background:#0c0c12;display:flex;align-items:center;justify-content:center;font-size:.58rem;text-align:center;line-height:1.2;border:1px dashed #463a6b;color:#9b8fd0;';
               thumb.textContent = pending ? window.i18n.t('tl.generating', '生成中') : window.i18n.t('common.generate', '生成');
+              sr.appendChild(thumb);
+              const desc = document.createElement('div');
+              desc.style.cssText = 'flex:1;min-width:0;font-size:.82rem;line-height:1.4;color:#cdd;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;';
+              desc.textContent = capText;
+              sr.appendChild(desc);
+              sr.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                if (pending) return;
+                try {
+                  const r = await window.aiImages.queueSceneFromPrompt(titleId, ch.idx, s, {
+                    prompt: scn.prompt, caption: capText, style: scn.style || '', sceneId: scn.id, label: label,
+                  });
+                  if (r && r.ok) {
+                    thumb.textContent = window.i18n.t('tl.generating', '生成中');
+                    try { window.aiImages.sync(titleId); } catch (_) {}
+                    try { window.showToast && window.showToast(window.i18n.t('tl.generating', '生成中'), 2000); } catch (_) {}
+                  }
+                } catch (_) {}
+              });
+              sceneBox.appendChild(sr);
             }
-            sr.appendChild(thumb);
-            const desc = document.createElement('div');
-            desc.style.cssText = 'flex:1;min-width:0;font-size:.82rem;line-height:1.4;color:#cdd;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;';
-            desc.textContent = scn.caption || scn.title || window.i18n.fmt('tl.scene_n', { n: s + 1 }, 'シーン ' + (s + 1));
-            sr.appendChild(desc);
-            // Scene read state: ✓ once its card has been opened, blue ● + bold
-            // caption while unread (email-style).
-            const _scRead = !!_aiRead.sc[idx + '_' + s];
-            const sk = document.createElement('span');
-            if (_scRead) {
-              sk.textContent = '✓';
-              sk.style.cssText = 'flex:none;color:#5f8f6a;font-size:.78rem;font-weight:700;';
-            } else {
-              sk.textContent = '●';
-              sk.style.cssText = 'flex:none;color:#3d9bff;font-size:.8rem;line-height:1;';
-              desc.style.fontWeight = '700';
-              desc.style.color = '#e8f1ff';
-            }
-            sr.appendChild(sk);
-            sr.addEventListener('click', (e) => { e.stopPropagation(); destroy(); openSceneCard(titleId, ch, art, s, () => { try { openPanel(); } catch (_) {} }); });
-            sceneBox.appendChild(sr);
           });
-          row.appendChild(sceneBox);
+          (body || row).appendChild(sceneBox);
         } else if (art && complete && window.aiProcessor && window.aiProcessor.generateSceneIdeas) {
           // Chapter summarized before scenes existed → offer to author them.
           const mk = document.createElement('button');
@@ -2370,32 +3785,166 @@
             try { const r = await window.aiProcessor.generateSceneIdeas(titleId, idx); if (r && r.ok) scheduleRefresh(60); else { mk.disabled = false; mk.textContent = (r && r.reason === 'ai-off') ? window.i18n.t('tl.enable_ai_short', 'AIを有効に') : window.i18n.t('tl.failed_retry', '失敗 — 再試行'); } }
             catch (_) { mk.disabled = false; mk.textContent = window.i18n.t('tl.error_retry', 'エラー — 再試行'); }
           });
-          row.appendChild(mk);
+          (body || row).appendChild(mk);
+        }
+        // Legacy 'scene_<idx>' bucket (old position-based auto-illustrate images):
+        // rendered as the SAME fixed-aspect figures as authored scenes — the old
+        // buildImageStrip had its own clashing chrome (Delete / model line /
+        // "Image caption") AND variable image heights, which was the residual
+        // scroll jitter. Count comes from the batched status so placeholders
+        // reserve exact space; bytes + captions load on approach.
+        const bareN = (_sceneSlotStat['scene_' + idx] && _sceneSlotStat['scene_' + idx].images) || 0;
+        if (bareN > 0 && window.aiImages && window.aiImages.getImages) {
+          const legacyBox = document.createElement('div');
+          legacyBox.style.cssText = 'margin-top:10px;display:flex;flex-direction:column;gap:10px;';
+          let rowsP = null;
+          const getRows = () => rowsP || (rowsP = window.aiImages.getImages(titleId, 'scene_' + idx).catch(() => []));
+          for (let li = 0; li < bareN; li++) {
+            const lfig = document.createElement('div');
+            lfig.className = 'tl-legacyfig';
+            const frame = document.createElement('div');
+            frame.className = 'tl-imgframe';
+            frame.style.cssText = 'width:100%;aspect-ratio:3/2;border-radius:10px;overflow:hidden;background:#0c0c12;border:1px solid #20202c;';
+            const im = document.createElement('img');
+            im.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+            im.decoding = 'async';
+            frame.appendChild(im);
+            const lcap = document.createElement('div');
+            // fixed 2-line box: the caption arrives async — space is reserved, no reflow
+            lcap.style.cssText = 'margin-top:4px;font-size:.92rem;line-height:1.5;color:#a89fc6;height:3em;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;';
+            lfig.classList.add('kai-img-lazy');
+            lfig._kaiLoad = async () => {
+              const loadImg = async () => {
+                try {
+                  const rows = await getRows();
+                  const r = rows && rows[li];
+                  if (r) { im.src = r.dataUri; lcap.textContent = r.caption || ''; }
+                } catch (_) {}
+              };
+              if (_picsHidden) lfig._kaiImgPending = loadImg; else loadImg();
+            };
+            lfig.appendChild(frame);
+            lfig.appendChild(lcap);
+            legacyBox.appendChild(lfig);
+          }
+          (body || row).appendChild(legacyBox);
+        }
+        // Read sentinel: the chapter counts as read once the END of its section
+        // has been scrolled into view (observed by render() via _readObs).
+        if (hasSum && _aiMark && _aiMark !== 'read') {
+          const sent = document.createElement('div');
+          sent.className = 'kai-read-sentinel';
+          sent.dataset.chIdx = String(idx);
+          sent.style.cssText = 'position:absolute;bottom:0;left:0;width:1px;height:1px;pointer-events:none;';
+          sent._kaiRow = row;
+          body.appendChild(sent);   // collapsed body = display:none = never intersects = never marks read
         }
         if (onTap) row.addEventListener('click', (e) => { e.stopPropagation(); onTap(); });
+        if (hasSum) {
+          const applyColl = (coll) => {
+            try {
+              if (tri) tri.textContent = coll ? '▸' : '▾';
+              if (body) body.style.display = coll ? 'none' : '';
+              if (preview) preview.style.display = coll ? '' : 'none';
+              titleEl.style.paddingBottom = coll ? '0px' : '7px';
+              titleEl.style.borderBottom = coll ? 'none' : '1px solid #2c2c38';
+            } catch (_) {}
+          };
+          toggleColl = () => {
+            const coll = !_collapsed.has(idx);
+            if (coll) _collapsed.add(idx); else _collapsed.delete(idx);
+            saveCollapsed();
+            applyColl(coll);
+            _rowCache.delete(idx);   // background renders rebuild this row to match
+          };
+          applyColl(isColl);
+          // tap anywhere on a COLLAPSED card to expand (no-op while expanded;
+          // inner buttons stopPropagation)
+          row.style.cursor = 'pointer';
+          row.addEventListener('click', (e) => {
+            if (!_collapsed.has(idx)) return;
+            e.stopPropagation();
+            toggleColl();
+          });
+        }
         return row;
       }
 
+      // Scroll anchoring: a re-render rebuilds `inner`, which momentarily zeroes
+      // the scroll height and CLAMPS main.scrollTop to 0 — the "list jumps to
+      // the top when an image lands" jank. Anchor to the row under the viewport
+      // top (by chapter idx) instead of a raw pixel offset, so height changes
+      // in rows far above don't shift the reading spot either.
+      function captureScrollAnchor() {
+        // Must succeed for ANY real scroll position, including the very top
+        // (st==0 is a legitimate spot to restore, not "nothing to save") and
+        // past the last row (iOS rubber-band overscroll can leave scrollTop
+        // briefly beyond the scrollable extent — a close tapped right after a
+        // scroll/fling, common while reading through consecutive summaries,
+        // used to land here). A null return here CLEARS the saved spot
+        // entirely (see destroy()) and falls back to centering on the
+        // CURRENT audio/read chapter — which, deep into a book, can be far
+        // from the feed position the user actually closed at. That fallback
+        // mismatch is exactly the "reopens at a different spot, near the
+        // end" bug — so this only returns null for a genuinely empty feed.
+        try {
+          const st = Math.max(0, main.scrollTop);
+          let lastRow = null;
+          for (const r of inner.children) {
+            if (!r.dataset || r.dataset.chIdx == null) continue;
+            lastRow = r;
+            if (r.offsetTop + r.offsetHeight > st) {
+              return { idx: r.dataset.chIdx, delta: Math.max(0, st - r.offsetTop) };
+            }
+          }
+          // scrolled past every row (bottom overscroll) → anchor to the last one
+          if (lastRow) return { idx: lastRow.dataset.chIdx, delta: Math.max(0, st - lastRow.offsetTop) };
+        } catch (_) {}
+        return null;
+      }
+      function restoreScrollAnchor(a) {
+        if (!a || a.idx == null) return false;
+        try {
+          let row = null;
+          for (const r of inner.children) {
+            if (r.dataset && r.dataset.chIdx === String(a.idx)) { row = r; break; }
+          }
+          if (!row) return false;
+          // Feed sections render at REAL height (no content-visibility), so a
+          // single exact scrollTop set restores the spot — no phased correction
+          // (a phased pass was visible as "lands, then jumps").
+          const delta = Math.min(Number(a.delta) || 0, Math.max(0, row.offsetHeight - 60));
+          main.scrollTop = Math.max(0, row.offsetTop + Math.max(0, delta));
+          return true;
+        } catch (_) {}
+        return false;
+      }
+
       function render() {
+        const anchor = captureScrollAnchor();
+        // a refresh may destroy the node hosting the shared waveform
+        try { if (_feedWfHost) { window.waveform && window.waveform.hide && window.waveform.hide(); _feedWfHost.style.display = 'none'; _feedWfHost = null; } } catch (_) {}
         inner.style.position = 'static';
         inner.style.height = 'auto';
         inner.style.padding = '12px 12px 6px';
-        inner.innerHTML = '';
         _curRowEl = null;
         const chapters = (map && Array.isArray(map.chunks)) ? map.chunks : null;
         if (!chapters || !chapters.length) {
           const m = document.createElement('div');
           m.style.cssText = 'color:#888;font-size:.9rem;text-align:center;padding:34px 16px;line-height:1.7;';
           m.textContent = window.i18n.t('tl.no_chapters_yet', 'チャプターはまだありません。読み進めると章ごとのカードが表示されます。');
-          inner.appendChild(m);
+          _rowCache.clear();
+          inner.replaceChildren(m);
           renderAxis();
           return;
         }
-        // Furthest watermark in AXIS units: jp for char axes, ms (via the
-        // furthest cue) for the time axis.
+        // Furthest watermark in AXIS units: jp for char axes, ms for the time
+        // axis — prefer the durable furthest.ms (generation-agnostic) over
+        // the legacy furthest.cue index.
         const furthestJp = axis.isTime
-          ? ((map.furthest && Number.isFinite(map.furthest.cue) && map.furthest.cue >= 0)
-              ? axis.cueToChars(map.furthest.cue) : null)
+          ? ((map.furthest && Number.isFinite(map.furthest.ms) && typeof axis.msToChars === 'function')
+              ? axis.msToChars(map.furthest.ms)
+              : ((map.furthest && Number.isFinite(map.furthest.cue) && map.furthest.cue >= 0) ? axis.cueToChars(map.furthest.cue) : null))
           : ((map.furthest && Number.isFinite(map.furthest.jp)) ? map.furthest.jp : null);
         const curP = currentAxisPos(axis);
         const pos = (curP !== null && Number.isFinite(curP)) ? curP : (furthestJp || 0);
@@ -2404,131 +3953,133 @@
           const a = axis.chStart(ch), b = axis.chEnd(ch);
           if (pos >= a && pos < (b > a ? b : Infinity)) { curIdx = ch.idx; break; }
         }
+        _chById = new Map(chapters.map(c => [String(c.idx), c]));   // axis scroll-marker lookup
+        const rows = [];
         for (const ch of chapters) {
           const idx = ch.idx;
-          const art = arts ? (arts[idx] || null) : null;
+          let art = arts ? (arts[idx] || null) : null;
           const complete = chapterComplete(map, ch);
+          const reached = chapterReached(map, ch);
+          // Generate-ahead gate: an artifact produced BEFORE the user reached
+          // the chapter stays hidden (compact unread row) until they ARRIVE in
+          // it — arriving, not finishing, is what reveals it.
+          if (art && art.ahead && !reached) art = null;
           const prog = chapterProgress(axis, ch, segs, furthestJp);
-          const onTap = makeChapterTap(ch, art, complete);
-          const row = buildChapterRow(ch, art, complete, prog, onTap, idx === curIdx, pos);
-          inner.appendChild(row);
+          // change signature — everything a row renders from
+          let scSig = '';
+          try {
+            const scn = (art && Array.isArray(art.scenes)) ? art.scenes : [];
+            for (let s2 = 0; s2 < scn.length; s2++) { const st2 = _sceneSlotStat['scene_' + idx + '_' + s2] || {}; scSig += (st2.images || 0) + '.' + (st2.pending || 0) + ';'; }
+          } catch (_) {}
+          const sig = [
+            ch.state || 'none', complete ? 1 : 0, reached ? 1 : 0, (art && art.ts) || 0, (art && art.fp) || '',
+            (art && art.label) || ch.label || '', idx === curIdx ? 1 : 0, aiReadMarkFor(idx, art) || '',
+            _collapsed.has(idx) ? 1 : 0, _fontScale, scSig,
+            (_sceneSlotStat['scene_' + idx] && _sceneSlotStat['scene_' + idx].images) || 0,
+            hasSummary(art) ? -1 : Math.round(((prog && prog.pct) || 0) * 100),
+            (ch.error || ''), (ch.attempts | 0),
+            (_sceneStat[idx] && _sceneStat[idx].images) || 0,
+            (art && Array.isArray(art.scenes)) ? art.scenes.reduce((t, x) => t + ((x && x.prompt) ? x.prompt.length : 0), 0) : 0,
+          ].join('|');
+          const cached = _rowCache.get(idx);
+          let row;
+          if (cached && cached.sig === sig && cached.el) {
+            row = cached.el;
+          } else {
+            const onTap = makeChapterTap(ch, art, complete, reached);
+            row = buildChapterRow(ch, art, complete, prog, onTap, idx === curIdx, pos);
+            _rowCache.set(idx, { sig, el: row });
+          }
+          rows.push(row);
           if (idx === curIdx) _curRowEl = row;
         }
+        for (const k of Array.from(_rowCache.keys())) { if (!chapters.some(c => c && c.idx === k)) _rowCache.delete(k); }
+        inner.replaceChildren.apply(inner, rows);
         renderAxis();
+        restoreScrollAnchor(anchor);
+        // Dict lookups on the feed's summary text — leaf text divs only (the
+        // chapter-view invariant). Idempotent per element; rows are fresh here.
+        try {
+          if (typeof window.dictEnableLookupIn === 'function') {
+            for (const el of inner.querySelectorAll('.kai-summary-text')) {
+              if (el.dataset.kaiDict === '1') continue;   // reused row — already enabled
+              el.dataset.kaiDict = '1';
+              window.dictEnableLookupIn(el);
+            }
+          }
+        } catch (_) {}
+        armReadObserver();
+        armImgObserver();
       }
 
-      const footBtnCss = (bg, bd, col) =>
-        'display:block;width:100%;text-align:center;border-radius:8px;padding:9px 12px;cursor:pointer;' +
-        'background:' + bg + ';border:1px solid ' + bd + ';color:' + col + ';font-size:.85rem;';
-
-      async function renderFoot() {
+      // Feed image pre-loader: set img.src well BEFORE the frame scrolls into
+      // view so the async IndexedDB read + data-URI decode finish off-screen.
+      let _imgObs = null;
+      function armImgObserver() {
         try {
-          foot.innerHTML = '';
-          const aiOn = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled());
-
-          // manual catch-up (incl. failed retries) with ~$ estimate
-          if (aiOn && window.aiProcessor && typeof window.aiProcessor.updateNow === 'function') {
-            let usd = 0, count = 0;
-            try {
-              const o = (typeof window.aiProcessor.owedEstimate === 'function')
-                ? await window.aiProcessor.owedEstimate(titleId) : null;
-              if (typeof o === 'number') usd = o;
-              else if (o) {
-                usd = Number(o.usd != null ? o.usd : (o.costUsd != null ? o.costUsd : o.est)) || 0;
-                count = Number(o.count != null ? o.count : o.chunks) || 0;
+          if (_imgObs) _imgObs.disconnect();
+          else {
+            _imgObs = new IntersectionObserver((ents) => {
+              for (const en of ents) {
+                if (!en.isIntersecting) continue;
+                const t = en.target;
+                try { _imgObs.unobserve(t); } catch (_) {}
+                if (t._kaiLoad) { const f = t._kaiLoad; t._kaiLoad = null; try { f(); } catch (_) {} }
               }
-            } catch (_) {}
-            if (usd > 0 || count > 0) {
-              const b = document.createElement('button');
-              b.className = 'menu-item';
-              b.style.cssText = footBtnCss('#191425', '#463a6b', '#d6c8ff');
-              b.textContent = window.i18n.t('tl.update_timeline', 'タイムラインを更新') +
-                (count ? (' · ' + window.i18n.fmt('tl.chapters_count', { n: count }, count + '章')) : '') +
-                (usd >= 0.01 ? (' · ~$' + usd.toFixed(2)) : '');
-              b.addEventListener('click', (e) => {
-                e.stopPropagation();
-                b.disabled = true;
-                b.textContent = window.i18n.t('tl.processing', '処理中…');
-                b.style.color = '#888';
-                offerProcess();
-              });
-              foot.appendChild(b);
-            } else {
-              // surface in-flight processing so the pulse nodes make sense
-              let st = null;
-              try {
-                st = (typeof window.aiProcessor.status === 'function')
-                  ? await window.aiProcessor.status(titleId) : null;
-              } catch (_) {}
-              const busy = !!(st && (Number.isFinite(st.inflightIdx) ||
-                                     (st.counts && st.counts.processing > 0)));
-              if (busy) {
-                // 0-based chunk idx → 1-based chapter number; fall back to the
-                // first 'processing' chunk when the inflight idx isn't local.
-                let n = Number.isFinite(st.inflightIdx) ? (st.inflightIdx + 1) : null;
-                if (n === null && Array.isArray(st.chunks)) {
-                  const pc = st.chunks.find(c => c && c.state === 'processing');
-                  if (pc && Number.isFinite(pc.idx)) n = pc.idx + 1;
+            }, { root: main, rootMargin: '2200px 0px' });
+          }
+          for (const f of inner.querySelectorAll('.kai-img-lazy')) _imgObs.observe(f);
+        } catch (_) {}
+      }
+
+      // ---- scroll-to-read marking ---------------------------------------------------
+      // A chapter's AI content counts as read once the user has scrolled to the
+      // END of its feed section and it stayed in view for a moment (dwell guards
+      // fast fling-throughs). Replaces the old "opened the chapter window" mark.
+      let _readObs = null;
+      function armReadObserver() {
+        try {
+          if (_readObs) { _readObs.disconnect(); }
+          else {
+            _readObs = new IntersectionObserver((ents) => {
+              for (const en of ents) {
+                const t = en.target;
+                if (!en.isIntersecting) {
+                  if (t._kaiTm) { clearTimeout(t._kaiTm); t._kaiTm = null; }
+                  continue;
                 }
-                const done = (st.counts && Number.isFinite(st.counts.ready)) ? st.counts.ready : 0;
-                const total = Number.isFinite(st.total) ? st.total : 0;
-                ensureKaiSpinStyle();
-                const s = document.createElement('div');
-                s.style.cssText =
-                  'display:flex;align-items:center;justify-content:center;gap:2px;' +
-                  'color:#8a7fb8;font-size:.72rem;';
-                const ring = document.createElement('span');
-                ring.className = 'kai-spin';
-                ring.style.marginLeft = '0';
-                const txt = document.createElement('span');
-                txt.style.marginLeft = '6px';
-                txt.textContent = (n !== null ? window.i18n.fmt('tl.processing_chapter', { n: n }, '第' + n + '章を処理中…') : window.i18n.t('tl.processing', '処理中…')) +
-                  (total ? (' (' + done + '/' + total + ')') : '');
-                s.appendChild(ring);
-                s.appendChild(txt);
-                foot.appendChild(s);
+                if (t._kaiTm || t._kaiDone) continue;
+                t._kaiTm = setTimeout(() => {
+                  t._kaiTm = null;
+                  if (t._kaiDone || !document.body.contains(t)) return;
+                  t._kaiDone = true;
+                  const idx = Number(t.dataset.chIdx);
+                  if (!Number.isFinite(idx)) return;
+                  try { aiReadMarkChapter(titleId, idx); } catch (_) {}
+                  try { if (!_aiRead.ch[idx]) _aiRead.ch[idx] = Date.now(); } catch (_) {}
+                  // scenes are visible inline in the section → they're read too
+                  try {
+                    const a = arts ? arts[idx] : null;
+                    const scn = (a && Array.isArray(a.scenes)) ? a.scenes : [];
+                    for (let s = 0; s < scn.length; s++) {
+                      aiReadMarkScene(titleId, idx, s);
+                      if (!_aiRead.sc[idx + '_' + s]) _aiRead.sc[idx + '_' + s] = Date.now();
+                    }
+                  } catch (_) {}
+                  // quiet in-place ● → ✓ swap; the 続きから pill migrates on the
+                  // next natural re-render (no full rebuild for a read mark)
+                  try {
+                    const row = t._kaiRow;
+                    if (row && row._kaiMarkEl) {
+                      const nm = aiReadMarkEl('read');
+                      if (nm) { row._kaiMarkEl.replaceWith(nm); row._kaiMarkEl = nm; }
+                    }
+                  } catch (_) {}
+                }, 1000);
               }
-            }
+            }, { root: main, threshold: 0 });
           }
-
-          // Re-detect chapters from the book's own chapter numbers whenever the
-          // book HAS markers (≥3). Available even when the map is already
-          // marker-based: marker detection itself gets corrected over time (e.g.
-          // rejecting a colophon year that became "第2007章"), so a stale
-          // marker map can still be rebuilt. It's opt-in with a cost confirm.
-          try {
-            if (aiOn && window.aiProcessor && typeof window.aiProcessor.reDetectChapters === 'function' &&
-                window.aiChunks && typeof window.aiChunks.markerCount === 'function' &&
-                window.aiChunks.markerCount(titleId) >= 3) {
-              const rb = document.createElement('button');
-              rb.className = 'menu-item';
-              rb.style.cssText = footBtnCss('#1a1622', '#3a3450', '#a99fc8');
-              rb.textContent = window.i18n.t('tl.redetect_chapters', '章を再検出（本の章番号に合わせる）');
-              rb.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                try {
-                  // keep the panel open — it live-refreshes from the new map via
-                  // the emitDataChanged the processor fires.
-                  await window.aiProcessor.reDetectChapters(titleId);
-                  scheduleRefresh(200);
-                } catch (_) {}
-              });
-              foot.appendChild(rb);
-            }
-          } catch (_) {}
-
-          if (aiOn && window.aiSummary) {
-            const btn = document.createElement('button');
-            btn.className = 'menu-item kai-glow';
-            btn.style.cssText = footBtnCss('#191425', '#463a6b', '#d6c8ff');
-            btn.textContent = window.i18n.t('tl.ai_summary_session', '✦ AI summary — this session');
-            btn.addEventListener('click', (e) => {
-              e.stopPropagation();
-              destroy();
-              try { window.aiSummary.summarizeRecent(); } catch (_) {}
-            });
-            foot.appendChild(btn);
-          }
+          for (const s of inner.querySelectorAll('.kai-read-sentinel')) _readObs.observe(s);
         } catch (_) {}
       }
 
@@ -2545,23 +4096,21 @@
             if (m2) {
               map = m2;
               const ax2 = buildMapAxis(m2);
-              if (ax2) axis = ax2;
+              // Never swap a cue-mappable axis for a degraded one: while
+              // transcription churns, _srtCues / chunk cue-bounds are briefly
+              // unavailable and the fresh axis maps every audio interval to
+              // null — the coverage spine "disappearing then reappearing".
+              if (ax2 && (ax2.canMapCues || !(axis && axis.canMapCues))) axis = ax2;
             }
             arts = map ? filterArtifacts(await loadArtifacts(titleId), map) : {};
-            segs = await coverageSegments(titleId, axis);
-            rsegs = await revisitSegments(titleId, axis);
-            try {
-              if (window.bookmarks && window.bookmarks.list) {
-                bms = window.bookmarks.list().filter(b => b.titleId === titleId);
-              }
-            } catch (_) {}
-            try {
-              if (window.aiSummary && window.aiSummary.listSaved) {
-                saved = await window.aiSummary.listSaved(titleId);
-              }
-            } catch (_) {}
+            // Same shield on the data side: coverage never legitimately shrinks
+            // to NOTHING between two refreshes — treat a transient empty read as
+            // a miss and keep the last good paint.
+            const s2 = await coverageSegments(titleId, axis);
+            if (s2.length || !segs.length) segs = s2;
+            const r2 = await revisitSegments(titleId, axis);
+            if (r2.length || !rsegs.length) rsegs = r2;
             render();
-            renderFoot();
             try {
               if (window.ai && typeof window.ai.markSeen === 'function') window.ai.markSeen(titleId, 'timeline');
             } catch (_) {}
@@ -2586,20 +4135,6 @@
       window.addEventListener('kai:img-data', refreshSceneHave);   // a scene rendered → re-mark which chapters have ✦
       refreshSceneHave();   // initial: mark chapters that already have scenes
 
-      // Processing-status broadcasts refresh just the footer (the spine /
-      // cards refresh via 'kai:ai-data' when results land).
-      function onProc(e) {
-        try {
-          if (!document.body.contains(overlay)) {
-            window.removeEventListener('kai:proc-status', onProc);
-            return;
-          }
-          const d = e && e.detail;
-          if (d && d.titleId && d.titleId !== titleId) return;
-          renderFoot();
-        } catch (_) {}
-      }
-      window.addEventListener('kai:proc-status', onProc);
 
       // Open: render the chapter list, scroll to the current chapter, and PULL any
       // finished scene renders from the server. (The panel never synced before, so a
@@ -2607,8 +4142,24 @@
       requestAnimationFrame(() => {
         try {
           render();
-          renderFoot();
-          if (_curRowEl && typeof _curRowEl.scrollIntoView === 'function') _curRowEl.scrollIntoView({ block: 'center' });
+          // Reopen at the REMEMBERED spot (saved per title on close); only a
+          // first-ever open (or a vanished anchor row) centers the current
+          // chapter instead.
+          let savedSpot = null;
+          try { savedSpot = JSON.parse(localStorage.getItem(tlScrollKey) || 'null'); } catch (_) {}
+          const land = () => {
+            if (savedSpot && restoreScrollAnchor(savedSpot)) return;
+            if (_curRowEl && typeof _curRowEl.scrollIntoView === 'function') _curRowEl.scrollIntoView({ block: 'center' });
+          };
+          land();
+          // content-visibility placeholder heights (rows are estimated until
+          // first paint) resolve right after — land once more so the spot
+          // doesn't drift. Gated on USER touch, not scroll events (the first
+          // landing + size resolution fire scroll events themselves, which
+          // would self-defeat the pass).
+          setTimeout(() => {
+            try { if (document.body.contains(overlay) && !_userTouchTs) land(); } catch (_) {}
+          }, 350);
         } catch (_) {}
       });
       // once on open: submit/reconcile (sync), THEN a full no-`since` catch-up so
@@ -2627,6 +4178,9 @@
       // replaced via prev.remove() (which doesn't call destroy()), so it can't leak.
       _imgPoll = setInterval(() => {
         if (!document.body.contains(overlay)) { clearInterval(_imgPoll); _imgPoll = null; return; }
+        // A stacked scene card (#kchapterView over this panel) runs its own 9s
+        // sync poll — skip ours while it's up instead of doubling the churn.
+        if (document.getElementById('kchapterView')) return;
         try { window.aiImages && window.aiImages.pollPending && window.aiImages.pollPending(titleId); } catch (_) {}
       }, 9000);
       // while open: keep the glowing current-place marker tracking the live position
@@ -2652,11 +4206,16 @@
     }
   }
 
+  // Place-safe clip player for other modules (vocab-srs review): dedicated
+  // <audio> on a native slice; the book is paused in place and NEVER seeked.
+  window.aiTimelineClip = { play: clipPlay, stop: clipStop, dispose: clipDispose };
   window.aiTimeline = {
     openPanel,
     openChapter,
+    openCurrentChapter,
+    currentChapterStatus,
     // ai-characters-screen.js calls openChapterView(idx) with no titleId;
     // openChapter defaults a null titleId to window._activeTitleId.
-    openChapterView: (idx) => openChapter(null, idx),
+    openChapterView: (idx) => openChapter(null, idx, { allowEmpty: true }),
   };
 })();

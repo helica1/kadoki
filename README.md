@@ -21,6 +21,34 @@ Unlike browser-script workflows, Kadoki is **fully integrated**. No plugins, bro
 
 ---
 
+## What's new in 1.7.0
+
+**Continuously smooth audio-follow in Read mode** — the highlight now tracks the narration through every line without the occasional freeze-and-jump, and **pages turn exactly in time with the word being spoken**.
+
+**Six follow highlight styles** (Appearance → Read) — glow + phrase pill, progress underline, marker dot, line ruler, comet trail, and margin beam. Pick what your eyes like.
+
+**Furigana dictionary lookups fixed** — words with furigana (including conjugations and multi-kanji compounds) now look up as full words with a clean continuous highlight.
+
+**AI quote & vocab clips end on the word** — no more running a subtitle past the quote, plus subtle fades.
+
+Also: place maps open at the place's own scale, a progress bar when jumping ahead of subtitle generation, a stricter reading timer, reliable Apple Watch pause sync — and a first preview of **Kadoki on Apple Vision Pro** with true spatial depth for movie-frame cards.
+
+---
+
+## What's new in 1.6.7
+
+**Better support for structured dictionaries like Jitendex** — large Yomitan dictionaries now import via streaming instead of loading fully into memory, fixing an out-of-memory crash on iOS for big structured dictionaries, plus broader zip-format tolerance.
+
+**Apple Watch: automatic subtitle sync** — the watch now keeps captions current on its own; no more manually resending just to update subtitles.
+
+**Apple Watch: new "On iPhone" screen** — mirrors your phone's audio with live karaoke highlighting directly on the watch face, without ever sending the audio itself to the watch — and doubles as a remote: tap to play/pause the phone, swipe left/right to step between subtitles, and swipe up to flag the current line to your phone's Lookup history.
+
+**Settings backup & transfer** (Preferences) — export/import your settings, Anki mappings, and AI configuration to move between devices.
+
+Also: fixed a Timeline feed gap for audio-only titles, and watch/read sessions now correctly credit stats and Timeline coverage.
+
+---
+
 ## What's new in 1.6.6
 
 The biggest update since the AI companion: **on-device subtitle generation and book sync, on both platforms**. SRT files are no longer needed — and results are actually better without them, as word-level karaoke-style highlighting is now possible. A book + audiobook pair is transcribed on device in real time and matched to the book's own text; an audiobook alone gets natively generated subtitles. It is no longer necessary to perform preprocessing with SubPlz, although existing SRTs remain fully supported.

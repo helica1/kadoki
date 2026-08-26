@@ -458,6 +458,7 @@
     // popup's "Set playhead" section.
 
     setupTouch();
+    setupMouse();   // macOS shell only (no-op elsewhere)
     setupScrollTracking();
     setupResize();
     // Floating playhead button removed 2026-05-29 — its functionality
@@ -599,12 +600,97 @@
         if (dismissedPopupOnStart) window._dictPopupDismissedTs = Date.now();
         return; // dismiss-only tap; no chrome toggle, no lookup
       }
+      // Vision word overlays sit ABOVE the text: caretRangeFromPoint can't
+      // see through them, so hitTextChar came back false and the tap fell
+      // into toggleChrome. The overlay's own click handler does the
+      // (word-quantized) lookup — this path just steps aside.
+      const _el0 = document.elementFromPoint(t.clientX, t.clientY);
+      if (_el0 && _el0.closest && _el0.closest('#kvReadHits')) return;
       if (hitTextChar(t.clientX, t.clientY)) {
         lookupAt(t.clientX, t.clientY);
-      } else {
+      } else if (!window.KADOKI_VISION) {
+        // Vision: NO tap-empty-space chrome toggle — the transport ornament
+        // has a dedicated top-bar button; mis-aimed gaze pinches kept
+        // flipping the bar.
         toggleChrome();
       }
     }, { passive: true });
+  }
+
+  // macOS shell: a mouse click acts like a tap (dictionary lookup / chrome
+  // toggle), mirroring setupTouch's tap gate. Holding CMD hands the gesture
+  // to the browser for native text selection (see the kadoki-mac-select
+  // body class toggled at boot below).
+  function setupMouse() {
+    if (!window.KADOKI_MAC) return;
+    let mx = 0, my = 0, mStart = 0;
+    let dismissedOnDown = false;
+    scrollEl.addEventListener('mousedown', (e) => {
+      mx = e.clientX; my = e.clientY;
+      mStart = Date.now();
+      dismissedOnDown = false;
+      if (e.metaKey) return;
+      const popup = document.getElementById('dictPopup');
+      if (popup && popup.style.display !== 'none' && !popup.contains(e.target)) {
+        try {
+          if (typeof window.hideDictPopup === 'function') window.hideDictPopup();
+          else { popup.style.display = 'none'; popup.innerHTML = ''; }
+        } catch (er) { popup.style.display = 'none'; popup.innerHTML = ''; }
+        dismissedOnDown = true;
+      }
+      const menu = document.getElementById('pagedSelectionMenu');
+      if (selectedCue && (!menu || !menu.contains(e.target))) {
+        clearSelection();
+        dismissedOnDown = true;
+      }
+    });
+    scrollEl.addEventListener('click', (e) => {
+      if (e.metaKey) return;               // CMD-click = selection, never lookup
+      if (physDragging) return;
+      if (Math.abs(e.clientX - mx) > 14 || Math.abs(e.clientY - my) > 14) return;
+      if (Date.now() - mStart > 400) return;
+      if (dismissedOnDown) {
+        window._dictPopupDismissedTs = Date.now();
+        return; // dismiss-only click; no chrome toggle, no lookup
+      }
+      if (hitTextChar(e.clientX, e.clientY)) {
+        lookupAt(e.clientX, e.clientY);
+      } else {
+        toggleChrome();
+      }
+    });
+  }
+
+  // macOS boot shim for the reader: clicks are lookups, so suppress the text
+  // caret/I-beam unless CMD is held (which flips native selection back on).
+  // iOS/Android are untouched — their long-press copy/translate depends on
+  // the reader staying selectable.
+  if (window.KADOKI_MAC) {
+    const installMacSelectMode = () => {
+      try {
+        document.body.classList.add('kadoki-mac');
+        const st = document.createElement('style');
+        st.textContent =
+          'body.kadoki-mac:not(.kadoki-mac-select) #readingPagedInner,' +
+          'body.kadoki-mac:not(.kadoki-mac-select) #readingPagedInner * {' +
+          ' -webkit-user-select: none; user-select: none; cursor: pointer; }';
+        document.head.appendChild(st);
+        const setSel = (on) => { try { document.body.classList.toggle('kadoki-mac-select', !!on); } catch (_) {} };
+        document.addEventListener('keydown', (e) => { if (e.key === 'Meta') setSel(true); });
+        document.addEventListener('keyup', (e) => { if (e.key === 'Meta') setSel(false); });
+        window.addEventListener('blur', () => setSel(false));
+        // With the chrome hidden, the reserved strip above the reader (where
+        // the header normally sits) belongs to no element but <body> — clicks
+        // there should toggle the chrome just like empty text area does.
+        document.addEventListener('click', (e) => {
+          if (!document.body.classList.contains('mode-read')) return;
+          if (e.target !== document.body && e.target !== document.documentElement) return;
+          try { toggleChrome(); } catch (_) {}
+        });
+      } catch (_) {}
+    };
+    if (document.body) installMacSelectMode();
+    else document.addEventListener('DOMContentLoaded', installMacSelectMode);
   }
 
   // True when the caret at (x,y) lands on a non-whitespace/non-punctuation
@@ -616,7 +702,15 @@
     if (!caret) return false;
     const node = caret.startContainer || caret.offsetNode;
     const off  = (caret.startContainer ? caret.startOffset : caret.offset) | 0;
-    if (!node || node.nodeType !== 3) return false;
+    if (!node || node.nodeType !== 3) {
+      // Element caret — WebKit resolves taps exactly on a <ruby> boundary to
+      // the element, not a text node. If the point is on a ruby, it IS a text
+      // tap (lookupAt's geometry resolver will find the char).
+      try {
+        const el = document.elementFromPoint(x, y);
+        return !!(el && innerEl.contains(el) && el.closest && el.closest('ruby'));
+      } catch (_) { return false; }
+    }
     if (!innerEl.contains(node)) return false;
     // Confirm we're inside a chunk (rejects taps that fall on the
     // padding region between chunks).
@@ -1295,7 +1389,33 @@
         if (d < bestDist) { bestDist = d; best = chunks[i]; }
       }
     }
-    return best;
+    if (best) return best;
+    // FUZZY fallback (small windows only — the follow's ±8 search): exact
+    // substring match fails whenever the ASR cue text diverges from the book
+    // by a few characters, and each such cue used to freeze the follow for
+    // its whole duration ("stops for 1-2 subtitles, then jumps"). A 6-gram
+    // vote survives scattered divergence: the chunk containing the most
+    // exact 6-char runs of the cue wins, needing ≥25% of grams so a stray
+    // shared phrase can't hijack it. Same technique as the quote-clip
+    // resolver (ai-chunks gramVote).
+    if (radius <= 24 && t.length >= 8) {
+      const G = 6, STEP = 3;
+      const grams = [];
+      for (let o = 0; o + G <= t.length; o += STEP) grams.push(t.substr(o, G));
+      const need = Math.max(2, Math.ceil(grams.length * 0.25));
+      let bestC = null, bestScore = 0, bestD = Infinity;
+      for (let i = lo; i <= hi; i++) {
+        const nrm = chunkNormNoRuby(chunks[i]);
+        if (!nrm || nrm.length < G) continue;
+        let score = 0;
+        for (const g of grams) if (nrm.includes(g)) score++;
+        if (score < need) continue;
+        const d = (i >= anchorIdx) ? (i - anchorIdx) : (anchorIdx - i) + 0.5;
+        if (score > bestScore || (score === bestScore && d < bestD)) { bestScore = score; bestD = d; bestC = chunks[i]; }
+      }
+      if (bestC) return bestC;
+    }
+    return null;
   }
 
   // Expected chunk index for a cue, derived from the auto-transcription
@@ -1326,6 +1446,116 @@
     } catch (_) { return -1; }
   }
 
+  // ── SEQUENTIAL FOLLOW CURSOR (engine 'cursor', default; revert via
+  // Appearance → Read → Follow engine → Classic) ──────────────────────────
+  // Cues and book are the same sequential text, so once the follow is locked
+  // the next cue MUST begin (nearly) where the last one ended — searching is
+  // only needed to (re)acquire the lock. The cursor tracks the norm-space
+  // position where the last cue ENDED; each next cue head-matches within a
+  // small forward window at the cursor (near-infallible), and an ASR-fallback
+  // cue whose text isn't in the book ADVANCES the cursor by its own length
+  // (interpolation — the lock can't rot) while its visuals fall through to
+  // the bridge. The alignment map stays ground truth when it has an entry;
+  // seeks/jumps or >3 consecutive misses drop the lock for re-acquisition.
+  let _fc = null;            // { ci, off } — chunk idx + offset in chunkNormNoRuby space
+  let _fcCueIdx = -1;
+  let _fcMisses = 0;
+  let _fcLastChunk = null;   // chunk answered for _fcCueIdx (idempotent repeats)
+  let _fcChunksRef = null;   // lock is valid only for this chunks array identity
+  const _fcOnCache = { v: true, t: 0 };
+  function _fcEngineOn() {
+    const now = Date.now();
+    if (now - _fcOnCache.t > 1000) {
+      _fcOnCache.t = now;
+      try { _fcOnCache.v = (window.appearance?.get?.('read')?.followEngine || 'cursor') !== 'classic'; }
+      catch (_) { _fcOnCache.v = true; }
+    }
+    return _fcOnCache.v;
+  }
+  function _fcReset() { _fc = null; _fcCueIdx = -1; _fcMisses = 0; _fcLastChunk = null; }
+  window.__fcResetFollowCursor = _fcReset;
+  function _fcValid() { return !!(_fc && _fcChunksRef === chunks && chunks[_fc.ci]); }
+  // (Re)lock from a chunk the cue was resolved to by the map or a search.
+  function _fcSyncFrom(idx, cueText, chunk) {
+    try {
+      if (!_fcEngineOn() || !chunk) return;
+      const ci = chunks.indexOf(chunk);
+      if (ci < 0) return;
+      const nrm = chunkNormNoRuby(chunk);
+      const t = normalizeJP(cueText);
+      let end = -1;
+      if (t && nrm) {
+        const k = nrm.indexOf(t);
+        if (k >= 0) end = k + t.length;
+        else for (const L of [10, 8, 6, 4]) {
+          if (t.length < L) continue;
+          const kk = nrm.lastIndexOf(t.slice(-L));
+          if (kk >= 0) { end = kk + L; break; }
+        }
+      }
+      _fc = { ci, off: end >= 0 ? end : 0 };
+      _fcChunksRef = chunks;
+      _fcCueIdx = idx; _fcMisses = 0; _fcLastChunk = chunk;
+    } catch (_) {}
+  }
+  function _fcWindow() {
+    const parts = [];
+    let total = 0;
+    for (let ci = _fc.ci; ci < chunks.length && parts.length < 5 && total < 1600; ci++) {
+      const nrm = chunkNormNoRuby(chunks[ci]);
+      const st = (ci === _fc.ci) ? Math.min(_fc.off, nrm.length) : 0;
+      const text = nrm.slice(st);
+      if (text) { parts.push({ ci, st, text, w0: total }); total += text.length; }
+    }
+    return parts;
+  }
+  const _fcPosToChunk = (parts, w) => {
+    for (let i = parts.length - 1; i >= 0; i--) if (w >= parts[i].w0) return { ci: parts[i].ci, off: parts[i].st + (w - parts[i].w0) };
+    return parts.length ? { ci: parts[0].ci, off: parts[0].st } : null;
+  };
+  function _fcAdvance(idx, cueText) {
+    try {
+      if (!_fcEngineOn() || !_fcValid()) return null;
+      if (idx === _fcCueIdx) return _fcLastChunk;                      // repaint / retry of the same cue
+      if (idx < _fcCueIdx || idx > _fcCueIdx + 4) { _fcReset(); return null; }  // seek/jump → re-acquire
+      const t = normalizeJP(cueText);
+      if (!t || t.length < 3) return null;
+      const parts = _fcWindow();
+      if (!parts.length) { _fcReset(); return null; }
+      const win = parts.map(p => p.text).join('');
+      let k = -1;
+      for (const L of [10, 8, 6, 5, 4]) {
+        if (t.length < L) continue;
+        const kk = win.indexOf(t.slice(0, L));
+        if (kk >= 0 && kk <= 250) { k = kk; break; }   // ≤250 slack: headings/gaps the cues skip
+      }
+      if (k >= 0) {
+        let e = -1;
+        for (const L of [10, 8, 6, 4]) {
+          if (t.length < L) continue;
+          const kk = win.indexOf(t.slice(-L), k + Math.max(1, Math.floor(t.length * 0.5)));
+          if (kk >= 0 && kk + L <= k + t.length + 60) { e = kk + L; break; }
+        }
+        if (e < 0) e = Math.min(win.length, k + t.length);
+        const startPos = _fcPosToChunk(parts, k);
+        const endPos = _fcPosToChunk(parts, Math.max(k, e - 1));
+        if (!startPos || !endPos) return null;
+        _fc = { ci: endPos.ci, off: endPos.off + 1 };
+        _fcChunksRef = chunks;
+        _fcCueIdx = idx; _fcMisses = 0; _fcLastChunk = chunks[startPos.ci];
+        return _fcLastChunk;
+      }
+      // MISS: the cue's text isn't in the book (unaligned ASR). Keep the lock
+      // — advance by the cue's own length so the NEXT cue still starts right —
+      // but answer null so the visual path bridges to a trusted neighbor.
+      _fcMisses++;
+      if (_fcMisses > 3) { _fcReset(); return null; }
+      const adv = _fcPosToChunk(parts, Math.min(Math.max(0, win.length - 1), t.length));
+      if (adv) { _fc = { ci: adv.ci, off: adv.off }; _fcChunksRef = chunks; _fcCueIdx = idx; _fcLastChunk = null; }
+      return null;
+    } catch (_) { return null; }
+  }
+
   // Resolve the chunk for a cue: alignment map → bounded local search around
   // the current green chunk → BOUNDED search around the aligner's expected
   // position → (only if allowGlobal, and only with no position estimate) a
@@ -1337,17 +1567,24 @@
     if (pagedCueToChunk && cueIdx >= 0 && cueIdx < pagedCueToChunk.length &&
         pagedCueToChunk[cueIdx] >= 0) {
       const c = chunks[pagedCueToChunk[cueIdx]];
-      if (c) return c;
+      if (c) { _fcSyncFrom(cueIdx, cueText, c); return c; }
     }
+    // Sequential cursor: the next cue starts where the last one ended.
+    const cc = _fcAdvance(cueIdx, cueText);
+    if (cc) return cc;
     const near = findChunkForTextNear(cueText, lastHighlightedChunkIdx, 8);
-    if (near) return near;
+    if (near) { _fcSyncFrom(cueIdx, cueText, near); return near; }
     const expIdx = expectedChunkForCue(cueIdx);
     if (expIdx >= 0) {
       // ~2% of the book each side, floor 20 / cap 200 chunks.
       const radius = Math.min(200, Math.max(20, Math.round(chunks.length * 0.02)));
-      return findChunkForTextNear(cueText, expIdx, radius);
+      const far = findChunkForTextNear(cueText, expIdx, radius);
+      if (far) _fcSyncFrom(cueIdx, cueText, far);
+      return far;
     }
-    return allowGlobal ? findChunkForText(cueText) : null;
+    const glob = allowGlobal ? findChunkForText(cueText) : null;
+    if (glob) _fcSyncFrom(cueIdx, cueText, glob);
+    return glob;
   }
 
   // Nearest cue index to `target` whose alignment entry is MATCHED (has a
@@ -2714,6 +2951,7 @@
     } catch (_) {}
   }
 
+  let _progRafPending = false;
   function setupScrollTracking() {
     let pendingSave = null;
     scrollEl.addEventListener('scroll', () => {
@@ -2743,7 +2981,13 @@
       // backstop; it no-ops (over=0) whenever the gutter did its job.
       if (_furiNudgeTimer) clearTimeout(_furiNudgeTimer);
       _furiNudgeTimer = setTimeout(_maybeFuriganaNudge, 450);
-      updateProgress();
+      // rAF-throttled: updateProgress walks every chunk with
+      // getBoundingClientRect; unthrottled it ran on each of the ~60 scroll
+      // events of a smooth page turn and starved the karaoke glow's rAF.
+      if (!_progRafPending) {
+        _progRafPending = true;
+        requestAnimationFrame(() => { _progRafPending = false; try { updateProgress(); } catch (_) {} });
+      }
       if (suppressScrollSave) return;
       if (pendingSave) clearTimeout(pendingSave);
       pendingSave = setTimeout(() => {
@@ -2838,6 +3082,7 @@
     cw = scrollEl.clientWidth;
     sw = innerEl.scrollWidth;
     chunks = Array.from(innerEl.querySelectorAll('.reading-chunk'));
+    _fcReset();   // sequential follow lock is meaningless across a re-chunk
     log(`recompute: clientW=${cw}, scrollW=${sw}, chunks=${chunks.length}`);
     updateProgress();
     _scheduleEdgeMask(); // column pitch may have changed (font/orientation) → refresh masks
@@ -3248,7 +3493,14 @@
         chunks.push({
           html: cel.innerHTML, len: _chunkBaseLen(cel), para: blk !== prevBlock, cue: cueForChunk(i),
           charOffset: parseInt(cel.dataset.charOffset) || 0,
-          charLen: parseInt(cel.dataset.charLen) || _chunkBaseLen(cel)
+          charLen: parseInt(cel.dataset.charLen) || _chunkBaseLen(cel),
+          // JP-standard offset/len (the coverage-axis unit — see mode-coverage.js
+          // / ai-timeline.js), kept alongside the raw charOffset/charLen the print
+          // layout itself measures with. Purely additive — never read by the
+          // print pagination math, only by print-reading.js's "Log printed
+          // reading" coverage credit.
+          jpOff: parseInt(cel.dataset.jpOff) || 0,
+          jpLen: parseInt(cel.dataset.jpLen) || 0
         });
         prevBlock = blk;
       }
@@ -3526,7 +3778,39 @@
       const sameCol = a.l < b.l + b.w - 1 && a.l + a.w > b.l + 1;
       if (a.kind === 'ruby' && sameCol && b.t < a.t + a.h && b.t > a.t) a.h = b.t - a.t;
     }
+    // Bridge the whitespace seams: this EPUB class separates the ruby pairs
+    // of one word with real whitespace nodes, so a word's boxes come out as
+    // per-character islands with visible gaps (磨|って, 油|淋|鶏). Merge
+    // consecutive boxes sharing a column (vertical text) or a row
+    // (horizontal) when the gap between them is under ~a fraction of a char,
+    // so the word reads as ONE continuous highlight. Boxes arrive in
+    // document order, so only neighbor-merging is needed; a column/line
+    // break never merges (different column ⇒ sameCol false).
+    const merged = [];
     for (const bx of boxes) {
+      if (bx.w < 0.5 || bx.h < 0.5) continue;
+      const a = merged[merged.length - 1];
+      if (a) {
+        const sameCol = a.l < bx.l + bx.w - 1 && a.l + a.w > bx.l + 1;
+        const colGap = bx.t - (a.t + a.h);
+        const sameRow = a.t < bx.t + bx.h - 1 && a.t + a.h > bx.t + 1;
+        const rowGap = bx.l - (a.l + a.w);
+        if (sameCol && colGap >= -1 && colGap <= Math.max(12, Math.min(a.w, bx.w) * 0.8)) {
+          const l = Math.min(a.l, bx.l), r = Math.max(a.l + a.w, bx.l + bx.w);
+          a.l = l; a.w = r - l;
+          a.h = Math.max(a.t + a.h, bx.t + bx.h) - a.t;
+          continue;
+        }
+        if (sameRow && rowGap >= -1 && rowGap <= Math.max(12, Math.min(a.h, bx.h) * 0.8)) {
+          const t = Math.min(a.t, bx.t), btm = Math.max(a.t + a.h, bx.t + bx.h);
+          a.t = t; a.h = btm - t;
+          a.w = Math.max(a.l + a.w, bx.l + bx.w) - a.l;
+          continue;
+        }
+      }
+      merged.push(bx);
+    }
+    for (const bx of merged) {
       if (bx.w < 0.5 || bx.h < 0.5) continue;
       const d = document.createElement('div');
       d.style.cssText = `position:fixed;left:${bx.l}px;top:${bx.t}px;width:${bx.w}px;height:${bx.h}px;` +
@@ -3580,6 +3864,86 @@
     // Correct the half-character boundary snap so the word starts on the glyph
     // actually under the finger (the "misses the first letter" fix).
     offset = refineCharOffset(node, offset, x, y);
+    return lookupFromNode(node, offset, x, y);
+  }
+
+  // Geometry-first tap resolution over an rt-filtered text-node list: returns
+  // the flat index of the character whose rendered box contains (x,y), or -1.
+  // See the RUBY-SAFE comment at the call site in lookupFromNode.
+  function _charIndexAtPointIn(textNodes, x, y) {
+    // BEST candidate across ALL nodes, chosen by distance from the char box's
+    // centre to the tap — NOT first-hit-in-document-order: a whitespace/newline
+    // sliver just before a ruby sits flush against the base glyph, and taking
+    // the first containing box selected that sliver instead of the kanji (the
+    // "only the space before the furigana word is selectable" bug). Whitespace
+    // never wins; ruby competes with element-box geometry like everything else.
+    const within = (r, sl) => r && r.width > 0.5 && r.height > 0.5 &&
+      x >= r.left - sl && x <= r.right + sl && y >= r.top - sl && y <= r.bottom + sl;
+    const d2 = (r) => {
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      return (x - cx) * (x - cx) + (y - cy) * (y - cy);
+    };
+    let best = -1, bestD = Infinity;
+    let acc = 0;
+    try {
+      for (const tn of textNodes) {
+        const len = tn.nodeValue.length;
+        let ruby = null, p = tn.parentNode;
+        while (p && p.nodeType === 1) {
+          if (p.tagName === 'RUBY') { ruby = p; break; }
+          if (p.classList && p.classList.contains('reading-chunk')) break;
+          p = p.parentNode;
+        }
+        if (ruby) {
+          // Base text inside ruby: Range rects lie (annotation-lane geometry);
+          // slice the host ELEMENT's box proportionally along the reading axis.
+          const host = (tn.parentElement && tn.parentElement.tagName === 'RB') ? tn.parentElement : ruby;
+          const r = host.getBoundingClientRect();
+          if (within(r, 3)) {
+            let vertical = false;
+            try { vertical = /vertical/.test(getComputedStyle(host).writingMode || ''); } catch (_) { vertical = r.height > r.width; }
+            const frac = vertical ? (y - r.top) / Math.max(1, r.height) : (x - r.left) / Math.max(1, r.width);
+            let i = Math.max(0, Math.min(len - 1, Math.floor(frac * len)));
+            while (i < len && /\s/.test(tn.nodeValue[i])) i++;
+            if (i < len) {
+              // Distance measured against the char's own slice of the box so a
+              // multi-char base competes fairly with neighbouring plain text.
+              const sl = vertical
+                ? { left: r.left, width: r.width, top: r.top + (i / len) * r.height, height: r.height / len }
+                : { left: r.left + (i / len) * r.width, width: r.width / len, top: r.top, height: r.height };
+              const dd = d2(sl);
+              if (dd < bestD) { bestD = dd; best = acc + i; }
+            }
+          }
+        } else {
+          const rng = document.createRange();
+          rng.selectNodeContents(tn);
+          let nodeHit = false;
+          for (const r of rng.getClientRects()) { if (within(r, 4)) { nodeHit = true; break; } }
+          if (nodeHit) {
+            for (let i = 0; i < len; i++) {
+              if (/\s/.test(tn.nodeValue[i])) continue;   // whitespace never wins a tap
+              rng.setStart(tn, i); rng.setEnd(tn, i + 1);
+              for (const r of rng.getClientRects()) {
+                if (!within(r, 2)) continue;
+                const dd = d2(r);
+                if (dd < bestD) { bestD = dd; best = acc + i; }
+              }
+            }
+          }
+        }
+        acc += len;
+      }
+    } catch (_) {}
+    return best;
+  }
+
+  // Direct-entry lookup: the Vision word overlays already know EXACTLY which
+  // text node + offset their word starts at — no caret round-trip, no
+  // half-character snap, no rt mis-resolution. lookupAt feeds into this after
+  // its coordinate resolution; x/y are optional (used only to project an rt
+  // hit onto the base text).
+  async function lookupFromNode(node, offset, x, y) {
     // Walk up to nearest reading-chunk (or block-level ancestor).
     let cur = node.parentNode, chunk = null;
     while (cur && cur !== innerEl) {
@@ -3593,6 +3957,9 @@
         cur = cur.parentNode;
       }
       chunk = (cur && cur !== innerEl) ? cur : node.parentNode;
+      // Never let the "chunk" be the ruby itself — its flat text would be the
+      // 1-2 base chars and every lookup degenerates to a single character.
+      while (chunk && chunk !== innerEl && /^(RUBY|RB|RT|RP)$/.test(chunk.tagName || '')) chunk = chunk.parentNode;
     }
     if (!chunk) return;
     // Tap resolved INSIDE the furigana (rt): remap to the ruby BASE instead of
@@ -3628,19 +3995,21 @@
       // word at the 2nd kanji. Walk ALL base text nodes (a ruby can hold
       // several, e.g. interleaved per-kanji bases), defaulting to the first.
       node = base; offset = 0;
-      try {
-        const r2 = document.createRange();
-        let bn = base;
-        outer: do {
-          for (let i = 0; i < bn.nodeValue.length; i++) {
-            r2.setStart(bn, i); r2.setEnd(bn, i + 1);
-            const rc = r2.getBoundingClientRect();
-            if (rc.height > 0 && y >= rc.top - 1 && y <= rc.bottom + 1) {
-              node = bn; offset = i; break outer;
+      if (Number.isFinite(y)) {
+        try {
+          const r2 = document.createRange();
+          let bn = base;
+          outer: do {
+            for (let i = 0; i < bn.nodeValue.length; i++) {
+              r2.setStart(bn, i); r2.setEnd(bn, i + 1);
+              const rc = r2.getBoundingClientRect();
+              if (rc.height > 0 && y >= rc.top - 1 && y <= rc.bottom + 1) {
+                node = bn; offset = i; break outer;
+              }
             }
-          }
-        } while ((bn = tw2.nextNode()));
-      } catch (_) {}
+          } while ((bn = tw2.nextNode()));
+        } catch (_) {}
+      }
     }
     // Flatten chunk text (skip rt/rp), compute charIndex.
     const textNodes = [];
@@ -3664,6 +4033,39 @@
       acc += tn.nodeValue.length;
     }
     if (charIndex < 0 || charIndex >= flatText.length) charIndex = 0;
+    // RUBY-SAFE RESOLUTION: trust GEOMETRY over the caret. caretRangeFromPoint
+    // snaps a tap on a ruby base to the FOLLOWING text node (the </ruby> edge
+    // and the okurigana's offset 0 are the same caret position), and
+    // refineCharOffset can't step back across the node boundary — so lookups
+    // on furigana words started mid-word and degenerated to one character.
+    // Find the char whose box actually contains the tap: per-char Range rects
+    // for plain text; ELEMENT rects sliced proportionally inside ruby (device
+    // WKWebView returns the annotation lane's geometry for base-text Ranges —
+    // same fact _paintDictHlOverlays already works around). Falls back to the
+    // caret result when nothing contains the point (tap between lines).
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      const gi = _charIndexAtPointIn(textNodes, x, y);
+      if (gi >= 0 && gi < flatText.length) charIndex = gi;
+    }
+    // Never start a lookup on whitespace (pretty-printed EPUBs keep newlines
+    // and indents inside paragraph text) — step to the next real character.
+    while (charIndex < flatText.length - 1 && /\s/.test(flatText[charIndex])) charIndex++;
+    // WHITESPACE-FREE LOOKUP SPACE. This EPUB class puts every <ruby> on its
+    // own source line, so real "\n" text nodes sit BETWEEN the base chars of
+    // one word (疎\nい, 油\n淋\n鶏) — every multi-char surface the deinflector
+    // tried contained whitespace and nothing but single characters ever
+    // matched. Strip whitespace for the dictionary, keep an index map back to
+    // raw flat space so the highlight lands on the real DOM ranges.
+    const sIdx = [];                                   // stripped idx → raw idx
+    const r2s = new Array(flatText.length).fill(-1);   // raw idx → stripped idx
+    let stripped = '';
+    for (let k = 0; k < flatText.length; k++) {
+      if (/\s/.test(flatText[k])) continue;
+      r2s[k] = stripped.length;
+      sIdx.push(k);
+      stripped += flatText[k];
+    }
+    const sChar = (r2s[charIndex] >= 0) ? r2s[charIndex] : 0;
 
     // Bind window.lookupContext to the cue containing the tapped position
     // BEFORE handing off to performDictLookupAtPosition — the dict popup's
@@ -3677,8 +4079,15 @@
     // its bounding rect when Range-based lookup fails on iOS WKWebView.
     try { window._dictLookupChunk = chunk; } catch (_) {}
 
-    const paintFn = (_ch, tns, start, len) => {
+    // paintFn receives STRIPPED-space indices (the dict ran on `stripped`);
+    // convert back to raw flat space before mapping onto the text nodes.
+    const paintFn = (_ch, tns, startS, lenS) => {
       if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
+      if (!sIdx.length || lenS < 1) return;
+      const _s0 = Math.max(0, Math.min(sIdx.length - 1, startS));
+      const _e0 = Math.max(_s0, Math.min(sIdx.length - 1, startS + lenS - 1));
+      const start = sIdx[_s0];
+      const len = (sIdx[_e0] + 1) - start;
       let a = 0, sNode = null, sOff = 0, eNode = null, eOff = 0;
       const end = start + len;
       for (const t of tns) {
@@ -3709,7 +4118,7 @@
         for (const t of tns) {
           const next = a2 + t.nodeValue.length;
           const s2 = Math.max(start, a2), e2 = Math.min(end, next);
-          if (s2 < e2) {
+          if (s2 < e2 && !/^\s+$/.test(t.nodeValue.slice(s2 - a2, e2 - a2))) {
             const sub = new Range();
             sub.setStart(t, s2 - a2);
             sub.setEnd(t, e2 - a2);
@@ -3719,14 +4128,15 @@
           a2 = next;
           if (next >= end) break;
         }
-        // iOS: ::highlight backgrounds never reach ruby BASE text in
-        // WKWebView, so the box skipped the kanji — paint overlay rects from
-        // element geometry instead (see _paintDictHlOverlays). Overlays
-        // REPLACE the ::highlight fill there (not supplement it): the
-        // ::highlight would still tint the plain-kana segments, leaving the
-        // word two different shades of green (double paint on kana, single
-        // on kanji). Android keeps the native ::highlight path unchanged.
-        if (window.Capacitor?.getPlatform?.() === 'ios') {
+        // WKWebView (iOS AND the macOS shell — same WebKit engine, same bug):
+        // ::highlight backgrounds never reach ruby BASE text, so the box
+        // skipped the kanji — paint overlay rects from element geometry
+        // instead (see _paintDictHlOverlays). Overlays REPLACE the
+        // ::highlight fill there (not supplement it): the ::highlight would
+        // still tint the plain-kana segments, leaving the word two different
+        // shades of green (double paint on kana, single on kanji). Android
+        // keeps the native ::highlight path unchanged.
+        if (window.Capacitor?.getPlatform?.() === 'ios' || window.KADOKI_MAC) {
           try { _paintDictHlOverlays(subs); } catch (_) {}
         } else {
           CSS.highlights.set('reader-dict-lookup', window._dictLookupHl);
@@ -3746,7 +4156,7 @@
     };
 
     try {
-      await window.performDictLookupAtPosition(chunk, textNodes, flatText, charIndex, paintFn);
+      await window.performDictLookupAtPosition(chunk, textNodes, stripped, sChar, paintFn);
     } catch (e) { log('lookup error:', e.message); }
   }
 
@@ -4688,7 +5098,7 @@
     // highlight so the reader is never left with NO indicator at all.
     if (kwOnly && !glowed && range) { try { setCueRangeHighlight(chunk, cue.text); } catch (_) {} }
     if (Date.now() - lastUserScrollTime < 5000) return;
-    autoScrollForRange(range);
+    autoScrollForRange(range, kwOnly);
   }
 
   // Set a CSS Custom Highlight on the exact cue text within the chunk.
@@ -4843,7 +5253,7 @@
   //   advances forward (= leftward in screen space, which is the natural
   //   reading direction for vertical Japanese). A POSITIVE scrollBy.left
   //   scrolls backward (= rightward, toward earlier text).
-  function autoScrollForRange(range) {
+  function autoScrollForRange(range, deferWordTurn) {
     if (!range || !scrollEl) return;
     const rangeRect = range.getBoundingClientRect();
     const sr = scrollEl.getBoundingClientRect();
@@ -4867,6 +5277,12 @@
     const visRight = sr.right - (_maskRW || 0);
     const fullyVisible = rangeRect.left >= visLeft && rangeRect.right <= visRight;
     if (fullyVisible) return;
+    // WORD-TIMED cues: when the cue STARTS on this page and merely runs off
+    // the forward edge, don't yank at the cue boundary — the reader's eyes
+    // are still mid-page. The karaoke tick turns the page at the exact word
+    // (word-follow lookahead, __pagedWordFollowTurn) so the column lands as
+    // the voice crosses the edge. Cues that start OFF-page still snap now.
+    if (deferWordTurn && rangeRect.right <= visRight + 2 && rangeRect.right > visLeft) return;
     // Cue overflows on one side (or is entirely off-screen). Right-justify
     // the cue's BEGINNING at the viewport's right edge (= top-right of
     // the first vertical column = where reading starts in vertical-rl).
@@ -4880,6 +5296,35 @@
     log('[scroll-trace] scrollBy delta=' + Math.round(delta));
     scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
   }
+
+  // Word-follow page turn (word-timed titles): called ~4×/s by
+  // word-highlight's reader tick with the rect of the word the voice will
+  // reach in ~350 ms. If that word lies beyond the clean reading region
+  // (off the forward edge or under an edge mask), turn now — justify the
+  // word at the reading edge — so the page lands exactly in time with it.
+  let _wordTurnLast = 0;
+  window.__pagedWordFollowTurn = function (r) {
+    try {
+      if (!scrollEl || !r || !(r.width > 0)) return;
+      if (document.hidden || _readerHidden()) return;
+      const now = Date.now();
+      if (now - _wordTurnLast < 700) return;               // one turn per beat
+      if (now - lastProgrammaticScrollTime < 650) return;  // previous glide still settling
+      if (now - lastUserScrollTime < 5000) return;         // user is exploring — same grace as the cue snap
+      const sr = scrollEl.getBoundingClientRect();
+      if (!sr.width) return;
+      const visLeft = sr.left + (_maskLW || 0);
+      const visRight = sr.right - (_maskRW || 0);
+      if (r.left >= visLeft && r.right <= visRight) return; // word is on the page — nothing owed
+      const pad = _furiGutter(sr.width);
+      const delta = r.right - (sr.right - pad);
+      if (Math.abs(delta) < 4) return;
+      _wordTurnLast = now;
+      lastProgrammaticScrollTime = now;
+      log('[scroll-trace] word-follow turn delta=' + Math.round(delta));
+      scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
+    } catch (_) {}
+  };
 
   function isChunkVisible(chunk) {
     const cr = chunk.getBoundingClientRect();
@@ -5201,6 +5646,10 @@
     flushReadPosition();
     if (viewEl) { viewEl.style.visibility = 'hidden'; viewEl.style.pointerEvents = 'none'; }  // hide but KEEP layout
     try { clearCueHighlight(); } catch (_) {}   // drop the green so it can't bleed on the hidden-but-laid-out reader (iOS WebKit)
+    // Same for the dict-lookup highlight: its geometry overlay rects live in
+    // viewEl and survive re-renders — leaving read mode with a lookup painted
+    // left a ghost green blob floating over the next view.
+    try { window._clearReaderDictHighlight?.(); } catch (_) {}
     document.body.classList.remove('has-paged-progress');
   }
 
@@ -5776,6 +6225,22 @@
                                                        : c.text.length;
             }
             if (total > 0) window.stats.incrementAudioChars(total);
+            // Timeline coverage credit — same continuity gate as the chars
+            // credit just above, but pushed EVENT-DRIVEN from this native-
+            // bridge-triggered callback rather than relying on mode-
+            // coverage.js's own setInterval poll to catch it. A background
+            // JS setInterval can be throttled/delayed by the OS for long
+            // stretches; this callback is driven by native audio position
+            // events instead, which is the exact mechanism already proven
+            // reliable for the chars credit above across long background
+            // sessions. Harmless overlap with mode-coverage's own poll —
+            // insertIv unions same-mode intervals, it never double-counts.
+            if (currentTitleId && posMs > lastPos) {
+              // forcePersist=false — this can fire many times a minute during
+              // live listening; let it respect the normal write throttle
+              // instead of forcing a blobStore write on every cue transition.
+              try { window.modeCoverage?.creditRange?.(currentTitleId, lastPos, posMs, 'audio', 'ms', false, 'paged-audio'); } catch (_) {}
+            }
           }
           window._lastAudioCueIdxForStats = idx; // high-water (forward only)
         }
@@ -5836,6 +6301,32 @@
       if (window._synthBookLoadedCues > 0 && idx >= window._synthBookLoadedCues - 5) {
         try { _maybeExtendSynthBook(idx, true); } catch (_) {}
       }
+      // BRIDGE: don't park on the stale line for this cue's whole duration —
+      // paint the nearest MAP-MATCHED neighbor instead (forward first: the
+      // voice is moving forward, and landing on the next line a beat early
+      // reads as smooth follow; alignment-map entries are trusted, so no
+      // wrong-spot risk). The real cue takes over at its own boundary. Only
+      // when no neighbor within ±2 is matched do we fall back to
+      // un-claiming, so every later event retries the resolve.
+      if (pagedCueToChunk) {
+        for (const cand of [idx + 1, idx + 2, idx - 1, idx - 2]) {
+          if (cand < 0 || cand >= pagedCueToChunk.length || pagedCueToChunk[cand] < 0) continue;
+          const cue2 = (Array.isArray(pagedCues) && pagedCues[cand]) ||
+                       (window.__abCues && window.__abCues[cand]) || null;
+          if (!cue2 || !cue2.text) continue;
+          try { window.__onPagedCueUpdate(cand, cue2, positionMs); } catch (_) {}
+          // Claim the REAL cue: its later events are already answered by the
+          // substitute paint; the memo must not re-run this every 150 ms.
+          lastHighlightedCue = idx;
+          return;
+        }
+      }
+      // Un-claim the cue: with lastHighlightedCue left at idx, the memo above
+      // (and the watchdog's idx===lastHighlightedCue test) treated this FAILED
+      // paint as done and the follow stayed parked until the NEXT cue landed —
+      // the reported "cursor stops following, then catches up". Resetting lets
+      // every subsequent position event retry (map lookup miss is cheap).
+      lastHighlightedCue = -1;
       return;
     }
     // READ-ALONG char credit: the reader is VISIBLE (read mode — guaranteed by the
@@ -5871,7 +6362,12 @@
     // Glow failed to bind (walker mismatch, dead range) → repaint the block
     // highlight so the reader is never left with NO indicator at all.
     if (kwOnly && !glowed && range) { try { setCueRangeHighlight(chunk, cue.text); } catch (_) {} }
-    if (!range || !scrollEl) return;
+    // Range resolution failed entirely (setCueRangeHighlight bailed): nothing
+    // was painted AND readerCuePainted(undefined) just tore the glow down.
+    // Un-claim the cue so the next position event retries instead of leaving
+    // the reader indicator-less until the following cue.
+    if (!range) { lastHighlightedCue = -1; return; }
+    if (!scrollEl) return;
     // No user-scroll grace gate here — this hook only fires when the
     // cue INDEX changes (the earlier `idx === lastHighlightedCue` early
     // return guarantees that). Every new cue is a fresh chance to snap,
@@ -5896,7 +6392,7 @@
       return;
     }
     log('[scroll-trace] __onPagedCueUpdate idx=' + idx);
-    autoScrollForRange(range);
+    autoScrollForRange(range, kwOnly);
   };
 
   // Boot-time setup. Each hook is wrapped in its own try/catch so a
@@ -5923,4 +6419,150 @@
   } else {
     safeBoot();
   }
+
+  // ---- visionOS: word-level gaze overlays for the paged reader --------------
+  // The proven audio/card pattern adapted to the vertical-rl scroller:
+  // childless absolutely-positioned strips in a NON-SCROLLING layer over the
+  // view are the only hit-testable elements → one steady capsule per word.
+  // A tap re-enters the reader's OWN lookup (lookupAt) at the word's first
+  // glyph, so context binding, boundary correction, and highlight painting
+  // are identical to a direct tap — just quantized to the word. Overlays are
+  // rebuilt after every scroll settle (page turn), only for VISIBLE text.
+  // The text itself is never touched — no re-raster risk (same guarantee as
+  // the karaoke glow overlay).
+  let _kvReadTok = 0, _kvReadLayer = null, _kvReadDeb = 0, _kvReadWired = false;
+  function _kvReadInstall() {
+    if (_kvReadWired || !window.KADOKI_VISION) return;
+    if (!viewEl || !scrollEl || !innerEl) return;
+    _kvReadWired = true;
+    _kvReadLayer = document.createElement('div');
+    _kvReadLayer.id = 'kvReadHits';
+    _kvReadLayer.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:5;';
+    viewEl.appendChild(_kvReadLayer);
+    const kick = () => { clearTimeout(_kvReadDeb); _kvReadDeb = setTimeout(_kvReadRebuild, 500); };
+    scrollEl.addEventListener('scroll', kick, { passive: true });
+    kick();
+  }
+  async function _kvReadRebuild() {
+    const tok = ++_kvReadTok;
+    if (!_kvReadLayer) return;
+    _kvReadLayer.innerHTML = '';
+    if (!window.KADOKI_VISION || !innerEl || !innerEl.isConnected) return;
+    if (!document.body.classList.contains('mode-read')) return;
+    if (typeof window.dictSegmentWord !== 'function') return;
+    try {
+      const vw = window.innerWidth, vh = window.innerHeight;
+      // Collect VISIBLE text nodes (skip furigana) into a flat map.
+      const walker = document.createTreeWalker(innerEl, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) {
+          let p = n.parentNode;
+          while (p && p !== innerEl) {
+            const t = p.tagName;
+            if (t === 'RT' || t === 'RP') return NodeFilter.FILTER_REJECT;
+            p = p.parentNode;
+          }
+          return (n.nodeValue && n.nodeValue.trim()) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      });
+      const segs = []; let flat = '';
+      const range = document.createRange();
+      let n;
+      while ((n = walker.nextNode())) {
+        range.selectNodeContents(n);
+        const r = range.getBoundingClientRect();
+        if (!r || (r.width === 0 && r.height === 0) || r.right < -20 || r.left > vw + 20 || r.bottom < -20 || r.top > vh + 20) continue;
+        segs.push({ node: n, start: flat.length, len: n.nodeValue.length });
+        flat += n.nodeValue;
+        if (flat.length > 3200) break;   // a visible page is well under this
+      }
+      if (!flat) return;
+      const isJa = (ch) => /[぀-ヿ一-鿿㐀-䶿々〆]/.test(ch);
+      const hasKk = (s) => /[゠-ヿ一-鿿㐀-䶿々]/.test(s);
+      const words = [];
+      let pos = 0;
+      while (pos < flat.length) {
+        if (!isJa(flat[pos])) { pos++; continue; }
+        let r2 = null;
+        try { r2 = await window.dictSegmentWord(flat, pos); } catch (_) {}
+        if (tok !== _kvReadTok) return;
+        const len = (r2 && r2.length >= 1) ? r2.length : 1;
+        const surface = flat.substr(pos, len);
+        if (hasKk(surface) || surface.length >= 3) words.push({ start: pos, len });
+        pos += len;
+      }
+      if (tok !== _kvReadTok || !words.length) return;
+      const locate = (ci) => {
+        for (const s of segs) { if (ci < s.start + s.len) return { node: s.node, off: Math.max(0, ci - s.start) }; }
+        return null;
+      };
+      const baseR = viewEl.getBoundingClientRect();
+      const frag = document.createDocumentFragment();
+      // Word rects, RUBY-AWARE: for any part of the word inside <ruby>, use
+      // the whole ruby element's boxes — the furigana column sits BESIDE the
+      // base glyphs in vertical text, and capsules built from base-text rects
+      // alone left the annotation as a dead zone that swallowed the gaze.
+      const rubySeen = new Set();
+      const rectsFor = (wd) => {
+        const out = [];
+        let ci = wd.start;
+        while (ci < wd.start + wd.len) {
+          const loc = locate(ci);
+          if (!loc) break;
+          const seg = segs.find(s2 => s2.node === loc.node);
+          if (!seg) break;
+          const upto = Math.min(wd.start + wd.len, seg.start + seg.len);
+          const rb = loc.node.parentElement && loc.node.parentElement.closest
+            ? loc.node.parentElement.closest('ruby') : null;
+          if (rb) {
+            if (!rubySeen.has(rb)) {
+              rubySeen.add(rb);
+              for (const r of Array.from(rb.getClientRects())) out.push(r);
+            }
+          } else {
+            try {
+              const eLoc = locate(upto - 1);
+              range.setStart(loc.node, loc.off);
+              range.setEnd(eLoc.node, Math.min(eLoc.off + 1, (eLoc.node.nodeValue || '').length));
+              for (const r of Array.from(range.getClientRects())) out.push(r);
+            } catch (_) {}
+          }
+          ci = upto;
+        }
+        return out.filter(r => r.width > 0 && r.height > 0);
+      };
+      for (const wd of words) {
+        const a = locate(wd.start);
+        if (!a) continue;
+        const rects = rectsFor(wd);
+        if (!rects.length) continue;
+        const wordNode = a.node, wordOff = a.off;   // exact word start for direct lookup
+        for (const r of rects) {
+          if (r.right < 0 || r.left > vw) continue;
+          const h = document.createElement('span');
+          // vertical-rl: columns run vertically → slack goes HORIZONTAL.
+          // Generous slack + big radius = a larger, more conspicuous capsule.
+          h.style.cssText = 'position:absolute;left:' + (r.left - baseR.left - 6) + 'px;top:' +
+            (r.top - baseR.top - 2) + 'px;width:' + (r.width + 12) + 'px;height:' + (r.height + 4) +
+            'px;pointer-events:auto;cursor:pointer;border-radius:12px;background:transparent;';
+          h.addEventListener('touchstart', () => {}, { passive: true });
+          h.addEventListener('click', (e) => {
+            e.stopPropagation();
+            // Popup open → this tap is a dismiss; the reader's own touch flow
+            // already handled it. Also skip the same-gesture re-lookup window.
+            const _pop = document.getElementById('dictPopup');
+            if (_pop && _pop.style.display !== 'none') return;
+            if (window._dictPopupDismissedTs && Date.now() - window._dictPopupDismissedTs < 500) return;
+            // DIRECT lookup at the word's exact text node + offset — no
+            // coordinate/caret round-trip (which mis-resolved on ruby words
+            // and returned single characters).
+            try { lookupFromNode(wordNode, wordOff); } catch (_) {}
+          });
+          frag.appendChild(h);
+        }
+      }
+      if (tok !== _kvReadTok) return;
+      _kvReadLayer.appendChild(frag);
+    } catch (_) {}
+  }
+  setInterval(() => { try { _kvReadInstall(); } catch (_) {} }, 2000);
 })();

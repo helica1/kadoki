@@ -4,6 +4,24 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.7.0 — 2026-08-26
+
+### Added
+- **Six audio-follow highlight styles in Read mode** (Preferences → Appearance → Read → "Audio-follow highlight"): the classic glow with phrase pill, a progress underline beside the text, a minimal marker dot, a full-line reading ruler, a comet trail, and a margin beam — a slim light-bar spanning the line with a bright node gliding word-by-word.
+- **Word-synced page turns.** With on-device generated subtitles, Read mode now turns the page exactly as the narration reaches the edge — the new column lands in step with the voice instead of jumping at subtitle boundaries.
+- **Syncing indicator.** Jumping into a part of the book whose subtitles haven't been generated yet now shows a live progress bar (with whole-book coverage) instead of freezing on the last known line.
+- **Smarter place maps.** Tapping an underlined real-world place now opens the map at that place's own scale — a Tokyo station or neighborhood shows the city around it, a prefecture shows the region — instead of always country scale.
+- **Apple Vision Pro (preview):** subs2srs movie frames render with true spatial depth in Card mode, with gaze-highlighted word lookup, a flat ⇄ 3D toggle in the transport bar, and hardware arrow-key navigation.
+
+### Changed
+- **Read mode audio-follow is now continuously smooth.** The highlight tracks the narration through every line — including lines the recognizer transcribed differently from the book — instead of occasionally freezing for a subtitle or two and jumping to catch up. (A "Follow engine" preference can restore the previous behavior.)
+- **AI quote and vocabulary clips end on the last word.** Quote playback used to run a subtitle or two past the quote; clips now stop at the quote's end and get a subtle fade-in/out (fades on iOS).
+- **Stricter reading timer.** The Read-mode timer now stops 10 seconds after audio pauses (any scroll or tap keeps it running for silent reading).
+
+### Fixed
+- **Dictionary lookups on words with furigana.** Tapping a furigana word used to select just one character; conjugated words never matched. Lookups now resolve the tapped word correctly — including multi-kanji compounds — with full deinflection and a continuous highlight with no gaps between characters.
+- **Apple Watch subtitles now stop when phone playback stops.** Pauses from every path (including end-of-book and phone-side errors) reach the watch reliably; as a safety net the watch parks itself if updates stop arriving.
+
 ## v1.5.1 — 2026-06-10
 
 ### Fixed

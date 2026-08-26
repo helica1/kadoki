@@ -35,6 +35,9 @@
   const KEY_PREFIX = 'STATS_V1_';
   const TIMEOUT_CARD_SEC = 20;
   const TIMEOUT_READ_SEC = 120;
+  // Strict post-pause tracking for the read timer (see the tick below).
+  let _readWasPlaying = false;
+  let _readPlayheadStopAt = 0;
   // AI-material pages (Characters / Timeline / Scenes overlays) accrue time
   // while open + screen-on; 30 s of no interaction stops the timer.
   const TIMEOUT_AI_SEC = 30;
@@ -81,11 +84,14 @@
     // (or fresh session) anchors the baseline without crediting anything,
     // so a user who resets at char 35,000 doesn't immediately get
     // credited with 35k chars on the next scroll.
-    read:  { totalSec: 0, chars: 0, maxCharOffsetSeen: 0, baselineSet: false, lastInteraction: 0, runningSince: 0 },
+    read:  { totalSec: 0, chars: 0, maxCharOffsetSeen: 0, baselineSet: false, lastInteraction: 0, runningSince: 0, lastNoteTs: 0 },
     audio: { totalSec: 0, chars: 0, watchSec: 0,                              runningSince: 0 },
     // ai — time spent on AI-material overlays (Characters / Timeline / Scenes).
     // Time only (no chars). Runs independently of the card/read/audio trio.
     ai:    { totalSec: 0,                                  lastInteraction: 0, runningSince: 0 },
+    // srs — time in the vocab review overlay (vocab-srs.js, #kvocabReview).
+    // Split out from `ai` per user request: review time is its own stat.
+    srs:   { totalSec: 0,                                  lastInteraction: 0, runningSince: 0 },
   };
 
   function persistableShape(mode) {
@@ -98,23 +104,85 @@
   }
   function persist(mode) {
     try { localStorage.setItem(KEY_PREFIX + mode, JSON.stringify(persistableShape(mode))); } catch (e) {}
+    mirrorSoon();
+  }
+
+  // ---- Native mirror: today's stats survive a WebView storage loss --------
+  //
+  // localStorage lives in the WebView's storage domain. When that layer goes
+  // down mid-session (observed 2026-08: dictionary IndexedDB wedged AND the
+  // whole day's audio stats gone after the restart that fixed it), everything
+  // written since the wedge began is silently lost. Mirror the four mode
+  // payloads + the stats-day stamp into native Preferences (UserDefaults /
+  // SharedPreferences — a different, native-side store) at most every
+  // MIRROR_MS, and on boot adopt the mirror when it is the SAME stats-day and
+  // strictly ahead of what localStorage gave us. Worst case after a storage
+  // loss is now ~MIRROR_MS of stats, not the whole day. Web/Mac builds have
+  // no Preferences plugin and skip all of this.
+  const MIRROR_KEY = 'STATS_MIRROR_V1';
+  const MIRROR_MS = 20000;
+  let _mirrorLastTs = 0, _mirrorTimer = null;
+  function mirrorWrite() {
+    try {
+      const P = window.Capacitor?.Plugins?.Preferences;
+      if (!P || !P.set) return;
+      const payload = { day: _dayStamp || statsDay(Date.now()), modes: {} };
+      for (const m of ['card', 'read', 'audio', 'ai', 'srs']) payload.modes[m] = persistableShape(m);
+      P.set({ key: MIRROR_KEY, value: JSON.stringify(payload) });
+    } catch (e) {}
+  }
+  function mirrorSoon() {
+    const now = Date.now();
+    if (now - _mirrorLastTs >= MIRROR_MS) { _mirrorLastTs = now; mirrorWrite(); return; }
+    if (_mirrorTimer) return;
+    _mirrorTimer = setTimeout(() => {
+      _mirrorTimer = null; _mirrorLastTs = Date.now(); mirrorWrite();
+    }, MIRROR_MS - (now - _mirrorLastTs));
+  }
+  async function mirrorAdopt() {
+    try {
+      const P = window.Capacitor?.Plugins?.Preferences;
+      if (!P || !P.get) return;
+      const res = await P.get({ key: MIRROR_KEY });
+      if (!res || !res.value) return;
+      const o = JSON.parse(res.value);
+      // A mirror from another stats-day is not today's data — never adopt it
+      // (the rollover snapshot path owns day boundaries).
+      if (!o || !o.modes || o.day !== _dayStamp) return;
+      let adopted = false;
+      for (const m of ['card', 'read', 'audio', 'ai', 'srs']) {
+        const mv = o.modes[m];
+        if (!mv || !Number.isFinite(mv.totalSec)) continue;
+        // Adopt the whole mode payload only when the mirror is clearly ahead —
+        // normal boots (localStorage intact) always have totalSec >= mirror,
+        // so this is a no-op outside the storage-loss case. +1s slack covers
+        // accrual between module init and this async read.
+        if (mv.totalSec > timers[m].totalSec + 1) {
+          applyPersisted(m, mv);
+          persist(m);
+          adopted = true;
+        }
+      }
+      if (adopted) console.log('[stats] adopted native mirror (storage-loss recovery)');
+    } catch (e) {}
+  }
+  function applyPersisted(mode, o) {
+    if (Number.isFinite(o.totalSec)) timers[mode].totalSec = o.totalSec;
+    if (mode === 'card' && Number.isFinite(o.cards)) timers[mode].cards = o.cards;
+    if (mode === 'card' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
+    if (mode === 'read' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
+    if (mode === 'read' && Number.isFinite(o.maxCharOffsetSeen))
+      timers[mode].maxCharOffsetSeen = o.maxCharOffsetSeen;
+    if (mode === 'read' && typeof o.baselineSet === 'boolean')
+      timers[mode].baselineSet = o.baselineSet;
+    if (mode === 'audio' && Number.isFinite(o.watchSec)) timers[mode].watchSec = o.watchSec;
+    if (mode === 'audio' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
   }
   function load() {
-    for (const mode of ['card', 'read', 'audio', 'ai']) {
+    for (const mode of ['card', 'read', 'audio', 'ai', 'srs']) {
       try {
         const raw = localStorage.getItem(KEY_PREFIX + mode);
-        if (!raw) continue;
-        const o = JSON.parse(raw);
-        if (Number.isFinite(o.totalSec)) timers[mode].totalSec = o.totalSec;
-        if (mode === 'card' && Number.isFinite(o.cards)) timers[mode].cards = o.cards;
-        if (mode === 'card' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
-        if (mode === 'read' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
-        if (mode === 'read' && Number.isFinite(o.maxCharOffsetSeen))
-          timers[mode].maxCharOffsetSeen = o.maxCharOffsetSeen;
-        if (mode === 'read' && typeof o.baselineSet === 'boolean')
-          timers[mode].baselineSet = o.baselineSet;
-        if (mode === 'audio' && Number.isFinite(o.watchSec)) timers[mode].watchSec = o.watchSec;
-        if (mode === 'audio' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
+        if (raw) applyPersisted(mode, JSON.parse(raw));
       } catch (e) {}
       timers[mode].runningSince = 0;
     }
@@ -127,6 +195,112 @@
     return 'card';
   }
 
+  // ---- Audio time truth: the native playhead, NOT the wall clock ----
+  //
+  // audio is the only timer that deliberately keeps running while the app is
+  // backgrounded (that's the entire point of audio mode), which made it the
+  // only timer that could credit hours the user never spent. Every wall-clock
+  // stop depends on JS hearing that playback ended, and there are several ways
+  // it doesn't:
+  //   • a 'state' event emitted while the WebView was suspended REPLAYS on
+  //     foreground (documented in app.js's remoteCommand/position listeners).
+  //     app.js sets `_bgPlaying = !!d.playing` from it with no staleness gate,
+  //     so a replayed playing:true pins the mirror true. Native never re-emits
+  //     "paused" for an already-paused player, so nothing ever unsticks it —
+  //     and reconcileMode restarts the audio timer every tick for as long as
+  //     the user sits in audio mode. That alone manufactures hours per day.
+  //   • playback ending / being paused from the lock screen while JS is frozen:
+  //     the stop isn't processed until foreground, and stopMode has no
+  //     inactivity cap for audio (timeoutSec is 0), so the whole frozen gap
+  //     lands in the total.
+  // Both are the same class of bug — trusting an event that may never arrive.
+  //
+  // Fix: credit min(wall-clock, playhead advance ÷ playback rate) per sample.
+  // The playhead is native truth: it cannot advance faster than real time
+  // during honest playback (a bigger jump is a seek, which the wall-clock
+  // bound clips), and it stops the instant playback does — which is exactly
+  // what the wall clock fails to notice. A stuck mirror now credits ZERO,
+  // while a genuine 4-hour pocket listen with JS frozen the whole time still
+  // credits in full, because the playhead really did move 4 hours.
+  const AUD_PERSIST_MS = 15000;
+  let _audAnchorTs = 0, _audAnchorPos = -1;
+  let _audLastSampleTs = 0, _audLastPersistTs = 0, _audPollBusy = false;
+  let _audTitlePend = 0;
+
+  function audioResetAnchor() { _audAnchorTs = 0; _audAnchorPos = -1; }
+
+  // One (position, time) observation. `tsIn` is the event's OWN timestamp when
+  // native supplies one — a burst of events replayed after a suspension then
+  // reconstructs the real listening span instead of collapsing into "now".
+  function audioSample(posMs, tsIn) {
+    if (!Number.isFinite(posMs) || posMs < 0) return;
+    const ts = (Number.isFinite(tsIn) && tsIn > 0) ? tsIn : Date.now();
+    _audLastSampleTs = Date.now();
+    // Not running, or no anchor yet: anchor without crediting.
+    if (!timers.audio.runningSince || _audAnchorPos < 0) {
+      _audAnchorTs = ts; _audAnchorPos = posMs;
+      return;
+    }
+    // Older than what we've already credited through — drop it entirely
+    // WITHOUT re-anchoring. This is the case where the backstop poll closed a
+    // suspension gap from native truth and the queued position burst for that
+    // same span replays afterwards: re-anchoring backwards would let the burst
+    // credit the span a second time.
+    if (ts <= _audAnchorTs) return;
+    const wallMs = ts - _audAnchorTs;
+    let advMs = posMs - _audAnchorPos;
+    _audAnchorTs = ts; _audAnchorPos = posMs;
+    // Normalise the advance by playback rate so 1.5× listening isn't credited
+    // 1.5× the real time (and 0.8× isn't shortchanged).
+    let rate = 1;
+    try { rate = Number(window.getActivePlaybackRate?.()) || 1; } catch (_) {}
+    if (rate > 0.05 && rate !== 1) advMs = advMs / rate;
+    const credit = Math.min(wallMs, advMs);
+    if (!(credit > 0)) return;
+    timers.audio.totalSec += credit / 1000;
+    // Per-title time log — same seconds, batched to whole seconds so a 150 ms
+    // event cadence doesn't spam blobStore.
+    _audTitlePend += credit / 1000;
+    if (_audTitlePend >= 1) {
+      const whole = Math.floor(_audTitlePend);
+      _audTitlePend -= whole;
+      try {
+        const tid = window._activeTitleId;
+        if (tid) window.titleStats?.noteTime?.(tid, 'audio', whole);
+      } catch (_) {}
+    }
+    const nowReal = Date.now();
+    if (nowReal - _audLastPersistTs > AUD_PERSIST_MS) {
+      _audLastPersistTs = nowReal;
+      persist('audio');
+    }
+  }
+
+  // Backstop for when position events stop arriving (dropped rather than
+  // queued, plugin re-attach, etc.): re-anchor from native truth — which also
+  // closes any gap a suspension left — and self-heal the `_bgPlaying` mirror,
+  // the thing a stale replayed 'state' event used to pin true forever. That
+  // heal matters beyond audio: read/card suppress their inactivity timeouts
+  // while `_bgPlaying` is true, so a stuck mirror inflated those totals too.
+  function audioTruthPoll() {
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bg?.getState) return;
+    _audPollBusy = true;
+    let p;
+    try { p = Promise.resolve(bg.getState()); } catch (_) { _audPollBusy = false; return; }
+    p.then((s) => {
+      _audPollBusy = false;
+      _audLastSampleTs = Date.now();
+      if (!s || typeof s.playing !== 'boolean') return;
+      if (s.playing !== !!window._bgPlaying) {
+        window._bgPlaying = s.playing;
+        console.log('[stats] audio mirror self-heal → playing=' + s.playing);
+      }
+      if (s.playing) audioSample(Number(s.positionMs), Date.now());
+      else audioResetAnchor();
+    }).catch(() => { _audPollBusy = false; });
+  }
+
   // Only one timer at a time: starting one stops the others.
   function startMode(mode) {
     const t = timers[mode];
@@ -134,6 +308,9 @@
     for (const other of ['card', 'read', 'audio']) {
       if (other !== mode && timers[other].runningSince) stopMode(other);
     }
+    // Fresh window: the first sample after a start anchors without crediting,
+    // so a pause gap never lands in the total.
+    if (mode === 'audio') audioResetAnchor();
     t.runningSince = Date.now();
     if ('lastInteraction' in t) t.lastInteraction = Date.now();
     console.log('[stats] start ' + mode);
@@ -143,7 +320,7 @@
   // so opening the stats popup doesn't continue ticking time the user
   // obviously isn't using.
   function stopAll() {
-    for (const m of ['card', 'read', 'audio', 'ai']) {
+    for (const m of ['card', 'read', 'audio', 'ai', 'srs']) {
       if (timers[m].runningSince) stopMode(m);
     }
   }
@@ -151,6 +328,17 @@
   function stopMode(mode, opts) {
     const t = timers[mode];
     if (!t.runningSince) return;
+    // audio accrues through audioSample() as the playhead moves, so stopping
+    // just closes the window — there is no wall-clock segment to credit here
+    // (crediting one is precisely the bug this replaced).
+    if (mode === 'audio') {
+      t.runningSince = 0;
+      audioResetAnchor();
+      _audTitlePend = 0;
+      persist('audio');
+      console.log('[stats] stop audio (total ' + t.totalSec.toFixed(0) + 's)');
+      return;
+    }
     // Cap credited time when stopping by inactivity. The cap is
     // `lastInteraction + (mode's timeout)`, i.e. the latest moment the
     // timer SHOULD have stopped. Without this, a tick that fires hours
@@ -166,7 +354,7 @@
       // event can't credit hours of suspended time.
       const timeoutSec = mode === 'card' ? TIMEOUT_CARD_SEC
                        : mode === 'read' ? TIMEOUT_READ_SEC
-                       : mode === 'ai'   ? TIMEOUT_AI_SEC
+                       : (mode === 'ai' || mode === 'srs') ? TIMEOUT_AI_SEC
                        : 0;
       if (timeoutSec > 0) {
         const capTs = t.lastInteraction + timeoutSec * 1000;
@@ -259,8 +447,28 @@
   // playing so the user can listen while browsing the summary. The character
   // POPUP (squiggle tap) is deliberately NOT tagged — that's captured by read.
   let _aiPagePrevOpen = false;
+  let _srsPagePrevOpen = false;
   function isAiPageVisible() {
     try { return !!document.querySelector('.kai-ai-page'); } catch (_) { return false; }
+  }
+  // Vocab-review overlay (its own stats bucket). While it is open the AI
+  // timer must NOT run — the review often stacks OVER an open Timeline panel
+  // (.kai-ai-page), and double-counting the same minute would inflate both.
+  function isSrsPageVisible() {
+    try { return !!document.querySelector('.kai-srs-page'); } catch (_) { return false; }
+  }
+  function srsBump() {
+    if (_shouldIgnoreBump()) return;
+    if (!isSrsPageVisible()) return;
+    const t = timers.srs;
+    t.lastInteraction = Date.now();
+    if (!t.runningSince) {
+      if (timers.card.runningSince) stopMode('card');
+      if (timers.read.runningSince) stopMode('read');
+      if (timers.ai.runningSince) stopMode('ai');
+      t.runningSince = Date.now();
+      console.log('[stats] start srs');
+    }
   }
   // Interaction inside an AI page — starts or keeps alive the ai timer. Gated
   // on the page actually being open and the app visible (same gate as bumpRead).
@@ -354,16 +562,29 @@
     // Per-title time-spent log (library Stats card): 1s per tick to whichever
     // mode timer is currently running (the timers already encode all the
     // active/idle/playback rules — this just attributes their seconds to the
-    // active title).
+    // active title). audio is deliberately absent: it's credited from playhead
+    // samples in audioSample(), since a tick can't tell whether audio is
+    // really playing (it was inflating this log the same way it inflated the
+    // daily total).
     try {
       const _tid = window._activeTitleId;
       if (_tid && window.titleStats?.noteTime) {
-        for (const _m of ['card', 'read', 'audio']) {
+        for (const _m of ['card', 'read']) {
           if (timers[_m] && timers[_m].runningSince) window.titleStats.noteTime(_tid, _m, 1);
         }
       }
     } catch (_) {}
-    const aiOpen = isAiPageVisible();
+    // Audio truth backstop. Position events are the primary heartbeat
+    // (~150 ms–1 s while playing); this only fires when they've gone quiet for
+    // 4 s while we still believe audio is live — i.e. exactly the situations
+    // that used to accrue phantom time. Costs one bridge call per 4 s in that
+    // state and nothing at all in the normal case.
+    if (!_audPollBusy && (timers.audio.runningSince || window._bgPlaying) &&
+        Date.now() - _audLastSampleTs > 4000) {
+      try { audioTruthPoll(); } catch (_) { _audPollBusy = false; }
+    }
+    const srsOpen = isSrsPageVisible();
+    const aiOpen = !srsOpen && isAiPageVisible();   // review stacked over an AI page → srs owns the time
     window._aiPageOpen = aiOpen;
     reconcileMode(currentMode());
 
@@ -376,6 +597,14 @@
       if (!aiOpen) stopMode('ai');
       else if (document.visibilityState !== 'visible') stopMode('ai', { byBackground: true });
       else if ((now - timers.ai.lastInteraction) / 1000 > TIMEOUT_AI_SEC) stopMode('ai', { byInactivity: true });
+    }
+    // Vocab review (.kai-srs-page) — same lifecycle as the ai timer.
+    if (srsOpen && !_srsPagePrevOpen) srsBump();
+    _srsPagePrevOpen = srsOpen;
+    if (timers.srs.runningSince) {
+      if (!srsOpen) stopMode('srs');
+      else if (document.visibilityState !== 'visible') stopMode('srs', { byBackground: true });
+      else if ((now - timers.srs.lastInteraction) / 1000 > TIMEOUT_AI_SEC) stopMode('srs', { byInactivity: true });
     }
     // Card inactivity — skipped during CONTINUOUS PLAY (the user pressed play, so
     // cards auto-advance and audio plays continuously; they're actively listening,
@@ -391,10 +620,22 @@
       timers.card.lastInteraction = now;
     }
     // Read inactivity — skipped while audio is playing (passive listening).
+    // STRICT POST-PAUSE RULE (user, 2026-08-26; supersedes the "audio stop
+    // never stops the read timer" decision above): 10 s after the playhead
+    // stops with NO interaction since, the read timer stops. An interaction
+    // after the pause means silent reading — the normal 120 s rule applies;
+    // a later bumpRead restarts the timer as always.
     if (timers.read.runningSince) {
       const idleSec = (now - timers.read.lastInteraction) / 1000;
       const audioPlaying = !!window._bgPlaying;
-      if (!audioPlaying && idleSec > TIMEOUT_READ_SEC) {
+      if (audioPlaying) { _readWasPlaying = true; _readPlayheadStopAt = 0; }
+      else if (_readWasPlaying) { _readWasPlaying = false; _readPlayheadStopAt = now; }
+      if (!audioPlaying && _readPlayheadStopAt &&
+          timers.read.lastInteraction <= _readPlayheadStopAt &&
+          (now - _readPlayheadStopAt) / 1000 >= 10) {
+        _readPlayheadStopAt = 0;
+        stopMode('read', { byInactivity: true });
+      } else if (!audioPlaying && idleSec > TIMEOUT_READ_SEC) {
         stopMode('read', { byInactivity: true });
       }
     }
@@ -404,7 +645,11 @@
       timers.read.lastInteraction = now;
     }
   }
-  setInterval(tick, 1000);
+  // READ-ONLY PANEL WINDOW (panel-bridge.js): a second webview on the SAME origin
+  // shares this storage, so it must never run a second copy of a writer — that
+  // is how the user's place gets lost. The module still loads (the panel reads
+  // through its public surface); only the crediting/polling clock stands down.
+  if (!window.KADOKI_PANEL) setInterval(tick, 1000);
 
   // Stop the prior mode's timer IMMEDIATELY on a mode switch — don't wait for
   // the next 1 s tick. E.g. read→audio: the read timer stops the instant the
@@ -464,6 +709,15 @@
         // audio paused, which felt too tight.
         if (inReadMode && d.playing) bumpRead();
       });
+      // Playhead heartbeat — the sole source of audio time (see audioSample).
+      // Deliberately NOT staleness-gated, unlike app.js's position listener: a
+      // burst replayed after a WebView suspension IS the record of what played
+      // while we were frozen, and each event carries its original `ts`, so
+      // sampling them reconstructs the real listening span rather than
+      // collapsing it into "now".
+      bg.addListener('position', (d) => {
+        try { audioSample(Number(d?.positionMs), Number(d?.ts)); } catch (_) {}
+      });
     } catch (e) {}
   }
   setTimeout(ensureAudioBgHooked, 500);
@@ -471,8 +725,8 @@
 
   // Capture-phase touch listeners — feed touch() on every interaction.
   // Now harmless for stopped timers (touch is a no-op when not running).
-  document.addEventListener('touchstart', () => { if (isAiPageVisible()) aiBump(); else touch(); }, { passive: true, capture: true });
-  document.addEventListener('mousedown',  () => { if (isAiPageVisible()) aiBump(); else touch(); }, { passive: true, capture: true });
+  document.addEventListener('touchstart', () => { if (isSrsPageVisible()) srsBump(); else if (isAiPageVisible()) aiBump(); else touch(); }, { passive: true, capture: true });
+  document.addEventListener('mousedown',  () => { if (isSrsPageVisible()) srsBump(); else if (isAiPageVisible()) aiBump(); else touch(); }, { passive: true, capture: true });
 
   // -------- Backgrounding / visibility stop --------
   //
@@ -499,7 +753,7 @@
       return;
     }
     let any = false;
-    for (const m of ['card', 'read', 'ai']) {
+    for (const m of ['card', 'read', 'ai', 'srs']) {
       if (timers[m].runningSince) { stopMode(m, { byBackground: true }); any = true; }
     }
     if (any) console.log('[stats] stopped interactive timers for background');
@@ -551,6 +805,10 @@
   // synced to wherever the audio has reached. An in-flight Anki round-trip
   // (<1s hop to AnkiDroid/AnkiMobile) is exempt and behaves exactly as before.
   function handleAppHidden() {
+    // Going to background is the last reliable moment before the OS may kill
+    // (or wedge) the WebView — flush the native mirror now, bypassing the
+    // MIRROR_MS throttle. One Preferences write per hide, negligible.
+    try { _mirrorLastTs = Date.now(); mirrorWrite(); } catch (e) {}
     const b = document.body.classList;
     const interactive = b.contains('mode-read') ? 'read' : (b.contains('mode-card') ? 'card' : null);
     if (!_ankiRoundtripActive && interactive && window._bgPlaying &&
@@ -642,6 +900,9 @@
   // Public API.
   function liveTotal(mode) {
     const t = timers[mode];
+    // audio's total is already up to date (accrued per playhead sample) —
+    // adding the running segment would double-count it.
+    if (mode === 'audio') return t.totalSec;
     if (t.runningSince) return t.totalSec + (Date.now() - t.runningSince) / 1000;
     return t.totalSec;
   }
@@ -664,6 +925,9 @@
     // per day. Own daily-max semantics inside — safe at any call cadence.
     try { window.titleStats?.noteRead(window._activeTitleId, charPosition, window._pagedTotalJpChars); } catch (_) {}
     const t = timers.read;
+    const nowTs = Date.now();
+    const prevNoteTs = t.lastNoteTs || 0;   // in-memory only: a fresh boot re-anchors
+    t.lastNoteTs = nowTs;
     // First call after a reset (or first launch): just anchor the
     // baseline. Don't credit chars retroactively — otherwise resetting
     // at char 35,000 and then scrolling one line would jump the count
@@ -679,7 +943,16 @@
     const delta = charPosition - t.maxCharOffsetSeen;
     // Always advance the high-water mark…
     t.maxCharOffsetSeen = charPosition;
-    // …but only CREDIT a plausible continuous-reading advance. A large jump is
+    // An advance that happened OUTSIDE an active read session is not reading:
+    // audio/watch listening moves the book while read mode is closed, and the
+    // FIRST note after re-entering read landed the whole accumulated gap
+    // (whenever it fit under the jump cap) as "chars read" — the 3,389-chars-
+    // in-3-seconds bug. Re-anchor silently unless read mode has been running
+    // continuously since the previous note (slow single-page dwells stay
+    // credited — the gate is session continuity, not a dwell timeout).
+    const inReadWholeGap = t.runningSince > 0 && prevNoteTs > 0 && t.runningSince <= prevNoteTs;
+    if (!inReadWholeGap && (nowTs - prevNoteTs) > 90000) { persist('read'); return; }
+    // …and only CREDIT a plausible continuous-reading advance. A large jump is
     // a seek / jump-to-percent / big flick, NOT reading every character in
     // between — crediting it inflated the count into the hundreds of thousands.
     // A page of vertical-rl text is well under this cap; a seek is far above it.
@@ -734,7 +1007,9 @@
     t.runningSince = 0;
     if (mode === 'card')  { t.cards = 0; t.chars = 0; }
     if (mode === 'read')  { t.chars = 0; t.maxCharOffsetSeen = 0; t.baselineSet = false; }
-    if (mode === 'audio') { t.chars = 0; }
+    // watchSec must reset WITH totalSec (it's a subset) — leaving it out let the
+    // watch row carry yesterday's seconds and exceed "time playing".
+    if (mode === 'audio') { t.chars = 0; t.watchSec = 0; audioResetAnchor(); _audTitlePend = 0; }
     persist(mode);
   }
 
@@ -780,6 +1055,7 @@
         read:  { sec: Math.round(liveTotal('read')),  chars: timers.read.chars },
         audio: { sec: Math.round(liveTotal('audio')), chars: timers.audio.chars },
         ai:    { sec: Math.round(liveTotal('ai')) },
+        srs:   { sec: Math.round(liveTotal('srs')) },
       },
     };
     try { localStorage.setItem(PREV_KEY, JSON.stringify(prev)); } catch (e) {}
@@ -795,6 +1071,11 @@
     }
     _dayStamp = day;
     try { localStorage.setItem(DAY_KEY, day); } catch (e) {}
+    // Flip the native mirror to the new day immediately — a crash between the
+    // rollover and the next throttled mirror write must not leave a stale
+    // yesterday-labelled mirror (mirrorAdopt ignores other-day mirrors, so
+    // stale means "no protection", not corruption — but close the gap anyway).
+    try { _mirrorLastTs = Date.now(); mirrorWrite(); } catch (e) {}
     console.log('[stats] daily rollover → ' + day + ' (snapshot saved for ' + prev.day + ')');
   }
   // Previous stats-day snapshot, or null. Shape:
@@ -806,6 +1087,9 @@
     } catch (e) { return null; }
   }
   try { checkRollover(); } catch (e) {}
+  // After the day stamp is settled: async-recover today's totals from the
+  // native mirror if localStorage came up behind it (storage-loss restart).
+  mirrorAdopt();
 
   // Modal pause/resume — Preferences and Library open while a session is
   // active, but they're meta-config, not "active session" time. Pause the
@@ -835,6 +1119,7 @@
     getReadSec:  () => liveTotal('read'),
     getAudioSec: () => liveTotal('audio'),
     getAiSec:    () => liveTotal('ai'),
+    getSrsSec:   () => liveTotal('srs'),
     getCardCount:  () => timers.card.cards,
     getCardChars:  () => timers.card.chars,
     getReadChars:  () => timers.read.chars,

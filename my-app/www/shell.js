@@ -155,15 +155,81 @@
           t.closest('#kperfOverlay')) return;
       if (t.closest('.reading-chunk')) return;
       if (t.closest('.dict-frag')) return;
+      // Audio subtitle taps are dictionary lookups. The char spans are
+      // pointer-events:none now (visionOS gaze-capsule fix), so the tap
+      // target is the container/word wrapper and the .dict-frag check above
+      // no longer catches them — without this, every lookup toggled chrome.
+      if (t.closest('#audiobookCueText')) return;
+      // Vision Pro, EVERY mode: no tap-anywhere chrome toggle at all — a
+      // mis-aimed gaze pinch kept flipping the top bar. The transport
+      // ornament's dedicated button owns show/hide there.
+      if (window.KADOKI_VISION) return;
       // Reading mode owns its own content-area tap logic (chunks, margins,
-      // bottom-bar toggle). Skip here so we don't double-fire.
+      // bottom-bar toggle). Skip here so we don't double-fire. The paged
+      // reader (and its Vision word-overlay layer) likewise.
       if (t.closest('#readingModeContent')) return;
+      if (t.closest('#readingPagedView')) return;
       // Bottom progress bar + COPY pill have their own click handlers
       // (jump-to-position / copy-text). Don't steal those taps for chrome.
       if (t.closest('#progressBar') || t.closest('#cardCopyBtn')) return;
       // Otherwise: tap on empty content area → toggle chrome.
       toggleChrome();
     }, { passive: true, capture: true });
+  }
+
+  // macOS shell: mouse twin of the chrome tap handler (same skip-list), with
+  // one addition — a click on EMPTY header area (between the controls) also
+  // toggles, since desktop has no other gesture to hide the bar. The paged
+  // reader is skipped: it owns its own click→chrome logic (setupMouse).
+  function installChromeClickHandler() {
+    if (!window.KADOKI_MAC) return;
+    let x0 = 0, y0 = 0, t0 = 0;
+    document.addEventListener('mousedown', (e) => {
+      x0 = e.clientX; y0 = e.clientY; t0 = Date.now();
+    }, { capture: true });
+    document.addEventListener('click', (e) => {
+      if (e.metaKey) return;
+      if (Math.abs(e.clientX - x0) > 10 || Math.abs(e.clientY - y0) > 10) return;
+      if (Date.now() - t0 > 350) return;
+      if (window._dictPopupDismissedTs && Date.now() - window._dictPopupDismissedTs < 500) return;
+      const t = e.target;
+      if (!t || !t.closest) return;
+      if (t.closest('#appHeader')) {
+        // Empty header area (not a control) → hide the chrome.
+        if (t.closest('button, a, input, select, textarea, label')) return;
+        toggleChrome();
+        return;
+      }
+      if (t.closest('button, a, input, select, textarea, label[for]') ||
+          t.closest('#dictPopup') ||
+          t.closest('.shell-menu') ||
+          t.closest('#preferencesModal') ||
+          t.closest('#readingSettingsModal') ||
+          t.closest('#readingStatsModal') ||
+          t.closest('#audiobookReentryModal') ||
+          t.closest('#lookupNavBar') ||
+          t.closest('#lookupNavShield') ||
+          t.closest('#lookupLogOverlay') ||
+          t.closest('.kai-modal') ||
+          t.closest('#bookmarksOverlay') ||
+          t.closest('#kchapterView') ||
+          t.closest('#kcharsScreen') ||
+          t.closest('#aiSummaryOverlay') ||
+          t.closest('#kcharPopup') ||
+          t.closest('#kperfOverlay') ||
+          t.closest('#libraryPage')) return;
+      if (t.closest('.reading-chunk')) return;
+      if (t.closest('.dict-frag')) return;
+      if (t.closest('#audiobookCueText')) return;   // subtitle taps = lookups (frags are inert now)
+      if (window.KADOKI_VISION && document.body.classList.contains('mode-audio')) return;
+      if (t.closest('#readingModeContent')) return;
+      if (t.closest('#readingPagedView')) return;
+      if (t.closest('#progressBar') || t.closest('#cardCopyBtn')) return;
+      // A click that's dismissing the open dict popup is not a chrome toggle.
+      const _p = document.getElementById('dictPopup');
+      if (_p && _p.style.display !== 'none') return;
+      toggleChrome();
+    }, { capture: true });
   }
 
   // Visual hint: tabs whose mode isn't "enabled" for the current title get a
@@ -966,6 +1032,20 @@
     if (window.lookupLog && window.lookupLog.openScreen) {
       list.appendChild(mkItem(window.i18n.t('menu.lookup_history', 'Lookup history…'), () => { try { window.lookupLog.openScreen(); } catch (_) {} }));
     }
+    // Vocab SRS (in-app review of the AI 語彙 picks) — due count appended live.
+    if (window.vocabSrs && window.vocabSrs.openHub) {
+      const srsItem = mkItem(window.i18n.t('menu.srs', 'SRS…'), () => { try { window.vocabSrs.openHub(); } catch (_) {} });
+      (async () => {
+        try {
+          const c = await window.vocabSrs.counts();
+          if (c && c.due > 0) {
+            srsItem.textContent = window.i18n.t('menu.srs', 'SRS…') + '  (' + c.due + ')';
+            srsItem.classList.add('kai-glow-text');
+          }
+        } catch (_) {}
+      })();
+      list.appendChild(srsItem);
+    }
     // Glowing "(N)" badges = count of new (unseen) timeline/character updates
     // for the active title. Computed AFTER the menu is appended (below, via
     // updateShellAiCountBadges) so the SAME idempotent path also live-updates
@@ -987,6 +1067,14 @@
     // (switches to it, or downloads its files if absent) — works with no title
     // open, which is how device 2 receives the latest. "Browse Drive…" lists /
     // downloads / force-syncs / deletes.
+    // Direct device ⇄ device handoff (LAN, no cloud): pull newer state from a
+    // nearby open Kadoki. Runs automatically too; this is the manual poke.
+    if (window.kadokiHandoff) {
+      list.appendChild(mkDivider());
+      list.appendChild(mkItem(window.i18n.t('menu.handoff', 'Sync nearby device'), () => {
+        try { window.kadokiHandoff.syncNow(false); } catch (_) {}
+      }));
+    }
     if (window.driveSyncUI) {
       list.appendChild(mkDivider());
       if (window._activeTitleId && window.driveSyncUI.syncUp) {
@@ -1253,6 +1341,7 @@
       document.body.classList.add('platform-' + (window.Capacitor?.getPlatform?.() || 'web'));
     } catch (_) {}
     installChromeTapHandler();
+    installChromeClickHandler();
     attachShellButtonListeners();
     startTimerPoll();
     setInterval(() => { if (!document.hidden) refreshShellPlayLabel(); }, 800);

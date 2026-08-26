@@ -1,0 +1,364 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 46;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		13D1945E91C8872A98265D2D /* AnkiConnectProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 766FCECFE7789564371557A2 /* AnkiConnectProxy.swift */; };
+		1D169AC9A71EFE5B95C66E1C /* mac-shim.js in Resources */ = {isa = PBXBuildFile; fileRef = 64C9F37DE5E21F0D2DAA7C63 /* mac-shim.js */; };
+		37B1C38B4EDC0C5F7FF8FF7D /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C12A9D0D55F5B29740554FCA /* Cocoa.framework */; };
+		4DDCB517E7324DA32F5FCF4D /* www in Resources */ = {isa = PBXBuildFile; fileRef = 08186950BC1AFC4E31FECAAB /* www */; };
+		5BDD758FD6BA98BAAFAE0009 /* AppMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F6D8A3B8ED4479B3F1546D2 /* AppMain.swift */; };
+		927D48993143E95527F800A8 /* AudioSlicerHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0A75F790764BB2738428F9 /* AudioSlicerHandler.swift */; };
+		B703EB00A8C01976348E4F1E /* FileStoreHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5276E79CCA38E13EEE64F5A9 /* FileStoreHandler.swift */; };
+		BABC82A8DDA5DB1B04F30117 /* SchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98A8C8019D3FCB1A89CA1F16 /* SchemeHandler.swift */; };
+		CC328405CB21F9A367F2A7CD /* KadokiEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68E6B1781B75631A9DE5D7E5 /* KadokiEvents.swift */; };
+		EA56BE233E2305B39EF8AAFA /* AutoTranscribeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F3A4DAE1DA97BCD581A18 /* AutoTranscribeHandler.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		08186950BC1AFC4E31FECAAB /* www */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder; name = www; path = ../www; sourceTree = "<group>"; };
+		1F6D8A3B8ED4479B3F1546D2 /* AppMain.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
+		2A0A75F790764BB2738428F9 /* AudioSlicerHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSlicerHandler.swift; sourceTree = "<group>"; };
+		5276E79CCA38E13EEE64F5A9 /* FileStoreHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileStoreHandler.swift; sourceTree = "<group>"; };
+		64C9F37DE5E21F0D2DAA7C63 /* mac-shim.js */ = {isa = PBXFileReference; includeInIndex = 1; path = "mac-shim.js"; sourceTree = "<group>"; };
+		68E6B1781B75631A9DE5D7E5 /* KadokiEvents.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiEvents.swift; sourceTree = "<group>"; };
+		766FCECFE7789564371557A2 /* AnkiConnectProxy.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiConnectProxy.swift; sourceTree = "<group>"; };
+		886F3A4DAE1DA97BCD581A18 /* AutoTranscribeHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutoTranscribeHandler.swift; sourceTree = "<group>"; };
+		98A8C8019D3FCB1A89CA1F16 /* SchemeHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SchemeHandler.swift; sourceTree = "<group>"; };
+		C12A9D0D55F5B29740554FCA /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+		C8A7CD935AEFBFED2AA59D13 /* Kadoki.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kadoki.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		126A4F1C2680D83616BDEC73 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				37B1C38B4EDC0C5F7FF8FF7D /* Cocoa.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		3065AF392DFDC79D0EABA014 = {
+			isa = PBXGroup;
+			children = (
+				3987106AEB50609E7F474B11 /* Products */,
+				C5E6BC3A7F8FD778F8575B18 /* Frameworks */,
+				B098037108A851205D215DC8 /* Kadoki */,
+				08186950BC1AFC4E31FECAAB /* www */,
+			);
+			sourceTree = "<group>";
+		};
+		3987106AEB50609E7F474B11 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C8A7CD935AEFBFED2AA59D13 /* Kadoki.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		833FD1A82FBBE8EADFB9B77A /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				C12A9D0D55F5B29740554FCA /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
+		B098037108A851205D215DC8 /* Kadoki */ = {
+			isa = PBXGroup;
+			children = (
+				1F6D8A3B8ED4479B3F1546D2 /* AppMain.swift */,
+				98A8C8019D3FCB1A89CA1F16 /* SchemeHandler.swift */,
+				766FCECFE7789564371557A2 /* AnkiConnectProxy.swift */,
+				64C9F37DE5E21F0D2DAA7C63 /* mac-shim.js */,
+				5276E79CCA38E13EEE64F5A9 /* FileStoreHandler.swift */,
+				2A0A75F790764BB2738428F9 /* AudioSlicerHandler.swift */,
+				886F3A4DAE1DA97BCD581A18 /* AutoTranscribeHandler.swift */,
+				68E6B1781B75631A9DE5D7E5 /* KadokiEvents.swift */,
+			);
+			name = Kadoki;
+			path = Kadoki;
+			sourceTree = "<group>";
+		};
+		C5E6BC3A7F8FD778F8575B18 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				833FD1A82FBBE8EADFB9B77A /* OS X */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AE7893F7A42374D223DDBB03 /* Kadoki */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B759F043A1A119B504A9BA3A /* Build configuration list for PBXNativeTarget "Kadoki" */;
+			buildPhases = (
+				FCA791DE6C40F3065F86A48D /* Sources */,
+				126A4F1C2680D83616BDEC73 /* Frameworks */,
+				549603954231043CA31E8980 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Kadoki;
+			productName = Kadoki;
+			productReference = C8A7CD935AEFBFED2AA59D13 /* Kadoki.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		4B7AFC037911A93C131D79E1 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+			};
+			buildConfigurationList = 3CE651AFA07EEDEF0A24DDEC /* Build configuration list for PBXProject "Kadoki" */;
+			compatibilityVersion = "Xcode 3.2";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 3065AF392DFDC79D0EABA014;
+			minimizedProjectReferenceProxies = 0;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 3987106AEB50609E7F474B11 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				AE7893F7A42374D223DDBB03 /* Kadoki */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		549603954231043CA31E8980 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4DDCB517E7324DA32F5FCF4D /* www in Resources */,
+				1D169AC9A71EFE5B95C66E1C /* mac-shim.js in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		FCA791DE6C40F3065F86A48D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5BDD758FD6BA98BAAFAE0009 /* AppMain.swift in Sources */,
+				BABC82A8DDA5DB1B04F30117 /* SchemeHandler.swift in Sources */,
+				13D1945E91C8872A98265D2D /* AnkiConnectProxy.swift in Sources */,
+				B703EB00A8C01976348E4F1E /* FileStoreHandler.swift in Sources */,
+				927D48993143E95527F800A8 /* AudioSlicerHandler.swift in Sources */,
+				EA56BE233E2305B39EF8AAFA /* AutoTranscribeHandler.swift in Sources */,
+				CC328405CB21F9A367F2A7CD /* KadokiEvents.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		2239354DC6BA7E6796A576F1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		41BCABF411DE556CF96C968C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		AE74AF4659EF0A6841752846 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Kadoki/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.6.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.kadoki.mac;
+				PRODUCT_NAME = Kadoki;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		F6366DBD23752C26BBA4E7B2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Kadoki/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.6.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.kadoki.mac;
+				PRODUCT_NAME = Kadoki;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		3CE651AFA07EEDEF0A24DDEC /* Build configuration list for PBXProject "Kadoki" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				41BCABF411DE556CF96C968C /* Debug */,
+				2239354DC6BA7E6796A576F1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B759F043A1A119B504A9BA3A /* Build configuration list for PBXNativeTarget "Kadoki" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AE74AF4659EF0A6841752846 /* Release */,
+				F6366DBD23752C26BBA4E7B2 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 4B7AFC037911A93C131D79E1 /* Project object */;
+}

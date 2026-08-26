@@ -204,7 +204,7 @@
     const meta = { localId: entry.localId, titleId: entry.titleId, charId: entry.charId, charName: entry.charName, attempt: entry.attempt };
     if (entry.charSig) meta.charSig = entry.charSig;
     if (isScene) meta.chapterIdx = entry.chapterIdx;
-    const job = { id: jobId(), status: 'done', meta, results: [], request: { model: cfg.modelLabel || 'cloud' } };
+    const job = { id: jobId(), status: 'done', meta, results: [], request: { model: entry.orModel || cfg.modelLabel || 'cloud' } };
 
     // ---- Stage 1: art-director task list, OR a PRE-BUILT prompt (skip Stage 1) ----
     const tasks = [];
@@ -244,7 +244,7 @@
         sceneNo++;
         prog(isScene ? '場面を生成中…' : '画像を生成中…');
         try {
-          const r = await client.render({ prompt: (dir ? (dir + '. ' + pair.prompt) : pair.prompt), titleId: entry.titleId, feature: isScene ? 'img-scene' : 'img-char' });
+          const r = await client.render({ prompt: (dir ? (dir + '. ' + pair.prompt) : pair.prompt), titleId: entry.titleId, feature: isScene ? 'img-scene' : 'img-char', orModel: entry.orModel || null });
           job.results.push({ b64: r.b64, scene: sceneNo, prompt: pair.prompt, caption: pair.caption || '', respId: r.respId || null, backend: kind, sceneId: entry.sceneId || null });
           produced++;
         } catch (e) {

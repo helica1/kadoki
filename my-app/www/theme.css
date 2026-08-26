@@ -277,8 +277,264 @@ body.pref-card-bgimage-off   #cardBackgroundImage { opacity: 0 !important; }
   bottom: calc(env(safe-area-inset-bottom, 0px) + 86px);
   display: flex; justify-content: center; align-items: center; gap: 10px;
   padding: 0 16px; z-index: 6; pointer-events: none;
+  transition: transform 0.22s ease, opacity 0.18s ease;
 }
 body.pref-audio-waveform-off #abRepeatBar { bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); }
+
+/* Vision Pro transport bar — hidden unless the RealityDevice check sets
+   body.kadoki-vision (manual override: localStorage KADOKI_VISION_UI=1).
+   Movie-player-sized gaze targets; sits above the repeat bar. The wrapper
+   passes gestures through (same pattern as #abRepeatBar); each button is its
+   own interaction region, which is exactly what visionOS hover wants. */
+#abTransportBar {
+  position: absolute; left: 0; right: 0;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 138px);
+  display: none; justify-content: center; align-items: center; gap: 18px;
+  padding: 0 16px; z-index: 6; pointer-events: none;
+  transition: transform 0.22s ease, opacity 0.18s ease;
+}
+body.kadoki-vision #abTransportBar { display: flex; }
+body.kadoki-vision.pref-audio-waveform-off #abTransportBar { bottom: calc(env(safe-area-inset-bottom, 0px) + 64px); }
+/* Deliberately NOT coupled to body.chrome-hidden — the bar itself hosts the
+   chrome toggle (abTpChrome), so it must survive hiding the top bar.
+   .tp-auto-hidden = movie mode (辞書 off) while PLAYING: controls slide away,
+   any click on the view pauses and brings them back. */
+#abTransportBar.tp-auto-hidden { transform: translateY(160%); opacity: 0; }
+#abTransportBar.tp-auto-hidden * { pointer-events: none !important; }
+/* NATIVE visionOS (transport = system ornament below the window): chapter
+   repeat is an iOS-lock-screen concept — hide the toggle; the summary and
+   next-chapter pills stay. */
+body.kadoki-vision-native #abRepeatToggle { display: none !important; }
+/* …and the remaining pills (章の要約 / 次の章へ) tuck into the bottom-RIGHT
+   corner so the centered transport ornament below never fights them. */
+body.kadoki-vision-native #abRepeatBar {
+  justify-content: flex-end;
+  padding-right: 28px;
+}
+/* Dictionary popup "lifts" toward the viewer on Vision: scale-in entrance +
+   deep soft shadow reads as elevation. (True separate-plane rendering needs
+   a native glass panel — future work; this is the in-window illusion.) */
+body.kadoki-vision-native #dictPopup {
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.7), 0 8px 22px rgba(0, 0, 0, 0.55) !important;
+  transform-origin: 50% 100%;
+  animation: kv-dict-pop 0.18s ease-out;
+}
+@keyframes kv-dict-pop {
+  from { transform: scale(0.92) translateY(8px); opacity: 0.4; }
+  to   { transform: scale(1) translateY(0); opacity: 1; }
+}
+/* NATIVE Vision build: the in-window popup is a GHOST — invisible and
+   untouchable but fully alive; the native glass side panel (a trailing
+   ornament) mirrors its content and forwards button taps back to it. */
+body.kadoki-vision-native #dictPopup {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  animation: none;
+}
+/* NO text selection anywhere on Vision — a long pinch (or gaze dwell) was
+   starting iOS-style selection on button labels and on the book text itself,
+   fighting the word-overlay lookup system. Lookups are tap-driven (never
+   selection-driven) on Vision, so selection has no job here. Editable fields
+   are exempt — typing needs a caret. (Vision-only: Mac keeps CMD=selection
+   lookup; iOS/Android untouched.) */
+body.kadoki-vision, body.kadoki-vision *,
+body.kadoki-vision-native, body.kadoki-vision-native * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -webkit-touch-callout: none !important;
+}
+body.kadoki-vision :is(input, textarea, [contenteditable="true"], [contenteditable=""]),
+body.kadoki-vision-native :is(input, textarea, [contenteditable="true"], [contenteditable=""]) {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+/* NATIVE Vision header: the ornament transport below the window IS the
+   play control now — drop the header's duplicate play button, give the row
+   more height, and make the hamburger a big round glass gaze target
+   (visionOS hover glow follows the button's shape, so round = round glow). */
+body.kadoki-vision-native #appHeader #shellPlayBtn { display: none !important; }
+body.kadoki-vision-native #appHeader {
+  height: 64px;
+  gap: 12px;
+  padding-right: 12px;
+}
+body.kadoki-vision-native #appHeader .mode-tab {
+  padding: 11px 18px;
+  border-radius: 999px;
+}
+body.kadoki-vision-native #appHeader .mode-tabs {
+  border-radius: 999px;
+  padding: 3px;
+}
+body.kadoki-vision-native #appHeader #shellMoreBtn {
+  width: 54px;
+  height: 54px;
+  min-width: 54px;
+  padding: 0 !important;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+body.kadoki-vision-native #appHeader #shellMoreBtn svg {
+  width: 26px;
+  height: 26px;
+}
+/* Content that tucks under the 48px header needs the extra 16px. */
+body.kadoki-vision-native #cardContainer { padding-top: calc(64px + env(safe-area-inset-top, 0px)); }
+body.kadoki-vision-native #readingModeContent { padding-top: calc(72px + env(safe-area-inset-top, 0px)); }
+body.kadoki-vision-native #audiobookReentryModal { top: calc(env(safe-area-inset-top, 0px) + 64px) !important; }
+/* Card-mode gaze nav zones (Vision native): tall side bands for prev/next +
+   a bottom-center band for replay. Faint glyphs always visible; the system
+   hover glow lights the whole rounded zone on gaze. z-index 1 = below word
+   overlays (dictionary wins over text), above the card background. The
+   middle of the screen stays free so text taps and chrome toggles work. */
+.kv-cardnav-zone { display: none; }
+/* ANKI-DECK cards only. Synthetic SRT/transcription cards (body.card-srt)
+   are audio-coupled — their prev/next is the transport's cue stepping, and
+   big side zones would just eat text taps. */
+body.kadoki-vision-native.mode-card.card-srt .kv-cardnav-zone { display: none !important; }
+body.kadoki-vision-native.mode-card .kv-cardnav-zone {
+  display: flex;
+  position: fixed;
+  z-index: 1;
+  /* Inert: no hit-test target = no system gaze glow (it was distracting and
+     flashed on advance under a spatial picture). Pinches are resolved by
+     coordinates in reading-mode.js kvInstallCardNavZones. */
+  pointer-events: none;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.26);
+  border-radius: 28px;
+}
+body.kadoki-vision-native.mode-card .kv-cardnav-zone:active {
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.07);
+}
+body.kadoki-vision-native.mode-card .kv-cardnav-zone span {
+  font-size: 64px;
+  line-height: 1;
+  font-family: var(--font-sans);
+}
+/* Side bands start a third of the way down — the subtitle text at the top
+   of the card keeps a full-width strip for lookups. */
+#kvCardPrev {
+  left: 8px;
+  top: 34%;
+  bottom: 92px;
+  width: 27%;
+}
+/* NEXT owns the middle too — it is the action taken the vast majority of the
+   time, so the dead centre of the card is better spent on it than kept empty.
+   Starts a third of the way down like PREV, so the subtitle strip stays
+   dictionary-only; its glyph is pulled to the right edge so it doesn't sit on
+   the picture's focal point. */
+#kvCardNext {
+  left: 36%;
+  right: 8px;
+  top: 34%;
+  bottom: 92px;
+  justify-content: flex-end;
+  padding-right: 6%;
+}
+/* Sits low: the glyph used to land on the picture's lower middle (the
+   subject's chest on a movie frame); a shorter band closer to the bottom
+   edge keeps it off the frame. */
+#kvCardReplay {
+  left: 29%;
+  right: 29%;
+  bottom: 16px;
+  height: 100px;
+}
+#kvCardReplay span { font-size: 44px; }
+/* COPY pill moves to the bottom-right corner on Vision — its centered spot
+   sat right on top of the replay zone. Below the next-card band (which ends
+   92px up), so the two never fight. */
+body.kadoki-vision-native #cardCopyBtn {
+  left: auto;
+  right: 16px;
+  bottom: 40px;
+  transform: none;
+}
+body.kadoki-vision-native.chrome-hidden #cardCopyBtn {
+  transform: translateY(140%);
+}
+/* visionOS-native look: one floating glass capsule, circular icon buttons.
+   The system's gaze-hover glow supplies the button feedback; we keep our own
+   chrome minimal. No text selection anywhere in the bar (gaze dwell on a
+   button's label was starting iOS text selection). */
+#abTransportBar, #abTransportBar * {
+  user-select: none !important; -webkit-user-select: none !important;
+}
+.ab-tp-pill {
+  pointer-events: none; display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px; border-radius: 999px;
+  background: rgba(28, 28, 34, 0.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.5);
+  backdrop-filter: blur(28px) saturate(1.5);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.4);
+}
+#abTransportBar button {
+  pointer-events: auto; cursor: pointer; font-family: inherit;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.06); color: #f0f0f2;
+  border: none; border-radius: 50%;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s, color .15s, opacity .15s;
+  line-height: 1;
+}
+#abTpPrev, #abTpNext { width: 60px; height: 60px; font-size: 1.5rem; }
+#abTpPlay { width: 76px; height: 76px; font-size: 1.9rem; }
+#abTpDict {
+  width: auto; height: 56px; border-radius: 999px; padding: 0 22px;
+  font-size: 1.05rem; font-weight: 600;
+  background: rgba(183, 148, 246, 0.16); color: #cfc0f5;
+}
+#abTpDict.dict-off {
+  background: rgba(255, 255, 255, 0.05); color: #777;
+  text-decoration: line-through;
+}
+/* Show/hide together with the shell top bar (tap-to-toggle chrome). */
+body.chrome-hidden #abRepeatBar {
+  transform: translateY(110%);
+  opacity: 0;
+}
+body.chrome-hidden #abRepeatBar,
+body.chrome-hidden #abRepeatBar * {
+  pointer-events: none !important;
+}
+/* "Go to this chapter's summary" — lives IN #abRepeatBar now (next to the
+   repeat toggle), so it inherits that bar's position/show-hide-with-chrome
+   rules; only its own pill styling is needed here. Trailing "›" in the label
+   (index.html) marks it as a navigation action, same convention as
+   tl.view_scenes/tl.next_scene in Timeline & Scenes. */
+#abSummaryBtn {
+  position: relative;
+  pointer-events: auto; display: inline-flex; align-items: center; gap: 4px;
+  background: rgba(183, 148, 246, 0.10); color: #cfc0f5;
+  border: 1px solid rgba(183, 148, 246, 0.45); border-radius: 999px;
+  padding: 7px 14px; font-size: .84rem; font-weight: 600; cursor: pointer;
+  font-family: inherit; -webkit-tap-highlight-color: transparent;
+  transition: background .15s, border-color .15s, color .15s;
+}
+/* New/unread chapter summary at the current position (reading-mode.js polls
+   window.aiTimeline.currentChapterStatus and toggles this class) — a small
+   dot badge plus a warmer border/text so it reads as "there's something new"
+   even with chrome dimmed, alongside the one-time toast on the same event. */
+#abSummaryBtn.has-new {
+  background: rgba(255, 158, 100, 0.14); color: #ffd9b8;
+  border-color: rgba(255, 158, 100, 0.55);
+}
+#abSummaryBtn.has-new::after {
+  content: ''; position: absolute; top: -3px; right: -3px;
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #ff8a4c; border: 1.5px solid #1a1226;
+}
 #abRepeatToggle {
   pointer-events: auto; display: inline-flex; align-items: center; gap: 10px;
   background: rgba(183, 148, 246, 0.10); color: #cfc0f5;
@@ -1131,3 +1387,99 @@ body.prefs-open #progressBar { pointer-events: none; }
   body.platform-android #appHeader #shellPlayBtn { min-width: 46px; }
   body.platform-android #appHeader #shellMoreBtn { min-width: 44px; }
 }
+
+/* macOS shell only (body.kadoki-mac is stamped by the Mac boot shim): render
+   card images at no more than their natural size — small phone-deck
+   screenshots upscaled to a desktop window looked pixelated. scale-down keeps
+   the layout box identical to contain; only the drawn image stops growing. */
+body.kadoki-mac .card-image {
+  object-fit: scale-down;
+}
+
+/* =====================================================================
+   MOVIE-STYLE SUBTITLES  (card mode · Anki-deck cards that have a picture)
+   ---------------------------------------------------------------------
+   A subs2srs card is a movie frame plus the line spoken over it, so the
+   natural presentation is a real subtitle — overlaid on the lower part of
+   the frame in a translucent black box — not a caption stacked ABOVE the
+   picture (the default in-flow layout, .subtitle-text order:1).
+
+   Opt-in: Appearance -> Card -> "Movie-style subtitles". Scoped to deck
+   cards that actually have a frame to overlay:
+     :not(.card-srt)  synthetic SRT / transcription cards are audio-coupled
+                      and routinely carry paragraph-length cues; overlaying
+                      those would bury the picture. They keep in-flow.
+     .card-has-image  a deck card with no picture has nothing to overlay, so
+                      it keeps in-flow too (set per-card in displayCard).
+
+   Side effect we want: taking the subtitle out of flow leaves .card-image as
+   the only flex item in #cardContainer, so the frame reclaims the ~4rem the
+   caption used to occupy.
+   ===================================================================== */
+/* Two selectors for one rule: `.card-has-image` is set by displayCard, so it
+   is only correct AFTER a render, and :has() is self-maintaining but newer.
+   Either one matching is enough, and together they cover the case where the
+   pref is flipped while a card is already on screen. */
+body.pref-card-moviesubs-on.mode-card:not(.card-srt).card-has-image
+  #cardContainer .subtitle-text,
+body.pref-card-moviesubs-on.mode-card:not(.card-srt)
+  #cardContainer:has(> .card-image) .subtitle-text {
+  position: absolute;
+  /* Centered via left/right + auto margins rather than translateX(-50%):
+     the .card-rise animation writes `transform` on .subtitle-text, and while
+     that path is SRT-only today, staying off the transform property means the
+     two can never collide. (.subtitle-next centers the same way.) */
+  left: 4%;
+  right: 4%;
+  width: fit-content;
+  margin: 0 auto;
+  bottom: 7%;
+  box-sizing: border-box;
+  padding: 0.28em 0.8em;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 6px;
+  line-height: 1.35;
+  /* ONE soft drop shadow, not the five-way glow the unboxed subtitle uses —
+     against a solid box that glow just reads as mud around the glyphs. */
+  text-shadow: 0 2px 6px rgba(0, 0, 0, 0.95);
+  /* Tighter than the in-flow 55vh cap: an absolutely-positioned box grows
+     UPWARD from `bottom`, so an over-long line would climb the frame.
+     overflow-y stays auto on purpose — app.js's inSubtitleSafeZone keys off
+     the element being scrollable RIGHT NOW, and losing that would turn a
+     scroll gesture inside a long subtitle into a send-to-Anki. */
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+/* =====================================================================
+   SPATIAL CARD PICTURES (visionOS) — the hole-punch.
+   ---------------------------------------------------------------------
+   RealityKit content cannot be composited inside WebKit, so the spatial
+   scene renders in a native layer BEHIND the webview (MainViewController's
+   installSpatialLayer) and the page gets out of its way. Applied only while
+   window.kvSpatial has a picture on screen — no effect otherwise.
+
+   .card-image stays in flow at opacity 0 rather than display:none: its rect
+   is what tells native where to draw, and removing it from layout would
+   resize the very box we're measuring.
+   ===================================================================== */
+body.kv-spatial-live #cardContainer { background: transparent !important; }
+body.kv-spatial-live #cardBackgroundImage { opacity: 0 !important; }
+body.kv-spatial-live #cardContainer .card-image { opacity: 0 !important; }
+/* Subtitle over a spatial picture: the page is snapshotted at 1.5x and drawn
+   back over the scene, which softens glyph edges a touch against a bright
+   frame. A crisp 1px dark rim + a wider halo + a slightly darker box keep it
+   conspicuous without changing its size or place. */
+body.kadoki-vision-native.kv-spatial-live #cardContainer .subtitle-text {
+  text-shadow: 0 0 2px rgba(0, 0, 0, 1), 0 0 2px rgba(0, 0, 0, 1),
+               2px 2px 8px rgba(0, 0, 0, 0.95), -2px -2px 8px rgba(0, 0, 0, 0.95),
+               2px -2px 8px rgba(0, 0, 0, 0.95), -2px 2px 8px rgba(0, 0, 0, 0.95),
+               0 0 22px rgba(0, 0, 0, 0.9) !important;
+  background: rgba(0, 0, 0, 0.42);
+}
+/* Cross-fade the handover. The native picture is already on screen behind the
+   webview when .kv-spatial-live lands, so fading the DOM copy out reads as the
+   flat frame gaining depth rather than as a swap. The transition lives on the
+   element unconditionally (Vision only) because a transition added in the same
+   frame as the value change does not animate. */
+body.kadoki-vision-native #cardContainer .card-image { transition: opacity .28s ease; }

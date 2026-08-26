@@ -447,6 +447,257 @@
   }
   function hidePills() { for (const d of pillEls) d.style.display = 'none'; }
 
+  // ── alternative reader styles (Appearance → Read → "Audio-follow highlight")
+  // 'glow' A (default) · 'underline' B · 'dot' C · 'ruler' D. All share the
+  // overlay discipline: position:fixed divs inside the reader view, GPU
+  // transforms, text paint untouched. positionGlow dispatches per style.
+  let _rStyle = 'glow', _rStyleAt = 0;
+  function readerStyle() {
+    const n = Date.now();
+    if (n - _rStyleAt > 800) {
+      _rStyleAt = n;
+      try {
+        const v = window.appearance?.get?.('read')?.karaokeStyle;
+        _rStyle = ['underline', 'dot', 'ruler', 'comet', 'beam'].includes(v) ? v : 'glow';
+      } catch (_) { _rStyle = 'glow'; }
+    }
+    return _rStyle;
+  }
+  const _mkOv = (id, z, extra) => {
+    const d = document.createElement('div');
+    if (id) d.id = id;
+    d.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;' +
+      'z-index:' + z + ';display:none;will-change:transform;' + (extra || '');
+    (document.getElementById('readingPagedView') || document.body).appendChild(d);
+    return d;
+  };
+  let dotEl = null;
+  function ensureDot() {
+    if (dotEl && dotEl.isConnected) return dotEl;
+    dotEl = _mkOv('kwDot', 2550, 'width:12px;height:12px;border-radius:50%;');
+    return dotEl;
+  }
+  function hideDot() { if (dotEl) dotEl.style.display = 'none'; }
+  let ulTrack = [], ulFill = [];
+  function ensureUnderline() {
+    const host = document.getElementById('readingPagedView') || document.body;
+    if (ulTrack.length && !ulTrack[0].isConnected) { for (const d of ulTrack.concat(ulFill)) host.appendChild(d); }
+    for (let i = ulTrack.length; i < 4; i++) ulTrack.push(_mkOv('', 2539, 'border-radius:2px;'));
+    for (let i = ulFill.length; i < 4; i++) ulFill.push(_mkOv('', 2541, 'border-radius:2px;'));
+    return { track: ulTrack, fill: ulFill };
+  }
+  function hideUnderline() { for (const d of ulTrack.concat(ulFill)) d.style.display = 'none'; }
+  let rulerEl = null;
+  function ensureRuler() {
+    if (rulerEl && rulerEl.isConnected) return rulerEl;
+    rulerEl = _mkOv('kwRuler', 2538, 'border-radius:9px;');
+    return rulerEl;
+  }
+  function hideRuler() { if (rulerEl) rulerEl.style.display = 'none'; }
+  function hideAllReaderOverlays() { hideGlow(); hidePills(); hideDot(); hideUnderline(); hideRuler(); hideTrail(); hideBeam(); }
+
+  // First laid-out char position of the bound cue (positions can have holes).
+  function _firstPos(rd) { for (const p of rd.positions) { if (p && p.node) return p; } return null; }
+  // The hot char's writing mode + owning chunk, resolved per frame from the
+  // hot node itself (a cue can straddle chunks; cached values went stale).
+  function _lineGeom(pa) {
+    const host = pa.node.parentElement;
+    const chunk = host ? (host.closest('.reading-chunk') || host) : null;
+    const now = Date.now();
+    if (chunk && chunk._kwGeo && now - chunk._kwGeo.t < 2000) return chunk._kwGeo;
+    let vert = true, pitch = 0;
+    try {
+      const cs = getComputedStyle(chunk || document.body);
+      vert = /vertical/.test(cs.writingMode || '');
+      pitch = parseFloat(cs.lineHeight);
+      if (!Number.isFinite(pitch) || pitch <= 0) pitch = (parseFloat(cs.fontSize) || 18) * 1.75;
+    } catch (_) {}
+    const g = { chunk, vert, pitch, t: now };
+    if (chunk) chunk._kwGeo = g;
+    return g;
+  }
+  // Centre of the INTER-LINE gap beside the hot char (the furigana-free side:
+  // left of the column in vertical-rl, below the line in horizontal). The gap
+  // is measured from the chunk's real line pitch — a fixed offset sat closer
+  // to the NEXT line than to the current one (user report).
+  function _gapCenter(rect, g) {
+    if (g.vert) {
+      const gap = Math.max(6, (g.pitch || rect.width * 1.75) - rect.width);
+      return { x: rect.left - gap / 2, y: rect.top + rect.height / 2 };
+    }
+    const gap = Math.max(6, (g.pitch || rect.height * 1.75) - rect.height);
+    return { x: rect.left + rect.width / 2, y: rect.bottom + gap / 2 };
+  }
+
+  // C — marker dot: a small karaoke dot gliding alongside the current word.
+  // Sits on the furigana-free side (left of the column in vertical text,
+  // below the line in horizontal), so it never covers glyphs or readings.
+  function drawDot(rd, rect, comet) {
+    const el = ensureDot();
+    const g = _lineGeom(rd._pa);
+    const A = rd.accent || rgbStr(accentRGB('--accent-read', '#4caf50'));
+    const c = _gapCenter(rect, g);
+    let x = c.x - 6, y = c.y - 6;
+    if (Number.isFinite(rd.gx)) {
+      const dx = x - rd.gx, dy = y - rd.gy;
+      if (Math.abs(dx) + Math.abs(dy) < Math.max(rect.width, rect.height) * 6) { x = rd.gx + dx * 0.3; y = rd.gy + dy * 0.3; }
+    }
+    rd.gx = x; rd.gy = y;
+    if (el._kwA !== A) {
+      el._kwA = A;
+      el.style.background = 'radial-gradient(circle at 40% 35%, rgba(' + A + ',1), rgba(' + A + ',0.75))';
+      el.style.boxShadow = '0 0 8px rgba(' + A + ',0.55), 0 0 18px rgba(' + A + ',0.25)';
+    }
+    el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
+    if (el.style.display !== 'block') el.style.display = 'block';
+    // E — comet: the same dot trailing 4 echoes of where it just was, sized
+    // and faded down the tail. History is time-sampled so the tail stretches
+    // with speed and collapses when the voice lingers.
+    if (comet) {
+      const els = ensureTrail();
+      const now = performance.now();
+      (rd._trail || (rd._trail = [])).unshift({ x: x + 6, y: y + 6, t: now });
+      while (rd._trail.length && now - rd._trail[rd._trail.length - 1].t > 700) rd._trail.pop();
+      const AGES = [110, 220, 340, 480], SIZE = [9, 7, 5.5, 4], OP = [0.45, 0.3, 0.18, 0.1];
+      for (let i = 0; i < els.length; i++) {
+        const want = now - AGES[i];
+        let smp = null;
+        for (const h of rd._trail) { if (h.t <= want) { smp = h; break; } }
+        const d = els[i];
+        if (!smp || (Math.abs(smp.x - (x + 6)) + Math.abs(smp.y - (y + 6)) < 3)) { d.style.display = 'none'; continue; }
+        const sz = SIZE[i];
+        if (d._kwA !== A) { d._kwA = A; d.style.background = 'rgba(' + A + ',0.9)'; }
+        d.style.width = sz + 'px'; d.style.height = sz + 'px';
+        d.style.opacity = String(OP[i]);
+        d.style.transform = 'translate3d(' + (smp.x - sz / 2).toFixed(1) + 'px,' + (smp.y - sz / 2).toFixed(1) + 'px,0)';
+        if (d.style.display !== 'block') d.style.display = 'block';
+      }
+    }
+  }
+  let trailEls = [];
+  function ensureTrail() {
+    const host = document.getElementById('readingPagedView') || document.body;
+    if (trailEls.length && !trailEls[0].isConnected) { for (const d of trailEls) host.appendChild(d); }
+    for (let i = trailEls.length; i < 4; i++) trailEls.push(_mkOv('', 2549, 'border-radius:50%;'));
+    return trailEls;
+  }
+  function hideTrail() { for (const d of trailEls) d.style.display = 'none'; }
+
+  // G — margin beam: a slim light-bar spanning the whole line in the margin,
+  // with a bright node sliding along it at the spoken word — the line context
+  // of the ruler and the word precision of the dot, in four pixels of ink.
+  let beamEl = null;
+  function ensureBeam() {
+    if (beamEl && beamEl.isConnected) return beamEl;
+    beamEl = _mkOv('kwBeam', 2540, 'border-radius:2px;');
+    return beamEl;
+  }
+  function hideBeam() { if (beamEl) beamEl.style.display = 'none'; }
+  function drawBeam(rd, rect) {
+    const el = ensureBeam();
+    const g = _lineGeom(rd._pa);
+    const A = rd.accent || rgbStr(accentRGB('--accent-read', '#4caf50'));
+    const cr = g.chunk ? g.chunk.getBoundingClientRect() : rect;
+    const c = _gapCenter(rect, g);
+    let x, y, w, h, frac;
+    if (g.vert) {
+      x = c.x - 2; w = 4; y = cr.top; h = Math.max(10, cr.height);
+      frac = (rect.top + rect.height / 2 - cr.top) / Math.max(1, cr.height);
+    } else {
+      x = cr.left; w = Math.max(10, cr.width); y = c.y - 2; h = 4;
+      frac = (rect.left + rect.width / 2 - cr.left) / Math.max(1, cr.width);
+    }
+    if (Number.isFinite(rd.gx)) {
+      const dx = x - rd.gx, dy = y - rd.gy;
+      if (Math.abs(dx) + Math.abs(dy) < Math.max(w, h) * 2) { x = rd.gx + dx * 0.4; y = rd.gy + dy * 0.4; }
+    }
+    rd.gx = x; rd.gy = y;
+    frac = Math.max(0.02, Math.min(0.98, frac));
+    const f = (frac * 100).toFixed(1);
+    const axis = g.vert ? 'to bottom' : 'to right';
+    el.style.background = 'linear-gradient(' + axis + ', rgba(' + A + ',0.14), rgba(' + A + ',0.14) ' +
+      'calc(' + f + '% - 26px), rgba(' + A + ',0.95) ' + f + '%, rgba(' + A + ',0.14) calc(' + f + '% + 26px), rgba(' + A + ',0.14))';
+    if (el._kwA !== A) { el._kwA = A; el.style.boxShadow = '0 0 8px rgba(' + A + ',0.18)'; }
+    el.style.width = w.toFixed(1) + 'px';
+    el.style.height = h.toFixed(1) + 'px';
+    el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
+    if (el.style.display !== 'block') el.style.display = 'block';
+  }
+
+  // B — progress underline: a faint track along the whole cue with a bright
+  // fill up to the word being spoken. Drawn on the furigana-free side; the
+  // glyphs themselves carry no ink at all.
+  function drawUnderline(rd, fill) {
+    const L = rd.cue.text.length;
+    const p0 = _firstPos(rd);
+    const pEnd = rd.positions[L] || rd.positions[L - 1];
+    if (!p0 || !pEnd || !pEnd.node || !pEnd.node.isConnected) { hideUnderline(); return; }
+    const { vert } = _lineGeom(rd._pa);
+    const A = rd.accent || rgbStr(accentRGB('--accent-read', '#4caf50'));
+    const fi = Math.max(1, Math.min(L, Math.ceil(fill)));
+    const pf = rd.positions[fi] || pEnd;
+    const rectsOf = (a, b) => {
+      const out = [];
+      try {
+        const r = document.createRange();
+        r.setStart(a.node, Math.min(a.off, a.node.nodeValue.length));
+        r.setEnd(b.node, Math.min(b.off, b.node.nodeValue.length));
+        for (const rc of r.getClientRects()) {
+          if (rc.width < 0.5 || rc.height < 0.5) continue;
+          out.push(rc);
+          if (out.length >= 4) break;
+        }
+      } catch (_) {}
+      return out;
+    };
+    const paint = (els, rects, css) => {
+      for (let i = 0; i < els.length; i++) {
+        const d = els[i], rc = rects[i];
+        if (!rc) { d.style.display = 'none'; continue; }
+        if (vert) {
+          d.style.width = '3px';
+          d.style.height = rc.height.toFixed(1) + 'px';
+          d.style.transform = 'translate3d(' + (rc.left - 7).toFixed(1) + 'px,' + rc.top.toFixed(1) + 'px,0)';
+        } else {
+          d.style.width = rc.width.toFixed(1) + 'px';
+          d.style.height = '3px';
+          d.style.transform = 'translate3d(' + rc.left.toFixed(1) + 'px,' + (rc.bottom + 3).toFixed(1) + 'px,0)';
+        }
+        if (d._kwC !== css) { d._kwC = css; d.style.background = css.bg; d.style.boxShadow = css.sh; }
+        if (d.style.display !== 'block') d.style.display = 'block';
+      }
+    };
+    const els = ensureUnderline();
+    paint(els.track, rectsOf(p0, pEnd), { bg: 'rgba(' + A + ',0.16)', sh: 'none' });
+    paint(els.fill, rectsOf(p0, pf), { bg: 'rgba(' + A + ',0.8)', sh: '0 0 6px rgba(' + A + ',0.35)' });
+  }
+
+  // D — line ruler: one soft band over the full line (column) being spoken,
+  // snapping line to line — the reading-ruler idiom; no sub-word motion.
+  function drawRuler(rd, rect) {
+    const el = ensureRuler();
+    const g = _lineGeom(rd._pa);
+    const A = rd.accent || rgbStr(accentRGB('--accent-read', '#4caf50'));
+    const cr = g.chunk ? g.chunk.getBoundingClientRect() : rect;
+    let x, y, w, h;
+    if (g.vert) { x = rect.left - 3; w = rect.width + 6; y = cr.top - 2; h = cr.height + 4; }
+    else { x = cr.left - 2; w = cr.width + 4; y = rect.top - 2; h = rect.height + 4; }
+    if (Number.isFinite(rd.gx)) {
+      const dx = x - rd.gx, dy = y - rd.gy;
+      if (Math.abs(dx) + Math.abs(dy) < Math.max(w, h) * 2) { x = rd.gx + dx * 0.45; y = rd.gy + dy * 0.45; }
+    }
+    rd.gx = x; rd.gy = y;
+    if (Math.abs(w - (rd.gw || 0)) > 1 || Math.abs(h - (rd.gh || 0)) > 1 || el._kwA !== A) {
+      rd.gw = w; rd.gh = h; el._kwA = A;
+      el.style.width = w.toFixed(1) + 'px';
+      el.style.height = h.toFixed(1) + 'px';
+      el.style.background = 'rgba(' + A + ',0.09)';
+      el.style.boxShadow = 'inset 0 0 0 1px rgba(' + A + ',0.16)';
+    }
+    el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
+    if (el.style.display !== 'block') el.style.display = 'block';
+  }
+
   // Repositioned EVERY reader frame (rects move under the auto-follow scroll;
   // the pills are position:fixed). Cheap: the rect reads share the frame's
   // clean layout with the glow's own read.
@@ -488,8 +739,7 @@
   }
 
   function clearReader() {
-    hideGlow();
-    hidePills();
+    hideAllReaderOverlays();
     reader = null;
   }
 
@@ -498,6 +748,7 @@
   // at stale viewport coordinates over the wrong text. Re-park on every
   // scroll frame (rAF-throttled; playing is already tracked by the loop).
   let _reparkRaf = 0;
+  let _wfLastCheck = 0;   // word-follow page-turn probe throttle (see positionGlow)
   function scheduleRepark() {
     if (_reparkRaf || !reader || playing) return;
     _reparkRaf = requestAnimationFrame(() => {
@@ -515,14 +766,16 @@
   // dead target (caller clears).
   function positionGlow(rd, t, immediate) {
     const L = rd.cue.text.length;
-    if (!L) { hideGlow(); return true; }
+    if (!L) { hideAllReaderOverlays(); return true; }
+    const style = readerStyle();
+    if (rd._style !== style) { rd._style = style; hideAllReaderOverlays(); rd.gw = 0; rd.gh = 0; }
     const rel = t - rd.cue.startMs;
     const fill = Math.max(0, Math.min(L, fillPosAt(rd.cue, rel)));
     // Level-1 chunk pill: frame the grammatical chunk being read, hopping to
     // the NEXT chunk once the voice is ≥70% through the current one (time-
     // based) — the anticipatory preview. Repositioned every frame because the
-    // fixed-position pills sit over scrolling text.
-    if (rd.chunks && rd.chunks.length) {
+    // fixed-position pills sit over scrolling text. Glow style only.
+    if (style === 'glow' && rd.chunks && rd.chunks.length) {
       let ci = Math.min(rd.chunkAt || 0, rd.chunks.length - 1);
       while (ci + 1 < rd.chunks.length && fill >= rd.chunks[ci + 1].a) ci++;
       while (ci > 0 && fill < rd.chunks[ci].a) ci--;
@@ -535,7 +788,8 @@
     const a = Math.max(0, Math.min(L - 1, Math.floor(fill - READER_HOT_HALF)));
     const b = Math.max(a + 1, Math.min(L, Math.ceil(fill + READER_HOT_HALF)));
     const pa = rd.positions[a], pb = rd.positions[b];
-    if (!pa || !pb || !pa.node || !pa.node.isConnected) { hideGlow(); return false; }
+    if (!pa || !pb || !pa.node || !pa.node.isConnected) { hideAllReaderOverlays(); return false; }
+    rd._pa = pa;   // hot-char anchor for the alternative styles' geometry
     let rect = null;
     try {
       const r = document.createRange();
@@ -547,7 +801,40 @@
         if (!rect || rc.width * rc.height > rect.width * rect.height) rect = rc;
       }
     } catch (_) {}
-    if (!rect) { hideGlow(); return true; }
+    if (!rect) { hideGlow(); hideDot(); hideRuler(); hideTrail(); hideBeam(); return true; }
+    // WORD-SYNCED PAGE TURN: hand the paged reader the rect of the word the
+    // voice will reach in ~350 ms (one smooth-scroll's worth of warning). If
+    // that word lies beyond the page edge, the reader turns NOW and the new
+    // column lands exactly as the word is spoken. Cue-boundary snaps are
+    // deferred for word-timed cues (autoScrollForRange deferWordTurn), so
+    // this is what turns the page mid-cue. ~4×/s; skipped while paused or
+    // during the parked repark (immediate).
+    if (playing && !immediate && typeof window.__pagedWordFollowTurn === 'function') {
+      const nowMs = performance.now();
+      if (nowMs - _wfLastCheck > 250) {
+        _wfLastCheck = nowMs;
+        try {
+          const aheadFill = Math.max(0, Math.min(L, fillPosAt(rd.cue, rel + 350)));
+          const ai = Math.max(0, Math.min(L - 1, Math.floor(aheadFill)));
+          const qa = rd.positions[ai], qb = rd.positions[Math.min(L, ai + 1)];
+          if (qa && qb && qa.node && qa.node.isConnected) {
+            const rr = document.createRange();
+            rr.setStart(qa.node, Math.min(qa.off, qa.node.nodeValue.length));
+            rr.setEnd(qb.node, Math.min(qb.off, qb.node.nodeValue.length));
+            let ar = null;
+            for (const rc of rr.getClientRects()) {
+              if (rc.width < 0.5 || rc.height < 0.5) continue;
+              if (!ar || rc.width * rc.height > ar.width * ar.height) ar = rc;
+            }
+            if (ar) window.__pagedWordFollowTurn(ar);
+          }
+        } catch (_) {}
+      }
+    }
+    if (style === 'dot' || style === 'comet') { drawDot(rd, rect, style === 'comet'); return true; }
+    if (style === 'underline') { drawUnderline(rd, fill); return true; }
+    if (style === 'ruler') { drawRuler(rd, rect); return true; }
+    if (style === 'beam') { drawBeam(rd, rect); return true; }
     const el = ensureGlow();
     // Vertical-rl columns are one char wide — inflate mostly ACROSS the column
     // so the halo reads as a soft pool of light around the characters.
@@ -653,11 +940,16 @@
     const fi = Math.min(s.cue.text.length, Math.max(0, Math.floor(fillU16)));
     const fill = s.fragOfU16[fi] + (fillU16 - Math.floor(fillU16));
     if (Math.abs(fill - s.lastFill) < 0.02) return true;
-    const prev = s.lastFill < 0 ? fill : s.lastFill;
+    // First tick after registration: classify the WHOLE cue, not just the
+    // frontier window. Registering mid-cue (mode entry, foreground return,
+    // in-cue seek) otherwise left every already-passed char un-classed —
+    // stuck at the unread dim color instead of the read white/accent.
+    const first = s.lastFill < 0;
+    const prev = first ? fill : s.lastFill;
     s.lastFill = fill;
     const frags = s.frags, P = s.palette;
-    const lo = Math.max(0, Math.floor(Math.min(prev, fill) - FEATHER - GLOW_SIGMA * 2 - 1));
-    const hi = Math.min(frags.length - 1, Math.ceil(Math.max(prev, fill) + FEATHER + GLOW_SIGMA * 2 + 1));
+    const lo = first ? 0 : Math.max(0, Math.floor(Math.min(prev, fill) - FEATHER - GLOW_SIGMA * 2 - 1));
+    const hi = first ? frags.length - 1 : Math.min(frags.length - 1, Math.ceil(Math.max(prev, fill) + FEATHER + GLOW_SIGMA * 2 + 1));
     for (let i = lo; i <= hi; i++) {
       const f = frags[i];
       const d = fill - (i + 0.5);
@@ -689,7 +981,14 @@
   function tickReader(t) {
     const rd = reader;
     if (!rd) return false;
-    if (!positionGlow(rd, t, false)) { clearReader(); return false; }
+    if (!positionGlow(rd, t, false)) {
+      clearReader();
+      // The bound text nodes died (chunk re-render/synth-book extension). The
+      // paged follow's memo would block a re-bind until the NEXT cue — ask it
+      // to repaint now so the glow comes back on the same cue.
+      try { window.__pagedForceCueRepaint?.(); } catch (_) {}
+      return false;
+    }
     return true;
   }
 
@@ -755,5 +1054,8 @@
     feedPosition,      // (ms, playing) — watchdog backup clock (native truth)
     clearSpan,
     clearReader,
+    // Preferences pokes this after a style change so a PAUSED (parked)
+    // indicator redraws in the new style immediately.
+    restyle() { _rStyleAt = 0; try { if (reader) positionGlow(reader, clockMs(), true); } catch (_) {} },
   };
 })();

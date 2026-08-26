@@ -395,6 +395,22 @@
           () => get().showNextSub === true,
           (on) => apply('card', { showNextSub: on })
         )));
+        // Movie-style subtitles: for subs2srs decks (frame + spoken line), put
+        // the line ON the lower part of the frame in a translucent black box
+        // instead of above it. Only affects deck cards that carry a picture —
+        // SRT/transcription cards and text-only cards keep the stacked layout.
+        block.appendChild(row(window.i18n.t('pj.movie_subs', 'Movie-style subtitles'), toggle(
+          () => get().movieSubs === true,
+          (on) => apply('card', { movieSubs: on })
+        )));
+        // Vision Pro only — nothing else can render a spatial scene, so the row
+        // would just be a dead switch on iOS/Android/Mac.
+        if (window.KADOKI_VISION_NATIVE) {
+          block.appendChild(row(window.i18n.t('pj.spatial_pics', 'Spatial pictures (depth)'), toggle(
+            () => get().spatialPics === true,
+            (on) => { apply('card', { spatialPics: on }); try { window.kvSpatial?.refresh?.(); } catch (_) {} }
+          )));
+        }
       }
       if (mode === 'read') {
         // Invert LINE ART (ink drawings / scanned text pages) so it renders
@@ -402,6 +418,35 @@
         // at load time — grayscale photos/shaded art and color artwork never
         // auto-invert (they'd look like film negatives); the image viewer's
         // ◑ Invert button covers those by hand.
+        // Audio-follow indicator style (word-highlight.js reader overlays).
+        block.appendChild(row(window.i18n.t('pj.karaoke_style', 'Audio-follow highlight'), (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['glow', window.i18n.t('pj.karaoke_style_glow', 'A · Glow + phrase pill')],
+           ['underline', window.i18n.t('pj.karaoke_style_under', 'B · Progress underline')],
+           ['dot', window.i18n.t('pj.karaoke_style_dot', 'C · Marker dot')],
+           ['ruler', window.i18n.t('pj.karaoke_style_ruler', 'D · Line ruler')],
+           ['comet', window.i18n.t('pj.karaoke_style_comet', 'E · Comet trail')],
+           ['beam', window.i18n.t('pj.karaoke_style_beam', 'F · Margin beam')]].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          const cur = get().karaokeStyle;
+          sel.value = ['glow', 'underline', 'dot', 'ruler', 'comet', 'beam'].includes(cur) ? cur : 'glow';
+          sel.addEventListener('change', () => { apply('read', { karaokeStyle: sel.value }); try { window.wordHighlight?.restyle?.(); } catch (_) {} });
+          return sel;
+        })()));
+        // Follow resolver engine — the revert switch for the sequential cursor.
+        block.appendChild(row(window.i18n.t('pj.follow_engine', 'Follow engine'), (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['cursor', window.i18n.t('pj.follow_engine_cursor', 'Sequential (new)')],
+           ['classic', window.i18n.t('pj.follow_engine_classic', 'Classic')]].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          sel.value = (get().followEngine === 'classic') ? 'classic' : 'cursor';
+          sel.addEventListener('change', () => { apply('read', { followEngine: sel.value }); try { window.__fcResetFollowCursor?.(); } catch (_) {} });
+          return sel;
+        })()));
         block.appendChild(row(window.i18n.t('pj.invert_line_art', 'Invert line art (dark mode)'), toggle(
           () => get().invertBwImages === true,
           (on) => apply('read', { invertBwImages: on })
@@ -1274,23 +1319,29 @@
     modal.style.display = 'flex';
     document.body.classList.add('prefs-open');
     try { window.i18n && window.i18n.applyStatic(modal); } catch (_) {}   // reflect current language in the static labels
-    await setupLangPref();
+    // Every step below self-guards: these run top-to-bottom with no barrier
+    // between them, and an uncaught throw partway through used to silently
+    // abort every section after it (e.g. a fetchDeckNames() failure in
+    // wireAnkiSection could take out Playback/color pickers too, or an
+    // earlier throw could skip Anki/OpenRouter wiring entirely) — each
+    // section should degrade on its own, not take its siblings down with it.
+    try { await setupLangPref(); } catch (e) { console.warn('[prefs] setupLangPref failed', e); }
 
-    buildAppearanceSection();
-    buildDictionarySection();
-    await setupCombineSubsPref();
-    await setupKeepAwakePref();
-    await setupAiPrefs();
-    try { await setupOpenRouterPrefs(); } catch (_) {}   // text-AI backend selector + OpenRouter key/model picker
+    try { buildAppearanceSection(); } catch (e) { console.warn('[prefs] buildAppearanceSection failed', e); }
+    try { buildDictionarySection(); } catch (e) { console.warn('[prefs] buildDictionarySection failed', e); }
+    try { await setupCombineSubsPref(); } catch (e) { console.warn('[prefs] setupCombineSubsPref failed', e); }
+    try { await setupKeepAwakePref(); } catch (e) { console.warn('[prefs] setupKeepAwakePref failed', e); }
+    try { await setupAiPrefs(); } catch (e) { console.warn('[prefs] setupAiPrefs failed', e); }
+    try { await setupOpenRouterPrefs(); } catch (e) { console.warn('[prefs] setupOpenRouterPrefs failed', e); }   // text-AI backend selector + OpenRouter key/model picker
     // Image-backend config is independent of the text-AI (Anthropic) module and its
     // DOM — wire it unconditionally so OpenAI/local image prefs still work even if the
     // text-AI section is absent or its element ids change. Both self-guard internally.
-    try { window.aiImages?.wireSettings?.(); } catch (_) {}   // image backend selects (local + OpenAI + fal)
-    try { await setupOpenAiPrefs(); } catch (_) {}            // OpenAI key (persist on change) + image usage line
-    try { await setupFalPrefs(); } catch (_) {}               // fal.ai key (persist on change)
-    try { await setupImageBackendPrefs(); } catch (_) {}      // image backend selector (fal/OpenRouter) + OpenRouter image-model picker
-    await wireAnkiSection();
-    setupIOSAnkiPickers();
+    try { window.aiImages?.wireSettings?.(); } catch (e) { console.warn('[prefs] aiImages.wireSettings failed', e); }   // image backend selects (local + OpenAI + fal)
+    try { await setupOpenAiPrefs(); } catch (e) { console.warn('[prefs] setupOpenAiPrefs failed', e); }            // OpenAI key (persist on change) + image usage line
+    try { await setupFalPrefs(); } catch (e) { console.warn('[prefs] setupFalPrefs failed', e); }               // fal.ai key (persist on change)
+    try { await setupImageBackendPrefs(); } catch (e) { console.warn('[prefs] setupImageBackendPrefs failed', e); }      // image backend selector (fal/OpenRouter) + OpenRouter image-model picker
+    try { await wireAnkiSection(); } catch (e) { console.warn('[prefs] wireAnkiSection failed', e); }
+    try { setupIOSAnkiPickers(); } catch (e) { console.warn('[prefs] setupIOSAnkiPickers failed', e); }
 
     // Playback
     const timeoutInput = document.getElementById('timeoutInput');
