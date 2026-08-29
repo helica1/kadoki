@@ -9,9 +9,15 @@
 /* Begin PBXBuildFile section */
 		03A23D56002A34C262E2F1EF /* WatchKaraoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = 185C6E878D8E8340EF596D5B /* WatchKaraoke.swift */; };
 		05FF0594F8EB556FD1B63E77 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A380C7719E1A050488C62B /* MainViewController.swift */; };
+		0A1BD52A38B08C225EEC589F /* Stereo.usda in Resources */ = {isa = PBXBuildFile; fileRef = E39F93AC09029512B91BE647 /* Stereo.usda */; };
+		1DA20AFDDE5D377CFC6562EB /* DepthAnythingV2SmallF16.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 40456775542510E4F6C3DFD4 /* DepthAnythingV2SmallF16.mlpackage */; };
+		21386B71231DC2DDB43AA65A /* VideoFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB25F0F3ECF37A58D8BEEE03 /* VideoFormat.swift */; };
+		26E3E9023D7C3FE44FBA62EC /* KadokiVideoPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 624F6C94595E034FC5DCBD6E /* KadokiVideoPlayer.swift */; };
+		2C531BE4057E98EED353C5B4 /* DepthAnythingV3_base_504.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = C4D103B49D0D447C72EB2637 /* DepthAnythingV3_base_504.mlpackage */; };
 		2D4D5772C9FC21E5D19B4CB9 /* PdfExportPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ED7087512EE4319DE456390 /* PdfExportPlugin.swift */; };
 		2FAD9763203C412B000D30F8 /* config.xml in Resources */ = {isa = PBXBuildFile; fileRef = 2FAD9762203C412B000D30F8 /* config.xml */; };
 		35AE8C7605511205A5E3FD31 /* AnkiMediaServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E732BA54E00EA38613613122 /* AnkiMediaServer.swift */; };
+		4C9AD83D4089A97D99D8D834 /* Stereo.metal in Sources */ = {isa = PBXBuildFile; fileRef = C118C4C675EAC796129D2013 /* Stereo.metal */; };
 		4E513EFC2DD345C5C01FBB48 /* LiveSessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D346E402C777D43386BE6D4E /* LiveSessionModel.swift */; };
 		50379B232058CBB4000EE86E /* capacitor.config.json in Resources */ = {isa = PBXBuildFile; fileRef = 50379B222058CBB4000EE86E /* capacitor.config.json */; };
 		504EC3081FED79650016851F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504EC3071FED79650016851F /* AppDelegate.swift */; };
@@ -21,10 +27,13 @@
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		5959FA6E5FB2AC407987D2D1 /* ArchiveExtractorPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DF5C3F132ED80A31C3CE8D0 /* ArchiveExtractorPlugin.swift */; };
 		5CB75FAF0840E754F6E0EBEB /* LiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B2FCAF3399E64682C1BBD19 /* LiveView.swift */; };
+		5E9D13301ACBB1805E711F6E /* StereoRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 190BF058F2B37BB4482A8FEC /* StereoRenderer.swift */; };
+		5FE71FFECDFFD7431C3CC2FA /* demo-video.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = CE6A2FA73646C6BDA732F40E /* demo-video.mp4 */; };
 		763A6A097EB909AC131545C6 /* AudioSlicerPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */; };
 		77A1B2C3D4E5F60718293A4B /* AutoTranscribePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */; };
 		89FA94E6170CADEA9D06609A /* KadokiLockWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10CF8B633B1A1CE39687EF4 /* KadokiLockWidget.swift */; };
 		A084ECDBA7D38E1E42DFC39D /* Pods_App.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */; };
+		A0CC3AF059D6FA7B7337F11F /* DepthEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 698541F6F81A7831A8ADCFFE /* DepthEstimator.swift */; };
 		A11CE0FF2B0000000016851F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A11CE0FE2B0000000016851F /* PrivacyInfo.xcprivacy */; };
 		A1B2C3D400000000000000B2 /* WatchBridgePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000B1 /* WatchBridgePlugin.swift */; };
 		A1B2C3D400000000000000D2 /* Kadoki Watch App.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000D1 /* Kadoki Watch App.app */; platformFilters = (ios, ); settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -38,9 +47,12 @@
 		A65AD9BF618F74F21C3551FA /* SpatialImagePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C96FCF6301A0596AB30AADD /* SpatialImagePlugin.swift */; };
 		A6DE0AFD65364537B35B6119 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6FFD589652B7837FFFF78DED /* Foundation.framework */; };
 		A8BFD7E4B17BF44E40C7FC5D /* BackgroundAudioPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */; };
+		B0C132DDF0A24EB0A25A7271 /* demo-video.srt in Resources */ = {isa = PBXBuildFile; fileRef = 2FDDB295D144E056F5A721F4 /* demo-video.srt */; };
 		B2C3D4E500000000000000D2 /* KadokiWatchWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B2C3D4E500000000000000E1 /* KadokiWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E500000000000000F1 /* KadokiWidgets.swift */; };
 		C5C183F988E421195EE65059 /* AnkiBridgePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */; };
+		D94ADCA0457E5EB7EF492C99 /* CurvedPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C470146FE78048DE547C398C /* CurvedPanel.swift */; };
+		DEAABD03271BEBD43653443C /* KadokiVideoLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */; };
 		DF1B17BAC81C72DEB33B7E91 /* KadokiLockWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */; platformFilters = (ios, ); };
 		EF8A04896EEFB1F1528F779D /* FileAccessPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */; };
 /* End PBXBuildFile section */
@@ -106,9 +118,14 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		117998D12F0CF62C2821B4A5 /* libkadokiremux-xros.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; path = "libkadokiremux-xros.a"; sourceTree = "<group>"; };
 		185C6E878D8E8340EF596D5B /* WatchKaraoke.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchKaraoke.swift; sourceTree = "<group>"; };
+		190BF058F2B37BB4482A8FEC /* StereoRenderer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StereoRenderer.swift; sourceTree = "<group>"; };
+		2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoLayer.swift; sourceTree = "<group>"; };
 		2DF5C3F132ED80A31C3CE8D0 /* ArchiveExtractorPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ArchiveExtractorPlugin.swift; sourceTree = "<group>"; };
 		2FAD9762203C412B000D30F8 /* config.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = config.xml; sourceTree = "<group>"; };
+		2FDDB295D144E056F5A721F4 /* demo-video.srt */ = {isa = PBXFileReference; includeInIndex = 1; path = "demo-video.srt"; sourceTree = "<group>"; };
+		40456775542510E4F6C3DFD4 /* DepthAnythingV2SmallF16.mlpackage */ = {isa = PBXFileReference; includeInIndex = 1; path = DepthAnythingV2SmallF16.mlpackage; sourceTree = "<group>"; };
 		50379B222058CBB4000EE86E /* capacitor.config.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = capacitor.config.json; sourceTree = "<group>"; };
 		504EC3041FED79650016851F /* App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = App.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		504EC3071FED79650016851F /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -117,6 +134,8 @@
 		504EC3111FED79650016851F /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		504EC3131FED79650016851F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
+		624F6C94595E034FC5DCBD6E /* KadokiVideoPlayer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoPlayer.swift; sourceTree = "<group>"; };
+		698541F6F81A7831A8ADCFFE /* DepthEstimator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DepthEstimator.swift; sourceTree = "<group>"; };
 		6FFD589652B7837FFFF78DED /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		720868DC3F5517482F3DE61C /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiBridgePlugin.swift; sourceTree = "<group>"; };
@@ -124,6 +143,7 @@
 		88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutoTranscribePlugin.swift; sourceTree = "<group>"; };
 		8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = KadokiLockWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		8ED7087512EE4319DE456390 /* PdfExportPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PdfExportPlugin.swift; sourceTree = "<group>"; };
+		936ABC0B66FB81ECA48CB6FF /* App-Bridging-Header.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "App-Bridging-Header.h"; sourceTree = "<group>"; };
 		9B2FCAF3399E64682C1BBD19 /* LiveView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
 		9C96FCF6301A0596AB30AADD /* SpatialImagePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpatialImagePlugin.swift; sourceTree = "<group>"; };
 		A11CE0FE2B0000000016851F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
@@ -139,14 +159,21 @@
 		AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_App.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		AF51FD2D460BCFE21FA515B2 /* Pods-App.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.release.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.release.xcconfig"; sourceTree = "<group>"; };
 		B10CF8B633B1A1CE39687EF4 /* KadokiLockWidget.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiLockWidget.swift; sourceTree = "<group>"; };
+		B1983E97FAED0A6E3891D418 /* kadoki_remux.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = kadoki_remux.h; sourceTree = "<group>"; };
 		B2A380C7719E1A050488C62B /* MainViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MainViewController.swift; sourceTree = "<group>"; };
 		B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = KadokiWatchWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2C3D4E500000000000000F1 /* KadokiWidgets.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiWidgets.swift; sourceTree = "<group>"; };
 		B2C3D4E500000000000000F2 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B2C3D4E500000000000000F3 /* KadokiWatch.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = KadokiWatch.entitlements; sourceTree = "<group>"; };
 		B2C3D4E500000000000000F4 /* KadokiWatchWidgets.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = KadokiWatchWidgets.entitlements; sourceTree = "<group>"; };
+		BB25F0F3ECF37A58D8BEEE03 /* VideoFormat.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VideoFormat.swift; sourceTree = "<group>"; };
 		BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileAccessPlugin.swift; sourceTree = "<group>"; };
+		C118C4C675EAC796129D2013 /* Stereo.metal */ = {isa = PBXFileReference; includeInIndex = 1; path = Stereo.metal; sourceTree = "<group>"; };
+		C470146FE78048DE547C398C /* CurvedPanel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CurvedPanel.swift; sourceTree = "<group>"; };
+		C4D103B49D0D447C72EB2637 /* DepthAnythingV3_base_504.mlpackage */ = {isa = PBXFileReference; includeInIndex = 1; path = DepthAnythingV3_base_504.mlpackage; sourceTree = "<group>"; };
+		CE6A2FA73646C6BDA732F40E /* demo-video.mp4 */ = {isa = PBXFileReference; includeInIndex = 1; path = "demo-video.mp4"; sourceTree = "<group>"; };
 		D346E402C777D43386BE6D4E /* LiveSessionModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveSessionModel.swift; sourceTree = "<group>"; };
+		E39F93AC09029512B91BE647 /* Stereo.usda */ = {isa = PBXFileReference; includeInIndex = 1; path = Stereo.usda; sourceTree = "<group>"; };
 		E732BA54E00EA38613613122 /* AnkiMediaServer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiMediaServer.swift; sourceTree = "<group>"; };
 		EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BackgroundAudioPlugin.swift; sourceTree = "<group>"; };
 		FC68EB0AF532CFC21C3344DD /* Pods-App.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.debug.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.debug.xcconfig"; sourceTree = "<group>"; };
@@ -242,6 +269,13 @@
 				8ED7087512EE4319DE456390 /* PdfExportPlugin.swift */,
 				A1B2C3D400000000000000B1 /* WatchBridgePlugin.swift */,
 				9C96FCF6301A0596AB30AADD /* SpatialImagePlugin.swift */,
+				624F6C94595E034FC5DCBD6E /* KadokiVideoPlayer.swift */,
+				2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */,
+				D615CECDF32AAFD3BE9E61F8 /* Stereo */,
+				BCB60EF0CFFA3F7A9A785C7E /* Remux */,
+				936ABC0B66FB81ECA48CB6FF /* App-Bridging-Header.h */,
+				CE6A2FA73646C6BDA732F40E /* demo-video.mp4 */,
+				2FDDB295D144E056F5A721F4 /* demo-video.srt */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -299,6 +333,32 @@
 				B2C3D4E500000000000000F4 /* KadokiWatchWidgets.entitlements */,
 			);
 			path = KadokiWatchWidgets;
+			sourceTree = "<group>";
+		};
+		BCB60EF0CFFA3F7A9A785C7E /* Remux */ = {
+			isa = PBXGroup;
+			children = (
+				B1983E97FAED0A6E3891D418 /* kadoki_remux.h */,
+				117998D12F0CF62C2821B4A5 /* libkadokiremux-xros.a */,
+			);
+			name = Remux;
+			path = Remux;
+			sourceTree = "<group>";
+		};
+		D615CECDF32AAFD3BE9E61F8 /* Stereo */ = {
+			isa = PBXGroup;
+			children = (
+				190BF058F2B37BB4482A8FEC /* StereoRenderer.swift */,
+				698541F6F81A7831A8ADCFFE /* DepthEstimator.swift */,
+				BB25F0F3ECF37A58D8BEEE03 /* VideoFormat.swift */,
+				C118C4C675EAC796129D2013 /* Stereo.metal */,
+				40456775542510E4F6C3DFD4 /* DepthAnythingV2SmallF16.mlpackage */,
+				E39F93AC09029512B91BE647 /* Stereo.usda */,
+				C470146FE78048DE547C398C /* CurvedPanel.swift */,
+				C4D103B49D0D447C72EB2637 /* DepthAnythingV3_base_504.mlpackage */,
+			);
+			name = Stereo;
+			path = Stereo;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -438,6 +498,9 @@
 				50379B232058CBB4000EE86E /* capacitor.config.json in Resources */,
 				504EC30D1FED79650016851F /* Main.storyboard in Resources */,
 				2FAD9763203C412B000D30F8 /* config.xml in Resources */,
+				0A1BD52A38B08C225EEC589F /* Stereo.usda in Resources */,
+				5FE71FFECDFFD7431C3CC2FA /* demo-video.mp4 in Resources */,
+				B0C132DDF0A24EB0A25A7271 /* demo-video.srt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -526,6 +589,15 @@
 				2D4D5772C9FC21E5D19B4CB9 /* PdfExportPlugin.swift in Sources */,
 				A1B2C3D400000000000000B2 /* WatchBridgePlugin.swift in Sources */,
 				A65AD9BF618F74F21C3551FA /* SpatialImagePlugin.swift in Sources */,
+				26E3E9023D7C3FE44FBA62EC /* KadokiVideoPlayer.swift in Sources */,
+				DEAABD03271BEBD43653443C /* KadokiVideoLayer.swift in Sources */,
+				5E9D13301ACBB1805E711F6E /* StereoRenderer.swift in Sources */,
+				A0CC3AF059D6FA7B7337F11F /* DepthEstimator.swift in Sources */,
+				21386B71231DC2DDB43AA65A /* VideoFormat.swift in Sources */,
+				4C9AD83D4089A97D99D8D834 /* Stereo.metal in Sources */,
+				1DA20AFDDE5D377CFC6562EB /* DepthAnythingV2SmallF16.mlpackage in Sources */,
+				D94ADCA0457E5EB7EF492C99 /* CurvedPanel.swift in Sources */,
+				2C531BE4057E98EED353C5B4 /* DepthAnythingV3_base_504.mlpackage in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -764,14 +836,66 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 29;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]" = (
+					"[\"[\\\"DepthAnythingV2SmallF16.mlpackage\\\",\",",
+					"\"\\\"Stereo.usda\\\",\",",
+					"\"\\\"Stereo.metal\\\"]\",",
+					"\"DepthAnythingV3_base_504.mlpackage\"]",
+					"demo-video.mp4",
+					"demo-video.srt",
+				);
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = (
+					"[\"[\\\"DepthAnythingV2SmallF16.mlpackage\\\",\",",
+					"\"\\\"Stereo.usda\\\",\",",
+					"\"\\\"Stereo.metal\\\"]\",",
+					"\"DepthAnythingV3_base_504.mlpackage\"]",
+					"demo-video.mp4",
+					"demo-video.srt",
+				);
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=xros*]" = (
+					"demo-video.mp4",
+					"demo-video.srt",
+				);
 				INFOPLIST_FILE = App/Info.plist;
 				"INFOPLIST_FILE[sdk=xros*]" = "App/Info-visionOS.plist";
+				"INFOPLIST_FILE[sdk=xrsimulator*]" = "App/Info-visionOS.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
 				"INFOPLIST_KEY_UIApplicationSupportsMultipleScenes[sdk=xros*]" = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.7.1;
 				"OTHER_LDFLAGS[sdk=xros*]" = (
+					"-lz",
+					"-framework",
+					CFNetwork,
+					"-framework",
+					Capacitor,
+					"-framework",
+					CapacitorApp,
+					"-framework",
+					CapacitorBrowser,
+					"-framework",
+					CapacitorFilesystem,
+					"-framework",
+					CapacitorHaptics,
+					"-framework",
+					CapacitorPreferences,
+					"-framework",
+					CapacitorSplashScreen,
+					"-framework",
+					Cordova,
+					"-framework",
+					FileAccess,
+					"-framework",
+					GCDWebServer,
+					"-framework",
+					MobileCoreServices,
+					"-framework",
+					WebKit,
+					"-lbz2",
+					"$(SRCROOT)/App/Remux/libkadokiremux-xros.a",
+				);
+				"OTHER_LDFLAGS[sdk=xrsimulator*]" = (
 					"-lz",
 					"-framework",
 					CFNetwork,
@@ -805,6 +929,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OBJC_BRIDGING_HEADER = "App/App-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				XROS_DEPLOYMENT_TARGET = 26.0;
@@ -819,8 +944,29 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 29;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]" = (
+					"[\"[\\\"DepthAnythingV2SmallF16.mlpackage\\\",\",",
+					"\"\\\"Stereo.usda\\\",\",",
+					"\"\\\"Stereo.metal\\\"]\",",
+					"\"DepthAnythingV3_base_504.mlpackage\"]",
+					"demo-video.mp4",
+					"demo-video.srt",
+				);
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphonesimulator*]" = (
+					"[\"[\\\"DepthAnythingV2SmallF16.mlpackage\\\",\",",
+					"\"\\\"Stereo.usda\\\",\",",
+					"\"\\\"Stereo.metal\\\"]\",",
+					"\"DepthAnythingV3_base_504.mlpackage\"]",
+					"demo-video.mp4",
+					"demo-video.srt",
+				);
+				"EXCLUDED_SOURCE_FILE_NAMES[sdk=xros*]" = (
+					"demo-video.mp4",
+					"demo-video.srt",
+				);
 				INFOPLIST_FILE = App/Info.plist;
 				"INFOPLIST_FILE[sdk=xros*]" = "App/Info-visionOS.plist";
+				"INFOPLIST_FILE[sdk=xrsimulator*]" = "App/Info-visionOS.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
 				"INFOPLIST_KEY_UIApplicationSupportsMultipleScenes[sdk=xros*]" = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
@@ -854,11 +1000,43 @@
 					MobileCoreServices,
 					"-framework",
 					WebKit,
+					"-lbz2",
+					"$(SRCROOT)/App/Remux/libkadokiremux-xros.a",
+				);
+				"OTHER_LDFLAGS[sdk=xrsimulator*]" = (
+					"-lz",
+					"-framework",
+					CFNetwork,
+					"-framework",
+					Capacitor,
+					"-framework",
+					CapacitorApp,
+					"-framework",
+					CapacitorBrowser,
+					"-framework",
+					CapacitorFilesystem,
+					"-framework",
+					CapacitorHaptics,
+					"-framework",
+					CapacitorPreferences,
+					"-framework",
+					CapacitorSplashScreen,
+					"-framework",
+					Cordova,
+					"-framework",
+					FileAccess,
+					"-framework",
+					GCDWebServer,
+					"-framework",
+					MobileCoreServices,
+					"-framework",
+					WebKit,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
+				SWIFT_OBJC_BRIDGING_HEADER = "App/App-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,7";
 				XROS_DEPLOYMENT_TARGET = 26.0;

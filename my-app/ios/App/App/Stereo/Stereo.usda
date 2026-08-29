@@ -1,0 +1,71 @@
+#usda 1.0
+(
+    defaultPrim = "Root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{
+    # Unlit material showing a single side-by-side texture: the left half to the left eye,
+    # the right half to the right eye (selected by the Camera Index Switch on the texcoord).
+    def Material "StereoMaterial"
+    {
+        asset inputs:packedTex = @@
+        token outputs:mtlx:surface.connect = </Root/StereoMaterial/UnlitSurface.outputs:out>
+        token outputs:realitykit:vertex
+
+        def Shader "UnlitSurface"
+        {
+            uniform token info:id = "ND_realitykit_unlit_surfaceshader"
+            bool inputs:applyPostProcessToneMap = 0
+            color3f inputs:color.connect = </Root/StereoMaterial/Image.outputs:out>
+            bool inputs:hasPremultipliedAlpha = 0
+            float inputs:opacity = 1
+            token outputs:out
+        }
+
+        def Shader "Image"
+        {
+            uniform token info:id = "ND_RealityKitTexture2D_color3"
+            asset inputs:file.connect = </Root/StereoMaterial.inputs:packedTex>
+            float2 inputs:texcoord.connect = </Root/StereoMaterial/EyeUV.outputs:out>
+            bool inputs:no_flip_v = 1
+            string inputs:u_wrap_mode = "clamp_to_edge"
+            string inputs:v_wrap_mode = "clamp_to_edge"
+            color3f outputs:out
+        }
+
+        def Shader "EyeUV"
+        {
+            uniform token info:id = "ND_realitykit_geometry_switch_cameraindex_vector2"
+            float2 inputs:mono.connect = </Root/StereoMaterial/LeftUV.outputs:out>
+            float2 inputs:left.connect = </Root/StereoMaterial/LeftUV.outputs:out>
+            float2 inputs:right.connect = </Root/StereoMaterial/RightUV.outputs:out>
+            float2 outputs:out
+        }
+
+        def Shader "LeftUV"
+        {
+            uniform token info:id = "ND_multiply_vector2"
+            float2 inputs:in1.connect = </Root/StereoMaterial/UV.outputs:out>
+            float2 inputs:in2 = (0.5, 1)
+            float2 outputs:out
+        }
+
+        def Shader "RightUV"
+        {
+            uniform token info:id = "ND_add_vector2"
+            float2 inputs:in1.connect = </Root/StereoMaterial/LeftUV.outputs:out>
+            float2 inputs:in2 = (0.5, 0)
+            float2 outputs:out
+        }
+
+        def Shader "UV"
+        {
+            uniform token info:id = "ND_texcoord_vector2"
+            int inputs:index = 0
+            float2 outputs:out
+        }
+    }
+}

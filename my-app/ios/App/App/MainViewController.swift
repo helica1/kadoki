@@ -15,6 +15,15 @@ final class KadokiTransportModel: ObservableObject {
     /// Card-mode picture style: flat (legacy) vs spatial depth. Mirrors the
     /// Appearance → Card → "Spatial pictures" pref; JS pushes it via tpState.
     @Published var spatialOn = false
+    /// A video Title is active in audio mode (video-mode.js pushes it): the
+    /// cube button doubles as the video AI-3D toggle there.
+    @Published var videoOn = false
+    /// The 3D-tuning slider card (depth / convergence) is expanded above the bar.
+    @Published var video3dOpen = false
+    /// Playback progress for the video transport row (whole seconds; fed by
+    /// BackgroundAudioPlugin's position ticks via KadokiAudioProgress).
+    @Published var positionMs = 0
+    @Published var durationMs = 0
     /// A text field has focus in the page (JS pushes focusin/focusout via
     /// tpState): hardware-key commands stand down so typing isn't hijacked.
     var typing = false
@@ -354,6 +363,20 @@ struct KadokiTransportView: View {
         .frame(width: 56, height: 56)
     }
     var body: some View {
+        VStack(spacing: 10) {
+            if model.mode == "audio" && model.videoOn && model.video3dOpen {
+                KadokiVideo3DSettings()
+            }
+            bar
+        }
+    }
+    private func fmtTime(_ ms: Int) -> String {
+        let s = max(0, ms / 1000)
+        return s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+                         : String(format: "%d:%02d", s / 60, s % 60)
+    }
+    private var bar: some View {
+        VStack(spacing: 8) {
         HStack(spacing: 14) {
             // Mode selectors (Card / Read / Audio) — mirror the top tabs so
             // the top bar can stay hidden entirely.
@@ -380,23 +403,45 @@ struct KadokiTransportView: View {
             }
             .buttonStyle(.borderless)
             .frame(width: 68, height: 68)
-            Divider().frame(height: 32)
-            Button { send("dict") } label: {
-                Text("辞書")
-                    .font(.system(size: 19, weight: .semibold))
-                    .foregroundStyle(model.dictOn ? Color(red: 0.81, green: 0.75, blue: 0.96) : Color.secondary)
-                    .strikethrough(!model.dictOn)
+            // Video: replay the current subtitle (was an in-window ⟲ that
+            // collided with the cue panel).
+            if model.mode == "audio" && model.videoOn {
+                Button { send("replay") } label: {
+                    Image(systemName: "arrow.counterclockwise").font(.title2)
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 60, height: 60)
+                // Episode / subtitle browser (DOM overlay; the video plane
+                // hides itself while it's open).
+                Button { send("epBrowse") } label: {
+                    Image(systemName: "list.bullet.rectangle").font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 56, height: 56)
             }
-            .buttonStyle(.borderless)
-            .frame(height: 68)
-            // Card mode only: flat ⇄ spatial (depth) pictures. Same pref as
-            // Appearance → Card → "Spatial pictures"; a one-pinch switch for
-            // comparing the two without leaving the card.
-            if model.mode == "card" {
+            // 辞書 toggle removed (2026-08-27, user: "we will always leave it
+            // on") — dictionary lookups are permanently enabled; JS forces the
+            // AB_DICT_LOOKUP pref on at boot. The movie-mode click-anywhere
+            // pause that dict-off enabled is gone with it (transport owns
+            // play/pause).
+            // Card mode: flat ⇄ spatial (depth) pictures (same pref as
+            // Appearance → Card → "Spatial pictures"). Audio mode with a video
+            // Title: the video's AI-3D stereo toggle. One-pinch switch either way.
+            if model.mode == "card" || (model.mode == "audio" && model.videoOn) {
                 Button { send("spatial") } label: {
                     Image(systemName: model.spatialOn ? "cube.fill" : "cube")
                         .font(.title3)
                         .foregroundStyle(model.spatialOn ? Color(red: 0.81, green: 0.75, blue: 0.96) : Color.secondary)
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 56, height: 56)
+            }
+            // Video settings (3D tuning + subtitle placement).
+            if model.mode == "audio" && model.videoOn {
+                Button { model.video3dOpen.toggle() } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.title3)
+                        .foregroundStyle(model.video3dOpen ? Color(red: 0.81, green: 0.75, blue: 0.96) : Color.secondary)
                 }
                 .buttonStyle(.borderless)
                 .frame(width: 56, height: 56)
@@ -406,11 +451,15 @@ struct KadokiTransportView: View {
             // not just the audio view's own 章の要約 button. openCurrentChapter
             // resolves the chapter from whichever modality is active and opens a
             // self-contained popup, so playback and the reading place are untouched.
-            Button { send("summary") } label: {
-                Image(systemName: "text.book.closed").font(.title3)
+            // Chapter summary is a book concept — hidden while a video Title
+            // plays (mode audio + videoOn).
+            if !(model.mode == "audio" && model.videoOn) {
+                Button { send("summary") } label: {
+                    Image(systemName: "text.book.closed").font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 56, height: 56)
             }
-            .buttonStyle(.borderless)
-            .frame(width: 56, height: 56)
             Divider().frame(height: 32)
             // Top-bar toggle + hamburger menu live HERE too — reaching for
             // the in-window header (or re-summoning it) was cumbersome.
@@ -425,8 +474,114 @@ struct KadokiTransportView: View {
             .buttonStyle(.borderless)
             .frame(width: 56, height: 56)
         }
+        // Video transport: elapsed / progress / total / percent. Display-only
+        // (no scrubbing — cue stepping is the navigation model).
+        if model.mode == "audio" && model.videoOn && model.durationMs > 0 {
+            HStack(spacing: 10) {
+                Text(fmtTime(model.positionMs)).font(.caption.monospacedDigit())
+                ProgressView(value: min(1.0, Double(model.positionMs) / Double(max(1, model.durationMs))))
+                    .progressViewStyle(.linear)
+                    .frame(width: 300)
+                Text(fmtTime(model.durationMs)).font(.caption.monospacedDigit())
+                Text("\(Int((Double(model.positionMs) * 100 / Double(max(1, model.durationMs))).rounded()))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        }
         .padding(.horizontal, 26)
         .padding(.vertical, 12)
+        .glassBackgroundEffect()
+    }
+}
+
+/// Slider card above the transport bar: live AI-3D tuning for video Titles.
+/// Binds straight to KadokiVideoModel — changes hit the stereo renderer on
+/// the next frame and persist in UserDefaults.
+struct KadokiVideo3DSettings: View {
+    @ObservedObject var vm = KadokiVideoModel.shared
+    private func send(_ action: String) {
+        NotificationCenter.default.post(name: Notification.Name("KadokiTransportTap"),
+                                        object: nil, userInfo: ["action": action])
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text("Depth").font(.callout).frame(width: 110, alignment: .leading)
+                Slider(value: $vm.strength, in: 0...0.06)
+                Text(String(format: "%.3f", vm.strength))
+                    .font(.callout.monospacedDigit()).frame(width: 56, alignment: .trailing)
+            }
+            HStack(spacing: 12) {
+                Text("Convergence").font(.callout).frame(width: 110, alignment: .leading)
+                Slider(value: $vm.convergence, in: 0...1.3)
+                Text(String(format: "%.2f", vm.convergence))
+                    .font(.callout.monospacedDigit()).frame(width: 56, alignment: .trailing)
+            }
+            HStack(spacing: 12) {
+                Text("Subtitle size").font(.callout).frame(width: 110, alignment: .leading)
+                Slider(value: $vm.subSize, in: 22...44, step: 1)
+                Text("\(Int(vm.subSize))")
+                    .font(.callout.monospacedDigit()).frame(width: 56, alignment: .trailing)
+            }
+            HStack(spacing: 12) {
+                Text("Subtitles").font(.callout).frame(width: 110, alignment: .leading)
+                Picker("", selection: $vm.subPlacement) {
+                    Text("Below").tag("below")
+                    Text("Overlay").tag("overlay")
+                }
+                .pickerStyle(.segmented)
+            }
+            HStack(spacing: 12) {
+                Text("Model").font(.callout).frame(width: 110, alignment: .leading)
+                Picker("", selection: $vm.depthModel) {
+                    Text("Small (fast)").tag("small")
+                    Text("Base (HQ)").tag("base")
+                }
+                .pickerStyle(.segmented)
+            }
+            HStack(spacing: 12) {
+                Text("Curve").font(.callout).frame(width: 110, alignment: .leading)
+                Slider(value: $vm.depthGamma, in: 0.5...1.5)
+                Text(String(format: "%.2f", vm.depthGamma))
+                    .font(.callout.monospacedDigit()).frame(width: 56, alignment: .trailing)
+            }
+            HStack(spacing: 12) {
+                Text("Edge").font(.callout).frame(width: 110, alignment: .leading)
+                Slider(value: $vm.edgeSigma, in: 0.03...0.2)
+                Text(String(format: "%.2f", vm.edgeSigma))
+                    .font(.callout.monospacedDigit()).frame(width: 56, alignment: .trailing)
+            }
+            HStack(spacing: 12) {
+                Text("Renderer").font(.callout).frame(width: 110, alignment: .leading)
+                Picker("", selection: $vm.renderMode) {
+                    Text("Splat (new)").tag("splat")
+                    Text("Classic").tag("classic")
+                }
+                .pickerStyle(.segmented)
+            }
+            if vm.episodeCount > 1 {
+                HStack(spacing: 12) {
+                    Text("Episode").font(.callout).frame(width: 110, alignment: .leading)
+                    Button { send("epPrev") } label: { Image(systemName: "chevron.left") }
+                        .buttonStyle(.borderless)
+                    Text("\(vm.episodeIndex)/\(vm.episodeCount)")
+                        .font(.callout.monospacedDigit()).frame(width: 70)
+                    Button { send("epNext") } label: { Image(systemName: "chevron.right") }
+                        .buttonStyle(.borderless)
+                    Spacer()
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Reset") { vm.strength = 0.03; vm.convergence = 0.45 }
+                    .font(.callout)
+                    .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 14)
+        .frame(width: 480)
         .glassBackgroundEffect()
     }
 }
@@ -481,6 +636,9 @@ final class KadokiHoverTargetView: UIView {
 class MainViewController: CAPBridgeViewController {
 
     override open func capacitorDidLoad() {
+        #if os(visionOS)
+        installVideoLayer()                   // idempotent; covers a late bridge
+        #endif
         guard let bridge = self.bridge else {
             NSLog("[MainViewController] bridge nil at capacitorDidLoad — cannot register plugins")
             return
@@ -550,8 +708,15 @@ class MainViewController: CAPBridgeViewController {
     // the looked-up line, so the definition opens beside what you're reading.
     private func placeDictOrnament() {
         guard let d = dictOrnament else { return }
-        let leading = KadokiDictModel.shared.dockLeading
-        d.sceneAnchor = UnitPoint(x: leading ? 0 : 1, y: dictAnchorY)
+        var leading = KadokiDictModel.shared.dockLeading
+        // Curved 3D film: its edges bow forward over the docks — force the
+        // panel RIGHT and push it further out so the bow can't clip it.
+        var xAnchor: CGFloat = 1
+        if KadokiVideoModel.shared.visible, KadokiVideoModel.shared.stereoOn {
+            leading = false
+            xAnchor = 1.06
+        }
+        d.sceneAnchor = UnitPoint(x: leading ? 0 : xAnchor, y: dictAnchorY)
         d.contentAlignment = leading ? .trailing : .leading
         applyOrnaments()
     }
@@ -606,7 +771,8 @@ class MainViewController: CAPBridgeViewController {
         box.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         box.backgroundColor = .clear
         box.hoverHit = { [weak self] pt in
-            guard let self = self, KadokiSpatialModel.shared.visible else { return nil }
+            guard let self = self else { return nil }
+            guard KadokiSpatialModel.shared.visible || KadokiVideoModel.shared.visible else { return nil }
             return self.hoverViews.first { !$0.isHidden && $0.frame.contains(pt) }
         }
         box.addSubview(host.view)
@@ -616,6 +782,137 @@ class MainViewController: CAPBridgeViewController {
         spatialHost = host
         spatialBox = box
         NSLog("[KadokiSpatial] layer installed behind webview")
+    }
+
+    // MARK: - Video layer (video Titles: audio mode with a picture)
+
+    private var videoFlatHost: UIHostingController<KadokiVideoFlatView>?
+
+    /// Claims gaze/pinch ONLY over the 3D subtitle panel's screen region.
+    final class KadokiStereoHostBox: UIView {
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            let m = KadokiVideoModel.shared
+            guard m.visible, m.stereoOn else { return nil }
+            let r = m.subHitRect
+            guard r.width > 1, r.insetBy(dx: -44, dy: -44).contains(point) else { return nil }
+            return super.hitTest(point, with: event)
+        }
+    }
+
+    private var videoStereoHost: UIHostingController<KadokiVideoStereoView>?
+    private var videoFitDone = false
+
+    /// Ask the system to resize the window so its height matches the video's
+    /// aspect plus the header + subtitle strip — once per video appearance
+    /// (never while the user is mid-resize fight). The user remains free to
+    /// resize afterwards.
+    @discardableResult
+    private func fitWindowToVideo() -> Bool {
+        guard let ws = view.window?.windowScene else { NSLog("[KadokiVideo] fit: no windowScene"); return false }
+        let b = ws.coordinateSpace.bounds
+        NSLog("[KadokiVideo] fit: scene bounds \(Int(b.width))x\(Int(b.height))")
+        guard b.width > 300 else { return false }
+        var aspect: CGFloat = 16.0 / 9.0
+        let vs = KadokiVideoModel.shared.videoSize
+        if vs.width > 1, vs.height > 1 { aspect = vs.width / vs.height }
+        // top pad 6 (header hidden in cinema) + bottom reserve + slack.
+        // "below": the subtitle strip; "overlay": subs sit ON the film.
+        let reserve: CGFloat = KadokiVideoModel.shared.subPlacement == "overlay" ? 40 : 170
+        let target = CGSize(width: b.width, height: (b.width / aspect) + 6 + reserve + 10)
+        guard abs(target.height - b.height) > 40 else { NSLog("[KadokiVideo] fit: already close (target \(Int(target.height)))"); return true }
+        ws.requestGeometryUpdate(.Vision(size: target))
+        NSLog("[KadokiVideo] window fit: \(Int(b.width))x\(Int(b.height)) → \(Int(target.width))x\(Int(target.height))")
+        return true
+    }
+
+    /// The video Title plane (KadokiVideoLayer). Same hosting arrangement as
+    /// the spatial-card layer — RealityKit content draws over the webview
+    /// regardless of UIKit order, so it sits on top — but with NO hotspot box:
+    /// the subtitle lives in the DOM below the video rect, so every pinch must
+    /// fall through (isUserInteractionEnabled = false end to end). JS
+    /// (video-mode.js) hides the plane whenever DOM content must win.
+    private func installVideoLayer() {
+        guard videoFlatHost == nil else { return }
+        // FLAT host UNDER the webview: 2D video obeys UIKit order — the
+        // transparent page shows it through, DOM subtitles draw over it.
+        let flat = UIHostingController(rootView: KadokiVideoFlatView())
+        flat.view.backgroundColor = .clear
+        flat.view.isUserInteractionEnabled = false
+        flat.view.frame = view.bounds
+        flat.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addChild(flat)
+        view.insertSubview(flat.view, at: 0)
+        flat.didMove(toParent: self)
+        videoFlatHost = flat
+        // STEREO host ABOVE the webview, inside a REGION-GATED container:
+        // gaze/pinch routing follows UIKit hit-testing, so hover for the 3D
+        // subtitle words needs an interactive chain — but only over the
+        // panel's own rect; everywhere else hitTest returns nil and the
+        // webview behaves exactly as before (KadokiSpatialHostView pattern).
+        let stereo = UIHostingController(rootView: KadokiVideoStereoView())
+        stereo.view.backgroundColor = .clear
+        stereo.view.isUserInteractionEnabled = true
+        stereo.view.frame = view.bounds
+        stereo.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        let box = KadokiStereoHostBox(frame: view.bounds)
+        box.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        box.backgroundColor = .clear
+        box.addSubview(stereo.view)
+        addChild(stereo)
+        view.addSubview(box)
+        stereo.didMove(toParent: self)
+        videoStereoHost = stereo
+        // Cinema mode: while the plane is up, the page goes transparent (the
+        // window reads as glass with the video + subtitle floating on it).
+        // Reuses the spatial-cards chrome (same save/restore of webview
+        // opacity); video and spatial cards live in different modes, so they
+        // never fight over it. Also auto-fits the window height to the movie
+        // once per appearance, so the glass is a thin frame around the film
+        // instead of a half-empty slab.
+        // Subtitle mirror: JS streams the DOM cue panel's rect; snapshot that
+        // region (≤5/s) and hand it to the scene attachment.
+        NotificationCenter.default.addObserver(forName: Notification.Name("KadokiVideoSubs"), object: nil, queue: .main) { [weak self] note in
+            guard let self, let u = note.userInfo else { return }
+            let visible = (u["visible"] as? Bool) ?? false
+            let rect = CGRect(x: (u["x"] as? Double) ?? 0, y: (u["y"] as? Double) ?? 0,
+                              width: (u["w"] as? Double) ?? 0, height: (u["h"] as? Double) ?? 0)
+            let m = KadokiVideoModel.shared
+            if visible {
+                m.subRect = rect
+                m.subText = (u["text"] as? String) ?? ""
+            } else {
+                m.subText = ""; m.subRect = .zero
+            }
+            NSLog("[KadokiVideo] subs: visible=\(visible) textLen=\(m.subText.count) segs=\(m.subSegs.count) words=\(m.subSegs.filter { ($0.count > 1 ? Int($0[1]) ?? -1 : -1) >= 0 }.count)")
+            // Gaze targets for the mirrored subtitle: the WebKit hover glow
+            // never shows through RealityKit content (spatial-cards law), so
+            // the word rects become UIKit hover views — same pool the card
+            // mirror uses. hs_manage=false leaves ownership to spatial-cards
+            // (card mode), where its own hotspot pipeline already runs.
+            // (Hover-view feed retired for video: flat mode's subtitle is pure
+            // DOM with native WebKit glow; 3D words self-hover inside the
+            // attachment. Clear anything a previous build left behind.)
+            if (u["hs_manage"] as? Bool) ?? true, !self.hoverViews.isEmpty {
+                self.syncHoverViews([])
+            }
+            m.subSegs = (u["segs"] as? [[String]]) ?? []
+        }
+        NotificationCenter.default.addObserver(forName: Notification.Name("KadokiVideoWordTap"), object: nil, queue: .main) { [weak self] note in
+            guard let k = note.userInfo?["k"] as? Int else { return }
+            self?.bridge?.triggerWindowJSEvent(eventName: "kadokiVideoWordTap", data: "{\"k\":\(k)}")
+        }
+        KadokiVideoModel.shared.onVisible = { [weak self] on in
+            self?.applySpatialChrome(on)
+            guard let self else { return }
+            if on {
+                // fit returns false when the scene isn't ready — retry on the
+                // next visible pulse (the 3s enforcement re-sends).
+                if !self.videoFitDone { self.videoFitDone = self.fitWindowToVideo() }
+            } else {
+                self.videoFitDone = false
+            }
+        }
+        NSLog("[KadokiVideo] layer installed")
     }
 
     /// The webview's own opacity is part of the hole-punch, so it is restored
@@ -659,6 +956,7 @@ class MainViewController: CAPBridgeViewController {
 
     private func applySpatialChrome(_ on: Bool) {
         installSpatialLayer()                 // idempotent; covers a late bridge
+        installVideoLayer()
         // Container ON TOP of the webview: the hover targets are the topmost
         // layer, so they win the gaze hit-test. (Tried and dead: the layer
         // UNDER the webview's scroll view with no mirror — the 3D content
@@ -732,6 +1030,7 @@ class MainViewController: CAPBridgeViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         installSpatialLayer()
+        installVideoLayer()
         // Native glass transport BELOW the window. Taps round-trip through JS
         // (same handlers as the in-window controls); state flows back via
         // NotificationCenter from the audio plugin + JS tpState.
@@ -866,6 +1165,18 @@ class MainViewController: CAPBridgeViewController {
         tpObservers.append(NotificationCenter.default.addObserver(
             forName: Notification.Name("KadokiSpatialMode"), object: nil, queue: .main) { note in
             if let d = note.userInfo?["on"] as? Bool { KadokiTransportModel.shared.spatialOn = d }
+        })
+        tpObservers.append(NotificationCenter.default.addObserver(
+            forName: Notification.Name("KadokiVideoMode"), object: nil, queue: .main) { note in
+            if let d = note.userInfo?["on"] as? Bool { KadokiTransportModel.shared.videoOn = d }
+        })
+        tpObservers.append(NotificationCenter.default.addObserver(
+            forName: Notification.Name("KadokiAudioProgress"), object: nil, queue: .main) { note in
+            guard let p = note.userInfo?["pos"] as? Int, let dd = note.userInfo?["dur"] as? Int else { return }
+            let m = KadokiTransportModel.shared
+            // per-second throttle: the row shows whole seconds
+            if p / 1000 != m.positionMs / 1000 { m.positionMs = p }
+            if dd != m.durationMs { m.durationMs = dd }
         })
     }
     #endif

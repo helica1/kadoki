@@ -48,7 +48,11 @@
              // scene (generative depth) behind the transparent webview. Opt-in
              // OFF — it costs a multi-second on-device generative pass per new
              // picture. See spatial-cards.js.
-             spatialPics: false },
+             spatialPics: false,
+             // Vision Pro only: mirror the subtitle into the RealityKit scene
+             // IN FRONT of the spatial picture (the video player's subtitle
+             // architecture) — never occluded by the 3D pop-out.
+             subsMirror: false },
     read:  { fontSize: '1.75rem', align: 'left',   fontFamily: 'serif',
              imageDisplay: 'none',  imageOpacity: 1, imageAlign: 'flex-start',
              // Audio-follow indicator style in the paged reader (word-highlight.js):

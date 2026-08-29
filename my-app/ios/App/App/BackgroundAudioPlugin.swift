@@ -78,7 +78,79 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "handoffGet",        returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "handoffServeResult", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "clearSavedPosition", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "videoSurface",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "videoSubs",          returnType: CAPPluginReturnPromise),
     ]
+
+    /// visionOS video Titles: the DOM subtitle's rect (CSS points). Native
+    /// snapshots that region and mirrors it into the RealityKit scene as an
+    /// attachment IN FRONT of the video plane — structurally impossible for
+    /// the video to occlude, while the DOM original underneath keeps gaze
+    /// glow + dictionary taps.
+    @objc func videoSubs(_ call: CAPPluginCall) {
+        #if os(visionOS)
+        var spots: [[Double]] = []
+        if let arr = call.getArray("hotspots") {
+            for it in arr {
+                if let d = it as? [String: Any],
+                   let hx = d["x"] as? Double, let hy = d["y"] as? Double,
+                   let hw = d["w"] as? Double, let hh = d["h"] as? Double {
+                    spots.append([hx, hy, hw, hh])
+                }
+            }
+        }
+        NotificationCenter.default.post(name: Notification.Name("KadokiVideoSubs"), object: nil, userInfo: [
+            "x": call.getDouble("x") ?? 0, "y": call.getDouble("y") ?? 0,
+            "w": call.getDouble("w") ?? 0, "h": call.getDouble("h") ?? 0,
+            "visible": call.getBool("visible") ?? false,
+            "hotspots": spots,
+            "hs_manage": call.getBool("hsManage") ?? true,
+            "text": call.getString("text") ?? "",
+            "segs": (call.getArray("segs") as? [[String]]) ?? [],
+        ])
+        #endif
+        call.resolve()
+    }
+
+    /// visionOS video Titles: JS streams the DOM anchor's rect (CSS points)
+    /// plus visibility + AI-3D state; the RealityKit plane in KadokiVideoLayer
+    /// follows. No-op (active:false) off visionOS.
+    @objc func videoSurface(_ call: CAPPluginCall) {
+        #if os(visionOS)
+        let visible = call.getBool("visible") ?? false
+        let x = call.getDouble("x") ?? 0, y = call.getDouble("y") ?? 0
+        let w = call.getDouble("w") ?? 0, h = call.getDouble("h") ?? 0
+        let stereo = call.getBool("stereo") ?? false
+        let active = self.player is KadokiVideoPlayer
+        Task { @MainActor in
+            let m = KadokiVideoModel.shared
+            if visible { m.frame = CGRect(x: x, y: y, width: w, height: h) }
+            m.stereoOn = stereo
+            m.wantsVisible = visible
+            m.episodeIndex = call.getInt("epIndex") ?? 0
+            m.episodeCount = call.getInt("epCount") ?? 0
+            m.applyVisibility()
+            // Re-assert the cinema chrome on every send while visible — other
+            // features (spatial cards) share the webview-transparency toggle
+            // and can restore an opaque page underneath us.
+            if m.visible { m.onVisible?(true) }
+            // Resolve with the AUTHORITATIVE contained video rect (true
+            // aspect from the loaded track) so JS can pin the subtitle panel
+            // exactly under the frame — its own 16:9 guess misplaces the
+            // panel for any other aspect, and the plane draws over the DOM.
+            let r = m.containedFrame()
+            call.resolve([
+                "active": active,
+                "frameX": r.origin.x, "frameY": r.origin.y,
+                "frameW": r.size.width, "frameH": r.size.height,
+                "subPlacement": m.subPlacement,
+                "subSize": m.subSize,
+            ])
+        }
+        #else
+        call.resolve(["active": false])
+        #endif
+    }
 
     // Handoff apply: the device-local durable floor must not out-vote a
     // position the user just adopted from another device (it's forward-only
@@ -227,6 +299,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             NotificationCenter.default.post(name: Notification.Name("KadokiSpatialMode"),
                                             object: nil, userInfo: ["on": spatialOn])
         }
+        // Video title active in audio mode → the transport ornament shows the
+        // cube (AI-3D) button there too, not just in card mode.
+        if let videoOn = call.getBool("videoOn") {
+            NotificationCenter.default.post(name: Notification.Name("KadokiVideoMode"),
+                                            object: nil, userInfo: ["on": videoOn])
+        }
         if let dictOn = call.getBool("dictOn") {
             NotificationCenter.default.post(name: Notification.Name("KadokiDictMode"),
                                             object: nil, userInfo: ["on": dictOn])
@@ -259,12 +337,50 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return String(cString: buf)
         }
         let sv = NSDictionary(contentsOfFile: "/System/Library/CoreServices/SystemVersion.plist")
+        var model = machine
+        var simDemo = false
+        var demoDir = ""
+        #if targetEnvironment(simulator)
+        // The simulator's utsname is the host Mac's — report the simulated
+        // device so KADOKI_VISION_NATIVE detection works there too.
+        model = ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] ?? machine
+        // Dev harness: SIMCTL_CHILD_KADOKI_SIM_DEMO=1 seeds a bundled demo
+        // video+SRT into Documents so the video player is testable in the
+        // simulator with zero manual imports.
+        if ProcessInfo.processInfo.environment["KADOKI_SIM_DEMO"] == "1" {
+            simDemo = true
+            if let host = ProcessInfo.processInfo.environment["KADOKI_SIM_DEMO_DIR"],
+               FileManager.default.fileExists(atPath: host + "/demo-video.mp4") {
+                // Simulator processes can read host paths — a HOST directory is
+                // container-rotation-proof (Documents paths go stale on every
+                // reinstall and poisoned the seeded title).
+                demoDir = host
+            } else {
+                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                demoDir = docs.path
+                for f in ["demo-video.mp4", "demo-video.srt"] {
+                    let dst = docs.appendingPathComponent(f)
+                    if !FileManager.default.fileExists(atPath: dst.path),
+                       let src = Bundle.main.url(forResource: (f as NSString).deletingPathExtension,
+                                                 withExtension: (f as NSString).pathExtension) {
+                        try? FileManager.default.copyItem(at: src, to: dst)
+                    }
+                }
+            }
+        }
+        #endif
         call.resolve([
-            "model": machine,
+            "model": model,
             "hwTarget": sysctlStr("hw.target"),
             "hwProduct": sysctlStr("hw.product"),
             "productName": (sv?["ProductName"] as? String) ?? "",
             "visionClass": NSClassFromString("UIWindowSceneGeometryPreferencesVision") != nil,
+            "simDemo": simDemo,
+            "demoDir": demoDir,
+            "sim3d": ProcessInfo.processInfo.environment["KADOKI_SIM_3D"] == "1",
+            "simSeries": !demoDir.isEmpty && FileManager.default.fileExists(atPath: demoDir + "/demo-ep1.mp4"),
+            "simAdv": ProcessInfo.processInfo.environment["KADOKI_SIM_ADV"] == "1",
+            "simBrowse": ProcessInfo.processInfo.environment["KADOKI_SIM_BROWSE"] == "1",
         ])
     }
 
@@ -297,7 +413,11 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     // MARK: - State
 
-    private var player: AVAudioPlayer?
+    // Engine slot: AVAudioPlayer for audio files, KadokiVideoPlayer (AVPlayer)
+    // for video files standing as audiobook attachments. Every consumer below
+    // drives it through the KadokiPlayback protocol, so transport / fades /
+    // durable floors / remote commands / chapter repeat are engine-agnostic.
+    private var player: KadokiPlayback?
     // The exact `url` string JS last asked us to play. Exposed via getState so JS
     // can confirm "same audio" before adopting the native playhead as truth on a
     // resume (the backwards-place-jump fix). Stored raw so it matches what JS sent.
@@ -588,12 +708,50 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             url = URL(fileURLWithPath: urlStr)
         }
 
+        // Video files (mp4/m4v/mov/3gp standing as the audiobook attachment)
+        // play through an AVPlayer engine — AVAudioPlayer can't open a file
+        // with a video track. Same events, fades, floors and timer as audio.
+        if KadokiVideoPlayer.isVideoUrl(url) {
+            stopPositionTimer()
+            player?.stop()
+            player = nil
+
+            let v = KadokiVideoPlayer(url: url)
+            v.onEnded = { [weak self] in self?.handleNaturalEnd() }
+            v.onError = { [weak self] msg in self?.handlePlaybackError(message: msg) }
+            v.rate = rate
+            v.currentTime = max(0, startMs / 1000.0)
+            fadeGeneration += 1
+            let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
+            if fadeMs > 0 {
+                v.volume = 0.0
+                v.play()
+                v.setVolume(1.0, fadeDuration: fadeMs / 1000.0)
+            } else {
+                v.volume = 1.0
+                v.play()
+            }
+            self.player = v
+            self.currentRate = rate
+            startPositionTimer()
+            emitState(playing: true)
+            updateNowPlaying()
+            #if os(visionOS)
+            Task { @MainActor in KadokiVideoModel.shared.adopt(v) }
+            #endif
+            call.resolve()
+            return
+        }
+
         do {
             // Tear down any prior player. Doing this synchronously avoids the
             // late-state-event race the Android plugin had.
             stopPositionTimer()
             player?.stop()
             player = nil
+            #if os(visionOS)
+            Task { @MainActor in KadokiVideoModel.shared.clear() }
+            #endif
 
             let p = try AVAudioPlayer(contentsOf: url)
             p.enableRate = true
@@ -703,6 +861,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         player?.stop()
         player = nil
         currentUrlStr = ""
+        #if os(visionOS)
+        Task { @MainActor in KadokiVideoModel.shared.clear() }
+        #endif
         emitState(playing: false)
         postLiveTick(ms: msAtStop, playing: false)
         clearNowPlaying()
@@ -1161,6 +1322,11 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "ts":         Int(Date().timeIntervalSince1970 * 1000)
         ])
         postLiveTick(ms: positionMs, playing: playing)
+        #if os(visionOS)
+        // Feed the transport ornament's video progress row.
+        NotificationCenter.default.post(name: Notification.Name("KadokiAudioProgress"),
+                                        object: nil, userInfo: ["pos": positionMs, "dur": durationMs])
+        #endif
     }
 
     // Pure notification post — no playback side effects — safe to call from
@@ -1209,7 +1375,18 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
 extension BackgroundAudioPlugin: AVAudioPlayerDelegate {
     public func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        // The delegate can arrive off-main (playback was started on the plugin's
+        handleNaturalEnd()
+    }
+    public func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        handlePlaybackError(message: error?.localizedDescription ?? "unknown decode error")
+    }
+}
+
+// MARK: - Engine-agnostic end / error paths (audio delegate + video observers)
+
+extension BackgroundAudioPlugin {
+    func handleNaturalEnd() {
+        // The audio delegate can arrive off-main (playback was started on the plugin's
         // background queue), but the repeat machinery — the main-RunLoop position +
         // failsafe timers and the synth — must run on main. Marshal, then recapture
         // all repeat state inside the hop (it may have changed e.g. via stop()).
@@ -1231,7 +1408,7 @@ extension BackgroundAudioPlugin: AVAudioPlayerDelegate {
             self.finishBookAtEof()
         }
     }
-    public func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+    func handlePlaybackError(message: String) {
         stopPositionTimer()
         // Order matters: 'error' BEFORE the state(false) — the JS error
         // handler captures _bgPlaying at entry to decide whether to restart
@@ -1239,13 +1416,13 @@ extension BackgroundAudioPlugin: AVAudioPlayerDelegate {
         // ts lets JS tell a live error from one replayed from the suspended
         // bridge backlog (a stale error must not auto-restart playback).
         self.notifyListeners("error", data: [
-            "message": error?.localizedDescription ?? "unknown decode error",
+            "message": message,
             "ts":      Int(Date().timeIntervalSince1970 * 1000)
         ])
         // Playback is dead: tell JS explicitly so window._bgPlaying can't
         // stay stale-true (the position poll above just stops silently).
         emitState(playing: false)
-        postLiveTick(ms: Int(player.currentTime * 1000), playing: false)
+        postLiveTick(ms: Int((player?.currentTime ?? 0) * 1000), playing: false)
         updateNowPlaying()
     }
 }

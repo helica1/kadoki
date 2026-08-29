@@ -1876,6 +1876,9 @@ body.dimmed .card-image {
   <!-- visionOS spatial card pictures — console-driven layering prototype
        (window.kvSpatial). Inert everywhere else; see spatial-cards.js. -->
   <script src="spatial-cards.js"></script>
+  <!-- visionOS video Titles: native video plane rect sync + AI-3D toggle
+       (window.kadokiVideoMode). Inert everywhere else; see video-mode.js. -->
+  <script src="video-mode.js"></script>
 <!-- visionOS: pop Timeline & Scenes / chapter summary / Characters out into
      their own system-placeable windows (second webview, same origin). No-op
      everywhere else — kadokiPanel.available() gates every affordance. -->
@@ -2092,7 +2095,7 @@ body.dimmed .card-image {
                 <div class="title-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">
                   ${chipHtml('card',  'DECK',  !!a.deck)}
                   ${chipHtml('read',  'EPUB',  !!a.epub)}
-                  ${chipHtml('audio', 'AUDIO', !!a.audiobook)}
+                  ${(a.audiobook && (a.audiobook.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(a.audiobook.name || ''))) ? chipHtml('audio', Array.isArray(a.series) && a.series.length > 1 ? ('VIDEO \u00d7' + a.series.length) : 'VIDEO', true) : chipHtml('audio', 'AUDIO', !!a.audiobook)}
                   ${chipHtml('srt',   'SRT',   !!a.srt)}
                 </div>
                 <div class="deck-info" style="color:#888;font-size:0.85em;display:flex;gap:10px;flex-wrap:wrap;">

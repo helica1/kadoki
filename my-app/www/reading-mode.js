@@ -3120,10 +3120,20 @@
     if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) { d = { action: d }; } }
     const action = (e && e.action) || (d && d.action) || '';
     if (action === 'toggle') tpTogglePlay();
+    else if (action === 'replay') { try { window.kadokiVideoMode?.replayCurrent?.(); } catch (_) {} }
+    else if (action === 'epPrev') { try { window.kadokiVideoMode?.advanceEpisode?.(-1, true, true); } catch (_) {} }
+    else if (action === 'epNext') { try { window.kadokiVideoMode?.advanceEpisode?.(1, true, true); } catch (_) {} }
+    else if (action === 'epBrowse') { try { window.kadokiVideoMode?.openBrowser?.(); } catch (_) {} }
     else if (action === 'prev') tpStepCue(-1);
     else if (action === 'next') tpStepCue(1);
     else if (action === 'dict') tpFlipDict();
-    else if (action === 'spatial') { try { window.kvSpatial?.toggle?.(); } catch (_) {} }
+    else if (action === 'spatial') {
+      // Audio mode + video title: the cube toggles the video AI-3D stereo;
+      // otherwise it's card mode's flat ⇄ spatial pictures switch.
+      try {
+        if (!(window.kadokiVideoMode && window.kadokiVideoMode.maybeToggle3d())) window.kvSpatial?.toggle?.();
+      } catch (_) {}
+    }
     else if (action === 'summary') {
       // visionOS transport bar: the chapter summary is reachable from EVERY
       // mode here, not just audio (openCurrentChapter resolves the chapter

@@ -21,6 +21,16 @@
 
 (function () {
   const AUDIO_EXTS = new Set(['mp3', 'm4a', 'm4b', 'ogg', 'oga', 'opus', 'wav', 'flac', 'aac']);
+  // Video files import as the AUDIOBOOK attachment (a video is "an audiobook
+  // whose file has pictures"): audio mode plays it (native AVPlayer engine),
+  // card mode gets SRT cards, AudioSlicer clips its audio track. The isVideo
+  // flag (plus extension sniffing at open time) tells the visionOS layer to
+  // show the native video surface.
+  const VIDEO_EXTS = new Set(['mp4', 'm4v', 'mov', '3gp', 'mkv']);   // mkv: losslessly remuxed to mp4 at first open (native kadoki_remux)
+  // Scanned so we can EXPLAIN, never imported: AVFoundation cannot play these
+  // containers (the classic mkv season rip). The import toast tells the user
+  // to convert instead of silently claiming "no books found".
+  const UNPLAYABLE_VIDEO_EXTS = new Set(['avi', 'wmv']);
   const SRT_EXTS   = new Set(['srt', 'vtt', 'ass']);
   const EPUB_EXTS  = new Set(['epub', 'txt']);   // txt = a plain-text book (read mode)
 
@@ -109,7 +119,7 @@
   // Produce 0+ "books" (each → one Title) from the files in one folder.
   function classifyFolder(dir, groupFiles, rootName) {
     const epubs  = groupFiles.filter(f => EPUB_EXTS.has(f.ext));
-    const audios = groupFiles.filter(f => AUDIO_EXTS.has(f.ext));
+    const audios = groupFiles.filter(f => AUDIO_EXTS.has(f.ext) || VIDEO_EXTS.has(f.ext));
     const srts   = groupFiles.filter(f => SRT_EXTS.has(f.ext));
     const folderName = dir ? baseName(dir) : (rootName || '');
     const books = [];
@@ -125,16 +135,37 @@
         });
       }
     } else if (audios.length) {
-      // No epub: an audiobook (+ srt) Title — enables Audio mode, and Card mode
-      // when an SRT is present.
-      const single = audios.length === 1;
-      for (const audio of audios) {
-        books.push({
-          name: (single ? (folderName || stripExt(audio.name)) : stripExt(audio.name)) || 'Untitled',
-          epub: null,
-          audio,
-          srt: matchByStem(audio, srts, single)
+      const videos = audios.filter(f => VIDEO_EXTS.has(f.ext));
+      if (videos.length >= 2 && videos.length === audios.length) {
+        // A SERIES: one folder of episodes (video + per-episode SRT) becomes a
+        // SINGLE Title. attachments.audiobook/srt point at the CURRENT episode
+        // (starts at ep 1); attachments.series lists them all in order —
+        // video-mode.js advances through it at end-of-episode.
+        const eps = videos.slice().sort((a, b) =>
+          (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' }));
+        const series = eps.map(v => {
+          const m = matchByStem(v, srts, false);
+          return { video: { uri: v.uri, name: v.name }, srt: m ? { uri: m.uri, name: m.name } : null };
         });
+        books.push({
+          name: folderName || stripExt(eps[0].name) || 'Untitled',
+          epub: null,
+          audio: eps[0],
+          srt: series[0].srt ? srts.find(s => s.name === series[0].srt.name) : null,
+          series
+        });
+      } else {
+        // No epub: an audiobook (+ srt) Title — enables Audio mode, and Card
+        // mode when an SRT is present.
+        const single = audios.length === 1;
+        for (const audio of audios) {
+          books.push({
+            name: (single ? (folderName || stripExt(audio.name)) : stripExt(audio.name)) || 'Untitled',
+            epub: null,
+            audio,
+            srt: matchByStem(audio, srts, single)
+          });
+        }
       }
     }
     // Folders with only SRT (or nothing recognized) produce no Title.
@@ -144,8 +175,12 @@
   function attachmentsFor(book) {
     const att = {};
     if (book.epub)  att.epub      = { uri: book.epub.uri,  name: book.epub.name };
-    if (book.audio) att.audiobook = { uri: book.audio.uri, name: book.audio.name };
+    if (book.audio) {
+      att.audiobook = { uri: book.audio.uri, name: book.audio.name };
+      if (VIDEO_EXTS.has(book.audio.ext)) att.audiobook.isVideo = true;
+    }
     if (book.srt)   att.srt       = { uri: book.srt.uri,   name: book.srt.name };
+    if (book.series) att.series   = book.series;
     return att;
   }
 
@@ -202,14 +237,27 @@
 
       setProgress(40, `Found ${files.length} files — organizing…`);
 
-      const groups = groupByDir(files);
+      // Unplayable video containers: explain instead of a bare "no books".
+      const unplayable = files.filter(f => UNPLAYABLE_VIDEO_EXTS.has(f.ext));
+      const playable = unplayable.length ? files.filter(f => !UNPLAYABLE_VIDEO_EXTS.has(f.ext)) : files;
+
+      const groups = groupByDir(playable);
       let books = [];
       for (const [dir, gf] of groups) books = books.concat(classifyFolder(dir, gf, res.rootName));
 
       if (!books.length) {
         hideModal();
-        toast('No books (epub or audiobook) found to import.');
+        if (unplayable.length) {
+          const exts = [...new Set(unplayable.map(f => '.' + f.ext))].join(' / ');
+          alert(`Found ${unplayable.length} video file${unplayable.length === 1 ? '' : 's'} in ${exts} format, ` +
+            `which iOS/visionOS cannot play. Convert to .mp4 (H.264/AAC) and re-import.`);
+        } else {
+          toast('No books (epub / audiobook / video) found to import.');
+        }
         return;
+      }
+      if (unplayable.length) {
+        toast(`${unplayable.length} ${[...new Set(unplayable.map(f => '.' + f.ext))].join('/')} file(s) skipped — not playable on this platform.`, 4500);
       }
 
       // Dedupe against the existing library AND within this batch.
@@ -245,6 +293,14 @@
 
       setProgress(100, `Imported ${fresh.length} book${fresh.length === 1 ? '' : 's'}`);
       if (typeof window.populateLibrary === 'function') await window.populateLibrary();
+      // A single created VIDEO title (a movie, or a season-as-series): open it
+      // right away in the player — that's always the next action anyway.
+      if (created && created.length === 1 && created[0]?.attachments?.audiobook?.isVideo &&
+          typeof window.loadTitleFromLibrary === 'function') {
+        try { await window.titleStore.setMode?.(created[0].id, 'audio'); } catch (_) {}
+        created[0].lastMode = 'audio';
+        setTimeout(() => { try { window.loadTitleFromLibrary(created[0]); } catch (_) {} }, 600);
+      }
       toast(`📁 Imported ${fresh.length} book${fresh.length === 1 ? '' : 's'}` + (skipped ? ` (${skipped} skipped)` : ''));
       setTimeout(hideModal, 1100);
       // Cover art: best-effort BACKGROUND pass (don't block import completion).

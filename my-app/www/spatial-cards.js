@@ -105,6 +105,7 @@
 
   function closeHole() {
     document.body.classList.remove('kv-spatial-live');
+    try { pushCardSubs._was = false; window.Capacitor?.Plugins?.BackgroundAudio?.videoSubs?.({ visible: false, hsManage: false }); } catch (_) {}
     if (!savedBg) return;
     document.documentElement.style.background = savedBg.html;
     document.body.style.background = savedBg.body;
@@ -236,6 +237,27 @@
   const MIRROR_MIN_GAP = 170;   // ≤ ~6 snapshots/s; a lookup mutates the DOM hard, and a
                                 // full-window snapshot each time was costing input latency
 
+  // Card-mode subtitle mirror (video-player subtitle architecture): while the
+  // spatial picture is live and the pref is on, stream the cue panel's rect;
+  // native snapshots it into a scene attachment IN FRONT of the picture.
+  // hsManage:false — this pipeline's own hotspots stay authoritative.
+  function pushCardSubs() {
+    const bgp = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bgp || typeof bgp.videoSubs !== 'function') return;
+    const on = live && window.appearance?.get?.('card')?.subsMirror === true;
+    if (!on) {
+      if (pushCardSubs._was) { pushCardSubs._was = false; try { bgp.videoSubs({ visible: false, hsManage: false }); } catch (_) {} }
+      return;
+    }
+    const el = document.querySelector('#cardContainer .subtitle-text');
+    const text = el ? (el.textContent || '').trim() : '';
+    if (!el || !text) { try { bgp.videoSubs({ visible: false, hsManage: false }); } catch (_) {} return; }
+    const r = el.getBoundingClientRect();
+    if (!(r.width > 1 && r.height > 1)) return;
+    pushCardSubs._was = true;
+    try { bgp.videoSubs({ visible: true, x: r.left, y: r.top, w: r.width, h: r.height, text, hsManage: false }); } catch (_) {}
+  }
+
   async function mirrorNow() {
     const p = plugin();
     if (!p || !live) return;
@@ -255,6 +277,7 @@
         hot: hot,
       });
     } catch (_) {}
+    try { pushCardSubs(); } catch (_) {}
     mirrorBusy = false;
     if (mirrorAgain) { mirrorAgain = false; mirrorSoon(MIRROR_MIN_GAP); }
   }

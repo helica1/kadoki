@@ -46,7 +46,12 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
 
     // Media extensions surfaced from a folder scan (lowercase, no dot).
     private static let mediaExts: Set<String> = [
-        "epub", "txt", "mp3", "m4a", "m4b", "ogg", "oga", "opus", "wav", "flac", "aac", "srt", "vtt", "ass"
+        "epub", "txt", "mp3", "m4a", "m4b", "ogg", "oga", "opus", "wav", "flac", "aac", "srt", "vtt", "ass",
+        // Video titles (folder-import.js pairs them with SRTs like audiobooks).
+        "mp4", "m4v", "mov", "3gp",
+        // Unplayable containers, scanned ONLY so the import UI can explain
+        // ("convert your mkv to mp4") instead of reporting an empty folder.
+        "mkv", "avi", "wmv"
     ]
 
     public override func load() {
@@ -287,7 +292,16 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         let cacheDir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("decks", isDirectory: true)
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        let cacheURL = cacheDir.appendingPathComponent("deck_\(hash).\(ext)")
+        // mkv: AVFoundation can't open the Matroska container, but the H.264/
+        // HEVC + AAC/AC3 streams inside play fine — materialize as a LOSSLESS
+        // remux into mp4 (kadoki_remux, the embedded minimal libavformat)
+        // instead of a byte copy. visionOS only (the static lib is xros-only).
+        #if os(visionOS) && !targetEnvironment(simulator)
+        let remuxMkv = ext.lowercased() == "mkv"   // libkadokiremux is a device-only build
+        #else
+        let remuxMkv = false
+        #endif
+        let cacheURL = cacheDir.appendingPathComponent("deck_\(hash).\(remuxMkv ? "mp4" : ext)")
 
         // Cache-hit path: cache file exists AND its mtime is >= source mtime.
         if let srcAttrs   = try? FileManager.default.attributesOfItem(atPath: sourceURL.path),
@@ -297,7 +311,10 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
            let srcSize  = srcAttrs[.size] as? Int,
            let cacheSize = cacheAttrs[.size] as? Int,
            cacheMod >= srcMod,
-           cacheSize == srcSize {     // size match rejects a TRUNCATED cache from a prior dataless (placeholder) copy
+           // size match rejects a TRUNCATED cache from a prior dataless
+           // (placeholder) copy. A remuxed cache legitimately differs in size
+           // from its source — sanity-check non-trivial instead.
+           (remuxMkv ? cacheSize > 65536 : cacheSize == srcSize) {
             let size = cacheSize
             // Bump lastUsed so getPersistedUriPermissions sorting is fresh.
             touchLastUsed(uri: touchUri)
@@ -309,10 +326,24 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
-        // Fresh copy.
+        // Fresh copy (or remux).
         do {
             try? FileManager.default.removeItem(at: cacheURL)
-            try FileManager.default.copyItem(at: sourceURL, to: cacheURL)
+            if remuxMkv {
+                #if os(visionOS) && !targetEnvironment(simulator)
+                NSLog("[FileAccess] remuxing mkv → mp4: \(sourceURL.lastPathComponent)")
+                var err = [CChar](repeating: 0, count: 256)
+                let rc = kadoki_remux(sourceURL.path, cacheURL.path, &err, 256, nil, nil)
+                if rc != 0 {
+                    let msg = String(cString: err)
+                    try? FileManager.default.removeItem(at: cacheURL)
+                    call.reject("mkv remux failed: \(msg.isEmpty ? "code \(rc)" : msg)")
+                    return
+                }
+                #endif
+            } else {
+                try FileManager.default.copyItem(at: sourceURL, to: cacheURL)
+            }
             let attrs = try FileManager.default.attributesOfItem(atPath: cacheURL.path)
             let size = (attrs[.size] as? Int) ?? 0
             touchLastUsed(uri: touchUri)
@@ -421,9 +452,14 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
     private func contentTypesFor(_ type: String) -> [UTType] {
         switch type.lowercased() {
         case "audio":
+            // Movie types included: a video file can stand as the audiobook
+            // attachment (video Titles — audio plays everywhere, the picture
+            // shows on visionOS).
             return [.audio, .mp3, .mpeg4Audio,
                     UTType(filenameExtension: "m4b") ?? .audio,
-                    UTType(filenameExtension: "m4a") ?? .audio]
+                    UTType(filenameExtension: "m4a") ?? .audio,
+                    .movie, .mpeg4Movie, .quickTimeMovie,
+                    UTType(filenameExtension: "m4v") ?? .movie]
         case "epub":
             return [UTType("org.idpf.epub-container") ?? .data,
                     UTType(filenameExtension: "epub") ?? .data,

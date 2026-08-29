@@ -410,6 +410,12 @@
             () => get().spatialPics === true,
             (on) => { apply('card', { spatialPics: on }); try { window.kvSpatial?.refresh?.(); } catch (_) {} }
           )));
+          // Subtitle mirrored in front of the spatial picture (video-player
+          // subtitle architecture; only meaningful with spatial pictures on).
+          block.appendChild(row(window.i18n.t('pj.subs_mirror', 'Subtitles in front (3D)'), toggle(
+            () => get().subsMirror === true,
+            (on) => { apply('card', { subsMirror: on }); try { window.kvSpatial?.refresh?.(); } catch (_) {} }
+          )));
         }
       }
       if (mode === 'read') {

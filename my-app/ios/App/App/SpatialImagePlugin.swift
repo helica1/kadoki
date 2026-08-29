@@ -161,6 +161,10 @@ final class KadokiSpatialModel: ObservableObject {
 /// layer. A picture floated forward of that plane swallows the UI.
 struct KadokiSpatialLayer: View {
     @ObservedObject private var m = KadokiSpatialModel.shared
+    /// Subtitle-mirror state (shared with the video player): when the card
+    /// pref streams the cue panel here, it draws IN FRONT of the spatial
+    /// picture instead of flat in the UI snapshot.
+    @ObservedObject private var vm = KadokiVideoModel.shared
 
     /// How far into the window the picture sits, in metres. Must exceed the
     /// spatial scene's own forward relief or the nearest parts of the scene
@@ -198,6 +202,7 @@ struct KadokiSpatialLayer: View {
                     m.placedGeneration = m.generation
                     place(content, e, geo.size)
                     placeOverlay(content, attachments, geo.size)
+                    placeVSubs(content, attachments, geo.size)
                 } update: { content, attachments in
                     if m.placedGeneration != m.generation {
                         m.entity?.removeFromParent()
@@ -208,6 +213,7 @@ struct KadokiSpatialLayer: View {
                     }
                     if let e = m.entity { place(content, e, geo.size) }
                     placeOverlay(content, attachments, geo.size)
+                    placeVSubs(content, attachments, geo.size)
                 } attachments: {
                     // The webview's own pixels, carried INTO the RealityKit scene
                     // as an attachment so RealityKit depth-sorts them against the
@@ -231,6 +237,17 @@ struct KadokiSpatialLayer: View {
                             .frame(width: m.overlayRect.width, height: m.overlayRect.height, alignment: .topLeading)
                         }
                     }
+                    // The video player's subtitle-mirror, reused for cards:
+                    // a snapshot of the cue panel floated in front of the
+                    // spatial picture (the flat copy inside the "ui" snapshot
+                    // sits underneath and is covered by this).
+                    Attachment(id: "vsubs") {
+                        if !vm.subText.isEmpty, vm.subRect.width > 1 {
+                            KadokiSubsPanel(text: vm.subText, segs: vm.subSegs, translucent: true,
+                                            maxWidth: max(vm.subRect.width + 120, 420),
+                                            fontSize: vm.subSize)
+                        }
+                    }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
                 // DEPTH GEOMETRY (measured the hard way): the region is
@@ -248,6 +265,20 @@ struct KadokiSpatialLayer: View {
             }
         }
         .ignoresSafeArea()
+    }
+
+    /// The subtitle mirror: over its DOM rect, 6cm forward — in front of the
+    /// picture (recessed at −4cm) and its generated scene's forward relief.
+    private func placeVSubs(_ content: RealityViewContent, _ attachments: RealityViewAttachments, _ size: CGSize) {
+        guard let a = attachments.entity(for: "vsubs") else { return }
+        if a.parent == nil { content.add(a) }
+        let r = vm.subRect
+        guard r.width > 1, !vm.subText.isEmpty else { a.isEnabled = false; return }
+        a.isEnabled = true
+        a.position = SIMD3<Float>(
+            Float(r.midX - size.width / 2) * m.mpp,
+            Float(size.height / 2 - r.midY) * m.mpp,
+            0.06)
     }
 
     /// Put the UI attachment exactly over its screen rect, in front of the

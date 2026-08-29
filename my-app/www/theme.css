@@ -1483,3 +1483,106 @@ body.kadoki-vision-native.kv-spatial-live #cardContainer .subtitle-text {
    element unconditionally (Vision only) because a transition added in the same
    frame as the value change does not animate. */
 body.kadoki-vision-native #cardContainer .card-image { transition: opacity .28s ease; }
+
+/* ---------- visionOS video Titles (video-mode.js) ---------- */
+/* The native RealityKit video plane draws at #kadokiVideoAnchor's rect; the
+   cover-image slot yields to it. The anchor itself is inserted by
+   video-mode.js (kept out of index.html so non-video layouts never carry it). */
+body.kadoki-video-title.mode-audio #audiobookCardImage { display: none !important; }
+/* Video titles: chapter summary is a book/audiobook concept — hide its
+   in-window button in the video player. */
+body.kadoki-video-title.mode-audio #abSummaryBtn { display: none !important; }
+/* Video titles: cinema layout — full-width frame, no audiobook chrome.
+   Chapter repeat and the live waveform are audiobook concepts; hiding them
+   frees the bottom of the window so the subtitle never collides. */
+body.kadoki-video-title.mode-audio #audiobookContent { padding-left: 0 !important; padding-right: 0 !important; }
+body.kadoki-video-title.mode-audio #abRepeatBar { display: none !important; }
+body.kadoki-video-title.mode-audio #liveWaveform { display: none !important; }
+/* Video cinema layout v2: the frame owns ALL leftover height (flex:1 on the
+   anchor), the subtitle is a fixed strip BELOW it — the plane aspect-fits
+   inside the anchor natively, so it can never draw over the cue text. */
+body.kadoki-video-title.mode-audio #audiobookContent {
+  /* !important throughout: #audiobookContent carries INLINE padding/gap from
+     index.html, which beats any stylesheet rule without it (this block was
+     silently dead for several device rounds because of that). */
+  height: 100% !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  gap: 10px !important;
+  /* bottom reserve = the subtitle strip (the fixed-position cue panel is out
+     of flow, so the layout must reserve its room explicitly) */
+  padding: calc(6px + env(safe-area-inset-top, 0px)) 0 calc(170px + env(safe-area-inset-bottom, 0px)) !important;
+}
+body.kadoki-video-title.mode-audio #audiobookCueText {
+  flex: 0 0 auto;
+  padding: 0 18px 64px;   /* keeps clear of the ⟲ replay button */
+  text-shadow: 0 1px 8px rgba(0,0,0,.9), 0 0 2px rgba(0,0,0,.95);
+}
+/* Cinema mode: kill the app background — the native layer makes the webview
+   transparent, so clearing these turns the window into glass with just the
+   video plane + subtitle floating on it. */
+body.kadoki-video-title.mode-audio { background: transparent !important; }
+html:has(body.kadoki-video-title.mode-audio) { background: transparent !important; }
+body.kadoki-video-title.mode-audio #audiobookModeView { background: transparent !important; }
+/* Cinema mode round 2: with the page transparent, everything that lives
+   BEHIND the audio view (the legacy reading chunks, card container) showed
+   through the glass — hide the whole underlying stack while the video player
+   is up. */
+body.kadoki-video-title.mode-audio #readingModeContent,
+body.kadoki-video-title.mode-audio #readingModeView,
+body.kadoki-video-title.mode-audio #cardContainer,
+body.kadoki-video-title.mode-audio #audiobookNextCueText,
+body.kadoki-video-title.mode-audio #audiobookCardImage {
+  visibility: hidden !important;
+}
+/* The subtitle becomes its own floating glass panel; video-mode.js pins it
+   just under the video frame's real bottom edge. */
+body.kadoki-video-title.mode-audio #audiobookCueText {
+  /* Placement is JS-driven (right under the authoritative frame rect from
+     native; overlay mode = on the film's lower edge). Styling only here. */
+  line-height: 1.45 !important;
+  background: rgba(16, 16, 16, 0.62);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 16px;
+  padding: 10px 26px !important;
+  width: fit-content;
+  max-width: 86%;
+  margin: 0 auto;
+}
+/* Cue panel defensiveness: never inherit a hidden state, always above other
+   in-window content. (Scoped :not(.kv-subs-native): in native-subtitle mode
+   the DOM twin must stay hidden — this rule's higher specificity was
+   overriding the hide rule and doubling the subtitle.) */
+body.kadoki-video-title.mode-audio:not(.kv-subs-native) #audiobookCueText {
+  visibility: visible !important;
+}
+body.kadoki-video-title.mode-audio #audiobookCueText { z-index: 80; }
+/* Native-subtitle mode, full-specificity hide. */
+body.kadoki-video-title.mode-audio.kv-subs-native #audiobookCueText { visibility: hidden !important; }
+body.kadoki-video-title.mode-audio.kv-subs-native #audiobookCueText .kword-hit { visibility: visible !important; opacity: 0 !important; }
+/* Cinema: no header at all during video playback — the transport ornament
+   carries mode switching and the menu. */
+body.kadoki-video-title.mode-audio #appHeader { display: none !important; }
+/* Subtitle placement = Overlay (ornament settings card): the panel sits ON
+   the lower part of the film, movie-style; the bottom strip shrinks. The DOM
+   twin is under the video plane there (invisible), and the mirror's backing
+   goes translucent natively. */
+body.kadoki-video-title.mode-audio.kv-subplace-overlay #audiobookContent {
+  padding-bottom: calc(40px + env(safe-area-inset-bottom, 0px)) !important;
+}
+body.kadoki-video-title.mode-audio.kv-subplace-overlay #audiobookCueText {
+  background: rgba(10, 10, 10, 0.40);
+}
+/* Native-subtitle mode (AI-3D / flat-overlay): the panel is rendered by the
+   native layer; the DOM twin keeps its LAYOUT (word rects drive the gaze
+   targets and tap replay) but paints nothing. The childless word overlays are
+   re-enabled explicitly: visibility is inherited but overridable, and
+   elementFromPoint skips hidden elements — the overlays must stay hit-
+   testable for the forwarded pinches. */
+body.kv-subs-native #audiobookCueText { visibility: hidden !important; }
+body.kv-subs-native #audiobookCueText .kword-hit { visibility: visible !important; opacity: 0 !important; }
+/* Subtitle browser open: the paused cue panel must not ghost through the
+   overlay backdrop. */
+body.kv-browser-open #audiobookCueText { visibility: hidden !important; }

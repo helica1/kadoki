@@ -48,11 +48,14 @@ post_install do |installer|
   installer.pods_project.targets.each do |t|
     next unless t.name == 'CapacitorFilesystem'
     t.build_configurations.each do |c|
-      c.build_settings['EXCLUDED_SOURCE_FILE_NAMES[sdk=xros*]'] = '*.swift'
-      # Target-level conditional beats the xcconfig (where the conditional
-      # append was NOT winning over the unconditional line): xros links only
-      # Capacitor, never the iOS-only binary.
-      c.build_settings['OTHER_LDFLAGS[sdk=xros*]'] = '-framework "Capacitor"'
+      # NOTE: sdk=xros* does NOT glob xrsimulator — both keys are needed.
+      ['xros*', 'xrsimulator*'].each do |sdk|
+        c.build_settings["EXCLUDED_SOURCE_FILE_NAMES[sdk=#{sdk}]"] = '*.swift'
+        # Target-level conditional beats the xcconfig (where the conditional
+        # append was NOT winning over the unconditional line): visionOS links
+        # only Capacitor, never the iOS-only binary.
+        c.build_settings["OTHER_LDFLAGS[sdk=#{sdk}]"] = '-framework "Capacitor"'
+      end
     end
   end
   fs_target = installer.pods_project.targets.find { |x| x.name == 'CapacitorFilesystem' }
@@ -71,14 +74,28 @@ post_install do |installer|
     ld = txt[/^OTHER_LDFLAGS = .*$/]
     next unless ld
     stripped = ld.sub('OTHER_LDFLAGS = ', 'OTHER_LDFLAGS[sdk=xros*] = ').gsub(' -framework "IONFilesystemLib"', '')
-    File.write(f, txt + "\n" + stripped + "\n")
+    stripped_sim = ld.sub('OTHER_LDFLAGS = ', 'OTHER_LDFLAGS[sdk=xrsimulator*] = ').gsub(' -framework "IONFilesystemLib"', '')
+    File.write(f, txt + "\n" + stripped + "\n" + stripped_sim + "\n")
+  end
+  # The App embed script also references the never-built framework on
+  # visionOS ("source: unbound variable" at [CP] Embed Pods Frameworks on any
+  # cold xros/xrsimulator build) — guard those lines by platform.
+  fwsh = File.join(support, 'Pods-App', 'Pods-App-frameworks.sh')
+  if File.exist?(fwsh)
+    txt = File.read(fwsh)
+    unless txt.include?('KADOKI_SKIP_IONFS')
+      txt = txt.gsub(/^(\s*)(install_framework "[^"]*IONFilesystemLib\/IONFilesystemLib\.framework")$/) do
+        "#{$1}case \"$PLATFORM_NAME\" in xros*|xrsimulator*) : ;; *) #{$2} ;; esac # KADOKI_SKIP_IONFS"
+      end
+      File.write(fwsh, txt)
+    end
   end
   xcfsh = File.join(support, 'IONFilesystemLib', 'IONFilesystemLib-xcframeworks.sh')
   if File.exist?(xcfsh)
     sh = File.read(xcfsh)
     unless sh.include?('xros')
       lines = sh.lines
-      lines.insert(1, "case \"$PLATFORM_NAME\" in xros*) exit 0;; esac\n")
+      lines.insert(1, "case \"$PLATFORM_NAME\" in xros*|xrsimulator*) exit 0;; esac\n")
       File.write(xcfsh, lines.join)
     end
   end
