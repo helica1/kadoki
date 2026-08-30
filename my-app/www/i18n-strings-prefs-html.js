@@ -98,6 +98,10 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
     en: 'Process chapters automatically<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">Finished chapters are processed quietly in the background (timeline + characters). Off: only the manual &ldquo;Update Timeline&rdquo; button sends anything.</span>',
     ja: '章を自動で処理<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">読み終えた章はバックグラウンドで静かに処理されます（タイムライン＋キャラクター）。オフの場合は手動の「タイムラインを更新」ボタンを押したときだけ送信されます。</span>'
   },
+  'ph.ai_autoactivate': {
+    en: 'Turn on Timeline for every new book<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">New books start with Timeline, chapter summaries and scenes enabled automatically &mdash; no per-book activation step. Off: each book asks once.</span>',
+    ja: '新しい本でタイムラインを自動オン<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">新しい本を開くとタイムライン・章の要約・シーンが自動で有効になります（本ごとの有効化は不要）。オフの場合は本ごとに一度確認します。</span>'
+  },
   'ph.falai_key': {
     en: 'fal.ai API key<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">The key from fal.ai/dashboard/keys (no identity verification needed). Character prompts are written by Claude.</span>',
     ja: 'fal.ai API key<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">fal.ai/dashboard/keys のキー（本人確認は不要）。キャラクターのプロンプトはClaudeが作成します。</span>'

@@ -690,6 +690,12 @@ class MainViewController: CAPBridgeViewController {
         // The panel windows build their own webviews from THIS one's asset
         // handler + data store — that's what puts them on the same origin.
         KadokiPanelHost.shared.mainWebView = self.bridge?.webView
+        #elseif os(iOS)
+        // iPhone/iPad flat video host: AVPlayerLayer view under the webview
+        // (positioned by the JS videoSurface stream; see KadokiVideoIOS.swift).
+        if let wv = self.bridge?.webView {
+            KadokiVideoIOSHost.shared.install(webView: wv)
+        }
         #endif
     }
 
@@ -806,7 +812,10 @@ class MainViewController: CAPBridgeViewController {
             let m = KadokiVideoModel.shared
             guard m.visible, m.stereoOn else { return nil }
             let r = m.subHitRect
-            guard r.width > 1, r.insetBy(dx: -44, dy: -44).contains(point) else { return nil }
+            let inCurrent = r.width > 1 && r.insetBy(dx: -44, dy: -44).contains(point)
+            let rp = m.prevSubHitRect
+            let inPrev = rp.width > 1 && rp.insetBy(dx: -44, dy: -44).contains(point)
+            guard inCurrent || inPrev else { return nil }
             return super.hitTest(point, with: event)
         }
     }
@@ -892,8 +901,21 @@ class MainViewController: CAPBridgeViewController {
             if visible {
                 m.subRect = rect
                 m.subText = (u["text"] as? String) ?? ""
+                // Previous cue: its OWN rect (independent size estimate —
+                // JS sends it only when that DOM element has real content),
+                // else clear so the panel hides (guard in placeSubs).
+                let prevText = (u["prevText"] as? String) ?? ""
+                if !prevText.isEmpty {
+                    m.prevSubText = prevText
+                    m.prevSubRect = CGRect(x: (u["prevX"] as? Double) ?? 0, y: (u["prevY"] as? Double) ?? 0,
+                                           width: (u["prevW"] as? Double) ?? 0, height: (u["prevH"] as? Double) ?? 0)
+                    m.prevSubSegs = (u["prevSegs"] as? [[String]]) ?? []
+                } else {
+                    m.prevSubText = ""; m.prevSubSegs = []; m.prevSubRect = .zero
+                }
             } else {
                 m.subText = ""; m.subRect = .zero
+                m.prevSubText = ""; m.prevSubSegs = []; m.prevSubRect = .zero
             }
             NSLog("[KadokiVideo] subs: visible=\(visible) textLen=\(m.subText.count) segs=\(m.subSegs.count) words=\(m.subSegs.filter { ($0.count > 1 ? Int($0[1]) ?? -1 : -1) >= 0 }.count)")
             // Gaze targets for the mirrored subtitle: the WebKit hover glow
@@ -911,7 +933,8 @@ class MainViewController: CAPBridgeViewController {
         }
         NotificationCenter.default.addObserver(forName: Notification.Name("KadokiVideoWordTap"), object: nil, queue: .main) { [weak self] note in
             guard let k = note.userInfo?["k"] as? Int else { return }
-            self?.bridge?.triggerWindowJSEvent(eventName: "kadokiVideoWordTap", data: "{\"k\":\(k)}")
+            let prev = (note.userInfo?["prev"] as? Bool) ?? false
+            self?.bridge?.triggerWindowJSEvent(eventName: "kadokiVideoWordTap", data: "{\"k\":\(k),\"prev\":\(prev)}")
         }
         KadokiVideoModel.shared.onVisible = { [weak self] on in
             self?.applySpatialChrome(on)

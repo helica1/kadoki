@@ -1545,7 +1545,24 @@
     } catch (_) { return false; }
   }
 
+  // Last-opened chapter per title — the summary button reopens HERE (survives
+  // app restart; localStorage is shared with the visionOS panel webview, so
+  // the panel and the main window always agree). Dual-written to Preferences
+  // for platforms where localStorage is the fast mirror, not the store.
+  function saveLastOpenedChapter(titleId, idx) {
+    if (!titleId || !Number.isFinite(idx)) return;
+    try { localStorage.setItem('AITL_LASTCH_' + titleId, String(idx)); } catch (_) {}
+    try { window.Capacitor?.Plugins?.Preferences?.set({ key: 'AITL_LASTCH_' + titleId, value: String(idx) }); } catch (_) {}
+  }
+  function loadLastOpenedChapter(titleId) {
+    try {
+      const v = parseInt(localStorage.getItem('AITL_LASTCH_' + titleId), 10);
+      return (Number.isFinite(v) && v >= 0) ? v : null;
+    } catch (_) { return null; }
+  }
+
   async function openChapterView(titleId, ch, art, reopen) {
+    try { if (ch && Number.isFinite(ch.idx)) saveLastOpenedChapter(titleId, ch.idx); } catch (_) {}
     try {
       const prev = document.getElementById('kchapterView');
       if (prev) {
@@ -2495,7 +2512,33 @@
           : ((map.furthest && Number.isFinite(map.furthest.cue) && map.furthest.cue >= 0) ? axis.cueToChars(map.furthest.cue) : null))
       : ((map.furthest && Number.isFinite(map.furthest.jp)) ? map.furthest.jp : null);
     const curP = currentAxisPos(axis);
-    const pos = (curP !== null && Number.isFinite(curP)) ? curP : (furthestJp || 0);
+    // No live position (cold boot before the first native tick; the visionOS
+    // summary PANEL webview, which has no audio engine at all): fall back to
+    // the SAVED per-title resume position — the user's actual place — before
+    // ever considering the furthest marker. Furthest is a high-water mark
+    // that can sit chapters AHEAD of where they are listening (the "summary
+    // opens at 100k while I'm at 55k" bug).
+    let resumeJp = null;
+    if (curP === null && typeof axis.msToChars === 'function') {
+      try {
+        const t = window.titleStore?.get ? await window.titleStore.get(titleId) : null;
+        let raw = null;
+        if (t && t.name) {
+          try { raw = localStorage.getItem('READING_AUDIO_LAST_POS_' + t.name); } catch (_) {}
+          if (raw == null && window.Capacitor?.Plugins?.Preferences) {
+            try { raw = (await window.Capacitor.Plugins.Preferences.get({ key: 'READING_AUDIO_LAST_POS_' + t.name })).value; } catch (_) {}
+          }
+        }
+        const ms = parseFloat(raw);
+        if (Number.isFinite(ms) && ms > 0) {
+          const v = axis.msToChars(ms);
+          if (v !== null && Number.isFinite(v)) resumeJp = v;
+        }
+      } catch (_) {}
+    }
+    const pos = (curP !== null && Number.isFinite(curP)) ? curP
+              : (resumeJp !== null) ? resumeJp
+              : (furthestJp || 0);
     let idx = -1;
     for (const ch of map.chunks) {
       const a = axis.chStart(ch), b = axis.chEnd(ch);
@@ -2526,6 +2569,18 @@
       // calls straight through to here) doesn't ask for a window recursively.
       if (!window.KADOKI_PANEL && window.kadokiPanel && window.kadokiPanel.available()) {
         if (window.kadokiPanel.popOut('summary')) return true;
+      }
+      // Last-opened chapter wins (user request: the button returns you to
+      // where you left off reading summaries, across app restarts too). Only
+      // a title whose summary view was never opened resolves the CURRENT
+      // chapter instead. Guard against a rebuilt/shrunk chunk map: a stale
+      // saved idx that no longer exists falls through to current.
+      const lastIdx = loadLastOpenedChapter(titleId);
+      if (lastIdx !== null) {
+        const map = await getMapSafe(titleId);
+        if (map && map.chunks.some(c => c && c.idx === lastIdx)) {
+          return await openChapter(titleId, lastIdx, { allowEmpty: true });
+        }
       }
       const r = await resolveCurrentChapter(titleId);
       if (!r) {

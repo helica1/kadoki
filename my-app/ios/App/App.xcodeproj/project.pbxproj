@@ -54,6 +54,7 @@
 		D94ADCA0457E5EB7EF492C99 /* CurvedPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C470146FE78048DE547C398C /* CurvedPanel.swift */; };
 		DEAABD03271BEBD43653443C /* KadokiVideoLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */; };
 		DF1B17BAC81C72DEB33B7E91 /* KadokiLockWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */; platformFilters = (ios, ); };
+		E04A373FE0634D55B8A4B4BE /* KadokiVideoIOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11DC002FECA73D02592DD93A /* KadokiVideoIOS.swift */; };
 		EF8A04896EEFB1F1528F779D /* FileAccessPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */; };
 /* End PBXBuildFile section */
 
@@ -119,6 +120,7 @@
 
 /* Begin PBXFileReference section */
 		117998D12F0CF62C2821B4A5 /* libkadokiremux-xros.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; path = "libkadokiremux-xros.a"; sourceTree = "<group>"; };
+		11DC002FECA73D02592DD93A /* KadokiVideoIOS.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoIOS.swift; sourceTree = "<group>"; };
 		185C6E878D8E8340EF596D5B /* WatchKaraoke.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchKaraoke.swift; sourceTree = "<group>"; };
 		190BF058F2B37BB4482A8FEC /* StereoRenderer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StereoRenderer.swift; sourceTree = "<group>"; };
 		2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoLayer.swift; sourceTree = "<group>"; };
@@ -168,6 +170,7 @@
 		B2C3D4E500000000000000F4 /* KadokiWatchWidgets.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = KadokiWatchWidgets.entitlements; sourceTree = "<group>"; };
 		BB25F0F3ECF37A58D8BEEE03 /* VideoFormat.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VideoFormat.swift; sourceTree = "<group>"; };
 		BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileAccessPlugin.swift; sourceTree = "<group>"; };
+		C0C5C153D6878E67920EBA06 /* libkadokiremux-ios.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; path = "libkadokiremux-ios.a"; sourceTree = "<group>"; };
 		C118C4C675EAC796129D2013 /* Stereo.metal */ = {isa = PBXFileReference; includeInIndex = 1; path = Stereo.metal; sourceTree = "<group>"; };
 		C470146FE78048DE547C398C /* CurvedPanel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CurvedPanel.swift; sourceTree = "<group>"; };
 		C4D103B49D0D447C72EB2637 /* DepthAnythingV3_base_504.mlpackage */ = {isa = PBXFileReference; includeInIndex = 1; path = DepthAnythingV3_base_504.mlpackage; sourceTree = "<group>"; };
@@ -276,6 +279,7 @@
 				936ABC0B66FB81ECA48CB6FF /* App-Bridging-Header.h */,
 				CE6A2FA73646C6BDA732F40E /* demo-video.mp4 */,
 				2FDDB295D144E056F5A721F4 /* demo-video.srt */,
+				11DC002FECA73D02592DD93A /* KadokiVideoIOS.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -340,6 +344,7 @@
 			children = (
 				B1983E97FAED0A6E3891D418 /* kadoki_remux.h */,
 				117998D12F0CF62C2821B4A5 /* libkadokiremux-xros.a */,
+				C0C5C153D6878E67920EBA06 /* libkadokiremux-ios.a */,
 			);
 			name = Remux;
 			path = Remux;
@@ -598,6 +603,7 @@
 				1DA20AFDDE5D377CFC6562EB /* DepthAnythingV2SmallF16.mlpackage in Sources */,
 				D94ADCA0457E5EB7EF492C99 /* CurvedPanel.swift in Sources */,
 				2C531BE4057E98EED353C5B4 /* DepthAnythingV3_base_504.mlpackage in Sources */,
+				E04A373FE0634D55B8A4B4BE /* KadokiVideoIOS.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -864,6 +870,11 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.7.1;
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"-lbz2",
+					"$(SRCROOT)/App/Remux/libkadokiremux-ios.a",
+				);
 				"OTHER_LDFLAGS[sdk=xros*]" = (
 					"-lz",
 					"-framework",
@@ -972,6 +983,11 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				MARKETING_VERSION = 1.7.1;
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"-lbz2",
+					"$(SRCROOT)/App/Remux/libkadokiremux-ios.a",
+				);
 				"OTHER_LDFLAGS[sdk=xros*]" = (
 					"-lz",
 					"-framework",

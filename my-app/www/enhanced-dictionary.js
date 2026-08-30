@@ -2098,7 +2098,7 @@
     // can resume audio underneath (racing e.g. key-passage playback). Gestures
     // inside a VISIBLE overlay belong to it; taps on dict text still dismiss
     // via the dict-frag handlers. New modals need the same exclusion.
-    const AI_OVERLAY_IDS = ['kchapterView', 'kcharsScreen', 'kcharPopup', 'kplacePopup', 'aiSummaryOverlay', 'bookmarksOverlay', 'kaiLightbox', 'kvocabReview'];
+    const AI_OVERLAY_IDS = ['kchapterView', 'kcharsScreen', 'kcharPopup', 'kplacePopup', 'aiSummaryOverlay', 'bookmarksOverlay', 'kaiLightbox', 'kvocabReview', 'shellSubMenu'];
     function _aiOverlayVisible(el) {
         if (!el || !el.getClientRects().length) return false;
         try {
@@ -3425,11 +3425,25 @@
             }
         }
 
-        // --- AnkiBridge path (default on Android) ---
+        // --- AnkiBridge path (default on Android; also iOS via AnkiMobile
+        // when AnkiConnect-over-LAN isn't configured) ---
         const ab = (typeof window.viaAnkiBridge === 'function')
             ? await window.viaAnkiBridge()
             : window.Capacitor?.Plugins?.AnkiBridge;
         if (ab) {
+            // Video Titles: no card image comes through the dict flow, but the
+            // frame on screen when the word appeared is exactly what the card
+            // wants — grab it natively (AVAssetImageGenerator at the playhead).
+            // This mirrors the AnkiConnect branch above — was missing here
+            // entirely, which is why phones (AnkiMobile/AnkiDroid, the
+            // AnkiBridge route) never got a screenshot while visionOS
+            // (AnkiConnect-only) always did.
+            if (!imageData && cfg.fields.image && window.kadokiVideoMode?.isVideoTitle?.()) {
+                try {
+                    const r = await window.Capacitor?.Plugins?.BackgroundAudio?.videoFrame?.({ maxDim: 1280 });
+                    if (r?.dataUri) imageData = r.dataUri;
+                } catch (e) { console.warn('[dict-anki] videoFrame:', e?.message || e); }
+            }
             try {
                 // Multi-attachment audio array — sentence audio AND term
                 // audio land on the same note. The native plugin splices

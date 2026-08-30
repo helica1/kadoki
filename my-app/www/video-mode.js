@@ -24,7 +24,7 @@
   // Build stamp — shown once per boot when the video player first appears,
   // so device tests can't silently run a stale binary (installs do NOT
   // restart a running app). Bump on every video-feature change.
-  const KV_BUILD = 'kv29';
+  const KV_BUILD = 'kv47';
   let _stamped = false;
   const VIDEO_RE = /\.(mp4|m4v|mov|3gp|mkv)$/i;
   // Keep in sync with app.js's modal marker list (the ".kai-modal is the
@@ -59,6 +59,17 @@
   function bg() {
     return (window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundAudio) || null;
   }
+  // Video now runs on visionOS AND iPhone/iPad (iOS gets the FLAT path:
+  // AVPlayerLayer under the webview, no stereo — see KadokiVideoIOS.swift).
+  // Vision reports platform 'ios' too, so this is one combined gate; Android
+  // stays off (no native video layer there yet).
+  function nativeVideoOk() {
+    return !!window.KADOKI_VISION_NATIVE || (window.Capacitor?.getPlatform?.() === 'ios');
+  }
+  // iPhone (not iPad, not Vision): the header has no room for a permanent
+  // VIDEO pill — it appears only while a video Title is active, where it
+  // REPLACES the hidden AUDIO tab (zero extra width).
+  let _isPhone = false;
   function isVideoName(n) { return VIDEO_RE.test(n || ''); }
   function stereoOn() { try { return localStorage.getItem('KADOKI_VIDEO_3D') === '1'; } catch (_) { return false; } }
 
@@ -99,8 +110,10 @@
   function ensureVideoTab() {
     let tab = document.getElementById('kvVideoTab');
     if (tab) return tab;
-    const cardTab = document.querySelector('#shellModeTabs .mode-tab[data-mode="card"]');
-    if (!cardTab || !cardTab.parentNode) return null;
+    // Sits where AUDIO used to be (which it replaces) — CARD stays leftmost,
+    // matching every other Title's tab order instead of jumping to the front.
+    const audioTab = document.querySelector('#shellModeTabs .mode-tab[data-mode="audio"]');
+    if (!audioTab || !audioTab.parentNode) return null;
     tab = document.createElement('button');
     tab.id = 'kvVideoTab';
     tab.className = 'mode-tab';
@@ -116,7 +129,7 @@
         }
       } catch (_) {}
     });
-    cardTab.parentNode.insertBefore(tab, cardTab);
+    audioTab.parentNode.insertBefore(tab, audioTab);
     return tab;
   }
 
@@ -124,9 +137,10 @@
     const tab = ensureVideoTab();
     const audioTab = document.querySelector('#shellModeTabs .mode-tab[data-mode="audio"]');
     if (!tab) return;
-    // Always visible; faded (data-empty, like the other tabs) when the active
-    // title has no video.
-    tab.style.display = '';
+    // Always visible on Vision/iPad; faded (data-empty) when the active title
+    // has no video. iPhone: no header room — the pill only exists while a
+    // video Title is active (it replaces the hidden AUDIO tab).
+    tab.style.display = (_isPhone && !_isVideoTitle) ? 'none' : '';
     if (_isVideoTitle) {
       delete tab.dataset.empty;
       if (audioTab) audioTab.style.display = 'none';
@@ -161,7 +175,35 @@
   // resume position (the per-title prefs are keyed by NAME, not URL — leaking
   // them into the new file would be a place bug), reloads the title through
   // the proven Library-open path, and autoplays from 0.
-  async function advanceEpisodeTo(targetIdx, autoplay, force) {
+  // Per-episode resume position lives on the series entry itself
+  // (series[i].lastPosMs), NOT the shared per-title pref key that used to be
+  // zeroed on every switch — that key is one slot shared by ALL episodes, so
+  // there was never any real "each episode remembers its own place" to begin
+  // with. Reading/writing it round-trips through titleStore (durable, travels
+  // with Drive sync like the rest of the Title's attachments).
+  async function saveCurrentEpisodePosition(tid, series) {
+    try {
+      const t = await window.titleStore.get(tid);
+      const curName = t?.attachments?.audiobook?.name || '';
+      const idx = series.findIndex((e) => e?.video?.name === curName);
+      if (idx < 0) return;
+      const st = await bg()?.getState?.();
+      const ms = Math.max(0, Math.round(st?.positionMs || 0));
+      // Only overwrite when we have a real, meaningfully-advanced reading —
+      // a 0/undefined getState() (engine not ready yet) must not stomp a
+      // previously-saved further-along position.
+      if (!(ms > 0)) return;
+      const next = series.slice();
+      next[idx] = Object.assign({}, next[idx], { lastPosMs: ms });
+      await window.titleStore.attach(tid, 'series', next);
+    } catch (_) {}
+  }
+
+  // targetMs: explicit seek target (the user picked a specific subtitle in
+  // the browser) — overrides the episode's own saved resume position, which
+  // is otherwise the default (so switching away and back lands where you
+  // left off, not at 0).
+  async function advanceEpisodeTo(targetIdx, autoplay, force, targetMs) {
     if (_advancing) return false;
     if (!force && Date.now() - _lastAdvanceTs < 15000) return false;
     _lastAdvanceTs = Date.now();
@@ -174,6 +216,7 @@
     if (!next || !next.video) return false;
     _advancing = true;
     try {
+      await saveCurrentEpisodePosition(tid, series);
       try { window.showToast?.(`Episode ${targetIdx + 1}/${series.length}: ${next.video.name}`, 3000); } catch (_) {}
       const abAtt = { uri: next.video.uri, name: next.video.name, isVideo: true };
       if (next.video.cachePath) abAtt.cachePath = next.video.cachePath;
@@ -187,12 +230,13 @@
       const fresh = await window.titleStore.get(tid);
       if (fresh) fresh.lastMode = 'audio';
       await window.loadTitleFromLibrary?.(fresh || t);
-      // ZERO THE RESUME STATE **AFTER** THE LOAD: the title switch itself
-      // saves the outgoing episode's END position under the same per-title
-      // pseudo key — zeroing before the load was silently undone, and every
-      // new episode opened pegged at 100% (which also re-triggered 'ended').
+      // startMs: explicit seek wins; else this episode's own saved place;
+      // else 0 (never visited). Persisted under the per-title pseudo key
+      // too so the rest of the resume machinery (cold boot, handoff) agrees.
+      const startMs = Number.isFinite(targetMs) ? Math.max(0, Math.round(targetMs))
+                     : (Number.isFinite(next.lastPosMs) ? next.lastPosMs : 0);
       const pseudo = t.attachments?.deck?.name || t.name;
-      await prefSet('READING_AUDIO_LAST_POS_' + pseudo, '0');
+      await prefSet('READING_AUDIO_LAST_POS_' + pseudo, String(startMs));
       await prefSet('READING_AUDIO_LAST_CHUNK_' + pseudo, '0');
       try { await bg()?.clearSavedPosition?.(); } catch (_) {}
       if (autoplay) {
@@ -203,7 +247,7 @@
         } else {
           const rate = (window.getActivePlaybackRate && window.getActivePlaybackRate()) || 1.0;
           try {
-            await bg()?.play?.({ url: path, startMs: 0, rate, fadeMs: 150 });
+            await bg()?.play?.({ url: path, startMs, rate, fadeMs: 150 });
           } catch (e) {
             try { window.showToast?.('Episode playback failed: ' + (e?.message || e), 4000); } catch (_) {}
           }
@@ -300,42 +344,112 @@
 
   // ---------- surface sync ----------
 
+  // iOS-only (Vision is untouched): landscape keeps the SAME picture-above /
+  // subtitle-below layout as portrait (consistency, no bleed-through risk
+  // from an overlay) but with a much smaller reserved strip — a landscape
+  // subtitle box is far WIDER, so the same text wraps to fewer lines, and
+  // the screen itself has less spare height to begin with. `landscape` also
+  // rides to native so it can drop the frame's corner rounding (true
+  // edge-to-edge cinema look) rather than the small-card rounding used
+  // everywhere else.
+  function isLandscapeOrientation() {
+    try { return window.innerWidth > window.innerHeight; } catch (_) { return false; }
+  }
+  // Drives `kv-ios-landscape` for BOTH the audio-mode cinema layout AND
+  // card-video's subtitle stack (below the video in both, per user request —
+  // card mode's stack needs a much smaller landscape allowance than audio's
+  // single-line cue, so theme.css keys extra rules off this same class).
+  function iosCinemaLandscapeActive() {
+    return _isVideoTitle && !window.KADOKI_VISION_NATIVE &&
+      (window.Capacitor?.getPlatform?.() === 'ios') &&
+      (document.body.classList.contains('mode-audio') || cardVideoActive()) &&
+      isLandscapeOrientation();
+  }
+
   function computeSurface() {
-    const active = _isVideoTitle &&
-      window.KADOKI_VISION_NATIVE &&
-      document.body.classList.contains('mode-audio') &&
-      !document.hidden;
-    const anchor = ensureAnchor();
-    if (anchor) anchor.style.display = (_isVideoTitle && document.body.classList.contains('mode-audio')) ? 'block' : 'none';
-    if (!active || !anchor) return { visible: false };
-    if (modalOpen()) return { visible: false };
+    // Apply BEFORE measuring the anchor's rect below — the class flip must
+    // land before getBoundingClientRect() so the reduced-reserve CSS is
+    // already in effect for this tick's measurement.
+    let _iosLandscape = false;
+    if (!window.KADOKI_VISION_NATIVE) {
+      _iosLandscape = iosCinemaLandscapeActive();
+      document.body.classList.toggle('kv-ios-landscape', _iosLandscape);
+    }
+    const inAudio = document.body.classList.contains('mode-audio');
+    const inCardVideo = cardVideoActive();
+    // "cinema" = conceptually in the video layout, BEFORE the modal check —
+    // native uses this (not `visible`) to decide whether to keep the webview
+    // transparent. `visible` additionally gates on modalOpen(): a temporary
+    // overlay (the hamburger menu, a dialog) should hide the PICTURE, but
+    // must NOT un-transparent the webview — doing that was the "screen turns
+    // white behind the menu" bug (it reverted to the page's pre-cinema
+    // background, e.g. plain white, instead of staying black).
+    const cinema = _isVideoTitle && nativeVideoOk() && (inAudio || inCardVideo) && !document.hidden;
+    const audioAnchor = ensureAnchor();
+    if (audioAnchor) audioAnchor.style.display = (_isVideoTitle && inAudio) ? 'block' : 'none';
+    const anchor = inCardVideo ? document.getElementById('kvCardAnchor') : audioAnchor;
+    if (!cinema || !anchor) return { visible: false, cinema: false };
+    if (modalOpen()) return { visible: false, cinema: true };
     const r = anchor.getBoundingClientRect();
-    if (!(r.width > 40 && r.height > 40)) return { visible: false };
+    if (!(r.width > 40 && r.height > 40)) return { visible: false, cinema: true };
     return {
-      visible: true,
+      visible: true, cinema: true,
       x: Math.round(r.left), y: Math.round(r.top),
       w: Math.round(r.width), h: Math.round(r.height),
       stereo: stereoOn(),
+      landscape: _iosLandscape,
       epIndex: _seriesInfo.idx, epCount: _seriesInfo.count,
     };
   }
 
   let _lastSurf = null;
+  // Previous-cue panel is Vision-only (see reading-mode.js's
+  // abUpdateCueDisplay for why it's not on iOS — card mode covers that
+  // need there instead).
+  function _prevCueOk() { return !!window.KADOKI_VISION_NATIVE; }
   function positionCuePanel(surf) {
+    if (!document.body.classList.contains('mode-audio')) return;   // card-video has its own stack
     const cue = document.getElementById('audiobookCueText');
     if (!cue) return;
-    if (!surf || !surf.visible) { cue.style.position = ''; cue.style.top = ''; cue.style.left = ''; cue.style.transform = ''; return; }
+    if (!surf || !surf.visible) {
+      cue.style.position = ''; cue.style.top = ''; cue.style.left = ''; cue.style.transform = '';
+      if (_prevCueOk()) {
+        const prev = document.getElementById('audiobookPrevCueText');
+        if (prev) { prev.style.position = ''; prev.style.bottom = ''; prev.style.left = ''; prev.style.transform = ''; }
+      }
+      return;
+    }
     // RIGHT under the frame (or, in overlay mode, on its lower edge) — the
     // authoritative contained rect comes back from native with true aspect.
+    // iOS landscape (2026-08-30): always overlay — the video fills the
+    // whole screen there now, so there's no reserved "below" strip to sit
+    // in any more (see the kv-ios-landscape reserve in theme.css).
     const f = _nativeFrame;
     if (f && f.h > 1) {
       const ch = cue.getBoundingClientRect().height || 70;
-      const overlay = document.body.classList.contains('kv-subplace-overlay');
+      const overlay = document.body.classList.contains('kv-subplace-overlay') ||
+        (!window.KADOKI_VISION_NATIVE && document.body.classList.contains('kv-ios-landscape'));
       const top = overlay ? (f.y + f.h - ch - 20) : (f.y + f.h + 10);
       cue.style.position = 'fixed';
       cue.style.left = '50%';
       cue.style.transform = 'translateX(-50%)';
-      cue.style.top = Math.round(Math.min(top, window.innerHeight - 70)) + 'px';
+      const cueTop = Math.round(Math.min(top, window.innerHeight - 70));
+      cue.style.top = cueTop + 'px';
+      // Previous-cue panel: bottom-anchored just above the current cue's
+      // TOP edge, so it grows upward with its own content height instead
+      // of needing to be pre-measured.
+      if (_prevCueOk()) {
+        const prev = document.getElementById('audiobookPrevCueText');
+        if (prev && prev.textContent) {
+          prev.style.position = 'fixed';
+          prev.style.left = '50%';
+          prev.style.transform = 'translateX(-50%)';
+          prev.style.bottom = Math.round(window.innerHeight - cueTop + 8) + 'px';
+        }
+      }
+    } else if (_prevCueOk()) {
+      const prev = document.getElementById('audiobookPrevCueText');
+      if (prev) { prev.style.position = ''; prev.style.bottom = ''; prev.style.left = ''; prev.style.transform = ''; }
     }
     try {
       const cr = cue.getBoundingClientRect();
@@ -351,10 +465,44 @@
 
   let _lastSendTs = 0;
   let _nativeFrame = null;   // authoritative contained rect from native
+  // Card mode's #kvCardAnchor is otherwise a flex:1 placeholder — TALLER
+  // than the video actually renders, so native's AVPlayerLayer (always
+  // .resizeAspect, which CENTERS within whatever frame it's given) put
+  // equal-ish blank space above AND below the picture instead of the
+  // "video at top" layout. Shrinking the anchor to the video's own
+  // aspect-fit height BEFORE it's measured/sent removes the slack that
+  // centering had to work with, so the video lands at the top by
+  // construction. Starts at a 16:9 guess (true for the near-totality of
+  // video Titles) and self-corrects to the real aspect once native's first
+  // response reports it.
+  let _cardAspect = 16 / 9;
+  function sizeCardAnchor() {
+    if (!cardVideoActive()) return;
+    const anchor = document.getElementById('kvCardAnchor');
+    if (!anchor) return;
+    if (isLandscapeOrientation()) {
+      // Landscape screens are WIDER than 16:9 (e.g. ~19.5:9), so sizing by
+      // WIDTH (portrait's fix, below) computes a height TALLER than the
+      // screen actually is — the anchor (and the subtitle pinned off its
+      // bottom edge) overflowed past the visible area and got clipped
+      // ("bottom of the screen and subtitle is cut off"). Landscape wants
+      // the OPPOSITE constraint: an unconstrained (CSS flex:1, see
+      // theme.css's kv-ios-landscape override) full-height anchor already
+      // makes native's video fill the whole vertical extent correctly, so
+      // just clear any leftover inline height from portrait.
+      anchor.style.height = '';
+      return;
+    }
+    const f = _nativeFrame;
+    if (f && f.w > 1 && f.h > 1) _cardAspect = f.w / f.h;
+    const w = anchor.getBoundingClientRect().width || anchor.parentElement?.getBoundingClientRect().width || 0;
+    if (w > 1) anchor.style.height = Math.round(w / _cardAspect) + 'px';
+  }
   function sync(force) {
-    if (!window.KADOKI_VISION_NATIVE) return;
+    if (!nativeVideoOk()) return;
     const p = bg();
     if (!p || typeof p.videoSurface !== 'function') return;
+    sizeCardAnchor();
     const s = computeSurface();
     const key = JSON.stringify(s);
     // While visible, re-send every ~3s even when unchanged: the native side
@@ -367,9 +515,13 @@
         if (r && Number.isFinite(r.frameW) && r.frameW > 1) {
           _nativeFrame = { x: r.frameX, y: r.frameY, w: r.frameW, h: r.frameH };
         }
-        // Subtitle placement is a native-side pref (set on the ornament's
-        // settings card); the DOM lays out to match via a body class.
-        if (r && r.subPlacement) {
+        // Subtitle placement: on Vision it's a native-side USER pref (set on
+        // the ornament's settings card) — apply it as-is. On iOS the class
+        // was already set by computeSurface() from screen ORIENTATION
+        // (landscape = overlay); the plugin's iOS branch always reports the
+        // fixed default "below", so applying it here would immediately
+        // stomp the orientation-driven choice back off every tick.
+        if (window.KADOKI_VISION_NATIVE && r && r.subPlacement) {
           document.body.classList.toggle('kv-subplace-overlay', r.subPlacement === 'overlay');
         }
         if (r && Number.isFinite(r.subSize) && r.subSize > 10) {
@@ -377,6 +529,7 @@
           if (cue) { cue.style.setProperty('font-size', Math.round(r.subSize) + 'px', 'important'); }
         }
         positionCuePanel(s);
+        positionCardSubs(s);
         pushSubs();
       }).catch(() => {});
     } catch (_) {}
@@ -396,7 +549,38 @@
   let _subsObserved = false;
   // Word elements for the native 3D panel's tap-back: index k → the DOM
   // .kword-hit overlay whose click runs the normal dictionary flow.
+  // Two SEPARATE arrays (current / previous line) — a tap on the mirrored
+  // previous-cue panel must replay onto the PREVIOUS cue's own DOM element,
+  // never the current one, or the Anki context would resolve to the wrong
+  // cue's audio.
   let _kvVideoWords = [];
+  let _kvVideoWordsPrev = [];
+  // Segment one cue element into [text, kwordIndex] runs + the word-element
+  // list segs[k] points at. Shared by the current and previous cue mirrors.
+  function segmentCueEl(cueEl, wordsOut) {
+    const segs = [];
+    try {
+      const frags = Array.from(cueEl.querySelectorAll('.dict-frag'));
+      const hits = Array.from(cueEl.querySelectorAll('.kword-hit'));
+      let particle = '';
+      for (const node of cueEl.children) {
+        if (node.classList && node.classList.contains('kword')) {
+          if (particle) { segs.push([particle, '-1']); particle = ''; }
+          const k = wordsOut.length;
+          const firstFrag = node.querySelector('.dict-frag');
+          const fragIdx = firstFrag ? frags.indexOf(firstFrag) : -1;
+          const hit = hits.find((h) => h._kwFragStart === fragIdx) || null;
+          wordsOut.push(hit || firstFrag || node);
+          segs.push([node.textContent || '', String(k)]);
+        } else if (node.classList && (node.classList.contains('dict-frag'))) {
+          particle += node.textContent || '';
+        }
+        // absolute helpers (.kword-hit etc.) are skipped
+      }
+      if (particle) segs.push([particle, '-1']);
+    } catch (_) {}
+    return segs;
+  }
   function pushSubs() {
     const p = bg();
     if (!p || typeof p.videoSubs !== 'function') return;
@@ -411,47 +595,55 @@
       if (pushSubs._was) { pushSubs._was = false; try { p.videoSubs({ visible: false }); } catch (_) {} }
       return;
     }
+    // Hold off until this cue's word-chunking has actually finished (and the
+    // previous-cue panel's, if it has content) — abApplyWordChunks wraps
+    // words into padded chips a beat AFTER the plain-text render this
+    // MutationObserver first fires on. Sending that intermediate plain
+    // layout to native, then the chip-wrapped one moments later, made the
+    // 3D panel visibly resize/reposition ("jumps down"). Skipping this tick
+    // is safe — the wrapping mutation re-triggers the observer itself, so a
+    // later tick sends the FINAL layout as the first (and only) thing native
+    // ever sees for this cue.
+    const prevCueGate = document.getElementById('audiobookPrevCueText');
+    const prevTextGate = prevCueGate ? (prevCueGate.textContent || '').trim() : '';
+    if (cue._kwDone === false) return;
+    if (prevTextGate && prevCueGate._kwDone === false) return;
     pushSubs._was = true;
     const r = cue.getBoundingClientRect();
     if (!(r.width > 1 && r.height > 1)) { try { p.videoSubs({ visible: false }); } catch (_) {} return; }
-    // Segment the cue for the native panel: [text, kwordIndex] runs in DOM
-    // order. Words carry their index; the native panel hover-glows and taps
-    // them (glow at the window plane sits BEHIND the popped-out 3D film, so
-    // the panel must light itself).
-    const segs = [];
     _kvVideoWords = [];
-    try {
-      const frags = Array.from(cue.querySelectorAll('.dict-frag'));
-      const hits = Array.from(cue.querySelectorAll('.kword-hit'));
-      let particle = '';
-      for (const node of cue.children) {
-        if (node.classList && node.classList.contains('kword')) {
-          if (particle) { segs.push([particle, '-1']); particle = ''; }
-          const k = _kvVideoWords.length;
-          const firstFrag = node.querySelector('.dict-frag');
-          const fragIdx = firstFrag ? frags.indexOf(firstFrag) : -1;
-          const hit = hits.find((h) => h._kwFragStart === fragIdx) || null;
-          _kvVideoWords.push(hit || firstFrag || node);
-          segs.push([node.textContent || '', String(k)]);
-        } else if (node.classList && (node.classList.contains('dict-frag'))) {
-          particle += node.textContent || '';
-        }
-        // absolute helpers (.kword-hit etc.) are skipped
+    const segs = segmentCueEl(cue, _kvVideoWords);
+    const payload = { visible: true, x: r.left, y: r.top, w: r.width, h: r.height, text, segs, hsManage: true };
+    // Previous cue, mirrored the same way (visionOS only — the DOM element
+    // doesn't exist off Vision, and #audiobookPrevCueText stays
+    // visibility:hidden here — still laid out, so its rect is real).
+    _kvVideoWordsPrev = [];
+    const prevCue = document.getElementById('audiobookPrevCueText');
+    const prevText = prevCue ? (prevCue.textContent || '').trim() : '';
+    if (prevCue && prevText) {
+      const pr = prevCue.getBoundingClientRect();
+      if (pr.width > 1 && pr.height > 1) {
+        payload.prevText = prevText;
+        payload.prevSegs = segmentCueEl(prevCue, _kvVideoWordsPrev);
+        payload.prevX = pr.left; payload.prevY = pr.top; payload.prevW = pr.width; payload.prevH = pr.height;
       }
-      if (particle) segs.push([particle, '-1']);
-    } catch (_) {}
-    try { p.videoSubs({ visible: true, x: r.left, y: r.top, w: r.width, h: r.height, text, segs, hsManage: true }); } catch (_) {}
+    }
+    try { p.videoSubs(payload); } catch (_) {}
   }
 
   // Native 3D panel word tap → replay as a click on the word's DOM overlay
   // (the document-level cue handler quantizes .kword-hit targets to the word
-  // start and runs the full dictionary flow).
+  // start and runs the full dictionary flow). `prev: true` routes to the
+  // PREVIOUS cue's own word list/element, so the dictionary lookup — and the
+  // Anki audio range it feeds — resolves against that cue, not the one
+  // currently playing.
   window.addEventListener('kadokiVideoWordTap', (e) => {
     try {
       let d = e && e.detail;
       if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) { d = null; } }
       const k = Number((d && d.k) != null ? d.k : e.k);
-      const el = _kvVideoWords[k];
+      const isPrev = !!(d && d.prev);
+      const el = isPrev ? _kvVideoWordsPrev[k] : _kvVideoWords[k];
       if (!el) return;
       const r = el.getBoundingClientRect();
       el.dispatchEvent(new MouseEvent('click', {
@@ -473,6 +665,182 @@
     }).observe(cue, { childList: true, subtree: true, characterData: true, attributes: true });
   }
 
+  // ---------- iOS/iPad video CARD mode: subtitle stack + video split ----------
+  // Left column: the current subtitle large, with 2 before / 2 after dimmed
+  // (tap any to jump); right column: the video, anchored for the native
+  // layer. Gestures stay app.js's card handlers — swipe left/right = cards,
+  // swipe up = send to Anki (waveform endpoint dialog first, then send).
+  // visionOS keeps its own card mode (spatial pictures); this is iOS-only.
+  // Fewer context rows in landscape — a landscape screen has much less
+  // spare height, and the full 2-before/2-after stack squeezed the video
+  // down to a tiny letterboxed square there.
+  // Portrait: full 2-before/2-after context stack, below the video.
+  // Landscape (2026-08-30 redesign — "the image should be the WHOLE
+  // SCREEN, subtitle overlaid, not below it"): the video now fills the
+  // entire screen and the stack becomes a small floating glass panel over
+  // its lower edge (positionCardSubs) — only PREVIOUS + current show, no
+  // upcoming line, same reasoning as visionOS's previous-subtitle panel
+  // (less gaze-shifting, no next-line spoiler floating over the picture).
+  function cardStackBefore() { return isLandscapeOrientation() ? 1 : 2; }
+  function cardStackAfter() { return isLandscapeOrientation() ? 0 : 2; }
+  let _lastStackIdx = -1;
+  let _lastStackLandscape = null;
+  function cardVideoActive() {
+    return _isVideoTitle && !window.KADOKI_VISION_NATIVE &&
+      (window.Capacitor?.getPlatform?.() === 'ios') &&
+      document.body.classList.contains('mode-card');
+  }
+  function ensureCardLayout() {
+    if (!cardVideoActive()) {
+      if (document.body.classList.contains('kv-card-video')) removeCardLayout();
+      return null;
+    }
+    document.body.classList.add('kv-card-video');
+    let el = document.getElementById('kvCardLayout');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'kvCardLayout';
+      const subs = document.createElement('div'); subs.id = 'kvCardSubs';
+      const anch = document.createElement('div'); anch.id = 'kvCardAnchor';
+      el.appendChild(subs); el.appendChild(anch);
+      document.body.appendChild(el);
+      _lastStackIdx = -1;
+    }
+    return el;
+  }
+  function removeCardLayout() {
+    document.body.classList.remove('kv-card-video');
+    document.getElementById('kvCardLayout')?.remove();
+    _lastStackIdx = -1;
+  }
+  function stripHtml(s) {
+    const d = document.createElement('div'); d.innerHTML = s || ''; return (d.textContent || '').trim();
+  }
+  function renderCardStack(force) {
+    const el = ensureCardLayout();
+    if (!el) return;
+    const notes = Array.isArray(window.allNotes) ? window.allNotes : [];
+    const idx = Number.isFinite(window.currentCardIndex) ? window.currentCardIndex : 0;
+    const landscape = isLandscapeOrientation();
+    if (!force && idx === _lastStackIdx && landscape === _lastStackLandscape) return;
+    _lastStackIdx = idx; _lastStackLandscape = landscape;
+    const before = cardStackBefore(), after = cardStackAfter();
+    const subs = el.querySelector('#kvCardSubs');
+    if (!subs) return;
+    subs.textContent = '';
+    for (let i = idx - before; i <= idx + after; i++) {
+      const n = notes[i];
+      const row = document.createElement('button');
+      row.className = 'kv-cs-row' + (i === idx ? ' kv-cur' : '');
+      if (!n) { row.classList.add('kv-cs-empty'); subs.appendChild(row); continue; }
+      // Timestamps removed per user feedback (2026-08-30) — clutter, not
+      // useful once the row itself is tappable to jump there.
+      const tx = document.createElement('span');
+      tx.textContent = stripHtml(n.expression);
+      row.appendChild(tx);
+      if (i !== idx) {
+        const target = i;
+        row.addEventListener('click', () => { try { window.updateCardIndex?.(target); } catch (_) {} });
+      }
+      subs.appendChild(row);
+    }
+    // The current card's subtitle words get dictionary lookups like the
+    // audio-mode cue panel does — and the EXACT SAME window.lookupContext
+    // shape the audiobook/video-tab click handler builds (reading-mode.js
+    // installAudiobookCueTapHandler), so the shared Anki-send plumbing in
+    // enhanced-dictionary.js (waveform-editor gate, audio slice, video-
+    // frame screenshot) works identically here. Without this, a tap fell
+    // through to performLookup's generic fallback — no cueAudioPath, so
+    // the waveform gate silently failed (no audio ever reached Anki) — and
+    // its sentence came from `.subtitle-text`, a STALE element left over
+    // from normal (non-video) card mode (hidden, not removed, while
+    // kv-card-video is active), explaining the wrong/combined text.
+    // dictKeepCtx tells dictEnableLookupInLazy's tap handler not to null
+    // this out before the lookup runs (same flag the lookup-history viewer
+    // uses to pre-bind its own context) — safe here because `cur` is a
+    // FRESH element every time currentCardIndex actually changes (the
+    // early-return above skips re-render, and thus re-binding, when it
+    // hasn't), so the context can never point at the wrong card.
+    try {
+      const cur = subs.querySelector('.kv-cur');
+      const n = notes[idx];
+      if (cur && n && n.isSrtCard) {
+        window.lookupContext = {
+          source: 'card',
+          card: null,
+          cardIdx: idx,
+          sentence: stripHtml(n.expression),
+          cueAudioPath: n.audiobookPath || null,
+          cueStartMs: Number.isFinite(n.audiobookStartMs) ? n.audiobookStartMs : null,
+          cueEndMs:   Number.isFinite(n.audiobookEndMs)   ? n.audiobookEndMs   : null,
+          cueIndex:   Number.isFinite(n.cueIndex) ? n.cueIndex : -1,
+        };
+        cur.dataset.dictKeepCtx = '1';
+      }
+      if (cur && typeof window.dictEnableLookupIn === 'function') window.dictEnableLookupIn(cur);
+    } catch (_) {}
+  }
+
+  // Pin #kvCardSubs to the video's TRUE rendered rect (native-reported
+  // _nativeFrame), not the oversized #kvCardAnchor box — the anchor is a
+  // flex:1 placeholder that claims all leftover height so native has room
+  // to letterbox into, but the actual video pixels only fill part of it;
+  // stacking the subtitle below the ANCHOR's outer edge (the old approach)
+  // left a big dead gap under the picture. Portrait: hug the video's real
+  // bottom edge, edge-to-edge width (unchanged look, just correctly
+  // positioned). Landscape: full floating glass overlay on the video's own
+  // lower edge — the video fills the whole screen there now (theme.css's
+  // kv-ios-landscape reserve was cut to ~0), so there's no "below" region
+  // left to stack into at all.
+  function positionCardSubs(surf) {
+    if (!cardVideoActive()) return;
+    const subs = document.getElementById('kvCardSubs');
+    if (!subs) return;
+    if (!surf || !surf.visible) {
+      subs.style.position = ''; subs.style.top = ''; subs.style.bottom = '';
+      subs.style.left = ''; subs.style.right = ''; subs.style.transform = '';
+      return;
+    }
+    const f = _nativeFrame;
+    if (!f || f.h <= 1) return;
+    subs.style.position = 'fixed';
+    if (isLandscapeOrientation()) {
+      subs.style.left = '50%';
+      subs.style.right = '';
+      subs.style.transform = 'translateX(-50%)';
+      subs.style.top = '';
+      subs.style.bottom = Math.round(window.innerHeight - (f.y + f.h) + 20) + 'px';
+    } else {
+      subs.style.left = '14px';
+      subs.style.right = '14px';
+      subs.style.transform = '';
+      subs.style.bottom = '';
+      subs.style.top = Math.round(f.y + f.h + 8) + 'px';
+    }
+  }
+
+  // Episode/subtitle browser entry point (iOS): a "Episodes…" row in the
+  // real hamburger menu (shell.js openShellMoreMenu), not a bespoke header
+  // button — a second icon next to the real hamburger read as a second,
+  // non-functional "hamburger" sitting in an unrelated spot. visionOS still
+  // reaches it from the transport ornament's dedicated button.
+
+  // Force the real #appHeader visible the moment a video Title's audio/card
+  // layout becomes active (iOS only — Vision's ornament is the equivalent
+  // there and is unaffected by chrome-hidden). Fires once per ENTRY (the
+  // false→true edge), not every tick, so a user who deliberately hides
+  // chrome afterward can still do so — this only guarantees a known-good
+  // default so the header/hamburger is never stuck invisible on arrival.
+  let _chromeCtxWasActive = false;
+  function forceShowChromeIfNeeded() {
+    if (window.KADOKI_VISION_NATIVE) return;
+    const active = _isVideoTitle && (document.body.classList.contains('mode-audio') || cardVideoActive());
+    if (active && !_chromeCtxWasActive) {
+      try { window.shellShowChrome?.(); } catch (_) {}
+    }
+    _chromeCtxWasActive = active;
+  }
+
   async function tick() {
     await refreshTitleFlag();
     sync(false);
@@ -480,6 +848,8 @@
     // placement depends on layout that can move without the surface changing.
     try { positionCuePanel(_lastSurf); } catch (_) {}
     try { observeSubs(); pushSubs(); } catch (_) {}
+    try { renderCardStack(false); } catch (_) {}
+    try { forceShowChromeIfNeeded(); } catch (_) {}
   }
 
   // ---------- 3D toggle (transport cube, audio mode) ----------
@@ -488,6 +858,7 @@
   // so reading-mode.js's 'spatial' action can fall through to the card-mode
   // spatial-pictures toggle otherwise.
   function maybeToggle3d() {
+    if (!window.KADOKI_VISION_NATIVE) return false;   // stereo is Vision-only; iOS is flat
     if (!_isVideoTitle || !document.body.classList.contains('mode-audio')) return false;
     const next = !stereoOn();
     try { localStorage.setItem('KADOKI_VIDEO_3D', next ? '1' : '0'); } catch (_) {}
@@ -552,91 +923,208 @@
                  : `${mn}:${String(sc).padStart(2, '0')}`;
   }
 
+  // Read + parse an episode's SRT WITHOUT touching playback/titleStore — a
+  // pure preview so browsing other episodes' subtitle lists never disturbs
+  // what's actually playing. Same materialize→fetch→parse path
+  // reading-mode.js uses for the real load, just not wired into it.
+  async function loadEpisodeCues(ep) {
+    try {
+      if (!ep?.srt) return [];
+      // Prefer an already-resolved cachePath (no materialize round-trip —
+      // also the ONLY thing the simulator demo harness's synthetic series
+      // entries carry, they have no real document-picker `uri`). Fall back
+      // to materializing from `uri` for a real, never-opened episode.
+      let path = ep.srt.cachePath;
+      if (!path && ep.srt.uri) {
+        const fa = window.Capacitor?.Plugins?.FileAccess;
+        if (!fa) return [];
+        const mat = await fa.materializeToCache({ uri: ep.srt.uri });
+        path = mat?.path;
+      }
+      if (!path) return [];
+      const url = window.Capacitor?.convertFileSrc ? window.Capacitor.convertFileSrc(path) : 'file://' + path;
+      const res = await fetch(url);
+      if (!res.ok) return [];
+      const text = await res.text();
+      return window.srtParser?.parseSrt?.(text) || [];
+    } catch (_) { return []; }
+  }
+
   async function openBrowser() {
     closeBrowser();
     const tid = window._activeTitleId;
     const t = tid && window.titleStore?.get ? await window.titleStore.get(tid) : null;
     const series = t?.attachments?.series;
+    const curName = t?.attachments?.audiobook?.name || '';
+    const curIdx = Array.isArray(series) ? series.findIndex((e) => e?.video?.name === curName) : -1;
+    // previewIdx: which episode's cue list is SHOWING — starts on the
+    // playing one. Tapping a chip only changes THIS (a look, not a switch);
+    // only tapping an actual subtitle row commits to a real episode change.
+    let previewIdx = curIdx >= 0 ? curIdx : 0;
     const ov = document.createElement('div');
     ov.id = 'kvEpBrowser';
     ov.className = 'kai-modal';
+    // FULLY opaque (no alpha) — a translucent backdrop let the live subtitle
+    // panel and #appHeader "shine through" behind it. safe-area-top padding
+    // on the title row so the notch/status bar never overlaps it.
     ov.style.cssText =
-      'position:fixed;inset:0;z-index:9400;background:rgba(8,8,8,.92);display:flex;' +
+      'position:fixed;inset:0;z-index:9400;background:#0a0a0a;display:flex;' +
       'flex-direction:column;color:#eee;font-family:var(--font-sans,system-ui);direction:ltr;';
-    const head = document.createElement('div');
-    head.style.cssText = 'display:flex;align-items:center;gap:14px;padding:18px 22px 10px;flex-wrap:wrap;flex-shrink:0;';
+    // Title row: name + the app's STANDARD close button (rounded-rect, matches
+    // every other overlay's ✕ — a big circle the same size as the episode
+    // chips below read as just another chip, not a close control).
+    const titleRow = document.createElement('div');
+    titleRow.style.cssText =
+      'display:flex;align-items:center;gap:14px;flex-shrink:0;' +
+      'padding:calc(14px + env(safe-area-inset-top,0px)) 20px 12px;' +
+      'border-bottom:1px solid #222;';
     const title = document.createElement('div');
     title.textContent = t?.name || '';
-    title.style.cssText = 'font-size:20px;font-weight:600;margin-right:8px;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    head.appendChild(title);
-    if (Array.isArray(series) && series.length > 1) {
-      const curName = t?.attachments?.audiobook?.name || '';
-      series.forEach((ep, i) => {
-        const chip = document.createElement('button');
-        chip.textContent = String(i + 1);
-        const cur = ep?.video?.name === curName;
-        chip.style.cssText =
-          'min-width:52px;height:52px;border-radius:26px;border:1px solid rgba(255,255,255,.18);' +
-          'font-size:19px;color:#eee;background:' + (cur ? 'rgba(147,130,220,.45)' : 'rgba(255,255,255,.07)') + ';';
-        chip.addEventListener('click', async () => {
-          chip.textContent = '…';
-          const ok = await advanceEpisodeTo(i, true, true);
-          if (ok) { openBrowser(); } else { chip.textContent = String(i + 1); }
-        });
-        head.appendChild(chip);
-      });
-    }
+    title.style.cssText = 'font-size:17px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    titleRow.appendChild(title);
     const close = document.createElement('button');
     close.textContent = '✕';
     close.style.cssText =
-      'margin-left:auto;width:52px;height:52px;border-radius:26px;border:1px solid rgba(255,255,255,.18);' +
-      'font-size:20px;color:#eee;background:rgba(255,255,255,.07);';
+      'flex-shrink:0;background:none;border:1px solid #333;border-radius:8px;color:#ccc;' +
+      'font-size:1.1rem;padding:7px 14px;line-height:1.1;';
+    // Closing WITHOUT picking a subtitle is a pure "look" — nothing changes,
+    // even if the user previewed a different episode's list on the way out.
     close.addEventListener('click', closeBrowser);
-    head.appendChild(close);
-    ov.appendChild(head);
+    titleRow.appendChild(close);
+    ov.appendChild(titleRow);
 
     const list = document.createElement('div');
+    list.id = 'kvEpBrowserList';
     list.style.cssText = 'flex:1;overflow-y:auto;padding:6px 22px calc(30px + env(safe-area-inset-bottom,0px));';
-    const cues = Array.isArray(window.__abCues) ? window.__abCues : [];
-    let st = null;
-    try { st = await bg()?.getState?.(); } catch (_) {}
-    const nowMs = st?.positionMs || 0;
-    let currentRow = null;
-    if (!cues.length) {
-      const empty = document.createElement('div');
-      empty.textContent = 'No subtitles loaded yet.';
-      empty.style.cssText = 'padding:40px;text-align:center;color:#999;font-size:17px;';
-      list.appendChild(empty);
-    }
-    cues.forEach((c) => {
-      const row = document.createElement('button');
-      const isCur = nowMs >= c.startMs && nowMs < (c.endMs || c.startMs + 1);
-      row.style.cssText =
-        'display:flex;gap:18px;align-items:baseline;width:100%;text-align:left;padding:12px 16px;' +
-        'border:none;border-radius:12px;margin:2px 0;background:' + (isCur ? 'rgba(147,130,220,.28)' : 'transparent') + ';' +
-        'color:#eee;';
-      const tm = document.createElement('span');
-      tm.textContent = fmtMs(c.startMs);
-      tm.style.cssText = 'color:#9b8fd8;font-size:15px;font-variant-numeric:tabular-nums;flex-shrink:0;min-width:56px;';
-      const tx = document.createElement('span');
-      tx.textContent = c.text || '';
-      tx.style.cssText = 'font-size:19px;line-height:1.5;font-family:var(--reader-font,serif);';
-      row.appendChild(tm); row.appendChild(tx);
-      row.addEventListener('click', async () => {
-        try {
-          await bg()?.seek?.({ ms: c.startMs, fadeMs: 100 });
-          const st2 = await bg()?.getState?.();
-          if (st2 && !st2.playing) await bg()?.resume?.({ fadeMs: 120 });
-        } catch (_) {}
-        closeBrowser();
+
+    // Episode chips: their OWN row, in a proper grid so they line up evenly
+    // regardless of count instead of an ad-hoc flex-wrap that left the last
+    // row ragged.
+    let chipEls = [];
+    if (Array.isArray(series) && series.length > 1) {
+      const chipRow = document.createElement('div');
+      chipRow.id = 'kvEpBrowserChips';
+      chipRow.style.cssText =
+        'display:grid;grid-template-columns:repeat(auto-fill,minmax(46px,1fr));gap:8px;' +
+        'padding:12px 20px;border-bottom:1px solid #222;flex-shrink:0;max-height:33vh;overflow-y:auto;';
+      series.forEach((ep, i) => {
+        const chip = document.createElement('button');
+        chip.textContent = String(i + 1);
+        chipEls[i] = chip;
+        // First tap on a chip only PREVIEWS its subtitle list (no switch —
+        // just looking around must never move the actual playhead). Tapping
+        // the SAME chip again — now already the preview — confirms: switch
+        // to it and resume wherever it was left off (its own saved place,
+        // not episode 1's or a re-seek to 0). Picking a specific subtitle
+        // (below) is the other way to commit, landing at that exact line
+        // instead of the saved place.
+        chip.addEventListener('click', async () => {
+          if (i === previewIdx && i !== curIdx) {
+            chip.textContent = '…';
+            const ok = await advanceEpisodeTo(i, true, true);
+            if (ok) closeBrowser(); else chip.textContent = String(i + 1);
+            return;
+          }
+          previewIdx = i; paintChips(); renderList();
+        });
+        chipRow.appendChild(chip);
       });
-      if (isCur) currentRow = row;
-      list.appendChild(row);
-    });
+      ov.appendChild(chipRow);
+    }
+    function paintChips() {
+      chipEls.forEach((chip, i) => {
+        const isPlaying = i === curIdx, isPreview = i === previewIdx;
+        chip.style.cssText =
+          'aspect-ratio:1;border-radius:10px;font-size:16px;font-variant-numeric:tabular-nums;color:#eee;' +
+          (isPreview ? 'border:1px solid rgba(147,130,220,.9);' : 'border:1px solid rgba(255,255,255,.14);') +
+          'background:' + (isPlaying ? 'rgba(147,130,220,.45)' : isPreview ? 'rgba(147,130,220,.16)' : 'rgba(255,255,255,.06)') + ';';
+      });
+    }
+
+    const cueCache = new Map();   // episode idx → cues[] (avoid re-fetching on chip flip-flop)
+    async function renderList() {
+      const myIdx = previewIdx;
+      list.textContent = '';
+      const loading = document.createElement('div');
+      loading.textContent = '…';
+      loading.style.cssText = 'padding:40px;text-align:center;color:#666;font-size:17px;';
+      list.appendChild(loading);
+
+      let cues;
+      if (myIdx === curIdx) {
+        cues = Array.isArray(window.__abCues) ? window.__abCues : [];
+      } else if (cueCache.has(myIdx)) {
+        cues = cueCache.get(myIdx);
+      } else {
+        cues = await loadEpisodeCues(series[myIdx]);
+        cueCache.set(myIdx, cues);
+      }
+      if (previewIdx !== myIdx) return;   // user flipped chips again while this was loading
+
+      let nowMs = 0;
+      if (myIdx === curIdx) {
+        try { nowMs = (await bg()?.getState?.())?.positionMs || 0; } catch (_) {}
+      } else {
+        // Not the playing episode: highlight where it was last left off.
+        nowMs = Number.isFinite(series[myIdx]?.lastPosMs) ? series[myIdx].lastPosMs : -1;
+      }
+
+      list.textContent = '';
+      if (myIdx !== curIdx) {
+        const hint = document.createElement('div');
+        hint.textContent = 'Just looking — tap ' + (myIdx + 1) + ' again to switch and resume, or pick a line to jump there.';
+        hint.style.cssText = 'padding:2px 4px 14px;color:#7a756a;font-size:12px;line-height:1.5;';
+        list.appendChild(hint);
+      }
+      let currentRow = null;
+      if (!cues.length) {
+        const empty = document.createElement('div');
+        empty.textContent = 'No subtitles loaded yet.';
+        empty.style.cssText = 'padding:40px;text-align:center;color:#999;font-size:17px;';
+        list.appendChild(empty);
+        return;
+      }
+      cues.forEach((c) => {
+        const row = document.createElement('button');
+        const isCur = nowMs >= c.startMs && nowMs < (c.endMs || c.startMs + 1);
+        row.style.cssText =
+          'display:flex;gap:18px;align-items:baseline;width:100%;text-align:left;padding:12px 16px;' +
+          'border:none;border-radius:12px;margin:2px 0;background:' + (isCur ? 'rgba(147,130,220,.28)' : 'transparent') + ';' +
+          'color:#eee;';
+        const tm = document.createElement('span');
+        tm.textContent = fmtMs(c.startMs);
+        tm.style.cssText = 'color:#9b8fd8;font-size:15px;font-variant-numeric:tabular-nums;flex-shrink:0;min-width:56px;';
+        const tx = document.createElement('span');
+        tx.textContent = c.text || '';
+        tx.style.cssText = 'font-size:19px;line-height:1.5;font-family:var(--reader-font,serif);';
+        row.appendChild(tm); row.appendChild(tx);
+        // Selecting a subtitle is the ONLY thing that actually changes
+        // place — in the CURRENT episode that's just a seek; in a
+        // PREVIEWED episode it's a real switch that lands exactly here.
+        row.addEventListener('click', async () => {
+          if (myIdx === curIdx) {
+            try {
+              await bg()?.seek?.({ ms: c.startMs, fadeMs: 100 });
+              const st2 = await bg()?.getState?.();
+              if (st2 && !st2.playing) await bg()?.resume?.({ fadeMs: 120 });
+            } catch (_) {}
+          } else {
+            row.textContent = ''; row.appendChild(document.createTextNode('…'));
+            await advanceEpisodeTo(myIdx, true, true, c.startMs);
+          }
+          closeBrowser();
+        });
+        if (isCur) currentRow = row;
+        list.appendChild(row);
+      });
+      if (currentRow) { try { currentRow.scrollIntoView({ block: 'center' }); } catch (_) {} }
+    }
+
     ov.appendChild(list);
     document.body.appendChild(ov);
     document.body.classList.add('kv-browser-open');
-    if (currentRow) { try { currentRow.scrollIntoView({ block: 'center' }); } catch (_) {} }
+    paintChips();
+    await renderList();
     sync(true);   // hide the native plane immediately
   }
 
@@ -781,7 +1269,50 @@
         // Harness auto-tests: KADOKI_SIM_ADV=1 exercises the episode switch;
         // KADOKI_SIM_BROWSE=1 opens the subtitle browser for a screenshot.
         if (dm.simAdv) setTimeout(() => { try { advanceEpisodeTo(1, true, true); } catch (_) {} }, 9000);
+        if (dm.simCard) setTimeout(() => { try { window.setShellMode?.('card', { force: true }); } catch (_) {} }, 9000);
+        if (dm.simMenu) setTimeout(() => { try { window.openShellMoreMenu?.(); } catch (_) {} }, 9000);
         if (dm.simBrowse) setTimeout(() => { try { openBrowser(); } catch (_) {} }, 9000);
+        // TEMP test hook: open the browser, preview episode 2's chip (must
+        // NOT switch playback), for verifying the preview-vs-commit split.
+        if (dm.simBrowsePreview) setTimeout(async () => {
+          try {
+            await openBrowser();
+            const ov = document.getElementById('kvEpBrowser');
+            const chip = ov?.querySelectorAll('#kvEpBrowserChips > button')?.[1];
+            chip?.click();
+          } catch (_) {}
+        }, 9000);
+        // TEMP test hook: preview ep2, then COMMIT by clicking its 4th
+        // subtitle row — must land exactly there (not 0) and actually
+        // switch (unlike the plain preview test above).
+        if (dm.simBrowseCommit) setTimeout(async () => {
+          try {
+            await openBrowser();
+            const ov = document.getElementById('kvEpBrowser');
+            ov?.querySelectorAll('#kvEpBrowserChips > button')?.[1]?.click();
+            await new Promise((r) => setTimeout(r, 800));
+            const rows = ov?.querySelectorAll('#kvEpBrowserList > button');
+            rows?.[3]?.click();
+          } catch (_) {}
+        }, 9000);
+        // TEMP test hook: switch to ep2 (as above), let it play a few
+        // seconds, then double-tap chip 1 to switch BACK — ep1 must resume
+        // near where it was (its saved lastPosMs), NOT reset to 0.
+        if (dm.simBrowseResume) setTimeout(async () => {
+          try {
+            await openBrowser();
+            let ov = document.getElementById('kvEpBrowser');
+            ov?.querySelectorAll('#kvEpBrowserChips > button')?.[1]?.click();
+            await new Promise((r) => setTimeout(r, 800));
+            ov?.querySelectorAll('#kvEpBrowserList > button')?.[3]?.click();
+            await new Promise((r) => setTimeout(r, 4000));   // let ep2 play a bit
+            await openBrowser();
+            ov = document.getElementById('kvEpBrowser');
+            ov?.querySelectorAll('#kvEpBrowserChips > button')?.[0]?.click();   // preview ep1
+            await new Promise((r) => setTimeout(r, 400));
+            ov?.querySelectorAll('#kvEpBrowserChips > button')?.[0]?.click();   // confirm → resume
+          } catch (_) {}
+        }, 9000);
         // KADOKI_SIM_ANKI=1: exercise the full send pipeline (frame grab +
         // audio slice + AnkiConnect addNote to the Mac) once playback is live.
         // Prefs are injected HERE, in-process — simctl `defaults write` can't
@@ -815,7 +1346,16 @@
   let boots = 0;
   const bootPoll = setInterval(() => {
     boots++;
-    if (window.KADOKI_VISION_NATIVE) { clearInterval(bootPoll); start(); maybeSeedDemo(); }
+    if (nativeVideoOk()) {
+      clearInterval(bootPoll);
+      (async () => {
+        try {
+          const dm = await bg()?.deviceModel?.();
+          _isPhone = !!(dm && /iPhone/i.test(dm.model || '') && !dm.visionClass);
+        } catch (_) {}
+        start(); maybeSeedDemo();
+      })();
+    }
     else if (boots > 20) clearInterval(bootPoll);
   }, 500);
 })();

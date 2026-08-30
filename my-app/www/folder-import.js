@@ -30,7 +30,20 @@
   // Scanned so we can EXPLAIN, never imported: AVFoundation cannot play these
   // containers (the classic mkv season rip). The import toast tells the user
   // to convert instead of silently claiming "no books found".
+  // mkv only plays where the remux library ships (visionOS device builds) —
+  // on iPhone/iPad it joins the explain-don't-import set at scan time.
   const UNPLAYABLE_VIDEO_EXTS = new Set(['avi', 'wmv']);
+  // mkv plays wherever the remux library ships: visionOS AND iOS device
+  // builds (libkadokiremux-xros.a / -ios.a). Android/web still explain.
+  function mkvOk() {
+    return !!window.KADOKI_VISION_NATIVE || (window.Capacitor?.getPlatform?.() === 'ios');
+  }
+  function extUnplayable(ext) {
+    return UNPLAYABLE_VIDEO_EXTS.has(ext) || (ext === 'mkv' && !mkvOk());
+  }
+  function videoExtOk(ext) {
+    return VIDEO_EXTS.has(ext) && !(ext === 'mkv' && !mkvOk());
+  }
   const SRT_EXTS   = new Set(['srt', 'vtt', 'ass']);
   const EPUB_EXTS  = new Set(['epub', 'txt']);   // txt = a plain-text book (read mode)
 
@@ -119,7 +132,7 @@
   // Produce 0+ "books" (each → one Title) from the files in one folder.
   function classifyFolder(dir, groupFiles, rootName) {
     const epubs  = groupFiles.filter(f => EPUB_EXTS.has(f.ext));
-    const audios = groupFiles.filter(f => AUDIO_EXTS.has(f.ext) || VIDEO_EXTS.has(f.ext));
+    const audios = groupFiles.filter(f => AUDIO_EXTS.has(f.ext) || videoExtOk(f.ext));
     const srts   = groupFiles.filter(f => SRT_EXTS.has(f.ext));
     const folderName = dir ? baseName(dir) : (rootName || '');
     const books = [];
@@ -135,7 +148,7 @@
         });
       }
     } else if (audios.length) {
-      const videos = audios.filter(f => VIDEO_EXTS.has(f.ext));
+      const videos = audios.filter(f => videoExtOk(f.ext));
       if (videos.length >= 2 && videos.length === audios.length) {
         // A SERIES: one folder of episodes (video + per-episode SRT) becomes a
         // SINGLE Title. attachments.audiobook/srt point at the CURRENT episode
@@ -238,7 +251,7 @@
       setProgress(40, `Found ${files.length} files — organizing…`);
 
       // Unplayable video containers: explain instead of a bare "no books".
-      const unplayable = files.filter(f => UNPLAYABLE_VIDEO_EXTS.has(f.ext));
+      const unplayable = files.filter(f => extUnplayable(f.ext));
       const playable = unplayable.length ? files.filter(f => !UNPLAYABLE_VIDEO_EXTS.has(f.ext)) : files;
 
       const groups = groupByDir(playable);
@@ -250,7 +263,7 @@
         if (unplayable.length) {
           const exts = [...new Set(unplayable.map(f => '.' + f.ext))].join(' / ');
           alert(`Found ${unplayable.length} video file${unplayable.length === 1 ? '' : 's'} in ${exts} format, ` +
-            `which iOS/visionOS cannot play. Convert to .mp4 (H.264/AAC) and re-import.`);
+            `which this device cannot play. Convert to .mp4 (H.264/AAC) and re-import.`);
         } else {
           toast('No books (epub / audiobook / video) found to import.');
         }

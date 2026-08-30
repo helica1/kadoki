@@ -1,6 +1,6 @@
 #!/bin/bash
 # Minimal ffmpeg static libs for the Kadoki mkv->mp4 remuxer.
-# Usage: build-remux.sh xros|macos
+# Usage: build-remux.sh xros|ios|macos
 set -e
 SCRATCH="$(cd "$(dirname "$0")" && pwd)"
 SRC="$SCRATCH/ffmpeg-7.1"
@@ -9,6 +9,10 @@ if [ "$PLAT" = "xros" ]; then
   SDK=$(xcrun --sdk xros --show-sdk-path)
   TARGET="arm64-apple-xros2.0"
   OUT="$SCRATCH/out-xros"
+elif [ "$PLAT" = "ios" ]; then
+  SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+  TARGET="arm64-apple-ios14.0"
+  OUT="$SCRATCH/out-ios"
 else
   SDK=$(xcrun --sdk macosx --show-sdk-path)
   TARGET="arm64-apple-macos13.0"

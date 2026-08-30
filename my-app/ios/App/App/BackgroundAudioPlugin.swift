@@ -146,6 +146,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "hs_manage": call.getBool("hsManage") ?? true,
             "text": call.getString("text") ?? "",
             "segs": (call.getArray("segs") as? [[String]]) ?? [],
+            // Previous cue (2026-08-30): shown above the current line, its
+            // own rect for an independent panel size/position estimate.
+            "prevText": call.getString("prevText") ?? "",
+            "prevSegs": (call.getArray("prevSegs") as? [[String]]) ?? [],
+            "prevX": call.getDouble("prevX") ?? 0, "prevY": call.getDouble("prevY") ?? 0,
+            "prevW": call.getDouble("prevW") ?? 0, "prevH": call.getDouble("prevH") ?? 0,
         ])
         #endif
         call.resolve()
@@ -184,6 +190,34 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 "frameW": r.size.width, "frameH": r.size.height,
                 "subPlacement": m.subPlacement,
                 "subSize": m.subSize,
+            ])
+        }
+        #elseif os(iOS)
+        // iOS flat path: AVPlayerLayer view under the webview, driven by the
+        // same JS stream. Resolve with the contained rect for the DOM subs.
+        let visible = call.getBool("visible") ?? false
+        // "cinema" = still conceptually in the video layout even though the
+        // PICTURE is momentarily hidden (a modal/menu covering it) — keeps
+        // the webview transparent+black in that case instead of reverting to
+        // its pre-cinema background (that revert was the "screen goes white
+        // behind the hamburger menu" bug: it fell back to the page's default,
+        // e.g. plain white, since nothing else painted over it).
+        let cinema = call.getBool("cinema") ?? visible
+        let x = call.getDouble("x") ?? 0, y = call.getDouble("y") ?? 0
+        let w = call.getDouble("w") ?? 0, h = call.getDouble("h") ?? 0
+        let landscape = call.getBool("landscape") ?? false
+        let active = self.player is KadokiVideoPlayer
+        DispatchQueue.main.async {
+            let host = KadokiVideoIOSHost.shared
+            if let vp = self.player as? KadokiVideoPlayer { host.adopt(vp.avPlayer) }
+            let r = host.update(frame: CGRect(x: x, y: y, width: w, height: h),
+                                visible: visible && active, cinema: cinema && active, landscape: landscape)
+            call.resolve([
+                "active": active,
+                "frameX": r.origin.x, "frameY": r.origin.y,
+                "frameW": r.size.width, "frameH": r.size.height,
+                "subPlacement": "below",
+                "subSize": 24,
             ])
         }
         #else
@@ -421,6 +455,11 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "simAdv": ProcessInfo.processInfo.environment["KADOKI_SIM_ADV"] == "1",
             "simBrowse": ProcessInfo.processInfo.environment["KADOKI_SIM_BROWSE"] == "1",
             "simAnki": ProcessInfo.processInfo.environment["KADOKI_SIM_ANKI"] == "1",
+            "simCard": ProcessInfo.processInfo.environment["KADOKI_SIM_CARD"] == "1",
+            "simMenu": ProcessInfo.processInfo.environment["KADOKI_SIM_MENU"] == "1",
+            "simBrowsePreview": ProcessInfo.processInfo.environment["KADOKI_SIM_BROWSE_PREVIEW"] == "1",
+            "simBrowseCommit": ProcessInfo.processInfo.environment["KADOKI_SIM_BROWSE_COMMIT"] == "1",
+            "simBrowseResume": ProcessInfo.processInfo.environment["KADOKI_SIM_BROWSE_RESUME"] == "1",
             "simAnkiHost": ProcessInfo.processInfo.environment["KADOKI_SIM_ANKI_HOST"] ?? "",
         ])
     }
@@ -779,6 +818,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             updateNowPlaying()
             #if os(visionOS)
             Task { @MainActor in KadokiVideoModel.shared.adopt(v) }
+            #elseif os(iOS)
+            DispatchQueue.main.async { KadokiVideoIOSHost.shared.adopt(v.avPlayer) }
             #endif
             call.resolve()
             return
@@ -792,6 +833,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             player = nil
             #if os(visionOS)
             Task { @MainActor in KadokiVideoModel.shared.clear() }
+            #elseif os(iOS)
+            DispatchQueue.main.async { KadokiVideoIOSHost.shared.clear() }
             #endif
 
             let p = try AVAudioPlayer(contentsOf: url)

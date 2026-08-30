@@ -579,6 +579,17 @@ async function sendToAnki({ expression, imageData, audioData }) {
     try { window.showToast?.('⚠ 画像フィールド未設定（Preferences → Anki）— 画像は添付されません', 6000); } catch (_) {}
   }
 
+  // Video Titles: swipe-up cards carry no image of their own — the frame on
+  // screen when the card was sent is exactly what the card wants (same as
+  // the dictionary-popup send in enhanced-dictionary.js). One shared
+  // insertion covers both delivery paths below (AnkiConnect + AnkiBridge).
+  if (!imageData && cfg.fields.image && window.kadokiVideoMode?.isVideoTitle?.()) {
+    try {
+      const r = await window.Capacitor?.Plugins?.BackgroundAudio?.videoFrame?.({ maxDim: 1280 });
+      if (r?.dataUri) imageData = r.dataUri;
+    } catch (e) { console.warn('[swipe-anki] videoFrame:', e?.message || e); }
+  }
+
   const imageFilename = `anki_${Date.now()}.jpg`;
   const audioFilename = `sentence_${Date.now()}.mp3`;
 

@@ -871,6 +871,22 @@
         });
       }
     }
+    // Auto-activate AI for every new book (ai-processor.js reads
+    // AI_AUTO_ACTIVATE at title open; default OFF — per-book opt-in stays).
+    const autoAct = document.getElementById('aiAutoActivateToggle');
+    if (autoAct) {
+      try { autoAct.checked = (localStorage.getItem('AI_AUTO_ACTIVATE') === '1'); } catch (_) { autoAct.checked = false; }
+      if (!autoAct.dataset.wired) {
+        autoAct.dataset.wired = '1';
+        autoAct.addEventListener('change', () => {
+          const v = autoAct.checked ? '1' : '0';
+          try { localStorage.setItem('AI_AUTO_ACTIVATE', v); } catch (_) {}
+          try {
+            window.Capacitor?.Plugins?.Preferences?.set({ key: 'AI_AUTO_ACTIVATE', value: v });
+          } catch (_) {}
+        });
+      }
+    }
     // Chapter split threshold (×1000 chars; 0 = off). ai-chunks.js reads AICHUNK_SPLIT_K.
     const split = document.getElementById('aiSplitTargetInput');
     if (split) {

@@ -92,14 +92,31 @@
     // srs — time in the vocab review overlay (vocab-srs.js, #kvocabReview).
     // Split out from `ai` per user request: review time is its own stat.
     srs:   { totalSec: 0,                                  lastInteraction: 0, runningSince: 0 },
+    // video — a video Title watched in audio/card-video layout. Mechanically
+    // identical to `audio` (same BackgroundAudio bridge, same playhead-based
+    // accrual via audioSample/audioTruthPoll below — see audFamilyBucket) but
+    // reported as its own stat per user request: watching a show shouldn't
+    // inflate "audiobook listening" time, and the two get visually distinct
+    // timer colors (theme.css) so they're never confused.
+    video: { totalSec: 0, chars: 0, watchSec: 0,                              runningSince: 0 },
   };
+
+  // Which bucket ('audio' or 'video') the shared playhead-accrual mechanism
+  // below should credit right now. Checked fresh on every sample/reconcile —
+  // never assume it's stable across a title switch.
+  function audFamilyBucket() {
+    try {
+      return (window.kadokiVideoMode && window.kadokiVideoMode.isVideoTitle && window.kadokiVideoMode.isVideoTitle())
+        ? 'video' : 'audio';
+    } catch (_) { return 'audio'; }
+  }
 
   function persistableShape(mode) {
     const t = timers[mode];
     const out = { totalSec: t.totalSec };
     if (mode === 'card')  { out.cards = t.cards; out.chars = t.chars; }
     if (mode === 'read')  { out.chars = t.chars; out.maxCharOffsetSeen = t.maxCharOffsetSeen; out.baselineSet = t.baselineSet; }
-    if (mode === 'audio') { out.chars = t.chars; out.watchSec = t.watchSec || 0; }
+    if (mode === 'audio' || mode === 'video') { out.chars = t.chars; out.watchSec = t.watchSec || 0; }
     return out;
   }
   function persist(mode) {
@@ -127,7 +144,7 @@
       const P = window.Capacitor?.Plugins?.Preferences;
       if (!P || !P.set) return;
       const payload = { day: _dayStamp || statsDay(Date.now()), modes: {} };
-      for (const m of ['card', 'read', 'audio', 'ai', 'srs']) payload.modes[m] = persistableShape(m);
+      for (const m of ['card', 'read', 'audio', 'video', 'ai', 'srs']) payload.modes[m] = persistableShape(m);
       P.set({ key: MIRROR_KEY, value: JSON.stringify(payload) });
     } catch (e) {}
   }
@@ -150,7 +167,7 @@
       // (the rollover snapshot path owns day boundaries).
       if (!o || !o.modes || o.day !== _dayStamp) return;
       let adopted = false;
-      for (const m of ['card', 'read', 'audio', 'ai', 'srs']) {
+      for (const m of ['card', 'read', 'audio', 'video', 'ai', 'srs']) {
         const mv = o.modes[m];
         if (!mv || !Number.isFinite(mv.totalSec)) continue;
         // Adopt the whole mode payload only when the mirror is clearly ahead —
@@ -175,11 +192,11 @@
       timers[mode].maxCharOffsetSeen = o.maxCharOffsetSeen;
     if (mode === 'read' && typeof o.baselineSet === 'boolean')
       timers[mode].baselineSet = o.baselineSet;
-    if (mode === 'audio' && Number.isFinite(o.watchSec)) timers[mode].watchSec = o.watchSec;
-    if (mode === 'audio' && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
+    if ((mode === 'audio' || mode === 'video') && Number.isFinite(o.watchSec)) timers[mode].watchSec = o.watchSec;
+    if ((mode === 'audio' || mode === 'video') && Number.isFinite(o.chars)) timers[mode].chars = o.chars;
   }
   function load() {
-    for (const mode of ['card', 'read', 'audio', 'ai', 'srs']) {
+    for (const mode of ['card', 'read', 'audio', 'video', 'ai', 'srs']) {
       try {
         const raw = localStorage.getItem(KEY_PREFIX + mode);
         if (raw) applyPersisted(mode, JSON.parse(raw));
@@ -190,7 +207,7 @@
 
   function currentMode() {
     const body = document.body;
-    if (body.classList.contains('mode-audio')) return 'audio';
+    if (body.classList.contains('mode-audio')) return audFamilyBucket();
     if (body.classList.contains('mode-read'))  return 'read';
     return 'card';
   }
@@ -232,12 +249,18 @@
   // One (position, time) observation. `tsIn` is the event's OWN timestamp when
   // native supplies one — a burst of events replayed after a suspension then
   // reconstructs the real listening span instead of collapsing into "now".
+  let _lastAudBucket = 'audio';
   function audioSample(posMs, tsIn) {
     if (!Number.isFinite(posMs) || posMs < 0) return;
+    const bucket = audFamilyBucket();
+    // Bucket changed (a video Title started/ended) since the last sample —
+    // the anchor position belongs to the OLD bucket's playhead; carrying it
+    // over would compute a nonsense delta and credit it to the new bucket.
+    if (bucket !== _lastAudBucket) { _lastAudBucket = bucket; audioResetAnchor(); }
     const ts = (Number.isFinite(tsIn) && tsIn > 0) ? tsIn : Date.now();
     _audLastSampleTs = Date.now();
     // Not running, or no anchor yet: anchor without crediting.
-    if (!timers.audio.runningSince || _audAnchorPos < 0) {
+    if (!timers[bucket].runningSince || _audAnchorPos < 0) {
       _audAnchorTs = ts; _audAnchorPos = posMs;
       return;
     }
@@ -257,7 +280,7 @@
     if (rate > 0.05 && rate !== 1) advMs = advMs / rate;
     const credit = Math.min(wallMs, advMs);
     if (!(credit > 0)) return;
-    timers.audio.totalSec += credit / 1000;
+    timers[bucket].totalSec += credit / 1000;
     // Per-title time log — same seconds, batched to whole seconds so a 150 ms
     // event cadence doesn't spam blobStore.
     _audTitlePend += credit / 1000;
@@ -266,13 +289,13 @@
       _audTitlePend -= whole;
       try {
         const tid = window._activeTitleId;
-        if (tid) window.titleStats?.noteTime?.(tid, 'audio', whole);
+        if (tid) window.titleStats?.noteTime?.(tid, bucket, whole);
       } catch (_) {}
     }
     const nowReal = Date.now();
     if (nowReal - _audLastPersistTs > AUD_PERSIST_MS) {
       _audLastPersistTs = nowReal;
-      persist('audio');
+      persist(bucket);
     }
   }
 
@@ -305,12 +328,12 @@
   function startMode(mode) {
     const t = timers[mode];
     if (t.runningSince) return;
-    for (const other of ['card', 'read', 'audio']) {
+    for (const other of ['card', 'read', 'audio', 'video']) {
       if (other !== mode && timers[other].runningSince) stopMode(other);
     }
     // Fresh window: the first sample after a start anchors without crediting,
     // so a pause gap never lands in the total.
-    if (mode === 'audio') audioResetAnchor();
+    if (mode === 'audio' || mode === 'video') audioResetAnchor();
     t.runningSince = Date.now();
     if ('lastInteraction' in t) t.lastInteraction = Date.now();
     console.log('[stats] start ' + mode);
@@ -320,7 +343,7 @@
   // so opening the stats popup doesn't continue ticking time the user
   // obviously isn't using.
   function stopAll() {
-    for (const m of ['card', 'read', 'audio', 'ai', 'srs']) {
+    for (const m of ['card', 'read', 'audio', 'video', 'ai', 'srs']) {
       if (timers[m].runningSince) stopMode(m);
     }
   }
@@ -331,12 +354,12 @@
     // audio accrues through audioSample() as the playhead moves, so stopping
     // just closes the window — there is no wall-clock segment to credit here
     // (crediting one is precisely the bug this replaced).
-    if (mode === 'audio') {
+    if (mode === 'audio' || mode === 'video') {
       t.runningSince = 0;
       audioResetAnchor();
       _audTitlePend = 0;
-      persist('audio');
-      console.log('[stats] stop audio (total ' + t.totalSec.toFixed(0) + 's)');
+      persist(mode);
+      console.log('[stats] stop ' + mode + ' (total ' + t.totalSec.toFixed(0) + 's)');
       return;
     }
     // Cap credited time when stopping by inactivity. The cap is
@@ -391,7 +414,7 @@
   // rule: only a swipe restarts the card timer.
   function touch(mode) {
     if (!mode) mode = currentMode();
-    if (mode === 'audio') return;
+    if (mode === 'audio' || mode === 'video') return;
     const t = timers[mode];
     if (!t.runningSince) return;
     t.lastInteraction = Date.now();
@@ -533,9 +556,14 @@
     if (!newMode) newMode = currentMode();
     if (lastMode === null) lastMode = newMode;
     handleModeChange(newMode);
-    const inAudio = newMode === 'audio';
-    if (window._bgPlaying && inAudio && !timers.audio.runningSince) startMode('audio');
-    if ((!window._bgPlaying || !inAudio) && timers.audio.runningSince) stopMode('audio');
+    const audBucket = (newMode === 'audio' || newMode === 'video') ? newMode : null;
+    const inAudio = !!audBucket;
+    if (window._bgPlaying && inAudio && !timers[audBucket].runningSince) startMode(audBucket);
+    // Stop whichever audio-family timer is running when we leave that state —
+    // covers "wrong bucket still running" too (a title switch mid-session).
+    for (const b of ['audio', 'video']) {
+      if (timers[b].runningSince && (!window._bgPlaying || !inAudio || b !== audBucket)) stopMode(b);
+    }
     // Card mirrors audio: while the playhead is running (continuous-mode SRT /
     // audio playback), entering card should start its timer too. Read already
     // starts via bumpRead on the bg 'state' listener; card had no equivalent,
@@ -698,8 +726,8 @@
         }
         const inAudioMode = document.body.classList.contains('mode-audio');
         const inReadMode  = document.body.classList.contains('mode-read');
-        if (d.playing && inAudioMode) startMode('audio');
-        else stopMode('audio');
+        if (d.playing && inAudioMode) startMode(audFamilyBucket());
+        else { if (timers.audio.runningSince) stopMode('audio'); if (timers.video.runningSince) stopMode('video'); }
         // Read-mode: audio start kicks the read timer alive (bumpRead).
         // Audio STOP intentionally does NOT stop the read timer —
         // the user often wants to keep reading silently after pause,
@@ -902,7 +930,7 @@
     const t = timers[mode];
     // audio's total is already up to date (accrued per playhead sample) —
     // adding the running segment would double-count it.
-    if (mode === 'audio') return t.totalSec;
+    if (mode === 'audio' || mode === 'video') return t.totalSec;
     if (t.runningSince) return t.totalSec + (Date.now() - t.runningSince) / 1000;
     return t.totalSec;
   }
@@ -1009,7 +1037,7 @@
     if (mode === 'read')  { t.chars = 0; t.maxCharOffsetSeen = 0; t.baselineSet = false; }
     // watchSec must reset WITH totalSec (it's a subset) — leaving it out let the
     // watch row carry yesterday's seconds and exceed "time playing".
-    if (mode === 'audio') { t.chars = 0; t.watchSec = 0; audioResetAnchor(); _audTitlePend = 0; }
+    if (mode === 'audio' || mode === 'video') { t.chars = 0; t.watchSec = 0; audioResetAnchor(); _audTitlePend = 0; }
     persist(mode);
   }
 
@@ -1054,6 +1082,7 @@
         card:  { sec: Math.round(liveTotal('card')),  chars: timers.card.chars, cards: timers.card.cards },
         read:  { sec: Math.round(liveTotal('read')),  chars: timers.read.chars },
         audio: { sec: Math.round(liveTotal('audio')), chars: timers.audio.chars },
+        video: { sec: Math.round(liveTotal('video')), chars: timers.video.chars },
         ai:    { sec: Math.round(liveTotal('ai')) },
         srs:   { sec: Math.round(liveTotal('srs')) },
       },
@@ -1097,7 +1126,7 @@
   // it was running on open.
   let _modalPausedMode = null;
   function pauseForModal() {
-    for (const m of ['card', 'read', 'audio']) {
+    for (const m of ['card', 'read', 'audio', 'video']) {
       if (timers[m].runningSince) {
         _modalPausedMode = m;
         stopMode(m);
@@ -1118,12 +1147,14 @@
     getCardSec:  () => liveTotal('card'),
     getReadSec:  () => liveTotal('read'),
     getAudioSec: () => liveTotal('audio'),
+    getVideoSec: () => liveTotal('video'),
     getAiSec:    () => liveTotal('ai'),
     getSrsSec:   () => liveTotal('srs'),
     getCardCount:  () => timers.card.cards,
     getCardChars:  () => timers.card.chars,
     getReadChars:  () => timers.read.chars,
     getAudioChars: () => timers.audio.chars,
+    getVideoChars: () => timers.video.chars,
     incrementCardCount,
     incrementCardChars,
     incrementAudioChars,

@@ -96,6 +96,7 @@
     chromeHidden ? showChrome() : hideChrome();
   }
   window.shellToggleChrome = toggleChrome;
+  window.shellShowChrome = showChrome;
 
   // Tap on a content area (anywhere outside the shell header + popups) toggles
   // chrome visibility. Skip if the tap was on an interactive element.
@@ -954,9 +955,54 @@
 
   // --------- MORE menu (preferences, library, etc.) ----------
 
+  // Small chooser popup for grouped menu rows (Print group, Sync group).
+  // kai-modal class = the generic modal marker: blocks background swipe
+  // gestures (app.js inModal) and hides the visionOS video plane while open.
+  function openShellSubMenu(title, items) {
+    try { document.getElementById('shellSubMenu')?.remove(); } catch (_) {}
+    if (!items || !items.length) return;
+    const ov = document.createElement('div');
+    ov.id = 'shellSubMenu';
+    ov.className = 'kai-modal';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:10050;background:rgba(0,0,0,.45);' +
+      'display:flex;align-items:center;justify-content:center;';
+    const card = document.createElement('div');
+    card.style.cssText = 'min-width:250px;max-width:86vw;background:#181818;border:1px solid #2e2e2e;' +
+      'border-radius:16px;padding:10px 8px 8px;box-shadow:0 18px 50px rgba(0,0,0,.55);';
+    const head = document.createElement('div');
+    head.textContent = title || '';
+    head.style.cssText = 'font-size:.78rem;letter-spacing:.08em;color:#888;padding:2px 12px 8px;';
+    card.appendChild(head);
+    for (const it of items) {
+      const b = document.createElement('button');
+      b.className = 'menu-item';
+      b.textContent = it.label;
+      b.style.cssText = 'display:block;width:100%;text-align:left;';
+      b.addEventListener('click', (e) => {
+        try { e.stopPropagation(); } catch (_) {}
+        try { window.kHaptic(); } catch (_) {}
+        ov.remove();
+        try { it.fn(); } catch (err) { console.warn('submenu action:', err); }
+      });
+      card.appendChild(b);
+    }
+    ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+    ov.appendChild(card);
+    document.body.appendChild(ov);
+  }
+
   window.openShellMoreMenu = function (ev) {
     ev?.stopPropagation();
     dismissShellMenu();
+    // Video Titles: freeze on the current frame while the menu is up rather
+    // than keep playing unseen behind it. Pause only (never auto-resume on
+    // close) — the user picks the moment to continue.
+    try {
+      if (window.kadokiVideoMode?.isVideoTitle?.()) {
+        const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+        bg?.getState?.().then((s) => { if (s?.playing) bg.pause({ fadeMs: 80 }); }).catch(() => {});
+      }
+    } catch (_) {}
     const menu = document.createElement('div');
     menu.id = 'shellFloatingMenu';
     menu.className = 'shell-menu';
@@ -1010,6 +1056,11 @@
     };
 
     list.appendChild(mkItem(window.i18n.t('menu.library', 'Library…'),        () => { if (typeof openLibrary === 'function') openLibrary(); }));
+    // Episode/subtitle browser (iPhone/iPad video Titles only — Vision has
+    // its own ornament button; only shown when a video Title is loaded).
+    if (window.kadokiVideoMode?.isVideoTitle?.()) {
+      list.appendChild(mkItem(window.i18n.t('menu.episodes', 'Episodes…'), () => { try { window.kadokiVideoMode.openBrowser(); } catch (_) {} }));
+    }
     list.appendChild(mkDivider());
     const aiOn = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled());
     const bmItem = mkItem(window.i18n.t('menu.timeline_scenes', 'Timeline & Scenes…'), () => { if (window.bookmarks?.openMenu) window.bookmarks.openMenu(); });
@@ -1018,11 +1069,9 @@
     bmItem.dataset.kaiProcRow = '1';
     bmItem.dataset.kaiCountKey = 'timeline';
     list.appendChild(bmItem);
-    const chItem = mkItem(window.i18n.t('menu.characters', 'Characters…'), () => { try { window.aiCharsScreen?.open?.(); } catch (_) {} });
-    if (aiOn) chItem.classList.add('kai-glow-text');
-    chItem.dataset.kaiProcRow = '1';
-    chItem.dataset.kaiCountKey = 'characters';
-    list.appendChild(chItem);
+    // "Characters…" removed from the menu (2026-08-30, user request): the
+    // Characters screen stays reachable from the Timeline panel and from the
+    // character links inside chapter summaries — one AI row here is enough.
     // History: the 3 most recent reading sessions (read / audio / card), each
     // tappable to jump back to that place.
     if (window.bookmarks && window.bookmarks.openHistory) {
@@ -1055,43 +1104,40 @@
     list.appendChild(mkDivider());
     list.appendChild(mkItem(window.i18n.t('menu.playback_speed', 'Playback Speed…'), () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
     list.appendChild(mkDivider());
-    list.appendChild(mkItem(window.i18n.t('menu.print', 'Print…'), () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); }));
-    // "Log printed reading…" only appears once a print is pending (set by the
-    // print flow, cleared after logging).
-    if (typeof window.hasPendingPrintedReading === 'function' && window.hasPendingPrintedReading()) {
-      list.appendChild(mkItem(window.i18n.t('menu.log_printed_reading', 'Log printed reading…'), () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); }));
-    }
-    // Cross-device sync (Google Drive). Two EXPLICIT directions (no guessing):
-    // "Sync ↑" pushes the currently-open title's state up (only shown with a
-    // title open); "Sync ↓" pulls the latest synced title down and opens it
-    // (switches to it, or downloads its files if absent) — works with no title
-    // open, which is how device 2 receives the latest. "Browse Drive…" lists /
-    // downloads / force-syncs / deletes.
-    // Direct device ⇄ device handoff (LAN, no cloud): pull newer state from a
-    // nearby open Kadoki. Runs automatically too; this is the manual poke.
-    if (window.kadokiHandoff) {
+    // Print group: one row. With a pending printed-reading log the row opens
+    // a small chooser (Print again / Log the reading); otherwise straight to
+    // the print dialog.
+    list.appendChild(mkItem(window.i18n.t('menu.print', 'Print…'), () => {
+      const pending = (typeof window.hasPendingPrintedReading === 'function' && window.hasPendingPrintedReading());
+      if (!pending) { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); return; }
+      openShellSubMenu(window.i18n.t('menu.print', 'Print…'), [
+        { label: window.i18n.t('menu.print_new', 'New print…'), fn: () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); } },
+        { label: window.i18n.t('menu.log_printed_reading', 'Log printed reading…'), fn: () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); } },
+      ]);
+    }));
+    // Sync group: ONE row for all cross-device sync (2026-08-30, user
+    // request) — the LAN handoff poke plus the three Drive actions live in a
+    // popup chooser instead of four separate menu rows.
+    if (window.kadokiHandoff || window.driveSyncUI) {
       list.appendChild(mkDivider());
-      list.appendChild(mkItem(window.i18n.t('menu.handoff', 'Sync nearby device'), () => {
-        try { window.kadokiHandoff.syncNow(false); } catch (_) {}
+      list.appendChild(mkItem(window.i18n.t('menu.sync_group', 'Sync…'), () => {
+        const items = [];
+        if (window.kadokiHandoff) {
+          items.push({ label: window.i18n.t('menu.handoff', 'Sync nearby device'), fn: () => { try { window.kadokiHandoff.syncNow(false); } catch (_) {} } });
+        }
+        if (window.driveSyncUI) {
+          if (window._activeTitleId && window.driveSyncUI.syncUp) {
+            items.push({ label: window.i18n.t('menu.sync_up', 'Sync ↑  (push this title)'), fn: () => { try { window.driveSyncUI.syncUp(); } catch (_) {} } });
+          }
+          if (window.driveSyncUI.syncDown) {
+            items.push({ label: window.i18n.t('menu.sync_down', 'Sync ↓  (get latest)'), fn: () => { try { window.driveSyncUI.syncDown(); } catch (_) {} } });
+          }
+          if (window.driveSyncUI.browseDrive) {
+            items.push({ label: window.i18n.t('menu.browse_drive', 'Browse Drive…'), fn: () => { try { window.driveSyncUI.browseDrive(); } catch (_) {} } });
+          }
+        }
+        openShellSubMenu(window.i18n.t('menu.sync_group', 'Sync…'), items);
       }));
-    }
-    if (window.driveSyncUI) {
-      list.appendChild(mkDivider());
-      if (window._activeTitleId && window.driveSyncUI.syncUp) {
-        list.appendChild(mkItem(window.i18n.t('menu.sync_up', 'Sync ↑  (push this title)'), () => {
-          try { window.driveSyncUI.syncUp(); } catch (_) {}
-        }));
-      }
-      if (window.driveSyncUI.syncDown) {
-        list.appendChild(mkItem(window.i18n.t('menu.sync_down', 'Sync ↓  (get latest)'), () => {
-          try { window.driveSyncUI.syncDown(); } catch (_) {}
-        }));
-      }
-      if (window.driveSyncUI.browseDrive) {
-        list.appendChild(mkItem(window.i18n.t('menu.browse_drive', 'Browse Drive…'), () => {
-          try { window.driveSyncUI.browseDrive(); } catch (_) {}
-        }));
-      }
     }
     list.appendChild(mkDivider());
     list.appendChild(mkItem(window.i18n.t('menu.preferences', 'Preferences…'),    () => { if (typeof openPreferences === 'function') openPreferences(); }));

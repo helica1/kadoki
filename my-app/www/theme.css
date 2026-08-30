@@ -841,6 +841,14 @@ html[lang="ja"] #appHeader .mode-tab { font-size: .86rem; letter-spacing: .04em;
 body.mode-card  #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-card)  !important; }
 body.mode-read  #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-read)  !important; }
 body.mode-audio #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-audio) !important; }
+/* Video Titles are body.mode-audio under the hood (VIDEO is a presentation
+   pill over the same shell mode) but track a SEPARATE stats timer (stats.js
+   'video' bucket) — give it a distinct color (the VIDEO tab's own cyan, not
+   audiobook's lavender) so the two are never confused at a glance. The
+   border matches automatically (border: 1px solid currentColor above).
+   Higher specificity than the plain .mode-audio rule above (2 classes vs 1)
+   wins. */
+body.kadoki-video-title.mode-audio #appHeader #shellTimerLabel:not(.paused) { color: var(--accent-cyan) !important; }
 #appHeader #shellTimerLabel::before {
   content: "TIMER";
   position: absolute;
@@ -1511,7 +1519,7 @@ body.kadoki-video-title.mode-audio #audiobookContent {
   gap: 10px !important;
   /* bottom reserve = the subtitle strip (the fixed-position cue panel is out
      of flow, so the layout must reserve its room explicitly) */
-  padding: calc(6px + env(safe-area-inset-top, 0px)) 0 calc(170px + env(safe-area-inset-bottom, 0px)) !important;
+  padding: calc(6px + env(safe-area-inset-top, 0px)) 0 calc(145px + env(safe-area-inset-bottom, 0px)) !important;
 }
 body.kadoki-video-title.mode-audio #audiobookCueText {
   flex: 0 0 auto;
@@ -1541,7 +1549,7 @@ body.kadoki-video-title.mode-audio #audiobookCueText {
   /* Placement is JS-driven (right under the authoritative frame rect from
      native; overlay mode = on the film's lower edge). Styling only here. */
   line-height: 1.45 !important;
-  background: rgba(16, 16, 16, 0.62);
+  background: rgba(16, 16, 16, 0.5);
   -webkit-backdrop-filter: blur(14px);
   backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.10);
@@ -1554,17 +1562,57 @@ body.kadoki-video-title.mode-audio #audiobookCueText {
 /* Cue panel defensiveness: never inherit a hidden state, always above other
    in-window content. (Scoped :not(.kv-subs-native): in native-subtitle mode
    the DOM twin must stay hidden — this rule's higher specificity was
-   overriding the hide rule and doubling the subtitle.) */
-body.kadoki-video-title.mode-audio:not(.kv-subs-native) #audiobookCueText {
+   overriding the hide rule and doubling the subtitle. ALSO scoped
+   :not(.kv-browser-open) — the episode browser's own hide rule further down
+   this file was losing to this one on specificity, 2026-08-30, which let the
+   live subtitle "shine through" the browser overlay.) */
+body.kadoki-video-title.mode-audio:not(.kv-subs-native):not(.kv-browser-open) #audiobookCueText {
   visibility: visible !important;
 }
 body.kadoki-video-title.mode-audio #audiobookCueText { z-index: 80; }
 /* Native-subtitle mode, full-specificity hide. */
 body.kadoki-video-title.mode-audio.kv-subs-native #audiobookCueText { visibility: hidden !important; }
 body.kadoki-video-title.mode-audio.kv-subs-native #audiobookCueText .kword-hit { visibility: visible !important; opacity: 0 !important; }
-/* Cinema: no header at all during video playback — the transport ornament
-   carries mode switching and the menu. */
-body.kadoki-video-title.mode-audio #appHeader { display: none !important; }
+
+/* PREVIOUS subtitle (visionOS video Titles only, 2026-08-30; briefly
+   brought to iOS the same day, then reverted per feedback — "remove the
+   preceding subtitle in video mode, the user can use card mode if they
+   want to see it"): sits just above the current cue — glass panel like it,
+   but subtly dimmer/smaller so the two are never confused at a glance.
+   Empty by default (`:empty` hides it) — reading-mode.js only fills it in
+   on Vision, so this is a total no-op everywhere else regardless of any
+   platform-scoping mistake. */
+#audiobookPrevCueText:empty { display: none; }
+body.kadoki-vision-native.kadoki-video-title.mode-audio #audiobookPrevCueText {
+  line-height: 1.4 !important;
+  font-size: 1.28rem;
+  color: rgba(255, 255, 255, 0.68);
+  background: rgba(16, 16, 16, 0.34);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 16px;
+  padding: 8px 24px !important;
+  width: fit-content;
+  max-width: 86%;
+  margin: 0 auto;
+  z-index: 79;   /* just under the current cue (80) */
+}
+body.kadoki-vision-native.kadoki-video-title.mode-audio:not(.kv-subs-native):not(.kv-browser-open) #audiobookPrevCueText {
+  visibility: visible !important;
+}
+body.kadoki-vision-native.kadoki-video-title.mode-audio.kv-subs-native #audiobookPrevCueText { visibility: hidden !important; }
+body.kadoki-vision-native.kadoki-video-title.mode-audio.kv-subs-native #audiobookPrevCueText .kword-hit { visibility: visible !important; opacity: 0 !important; }
+/* The previous cue's own word chips/glow read a hair dimmer too, echoing
+   the text's reduced opacity so the whole block feels secondary
+   (Vision-only — iOS never builds .kword chips, see abApplyWordChunks). */
+body.kadoki-vision-native #audiobookPrevCueText .kword-hit { opacity: 0.85; }
+/* Cinema, VISION ONLY: no header at all during video playback — the
+   transport ornament carries mode switching and the menu there. iOS has no
+   ornament, so its header must stay reachable (tap-to-toggle chrome, same as
+   every other mode) — this used to hide it unconditionally, leaving iPhone/
+   iPad with no way to switch modes or open the menu while a video played. */
+body.kadoki-vision-native.kadoki-video-title.mode-audio #appHeader { display: none !important; }
 /* Subtitle placement = Overlay (ornament settings card): the panel sits ON
    the lower part of the film, movie-style; the bottom strip shrinks. The DOM
    twin is under the video plane there (invisible), and the mirror's backing
@@ -1573,7 +1621,23 @@ body.kadoki-video-title.mode-audio.kv-subplace-overlay #audiobookContent {
   padding-bottom: calc(40px + env(safe-area-inset-bottom, 0px)) !important;
 }
 body.kadoki-video-title.mode-audio.kv-subplace-overlay #audiobookCueText {
-  background: rgba(10, 10, 10, 0.40);
+  background: rgba(10, 10, 10, 0.32);
+}
+/* iOS landscape cinema — round 4 (2026-08-30): "the video should FILL THE
+   WHOLE SCREEN. No margins at the top OR the bottom. The top bar will
+   occlude the top of the video; that's ok as the user can hide it." Round
+   3 still reserved the safe-area insets; this drops to a literal zero on
+   both edges — the anchor requests the FULL physical screen height, header
+   included, and native drops the frame's corner rounding here (the
+   `landscape` flag → KadokiVideoIOSHost) for a true edge-to-edge look.
+   positionCuePanel() (video-mode.js) always treats iOS landscape as
+   overlay, floating the cue as a glass panel over the video's own lower
+   edge — same mechanism the ornament's user "Overlay" placement pref
+   already used, just forced on for landscape specifically. Higher
+   specificity than the base rule above (3 classes vs 2) wins. */
+body.kadoki-video-title.mode-audio.kv-ios-landscape #audiobookContent {
+  padding-top: 0px !important;
+  padding-bottom: 0px !important;
 }
 /* Native-subtitle mode (AI-3D / flat-overlay): the panel is rendered by the
    native layer; the DOM twin keeps its LAYOUT (word rects drive the gaze
@@ -1586,3 +1650,105 @@ body.kv-subs-native #audiobookCueText .kword-hit { visibility: visible !importan
 /* Subtitle browser open: the paused cue panel must not ghost through the
    overlay backdrop. */
 body.kv-browser-open #audiobookCueText { visibility: hidden !important; }
+
+/* ============ iOS/iPad video CARD mode (kv-card-video) ============
+   Video on TOP (fills the leftover height), subtitle stack (2 before /
+   current / 2 after, tap to jump) BELOW it — same vertical structure in
+   BOTH orientations. (Was a left/right split; dropped per user feedback —
+   shifting gaze sideways between a video and a side column was tiring, and
+   it's the same reasoning audio mode's landscape layout already follows.)
+   Gestures stay the card mode's own (swipe up = send to Anki). */
+body.kv-card-video { background: transparent !important; }
+html:has(body.kv-card-video) { background: transparent !important; }
+body.kv-card-video #cardContainer { visibility: hidden !important; }
+#kvCardLayout {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 64px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 92px);
+  left: 0; right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 14px;
+  z-index: 30;
+  pointer-events: none;   /* swipes fall through to the card gesture layer */
+}
+/* flex: 0 0 auto (2026-08-30, was 1 1 auto): video-mode.js's
+   sizeCardAnchor() now sets an explicit inline height (aspect-fit to the
+   video, self-correcting from the native-reported true aspect) BEFORE this
+   is measured — flex-grow would have stretched the box past that height to
+   fill leftover space regardless, which is what put the video centered in
+   a too-tall box with blank space above it instead of pinned at the top. */
+#kvCardAnchor { order: 1; flex: 0 0 auto; min-height: 0; }
+/* #kvCardSubs starts here (flex-flow fallback, before the first native
+   frame arrives) but video-mode.js's positionCardSubs immediately takes
+   over with position:fixed pinned to the video's TRUE rendered rect —
+   the old flex-below-the-anchor placement left a big dead gap under the
+   picture, since #kvCardAnchor is a flex:1 placeholder taller than the
+   video actually renders (letterboxed inside it). Spacing/font tightened
+   2026-08-30 per feedback, then font bumped further + gap loosened a
+   second round the same day ("still poorly spaced, make it bigger"). */
+#kvCardSubs {
+  order: 2; flex: 0 0 auto; max-height: 36vh;
+  display: flex; flex-direction: column; justify-content: center;
+  gap: 6px; min-width: 0; overflow: hidden; padding-top: 4px;
+}
+/* Landscape — round 2 (2026-08-30): "the video should FILL THE WHOLE
+   SCREEN, no margins top or bottom — the top bar occluding it is fine,
+   the user can hide it." Reserve dropped from the safe-area insets (round
+   1) to a literal zero — the anchor now requests the full physical screen
+   height, header included, and native drops the frame's corner rounding
+   here for a true edge-to-edge look. Only previous + current show in the
+   floating overlay panel (cardStackAfter() = 0 in landscape). */
+body.kv-card-video.kv-ios-landscape #kvCardLayout {
+  top: 0px;
+  bottom: 0px;
+}
+/* Portrait sizes #kvCardAnchor by an explicit inline height (JS
+   sizeCardAnchor, "video at top" fix) because a flex:1 box there is far
+   TALLER than a 16:9 video needs, and native centers within whatever box
+   it's given. Landscape is the opposite: the screen itself is WIDER than
+   16:9, so an unconstrained flex:1 box is already the right shape — native
+   naturally fills the full vertical extent with no extra math needed, and
+   sizeCardAnchor() (video-mode.js) skips its portrait-only inline height
+   for this orientation so this flex:1 isn't fighting a leftover px value. */
+body.kv-card-video.kv-ios-landscape #kvCardAnchor { flex: 1 1 auto; }
+body.kv-card-video.kv-ios-landscape #kvCardSubs {
+  max-height: none; gap: 4px;
+  background: rgba(16, 16, 16, 0.5);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 16px;
+  padding: 6px 20px;
+  width: fit-content; max-width: 82%; margin: 0 auto;
+}
+body.kv-card-video.kv-ios-landscape .kv-cs-row { padding: 2px 4px; font-size: 17px; opacity: .7; }
+body.kv-card-video.kv-ios-landscape .kv-cs-row.kv-cur { font-size: 23px; padding: 4px 4px; }
+.kv-cs-row {
+  pointer-events: auto;
+  border: none; background: transparent; text-align: left;
+  font-family: var(--reader-font, 'Hiragino Mincho ProN', serif);
+  color: #8d887d; font-size: 19px; line-height: 1.4;
+  padding: 4px 10px; border-radius: 12px;
+  display: block; width: 100%;
+  overflow: hidden;
+  transition: color .18s ease, background .18s ease;
+}
+.kv-cs-row:active { background: rgba(255,255,255,.06); }
+.kv-cs-row.kv-cs-empty { min-height: 16px; pointer-events: none; }
+.kv-cs-row > span:last-child {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.kv-cs-row.kv-cur {
+  color: #f4efe4; font-size: 26px; line-height: 1.5;
+  background: rgba(255,255,255,.055);
+  border-left: 3px solid #9b8fd8;
+  padding: 7px 12px;
+}
+.kv-cs-row.kv-cur > span:last-child { -webkit-line-clamp: 6; }
+#kvCardAnchor { min-width: 0; pointer-events: none; }
+
+/* Episode/subtitle browser (iPhone/iPad): reached via "Episodes…" in the
+   real hamburger menu (shell.js) — no header button of its own. */

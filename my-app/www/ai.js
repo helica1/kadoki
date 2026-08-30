@@ -83,12 +83,14 @@
     // localStorage can be wiped while Capacitor Preferences survives — if the
     // local copy is gone, restore it from Preferences so the toggle sticks.
     try {
-      if (localStorage.getItem('AI_AUTO_PROCESS') === null) {
-        const p = CapPrefs();
-        if (p) {
-          const r = await p.get({ key: 'AI_AUTO_PROCESS' });
-          if (r && r.value !== null && r.value !== undefined) {
-            localStorage.setItem('AI_AUTO_PROCESS', r.value);
+      for (const k of ['AI_AUTO_PROCESS', 'AI_AUTO_ACTIVATE']) {
+        if (localStorage.getItem(k) === null) {
+          const p = CapPrefs();
+          if (p) {
+            const r = await p.get({ key: k });
+            if (r && r.value !== null && r.value !== undefined) {
+              localStorage.setItem(k, r.value);
+            }
           }
         }
       }

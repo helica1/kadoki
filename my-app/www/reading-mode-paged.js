@@ -484,9 +484,15 @@
   }
 
   // Tap empty space toggles the shell header (mode tabs / timer / play
-  // / menu). The paged reader has no chrome of its own anymore.
+  // / menu). The paged reader has no chrome of its own anymore — delegate to
+  // shell.js's toggleChrome so its `chromeHidden` module var stays in sync.
+  // (Bug fixed 2026-08-30: this used to toggle the class directly, which
+  // desynced shell.js's own tracked state — the NEXT tap anywhere else, e.g.
+  // over a video, would then re-apply the SAME state instead of flipping it,
+  // making the header look stuck / unresponsive to the first tap.)
   function toggleChrome() {
-    document.body.classList.toggle('chrome-hidden');
+    if (typeof window.shellToggleChrome === 'function') window.shellToggleChrome();
+    else document.body.classList.toggle('chrome-hidden');
   }
 
   // Is the tap point ON actual chunk text (vs empty margin / between
@@ -5693,7 +5699,8 @@
     // underneath us.
     const legacyView = document.getElementById('readingModeView');
     if (legacyView) legacyView.style.display = 'none';
-    document.body.classList.remove('chrome-hidden');
+    if (typeof window.shellShowChrome === 'function') window.shellShowChrome();
+    else document.body.classList.remove('chrome-hidden');
     setPref(KEY_USE_PAGED, '1');
     installReadingRouteOverride();
 

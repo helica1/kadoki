@@ -133,6 +133,19 @@ final class KadokiVideoModel: ObservableObject {
     /// the attachment (the window-plane glow layers are BEHIND the popped-out
     /// 3D film, so the panel must light itself) and forward taps to JS.
     @Published var subSegs: [[String]] = []
+    /// Previous cue, mirrored the same way (2026-08-30 user request — "I
+    /// often have to pause, rewind to catch something just said"). Shown
+    /// ABOVE the current line, smaller/dimmer (KadokiSubsPanel's
+    /// `translucent`+`fontSize`), independently word-tappable — its taps
+    /// post `prev: true` so JS resolves the lookup (and therefore the Anki
+    /// audio range) against THIS cue, not the currently-playing one.
+    @Published var prevSubText: String = ""
+    @Published var prevSubRect: CGRect = .zero
+    @Published var prevSubSegs: [[String]] = []
+    /// Hit-test region for the previous panel — a SECOND region alongside
+    /// `subHitRect` (KadokiStereoHostBox checks both; either one lets gaze/
+    /// pinch reach the RealityKit content there).
+    var prevSubHitRect: CGRect = .zero
     /// Depth→disparity curve exponent (γ<1 expands near/mid separation;
     /// the linear map reads flat/diorama-like — pipeline notes §4).
     @Published var depthGamma: Double = UserDefaults.standard.object(forKey: "kadoki.video.gamma") == nil
@@ -179,6 +192,10 @@ final class KadokiVideoModel: ObservableObject {
         visible = false
         subText = ""
         subRect = .zero
+        prevSubText = ""
+        prevSubSegs = []
+        prevSubRect = .zero
+        prevSubHitRect = .zero
         KadokiVideoStereo.shared.teardown()
     }
 
@@ -343,15 +360,21 @@ struct KadokiSubsPanel: View {
     let translucent: Bool
     let maxWidth: CGFloat
     var fontSize: Double = 30
+    /// True for the PREVIOUS-cue panel (2026-08-30): dims text + the word
+    /// chip background a bit further so it reads as clearly secondary next
+    /// to the current line, and tags its tap notifications `prev: true` so
+    /// JS routes the lookup (and Anki audio range) to THAT cue.
+    var isPrev: Bool = false
 
     private var font: Font { .system(size: fontSize, weight: .medium, design: .serif) }
+    private var textOpacity: Double { isPrev ? 0.78 : 1.0 }
 
     var body: some View {
         Group {
             if segs.isEmpty {
                 Text(text)
                     .font(font)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.white.opacity(textOpacity))
                     .multilineTextAlignment(.center)
                     .lineSpacing(6)
                     .allowsHitTesting(false)
@@ -363,25 +386,25 @@ struct KadokiSubsPanel: View {
                         if k >= 0 {
                             Text(t)
                                 .font(font)
-                                .foregroundStyle(.white)
+                                .foregroundStyle(.white.opacity(textOpacity))
                                 .padding(.horizontal, 3)
                                 .padding(.vertical, 1)
                                 // Faint chip: shows the word is a target (and
                                 // is the diagnostic for segmentation reaching
                                 // the panel — chips without glow = hover
                                 // routing issue, no chips = no segments).
-                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.10)))
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(isPrev ? 0.07 : 0.10)))
                                 .contentShape(RoundedRectangle(cornerRadius: 8))
                                 .hoverEffect(.highlight)
                                 .onTapGesture {
                                     NotificationCenter.default.post(
                                         name: Notification.Name("KadokiVideoWordTap"),
-                                        object: nil, userInfo: ["k": k])
+                                        object: nil, userInfo: ["k": k, "prev": isPrev])
                                 }
                         } else {
                             Text(t)
                                 .font(font)
-                                .foregroundStyle(.white)
+                                .foregroundStyle(.white.opacity(textOpacity))
                                 .allowsHitTesting(false)
                         }
                     }
@@ -478,6 +501,20 @@ struct KadokiVideoStereoView: View {
                                     translucent: m.subPlacement == "overlay",
                                     maxWidth: max(m.subRect.width + 120, 420),
                                     fontSize: m.subSize)
+                }
+            }
+            // Previous cue (2026-08-30): a SECOND, smaller/dimmer panel
+            // stacked above the current one — always translucent regardless
+            // of subPlacement (it's the secondary line either way), and
+            // sized down a bit to read as clearly subordinate.
+            Attachment(id: "subsPrev") {
+                if !m.prevSubText.isEmpty, m.prevSubRect.width > 1 {
+                    KadokiSubsPanel(text: m.prevSubText,
+                                    segs: m.prevSubSegs,
+                                    translucent: true,
+                                    maxWidth: max(m.prevSubRect.width + 120, 420),
+                                    fontSize: m.subSize * 0.82,
+                                    isPrev: true)
                 }
             }
         }
@@ -610,6 +647,27 @@ struct KadokiVideoStereoView: View {
         let cxPt = size.width / 2 + CGFloat(cx / m.mpp)
         let cyPt = size.height / 2 - CGFloat(y / m.mpp)
         m.subHitRect = CGRect(x: cxPt - wPt / 2, y: cyPt - hPt / 2, width: wPt, height: hPt)
+
+        // Previous-cue panel (2026-08-30): stacked ABOVE the current one —
+        // same x/z (same curve position, just higher), y offset by half of
+        // EACH panel's own height plus a small gap so they never overlap
+        // regardless of how long either line is.
+        guard let ap = attachments.entity(for: "subsPrev") else { return }
+        if ap.parent == nil { content.add(ap) }
+        guard m.prevSubRect.width > 1, !m.prevSubText.isEmpty else { ap.isEnabled = false; return }
+        ap.isEnabled = true
+        let panelWPrev = (Float(m.prevSubRect.width) + 60) * m.mpp
+        let panelHPrev = (Float(m.prevSubRect.height) + 30) * m.mpp
+        let gap: Float = 0.008
+        let yPrev = y + panelH / 2 + gap + panelHPrev / 2
+        let uMaxPrev = min(0.5, (panelWPrev * 0.575) / max(wScaled, 0.001))
+        let bowAtPanelPrev = radius * (1 - cos(uMaxPrev * curveArc)) * wScaled
+        var zPrev = max((-setback - bow * 0.5) + bowAtPanelPrev + 0.02, 0.015)
+        zPrev += Float(m.placeNudge % 2) * 0.001
+        ap.position = SIMD3<Float>(cx, yPrev, zPrev)
+        let wPtPrev = CGFloat(panelWPrev / m.mpp), hPtPrev = CGFloat(panelHPrev / m.mpp)
+        let cyPtPrev = size.height / 2 - CGFloat(yPrev / m.mpp)
+        m.prevSubHitRect = CGRect(x: cxPt - wPtPrev / 2, y: cyPtPrev - hPtPrev / 2, width: wPtPrev, height: hPtPrev)
     }
 }
 #endif

@@ -699,7 +699,16 @@
   }
   async function titleOpenSweep(titleId) {
     if (!titleId || !(await aiReady())) return;
-    if (!isActivated(titleId)) return;       // per-book opt-in: nothing runs until activated
+    if (!isActivated(titleId)) {
+      // AI_AUTO_ACTIVATE (Preferences → AI features): treat every book as
+      // opted-in on first open, in 'new' mode — first chapter now, then each
+      // chapter as it's reached. Never a retroactive catch-up bill beyond
+      // the normal confirm-gated sweep below.
+      let auto = false;
+      try { auto = localStorage.getItem('AI_AUTO_ACTIVATE') === '1'; } catch (_) {}
+      if (!auto || !window.ai || !window.ai.setActivated) return;   // per-book opt-in: nothing runs until activated
+      await window.ai.setActivated(titleId, 'new');
+    }
     let map = null;
     try {
       if (window.aiChunks && typeof window.aiChunks.ensure === 'function') {

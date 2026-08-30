@@ -1334,9 +1334,13 @@
   window.getReadingTimerState = function () {
     const s = window.stats;
     if (!s) return { running: false, totalSec: 0 };
-    const mode = document.body.classList.contains('mode-audio') ? 'audio'
-               : document.body.classList.contains('mode-read')  ? 'read'
-               : 'card';
+    // Delegate to stats.js's own mode resolution (not a duplicate here) —
+    // it already knows a video Title in mode-audio reports as 'video', a
+    // separate timer/color from plain audiobook listening. A local copy of
+    // this logic previously always said 'audio', so the header pill kept
+    // showing the (correctly idle) audio timer while video's own timer
+    // silently ran underneath — looked exactly like "stuck at 0:00, paused".
+    const mode = s.currentMode();
     return { running: s.isRunning(mode), totalSec: s.liveTotal(mode) };
   };
 
@@ -2644,7 +2648,12 @@
   // interactive element, so the hover region is word-sized. Particles and
   // short kana runs are deliberately left inert (no glow noise: nobody looks
   // up は). Vision-only: phones keep the flat span list untouched.
-  let _kwordToken = 0;
+  // Token lives PER HOST ELEMENT (cueEl._kwToken), not a single shared
+  // counter: the previous-cue panel and the current-cue panel each run
+  // their own independent abApplyWordChunks call on every cue advance, and
+  // a shared counter meant the second call (previous) always invalidated
+  // the first (current) before its async loop finished — current never
+  // finished tokenizing, so it never got .kword wrappers, hover, or taps.
   const _kwDiag = (msg) => {   // TEMP: one-shot pipeline diagnostic (remove once glow confirmed)
     try {
       if (window._kwDiagged || !window.KADOKI_VISION) return;
@@ -2655,10 +2664,19 @@
   async function abApplyWordChunks(cueEl) {
     if (!window.KADOKI_VISION) return;
     if (!cueEl) return;
-    if (typeof window.dictSegmentWord !== 'function') { _kwDiag('no segmenter'); return; }
-    const tok = ++_kwordToken;
+    if (typeof window.dictSegmentWord !== 'function') { _kwDiag('no segmenter'); cueEl._kwDone = true; return; }
+    const tok = (cueEl._kwToken = (cueEl._kwToken || 0) + 1);
+    // Vision video panel (2026-08-30): the word-chip wrapping this function
+    // adds (per-word padding) makes the panel measurably taller/wider than
+    // the plain flat-text render it started from — pushSubs() mirrors to the
+    // native 3D panel on every DOM mutation, so without this flag it sends
+    // the plain layout first and the chip layout a beat later, and the
+    // native panel visibly resizes/repositions between the two. cueEl._kwDone
+    // stays false for the whole run so pushSubs can hold off and send only
+    // the FINAL layout — no visible jump.
+    cueEl._kwDone = false;
     const frags = Array.from(cueEl.querySelectorAll('.dict-frag'));
-    if (!frags.length) return;
+    if (!frags.length) { cueEl._kwDone = true; return; }
     // UTF-16 offset of each frag (a frag is one code point — may be 2 units).
     const offs = []; let acc = 0;
     for (const f of frags) { offs.push(acc); acc += (f.textContent || '').length; }
@@ -2671,13 +2689,13 @@
       if (!isJa(text[pos])) { pos++; continue; }
       let r = null;
       try { r = await window.dictSegmentWord(text, pos); } catch (_) {}
-      if (tok !== _kwordToken || !cueEl.isConnected) return;   // cue changed mid-run
+      if (tok !== cueEl._kwToken || !cueEl.isConnected) return;   // cue changed mid-run
       const len = (r && r.length >= 1) ? r.length : 1;
       const surface = text.substr(pos, len);
       if (hasKanjiKana(surface) || surface.length >= 3) segs.push({ u16: pos, len });
       pos += len;
     }
-    if (tok !== _kwordToken || !cueEl.isConnected) return;
+    if (tok !== cueEl._kwToken || !cueEl.isConnected) return;
     const fragIdxAt = (u16) => offs.indexOf(u16);   // ≤ ~200 entries; must align exactly
     for (let i = segs.length - 1; i >= 0; i--) {
       const fs = fragIdxAt(segs[i].u16);
@@ -2713,9 +2731,12 @@
       // wrappers and frags are fully inert, so the region system has exactly
       // one candidate per word (kills the letter-level flicker AND quantizes
       // taps to words structurally).
-      st.textContent = '#audiobookCueText { position: relative; }' +
-        '#audiobookCueText .kword { pointer-events: none; }' +
-        '#audiobookCueText .kword-hit { position: absolute; pointer-events: auto; cursor: pointer; border-radius: 8px; z-index: 2; background: transparent; }';
+      // Same rules apply to the previous-cue panel (visionOS video Titles) —
+      // it runs the identical word-chunking pipeline and must be word-level
+      // hit-testable too, not just the current cue.
+      st.textContent = '#audiobookCueText, #audiobookPrevCueText { position: relative; }' +
+        '#audiobookCueText .kword, #audiobookPrevCueText .kword { pointer-events: none; }' +
+        '#audiobookCueText .kword-hit, #audiobookPrevCueText .kword-hit { position: absolute; pointer-events: auto; cursor: pointer; border-radius: 8px; z-index: 2; background: transparent; }';
       document.head.appendChild(st);
     }
     // Build the word hit overlays from each wrapper's laid-out rects (a word
@@ -2769,7 +2790,7 @@
       // Squiggles are marked asynchronously (1.5s poll), so run once now and
       // once after the marker has had a chance.
       const nameOverlays = () => {
-        if (tok !== _kwordToken || !cueEl.isConnected) return;
+        if (tok !== cueEl._kwToken || !cueEl.isConnected) return;
         const nbase = cueEl.getBoundingClientRect();
         for (const nm of Array.from(cueEl.querySelectorAll('.kchar-name, .kplace-name'))) {
           if (nm._kvHit) continue;
@@ -2791,7 +2812,8 @@
       };
       nameOverlays();
       setTimeout(nameOverlays, 1900);
-    } catch (_) {}
+      cueEl._kwDone = true;
+    } catch (_) { cueEl._kwDone = true; }
   }
   // Swipe-down on the audiobook view toggles bg play/pause, matching
   // the reader's behavior. Attached once. Skip swipes that originate
@@ -3077,8 +3099,8 @@
       st.id = 'abDictModeStyle';
       // pointer-events does NOT cascade as a block — cover the wrappers and
       // the frags inside them (both set explicit auto) as well.
-      st.textContent = '#audiobookCueText, #audiobookCueText .kword { pointer-events: none !important; }' +
-        '#audiobookCueText .kword-hit { display: none !important; }' +
+      st.textContent = '#audiobookCueText, #audiobookCueText .kword, #audiobookPrevCueText, #audiobookPrevCueText .kword { pointer-events: none !important; }' +
+        '#audiobookCueText .kword-hit, #audiobookPrevCueText .kword-hit { display: none !important; }' +
         '.subtitle-text .kv-card-hit { display: none !important; }';
       document.head.appendChild(st);
     } else if (!off && st) st.remove();
@@ -3235,13 +3257,19 @@
     if (!document.getElementById('abCueDictStyle')) {
       const st = document.createElement('style');
       st.id = 'abCueDictStyle';
-      st.textContent = '#audiobookCueText .dict-frag { pointer-events: none; }';
+      st.textContent = '#audiobookCueText .dict-frag, #audiobookPrevCueText .dict-frag { pointer-events: none; }';
       document.head.appendChild(st);
     }
     document.addEventListener('click', async (e) => {
-      const cueEl = document.getElementById('audiobookCueText');
-      if (!cueEl) return;
       const t0 = e.target;
+      // The PREVIOUS-cue panel (visionOS video Titles only) is dict-tappable
+      // exactly like the current one — check it FIRST so a tap there resolves
+      // against ITS OWN element (and therefore its own dataset.cueIdx), not
+      // the currently-playing cue's.
+      const prevCueEl = document.getElementById('audiobookPrevCueText');
+      const cueEl = (prevCueEl && t0 && t0.nodeType === 1 && prevCueEl.contains(t0))
+        ? prevCueEl : document.getElementById('audiobookCueText');
+      if (!cueEl) return;
       if (!(t0 === cueEl || (t0 && t0.nodeType === 1 && cueEl.contains(t0)))) return;
       // Name/place squiggle wrappers own their taps (char/place popup) — with
       // the frags inert the wrapper IS the target now, so guard explicitly.
@@ -3461,6 +3489,28 @@
         try { window.wordHighlight?.setSpanCue(cueEl, abCues[idx]); } catch (_) {}
       } else {
         cueEl.textContent = '…';
+      }
+    }
+    // PREVIOUS cue (visionOS video Titles only — user request: "I often
+    // have to pause, rewind etc. to catch something just said"). Briefly
+    // brought to iOS's plain video/audio tab 2026-08-30 for parity, then
+    // reverted the SAME day per user feedback — "remove the preceding
+    // subtitle in video mode, the user can use card mode if they want to
+    // see it" — card mode already shows surrounding context there, so this
+    // stays Vision-only. Fully tappable like the current cue —
+    // renderAudiobookCueTokens stamps THIS cue's own index on the host,
+    // which is what makes a lookup from here correctly pull ITS audio for
+    // Anki (see the click handler below) instead of the currently-playing
+    // line's.
+    if (!_hidden && window.KADOKI_VISION_NATIVE && document.body.classList.contains('kadoki-video-title')) {
+      const prevEl = document.getElementById('audiobookPrevCueText');
+      if (prevEl) {
+        if (idx > 0 && abCues[idx - 1]) {
+          renderAudiobookCueTokens(prevEl, abCues[idx - 1].text, idx - 1);
+        } else {
+          prevEl.innerHTML = '';
+          delete prevEl.dataset.cueIdx;
+        }
       }
     }
     // Upcoming cue (grayed, plain text → not dict-tappable). Always kept in

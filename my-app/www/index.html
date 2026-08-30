@@ -1046,6 +1046,14 @@ body.dimmed .card-image {
             </label>
             <input type="checkbox" id="aiAutoProcessToggle" />
           </div>
+          <div class="prefs-row" style="align-items:center;">
+            <label for="aiAutoActivateToggle" style="flex:1;line-height:1.35;" data-i18n-html="ph.ai_autoactivate">Turn on Timeline for every new book
+              <span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">
+                New books start with Timeline, chapter summaries and scenes enabled automatically &mdash; no per-book activation step. Off: each book asks once.
+              </span>
+            </label>
+            <input type="checkbox" id="aiAutoActivateToggle" />
+          </div>
           <div class="prefs-row ai-anthropic-only" style="flex-direction:column;align-items:stretch;gap:4px;">
             <label for="aiApiKeyInput" style="font-size:.85rem;" data-i18n="ph.api_key">API key</label>
             <input type="password" id="aiApiKeyInput" placeholder="sk-ant-…" autocomplete="off"
@@ -1492,6 +1500,14 @@ body.dimmed .card-image {
            the image (the "jiggle" the user noticed when subtitles grew /
            shrank). Smaller default (35vh) since the cue is the focus. -->
       <img id="audiobookCardImage" alt="" style="width:60%;max-width:280px;height:35vh;border-radius:8px;display:none;object-fit:contain;flex-shrink:0;">
+      <!-- visionOS video Titles only (see reading-mode.js abUpdateCueDisplay
+           + video-mode.js positionCuePanel): the PREVIOUS subtitle, shown
+           above the current one so a missed line doesn't require pausing to
+           rewind. Dict-tappable exactly like the current cue — its own
+           dataset.cueIdx (the previous cue's index) is what makes a lookup
+           from here correctly pull that line's own audio for Anki, not the
+           currently-playing line's. Empty/hidden on every other platform. -->
+      <div id="audiobookPrevCueText" style="text-align:center;font-family:var(--reader-font,serif);"></div>
       <div id="audiobookCueText" style="text-align:center;font-size:1.6rem;line-height:1.7;font-family:var(--reader-font,serif);">
         Pick an audiobook + SRT in reading settings, then tap ▶ Audiobook Mode.
       </div>

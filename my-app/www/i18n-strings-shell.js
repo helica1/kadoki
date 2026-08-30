@@ -24,6 +24,8 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'menu.srs':                 { en: 'SRS…',               ja: 'SRS…' },
   'menu.playback_speed':      { en: 'Playback Speed…',    ja: '再生速度…' },
   'menu.print':               { en: 'Print…',             ja: '印刷…' },
+  'menu.print_new':           { en: 'New print…',         ja: '新しく印刷…' },
+  'menu.sync_group':          { en: 'Sync…',              ja: '同期…' },
   'menu.log_printed_reading': { en: 'Log printed reading…', ja: '紙の読書を記録…' },
   'menu.sync_up':             { en: 'Sync ↑  (push this title)', ja: '同期 ↑  (このタイトルを送信)' },
   'menu.sync_down':           { en: 'Sync ↓  (get latest)',      ja: '同期 ↓  (最新を取得)' },

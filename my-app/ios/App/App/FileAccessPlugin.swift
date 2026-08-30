@@ -296,8 +296,8 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         // HEVC + AAC/AC3 streams inside play fine — materialize as a LOSSLESS
         // remux into mp4 (kadoki_remux, the embedded minimal libavformat)
         // instead of a byte copy. visionOS only (the static lib is xros-only).
-        #if os(visionOS) && !targetEnvironment(simulator)
-        let remuxMkv = ext.lowercased() == "mkv"   // libkadokiremux is a device-only build
+        #if (os(visionOS) || os(iOS)) && !targetEnvironment(simulator)
+        let remuxMkv = ext.lowercased() == "mkv"   // libkadokiremux is a device-only build (xros + iphoneos)
         #else
         let remuxMkv = false
         #endif
@@ -330,7 +330,7 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         do {
             try? FileManager.default.removeItem(at: cacheURL)
             if remuxMkv {
-                #if os(visionOS) && !targetEnvironment(simulator)
+                #if (os(visionOS) || os(iOS)) && !targetEnvironment(simulator)
                 NSLog("[FileAccess] remuxing mkv → mp4: \(sourceURL.lastPathComponent)")
                 var err = [CChar](repeating: 0, count: 256)
                 let rc = kadoki_remux(sourceURL.path, cacheURL.path, &err, 256, nil, nil)
