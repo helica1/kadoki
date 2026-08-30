@@ -24,7 +24,7 @@
   // Build stamp — shown once per boot when the video player first appears,
   // so device tests can't silently run a stale binary (installs do NOT
   // restart a running app). Bump on every video-feature change.
-  const KV_BUILD = 'kv26';
+  const KV_BUILD = 'kv29';
   let _stamped = false;
   const VIDEO_RE = /\.(mp4|m4v|mov|3gp|mkv)$/i;
   // Keep in sync with app.js's modal marker list (the ".kai-modal is the
@@ -647,12 +647,90 @@
     sync(true);
   }
 
+  // Anki tag for the currently-playing episode, from the Title's ORIGINAL
+  // attachment name — the playing URL is the materialized cache copy
+  // (deck_<hash>.<ext>), useless as a label. Hierarchical:
+  // "kadoki-video::<series>::<episode>" when the Title is a series (levels
+  // differ), else "kadoki-video::<name>". Whitespace → _, extension stripped,
+  // "::" inside a name neutralized (it's the tag-hierarchy separator).
+  function tagPart(s) {
+    return String(s || '').replace(/\.[^.]+$/, '').replace(/::/g, '_')
+      .replace(/\s+/g, '_').trim();
+  }
+  async function mediaTag() {
+    try {
+      const tid = window._activeTitleId;
+      const t = (tid && window.titleStore?.get) ? await window.titleStore.get(tid) : null;
+      const ep = tagPart(t?.attachments?.audiobook?.name);
+      const series = tagPart(t?.name);
+      if (ep && series && ep !== series) return 'kadoki-video::' + series + '::' + ep;
+      if (ep || series) return 'kadoki-video::' + (ep || series);
+      // Last resort: the playing URL's basename (cache name, but never empty).
+      const st = await bg()?.getState?.();
+      const n = tagPart(decodeURIComponent((st?.url || '').split('/').pop() || ''));
+      return n ? ('kadoki-video::' + n) : '';
+    } catch (_) { return ''; }
+  }
+
+  // Ornament send button: current subtitle → Anki card with a frame grab
+  // (native AVAssetImageGenerator at the playhead) + the cue's audio clip
+  // (AudioSlicer's AppleM4A export pulls the audio track out of the video
+  // file directly). Pauses playback so the user sees what got sent; resume
+  // is theirs (never touches the playhead — place-loss invariant).
+  let _ankiSending = false;
+  async function ankiSend() {
+    if (!_isVideoTitle || _ankiSending) return;
+    const p = bg();
+    if (!p || typeof window.sendToAnki !== 'function') return;
+    _ankiSending = true;
+    try {
+      let st = null;
+      try { st = await p.getState(); } catch (_) {}
+      const cues = Array.isArray(window.__abCues) ? window.__abCues : [];
+      const idx = (st && cues.length && window.srtParser)
+        ? window.srtParser.findCueAtTime(cues, st.positionMs || 0) : -1;
+      if (idx < 0) {
+        window.showToast?.(window.i18n?.t?.('kv.anki_no_cue', 'No subtitle at this spot') || 'No subtitle at this spot', 3000);
+        return;
+      }
+      const cue = cues[idx];
+      const expression = (cue.text || '').replace(/<[^>]+>/g, '').trim();
+      try { if (st.playing) await p.pause({ fadeMs: 80 }); } catch (_) {}
+      window.showToast?.('➤ Anki…', 1200);
+      let imageData = '';
+      try {
+        const r = await p.videoFrame?.({ maxDim: 1280 });
+        if (r?.dataUri) imageData = r.dataUri;
+      } catch (e) { console.warn('[video-anki] frame grab:', e?.message || e); }
+      let audioData = '';
+      try {
+        const slicer = window.Capacitor?.Plugins?.AudioSlicer;
+        const srcPath = (st.url || '').replace(/^file:\/\//, '');
+        if (slicer && srcPath) {
+          const slice = await slicer.slice({
+            srcPath,
+            startMs: Math.round(cue.startMs),
+            endMs:   Math.round(cue.endMs || (cue.startMs + 1000))
+          });
+          if (slice?.path && typeof window.cacheFileToDataUri === 'function') {
+            audioData = await window.cacheFileToDataUri(slice.path, slice.mime || 'audio/mp4');
+          }
+        }
+      } catch (e) { console.warn('[video-anki] slice:', e?.message || e); }
+      await window.sendToAnki({ expression, imageData, audioData });
+    } finally {
+      _ankiSending = false;
+    }
+  }
+
   window.kadokiVideoMode = {
     maybeToggle3d,
     advanceEpisode,
     advanceEpisodeTo,
     openBrowser,
     replayCurrent: replayCurrentCue,
+    ankiSend,
+    mediaTag,
     sync: () => { _checkedTitleId = undefined; tick(); },
     isVideoTitle: () => _isVideoTitle,
   };
@@ -704,6 +782,30 @@
         // KADOKI_SIM_BROWSE=1 opens the subtitle browser for a screenshot.
         if (dm.simAdv) setTimeout(() => { try { advanceEpisodeTo(1, true, true); } catch (_) {} }, 9000);
         if (dm.simBrowse) setTimeout(() => { try { openBrowser(); } catch (_) {} }, 9000);
+        // KADOKI_SIM_ANKI=1: exercise the full send pipeline (frame grab +
+        // audio slice + AnkiConnect addNote to the Mac) once playback is live.
+        // Prefs are injected HERE, in-process — simctl `defaults write` can't
+        // reach the app's named domain reliably (cfprefsd cache).
+        if (dm.simAnki) setTimeout(async () => {
+          try {
+            const host = dm.simAnkiHost || '127.0.0.1';
+            const cfg = [
+              ['ANKICONNECT_HOST', host],
+              ['ANKI_SWIPE_DECK', 'Default'], ['SELECTED_DECK', 'Default'],
+              ['ANKI_SWIPE_MODEL', 'Basic'],
+              ['ANKI_SWIPE_F_EXPRESSION', 'Front'],
+              ['ANKI_SWIPE_F_IMAGE', 'Back'], ['ANKI_SWIPE_F_AUDIO', 'Back'],
+            ];
+            // BOTH stores: on visionOS preferences.js falls back to
+            // localStorage (Filesystem plugin is excluded from the xros build,
+            // which flips isCapacitorEnvironment() false).
+            for (const [k, v] of cfg) {
+              try { localStorage.setItem(k, v); } catch (_) {}
+              await prefSet(k, v);
+            }
+            ankiSend();
+          } catch (e) { console.warn('[sim-anki]', e?.message || e); }
+        }, 9000);
       }
     } catch (_) {}
   }

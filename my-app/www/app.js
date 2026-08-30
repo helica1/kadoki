@@ -3640,8 +3640,19 @@ function setupSwipe() {
               // branch.)
               // Vision: swipe-up send-to-Anki disabled — a gaze pinch-drag
               // read as an up-swipe and fired Anki sends accidentally.
-              // (Future: a dedicated send zone instead.)
+              // (The transport-ornament send button calls kadokiCardAnkiSend
+              // directly there instead.)
               if (window.KADOKI_VISION) return;
+              window.kadokiCardAnkiSend();
+            }
+          }
+        };
+
+        // Send the CURRENT card to Anki (waveform fine-tune for SRT cards,
+        // then slice + send). Shared by the swipe-up gesture above and the
+        // visionOS transport-ornament send button (swipes are disabled on
+        // Vision, so the button is the only trigger there).
+        window.kadokiCardAnkiSend = async function () {
               const card = allNotes[currentCardIndex];
               if (card && window.sendToAnki) {
                 // Combined card: default the Anki send to the SINGLE currently-
@@ -3742,8 +3753,6 @@ function setupSwipe() {
                 }
                 sendToAnki({ expression: finalExpression, imageData, audioData });
               }
-            }
-          }
         };
 
         document.addEventListener("touchstart", touchStartHandler, { passive: true });

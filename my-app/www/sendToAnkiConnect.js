@@ -210,6 +210,103 @@ async function setPref(key, value) {
   }
 }
 
+// ============================================================================
+// AnkiConnect over LAN — desktop Anki running on the user's always-on Mac.
+//
+// When a host is configured (Preferences → Anki → Desktop Anki (Mac)), this
+// transport takes priority over AnkiBridge/AnkiMobile on EVERY platform: it's
+// the only working route on visionOS (AnkiMobile in iPad-compat ignores all
+// x-callback URLs there), and a nice zero-app-switch bonus on iOS/Android
+// when the Mac is on.
+//
+// HTTP goes through the native CapacitorHttp plugin — same CORS/cleartext
+// bypass the AI image LAN server uses — so the Mac needs NO webCorsOriginList
+// entry, only AnkiConnect's webBindAddress: "0.0.0.0". Media rides inside
+// addNote's audio/picture arrays (base64 `data`); AnkiConnect stores the
+// files and appends the [sound:...]/<img> references itself, so there is no
+// separate storeMediaFile round-trip and no loopback media server.
+// ============================================================================
+
+const ANKICONNECT_HOST_KEY = 'ANKICONNECT_HOST';
+
+// "192.168.1.229" → "http://192.168.1.229:8765" (scheme/port optional in UI).
+function normalizeAnkiConnectHost(raw) {
+  let h = (raw || '').trim();
+  if (!h) return '';
+  if (!/^https?:\/\//i.test(h)) h = 'http://' + h;
+  // Append the default port only when the authority has none.
+  if (!/^https?:\/\/[^/]*:\d+/i.test(h)) h = h.replace(/\/+$/, '') + ':8765';
+  return h.replace(/\/+$/, '');
+}
+window.normalizeAnkiConnectHost = normalizeAnkiConnectHost;
+
+async function getAnkiConnectHost() {
+  // localStorage mirror first (fast, sync writes from the prefs UI), then the
+  // durable Capacitor Preferences copy.
+  let raw = null;
+  try { raw = localStorage.getItem(ANKICONNECT_HOST_KEY); } catch (_) {}
+  if (raw === null || raw === undefined) raw = await getPref(ANKICONNECT_HOST_KEY);
+  return normalizeAnkiConnectHost(raw);
+}
+window.getAnkiConnectHost = getAnkiConnectHost;
+
+async function ankiConnectEnabled() {
+  return !!(await getAnkiConnectHost());
+}
+
+// One AnkiConnect RPC. Throws on transport failure, timeout, or a non-null
+// json.error. CapacitorHttp when available (native URLSession/OkHttp — no
+// CORS), fetch fallback for browser dev.
+async function acInvoke(action, params = {}, timeoutMs = 6000) {
+  const host = await getAnkiConnectHost();
+  if (!host) throw new Error('no AnkiConnect host configured');
+  const body = { action, version: 6, params };
+  let json;
+  const http = window.Capacitor?.Plugins?.CapacitorHttp;
+  if (http) {
+    // CapacitorHttp's own timeouts are respected by iOS/Android, but race a
+    // JS timer too so a wedged plugin call can't hang a send forever.
+    const req = http.request({
+      url: host,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      data: body,
+      connectTimeout: timeoutMs,
+      readTimeout: timeoutMs
+    });
+    const r = await Promise.race([
+      req,
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout — no reply from desktop Anki')), timeoutMs + 1000))
+    ]);
+    json = (typeof r?.data === 'string') ? JSON.parse(r.data) : r?.data;
+  } else {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    try {
+      const res = await fetch(host, {
+        method: 'POST',
+        body: JSON.stringify(body),
+        headers: { 'Content-Type': 'application/json' },
+        signal: ctl.signal
+      });
+      json = await res.json();
+    } finally { clearTimeout(t); }
+  }
+  if (!json || typeof json !== 'object') throw new Error('bad AnkiConnect reply');
+  if (json.error) throw new Error(json.error);
+  return json.result;
+}
+
+// Prefs-UI surface: probe() = version check with a short timeout.
+window.ankiConnect = {
+  invoke: acInvoke,
+  enabled: ankiConnectEnabled,
+  probe: async function () {
+    const v = await acInvoke('version', {}, 3000);
+    return v;
+  }
+};
+
 // Returns the AnkiBridge plugin instance if AnkiDroid is reachable. If the
 // permission hasn't been granted yet, surfaces the system prompt and waits
 // for the user's decision before returning. Null = AnkiDroid not installed
@@ -304,6 +401,15 @@ window.fetchAnkiInfoIOS = function () {
 // fetchDeckNames
 // ----------------------------------------------------------------------------
 async function fetchDeckNames() {
+  if (await ankiConnectEnabled()) {
+    try {
+      const r = await acInvoke('deckNames', {}, 4000);
+      return Array.isArray(r) ? r : [];
+    } catch (e) {
+      console.warn('AnkiConnect deckNames failed:', e?.message || e);
+      return [];
+    }
+  }
   if (isIOSPlatform()) return (window._iosAnkiInfo && window._iosAnkiInfo.decks) || [];
   const ab = await viaBridge();
   if (ab) {
@@ -339,6 +445,15 @@ window.fetchDeckNames = fetchDeckNames;
 // fetchModelNames
 // ----------------------------------------------------------------------------
 async function fetchModelNames() {
+  if (await ankiConnectEnabled()) {
+    try {
+      const r = await acInvoke('modelNames', {}, 4000);
+      return Array.isArray(r) ? r : [];
+    } catch (e) {
+      console.warn('AnkiConnect modelNames failed:', e?.message || e);
+      return [];
+    }
+  }
   if (isIOSPlatform()) return ((window._iosAnkiInfo && window._iosAnkiInfo.notetypes) || []).map(n => n.name);
   const ab = await viaBridge();
   if (ab) {
@@ -374,6 +489,15 @@ window.fetchModelNames = fetchModelNames;
 // ----------------------------------------------------------------------------
 async function fetchModelFieldNames(modelName) {
   if (!modelName) return [];
+  if (await ankiConnectEnabled()) {
+    try {
+      const r = await acInvoke('modelFieldNames', { modelName }, 4000);
+      return Array.isArray(r) ? r : [];
+    } catch (e) {
+      console.warn('AnkiConnect modelFieldNames failed:', e?.message || e);
+      return [];
+    }
+  }
   if (isIOSPlatform()) {
     const nt = ((window._iosAnkiInfo && window._iosAnkiInfo.notetypes) || []).find(n => n.name === modelName);
     return (nt && nt.fields) || [];
@@ -462,6 +586,68 @@ async function sendToAnki({ expression, imageData, audioData }) {
   fields[cfg.fields.expression] = expression || '';
   if (cfg.fields.image) fields[cfg.fields.image] = '';
   if (cfg.fields.audio) fields[cfg.fields.audio] = '';
+
+  // --- AnkiConnect path (desktop Anki over LAN — priority when configured) ---
+  if (await ankiConnectEnabled()) {
+    const host = await getAnkiConnectHost();
+    try {
+      // Reachability first with a short timeout: a clear "the Mac is off"
+      // beats a long hang followed by a cryptic transport error.
+      await acInvoke('version', {}, 3000);
+    } catch (e) {
+      if (typeof window.showToast === 'function') {
+        window.showToast(`✗ Desktop Anki unreachable (${host}) — is Anki open on the Mac?`, 5000);
+      } else {
+        alert(`Desktop Anki unreachable (${host}) — is Anki open on the Mac?`);
+      }
+      return;
+    }
+    try {
+      // Tag video-sourced cards with the episode ("kadoki-video::<basename>").
+      let videoTag = '';
+      try {
+        if (window.kadokiVideoMode?.isVideoTitle?.()) videoTag = await window.kadokiVideoMode.mediaTag();
+      } catch (_) {}
+      const note = {
+        deckName:  cfg.deck,
+        modelName: cfg.model,
+        fields,
+        options: { allowDuplicate: true },
+        tags: ['kadoki', videoTag].filter(Boolean)
+      };
+      if (audioData && cfg.fields.audio) {
+        const aMime = sniffAudioBase64(audioData);
+        note.audio = [{
+          filename: ankiAudioFilename(audioFilename, { mime: aMime }),
+          data:     audioData.split(',')[1],
+          fields:   [cfg.fields.audio]
+        }];
+      }
+      if (imageData && cfg.fields.image) {
+        // Keep the extension honest — Title covers are often PNG.
+        const isPng = /^data:image\/png/i.test(imageData);
+        note.picture = [{
+          filename: isPng ? _replaceExt(imageFilename, 'png') : imageFilename,
+          data:     imageData.split(',')[1],
+          fields:   [cfg.fields.image]
+        }];
+      }
+      // Generous timeout: media base64 upload + collection write on the Mac.
+      await acInvoke('addNote', { note }, 30000);
+      if (typeof window.showToast === 'function') {
+        window.showToast(`✓ Added to ${cfg.deck} (Mac)`, 2200);
+      }
+    } catch (err) {
+      console.error('AnkiConnect addNote error:', err);
+      const msg = err?.message || String(err);
+      if (typeof window.showToast === 'function') {
+        window.showToast(`✗ Desktop Anki: ${msg}`, 6000);
+      } else {
+        alert(`Desktop Anki: ${msg}`);
+      }
+    }
+    return;
+  }
 
   // --- AnkiBridge path (default on Android) ---
   const ab = await viaBridge();

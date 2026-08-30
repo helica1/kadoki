@@ -66,6 +66,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'nav.mode_audio': { en: 'AUDIO', ja: '聴く' },
   // Video Titles: shown instead of AUDIO (video-mode.js injects the tab).
   'nav.mode_video': { en: 'VIDEO', ja: '映像' },
+  'kv.anki_no_cue': { en: 'No subtitle at this spot', ja: 'この位置に字幕がありません' },
 
   // ---- audio mode: chapter-repeat bar (static HTML in the audiobook view) ----
   'audio.repeat_chapter': { en: 'Repeat Chapter', ja: '章をリピート' },

@@ -1271,6 +1271,38 @@ body.dimmed .card-image {
           </div>
         </details>
 
+        <!-- ===== ANKI: DESKTOP ANKI OVER LAN (AnkiConnect) ===== -->
+        <details class="prefs-section">
+          <summary class="prefs-heading" data-i18n="ph.sec_anki_connect">Anki: Desktop Anki (Mac)</summary>
+          <div class="prefs-row">
+            <label data-i18n="ph.ankiconnect_host">Mac address (AnkiConnect)</label>
+            <input id="ankiConnectHostInput" type="text" inputmode="url"
+                   autocapitalize="off" autocorrect="off" spellcheck="false"
+                   placeholder="192.168.1.229"
+                   style="min-width:170px;background:#1a1a1a;color:#eee;
+                          border:1px solid #333;border-radius:6px;padding:8px 10px;
+                          font-family:var(--font-sans);font-size:.85rem;">
+          </div>
+          <div class="prefs-row" style="justify-content:flex-start;gap:10px;">
+            <button id="ankiConnectTestBtn" type="button"
+                    data-i18n="ph.ankiconnect_test"
+                    style="background:transparent;color:var(--accent-cyan,#00ffcc);
+                           border:1px solid var(--accent-cyan,#00ffcc);
+                           padding:8px 14px;border-radius:8px;font-weight:600;
+                           font-family:var(--font-sans);font-size:.82rem;cursor:pointer;">
+              Test connection
+            </button>
+            <span id="ankiConnectStatus" style="font-size:.78rem;color:#888;"></span>
+          </div>
+          <div style="font-size:.72rem;color:#777;margin:6px 2px 0;line-height:1.5;"
+               data-i18n="ph.ankiconnect_help">
+            Sends cards straight to Anki running on your Mac over Wi-Fi (needs the
+            AnkiConnect add-on with webBindAddress 0.0.0.0). When set, this route is
+            used everywhere instead of AnkiMobile/AnkiDroid — leave empty to use the
+            on-device apps. On Vision Pro this is the only way to send.
+          </div>
+        </details>
+
         <!-- ===== ANKI: SWIPE-UP AND SCENE SAVE ===== -->
         <details class="prefs-section">
           <summary class="prefs-heading" data-i18n="ph.sec_anki_swipe">Anki: Swipe-Up and Scene Save</summary>

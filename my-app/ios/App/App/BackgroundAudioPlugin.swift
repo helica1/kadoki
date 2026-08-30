@@ -80,7 +80,46 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "clearSavedPosition", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "videoSurface",       returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "videoSubs",          returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "videoFrame",         returnType: CAPPluginReturnPromise),
     ]
+
+    /// Current video frame as a JPEG data URI — the Anki card's "what was on
+    /// screen when this line was spoken" picture. Rejects when no video is
+    /// playing (audio-only Titles fall back to the cover image in JS).
+    @objc func videoFrame(_ call: CAPPluginCall) {
+        let maxDim = call.getDouble("maxDim") ?? 1280
+        DispatchQueue.main.async { [weak self] in
+            guard let vp = self?.player as? KadokiVideoPlayer,
+                  let item = vp.avPlayer.currentItem else {
+                call.reject("no video playing")
+                return
+            }
+            let gen = AVAssetImageGenerator(asset: item.asset)
+            gen.appliesPreferredTrackTransform = true
+            // Tight tolerance so the frame matches the subtitle being sent,
+            // not the nearest keyframe seconds away.
+            gen.requestedTimeToleranceBefore = CMTime(seconds: 0.15, preferredTimescale: 600)
+            gen.requestedTimeToleranceAfter  = CMTime(seconds: 0.15, preferredTimescale: 600)
+            gen.maximumSize = CGSize(width: maxDim, height: maxDim)
+            // The async generator is iOS 16+/visionOS-only; video Titles only
+            // exist on visionOS today, so older iOS just reports unsupported.
+            if #available(iOS 16.0, *) {
+                gen.generateCGImageAsynchronously(for: vp.avPlayer.currentTime()) { cg, _, err in
+                    guard let cg = cg else {
+                        call.reject("frame grab failed: \(err?.localizedDescription ?? "unknown")")
+                        return
+                    }
+                    guard let jpg = UIImage(cgImage: cg).jpegData(compressionQuality: 0.85) else {
+                        call.reject("jpeg encode failed")
+                        return
+                    }
+                    call.resolve(["dataUri": "data:image/jpeg;base64," + jpg.base64EncodedString()])
+                }
+            } else {
+                call.reject("frame grab needs iOS 16+")
+            }
+        }
+    }
 
     /// visionOS video Titles: the DOM subtitle's rect (CSS points). Native
     /// snapshots that region and mirrors it into the RealityKit scene as an
@@ -381,6 +420,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "simSeries": !demoDir.isEmpty && FileManager.default.fileExists(atPath: demoDir + "/demo-ep1.mp4"),
             "simAdv": ProcessInfo.processInfo.environment["KADOKI_SIM_ADV"] == "1",
             "simBrowse": ProcessInfo.processInfo.environment["KADOKI_SIM_BROWSE"] == "1",
+            "simAnki": ProcessInfo.processInfo.environment["KADOKI_SIM_ANKI"] == "1",
+            "simAnkiHost": ProcessInfo.processInfo.environment["KADOKI_SIM_ANKI_HOST"] ?? "",
         ])
     }
 

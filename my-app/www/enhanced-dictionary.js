@@ -3345,6 +3345,86 @@
         if (cfg.fields.glossary)     fields[cfg.fields.glossary]     = glossary || '';
         if (cfg.fields.termFurigana) fields[cfg.fields.termFurigana] = termFurigana || '';
 
+        // --- AnkiConnect path (desktop Anki over LAN — priority when configured;
+        // the only working route on visionOS, optional everywhere else) ---
+        if (window.ankiConnect && await window.ankiConnect.enabled()) {
+            try {
+                await window.ankiConnect.probe();
+            } catch (e) {
+                const host = (typeof window.getAnkiConnectHost === 'function') ? await window.getAnkiConnectHost() : '';
+                const msg = `✗ Desktop Anki unreachable (${host}) — is Anki open on the Mac?`;
+                if (typeof window.showToast === 'function') window.showToast(msg, 5000); else alert(msg);
+                throw new Error('AnkiConnect unreachable');
+            }
+            // Video Titles: no card image comes through the dict flow, but the
+            // frame on screen when the word appeared is exactly what the card
+            // wants — grab it natively (AVAssetImageGenerator at the playhead).
+            if (!imageData && cfg.fields.image && window.kadokiVideoMode?.isVideoTitle?.()) {
+                try {
+                    const r = await window.Capacitor?.Plugins?.BackgroundAudio?.videoFrame?.({ maxDim: 1280 });
+                    if (r?.dataUri) imageData = r.dataUri;
+                } catch (e) { console.warn('[dict-anki] videoFrame:', e?.message || e); }
+            }
+            // Tag mined cards with the episode they came from
+            // ("kadoki-video::<file basename>") so they're findable per video.
+            let videoTag = '';
+            try {
+                if (window.kadokiVideoMode?.isVideoTitle?.()) videoTag = await window.kadokiVideoMode.mediaTag();
+            } catch (_) {}
+            const audioArr = [];
+            // Sentence audio arrives as a data URI (audioData) or a native tmp
+            // file path (audioSrcPath — the AnkiBridge disk fast-path); for
+            // HTTP we need base64, so materialize the file when needed.
+            let sentUri = audioData || '';
+            if (!sentUri && audioSrcPath && typeof window.cacheFileToDataUri === 'function') {
+                try { sentUri = await window.cacheFileToDataUri(audioSrcPath, 'audio/mp4'); } catch (_) {}
+            }
+            if (sentUri && cfg.fields.sentenceAudio) {
+                const sMime = window.sniffAudioBase64?.(sentUri) || '';
+                audioArr.push({
+                    filename: window.ankiAudioFilename(sentenceAudioFilename, { mime: sMime }),
+                    data:     sentUri.split(',')[1],
+                    fields:   [cfg.fields.sentenceAudio]
+                });
+            }
+            if (wordAudio && wordAudio.base64 && cfg.fields.termAudio) {
+                // wordAudio.base64 is already raw base64 (no data: prefix).
+                const wMime = window.sniffAudioBase64?.(wordAudio.base64) || '';
+                audioArr.push({
+                    filename: window.ankiAudioFilename(`word_${Date.now()}_${wordAudio.filename || 'audio.mp3'}`, { mime: wMime }),
+                    data:     wordAudio.base64,
+                    fields:   [cfg.fields.termAudio]
+                });
+            }
+            const note = {
+                deckName:  cfg.deck,
+                modelName: cfg.model,
+                fields,
+                options: { allowDuplicate: true },
+                tags: ['mining', 'dictionary', dictionary || 'unknown', videoTag].filter(Boolean)
+            };
+            if (audioArr.length) note.audio = audioArr;
+            if (imageData && cfg.fields.image) {
+                note.picture = [{
+                    filename: imageFilename,
+                    data:     imageData.split(',')[1],
+                    fields:   [cfg.fields.image]
+                }];
+            }
+            try {
+                await window.ankiConnect.invoke('addNote', { note }, 30000);
+                if (typeof window.showToast === 'function') {
+                    window.showToast(dF('dc.added_to_deck', { deck: cfg.deck }, `✓ Added to ${cfg.deck}`) + ' (Mac)', 2200);
+                }
+                return true;
+            } catch (err) {
+                const msg = err?.message || String(err);
+                if (typeof window.showToast === 'function') window.showToast(`✗ Desktop Anki: ${msg}`, 6000);
+                else alert(`Desktop Anki: ${msg}`);
+                throw err;
+            }
+        }
+
         // --- AnkiBridge path (default on Android) ---
         const ab = (typeof window.viaAnkiBridge === 'function')
             ? await window.viaAnkiBridge()

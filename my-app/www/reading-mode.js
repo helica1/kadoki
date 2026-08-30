@@ -3124,6 +3124,15 @@
     else if (action === 'epPrev') { try { window.kadokiVideoMode?.advanceEpisode?.(-1, true, true); } catch (_) {} }
     else if (action === 'epNext') { try { window.kadokiVideoMode?.advanceEpisode?.(1, true, true); } catch (_) {} }
     else if (action === 'epBrowse') { try { window.kadokiVideoMode?.openBrowser?.(); } catch (_) {} }
+    else if (action === 'ankiSend') {
+      // Ornament send button (Vision — swipe-up send is disabled there).
+      // Video titles send the current subtitle + frame grab + audio clip;
+      // card mode sends the current card through the same path as swipe-up.
+      try {
+        if (window.kadokiVideoMode?.isVideoTitle?.()) window.kadokiVideoMode.ankiSend();
+        else if (window.kadokiCardAnkiSend) window.kadokiCardAnkiSend();
+      } catch (err) { console.warn('ankiSend:', err); }
+    }
     else if (action === 'prev') tpStepCue(-1);
     else if (action === 'next') tpStepCue(1);
     else if (action === 'dict') tpFlipDict();

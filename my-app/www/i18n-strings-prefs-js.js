@@ -70,6 +70,8 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'pj.link_folder': { en: 'Link folder', ja: 'フォルダをリンク' },
   'pj.unlink': { en: 'Unlink', ja: 'リンク解除' },
   'pj.send_test_card': { en: 'Send test card', ja: 'テストカードを送信' },
+  'pj.ac_no_host': { en: 'Enter the Mac’s IP first', ja: 'まずMacのIPを入力してください' },
+  'pj.ac_connected': { en: 'Connected — {n} decks', ja: '接続OK — デッキ{n}件' },
   'pj.media_linked': { en: 'Linked: {name}', ja: 'リンク済み: {name}' },
   'pj.relink': { en: 'Re-link', ja: '再リンク' },
   'pj.not_linked': { en: 'Not linked (fallback only — not required)', ja: 'リンクなし（フォールバックのみ — 不要）' },

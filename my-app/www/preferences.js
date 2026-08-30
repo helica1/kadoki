@@ -1346,6 +1346,7 @@
     try { await setupOpenAiPrefs(); } catch (e) { console.warn('[prefs] setupOpenAiPrefs failed', e); }            // OpenAI key (persist on change) + image usage line
     try { await setupFalPrefs(); } catch (e) { console.warn('[prefs] setupFalPrefs failed', e); }               // fal.ai key (persist on change)
     try { await setupImageBackendPrefs(); } catch (e) { console.warn('[prefs] setupImageBackendPrefs failed', e); }      // image backend selector (fal/OpenRouter) + OpenRouter image-model picker
+    try { await setupAnkiConnectPref(); } catch (e) { console.warn('[prefs] setupAnkiConnectPref failed', e); }
     try { await wireAnkiSection(); } catch (e) { console.warn('[prefs] wireAnkiSection failed', e); }
     try { setupIOSAnkiPickers(); } catch (e) { console.warn('[prefs] setupIOSAnkiPickers failed', e); }
 
@@ -1762,6 +1763,61 @@
       if (!sel) continue;
       const saved = await getOr(fieldPrefs[slot], defaults[slot]);
       fillFieldSelect(sel, fields, saved);
+    }
+  }
+
+  // Desktop Anki over LAN (AnkiConnect on the user's Mac). Host persists on
+  // change (dual-write Preferences + localStorage so sendToAnkiConnect.js can
+  // read it synchronously); changing it repopulates the deck/model pickers
+  // from the new source. Test button = version probe + deck count.
+  async function setupAnkiConnectPref() {
+    const input = document.getElementById('ankiConnectHostInput');
+    const testBtn = document.getElementById('ankiConnectTestBtn');
+    const status = document.getElementById('ankiConnectStatus');
+    if (!input) return;
+    try {
+      const saved = (await getPref('ANKICONNECT_HOST')) ||
+                    localStorage.getItem('ANKICONNECT_HOST') || '';
+      input.value = saved;
+    } catch (_) {}
+    if (!input.dataset.wired) {
+      input.dataset.wired = '1';
+      input.addEventListener('change', async () => {
+        const v = input.value.trim();
+        try { localStorage.setItem('ANKICONNECT_HOST', v); } catch (_) {}
+        try { await setPref('ANKICONNECT_HOST', v); } catch (_) {}
+        if (status) status.textContent = '';
+        // Pickers now come from (or stop coming from) the Mac.
+        try { await wireAnkiSection(); } catch (_) {}
+      });
+    }
+    if (testBtn && !testBtn.dataset.wired) {
+      testBtn.dataset.wired = '1';
+      testBtn.addEventListener('click', async () => {
+        // Persist whatever is typed before probing (user may not have blurred).
+        const v = input.value.trim();
+        try { localStorage.setItem('ANKICONNECT_HOST', v); } catch (_) {}
+        try { await setPref('ANKICONNECT_HOST', v); } catch (_) {}
+        if (!v) {
+          if (status) { status.textContent = window.i18n.t('pj.ac_no_host', 'Enter the Mac’s IP first'); status.style.color = '#c88'; }
+          return;
+        }
+        if (status) { status.textContent = '…'; status.style.color = '#888'; }
+        try {
+          await window.ankiConnect.probe();
+          const decks = await window.fetchDeckNames();
+          if (status) {
+            status.textContent = '✓ ' + window.i18n.fmt('pj.ac_connected', { n: decks.length });
+            status.style.color = 'var(--accent-read,#4caf50)';
+          }
+          try { await wireAnkiSection(); } catch (_) {}
+        } catch (e) {
+          if (status) {
+            status.textContent = '✗ ' + (e?.message || e);
+            status.style.color = '#c88';
+          }
+        }
+      });
     }
   }
 

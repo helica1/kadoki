@@ -436,6 +436,18 @@ struct KadokiTransportView: View {
                 .buttonStyle(.borderless)
                 .frame(width: 56, height: 56)
             }
+            // Send to Anki — the current card (card mode) or the current video
+            // subtitle + frame grab + audio clip (video Titles). Swipe-up sends
+            // are disabled on Vision (gaze pinch-drags misfired them), so this
+            // button is the deliberate send affordance. Route: desktop Anki on
+            // the user's Mac over AnkiConnect (Preferences → Anki).
+            if model.mode == "card" || (model.mode == "audio" && model.videoOn) {
+                Button { send("ankiSend") } label: {
+                    Image(systemName: "square.and.arrow.up").font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .frame(width: 56, height: 56)
+            }
             // Video settings (3D tuning + subtitle placement).
             if model.mode == "audio" && model.videoOn {
                 Button { model.video3dOpen.toggle() } label: {
