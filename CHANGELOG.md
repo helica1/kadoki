@@ -4,6 +4,30 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## v1.8.0 — 2026-09-09
+
+### Added
+- **Pitch-preserving speech engines for read mode.** Sonic and Speedy (nonlinear) time-stretching keep narration natural at 1.4×–1.8×. Speedy is the default; choose under Preferences → Read.
+- **Drag scrub.** With audio playing in read mode, drag anywhere on the page to scrub the playhead like a turntable — the highlight follows your finger, the sound follows the highlight, and release resumes exactly there. Re-heard audio plays at 1× and eases back up to your speed. Visual-only or off under Preferences → Read.
+- **Video scrub.** Press and drag on a video to scrub picture, sound and subtitle together, with live word highlighting. Word timings for subtitle files are generated on device.
+- **New follow styles.** Focus brackets, highlighter swipe, ember, and twin beams with a slow colour wash (the new default). Smoother glide, and the current line is highlighted the moment a title opens.
+- **Playback speed control** beside the status band in read mode, in 0.05 steps.
+- **Video on Android**, with the same formats as iOS.
+- **Video watching time** in Stats.
+
+### Changed
+- Titles switch much faster: the subtitle-to-text alignment is now genuinely cached, and video titles no longer spend seconds "indexing" a book they don't have.
+- Subtitle generation starts from the page you are reading, shows a progress pill, and "set playhead" works anywhere in a partly generated book.
+- Folder import reports "1 video series (N episodes)".
+- Character cards drop the motivation analysis.
+- Default settings now match the most-used configuration: twin-beam follow, Speedy engine, line art inverted, waveform off, upcoming subtitle on.
+
+### Fixed
+- The previous title's cover no longer flashes when switching titles.
+- Cover art is taken from the audio file on Android.
+- Android: scrubbing pauses the player properly, starts with sound immediately, and resumes and speeds up without clicks; the follow highlight is as smooth as iOS.
+- Read-mode startup no longer rewinds a paragraph.
+
 ## v1.7.1 — 2026-08-26
 
 ### Fixed
