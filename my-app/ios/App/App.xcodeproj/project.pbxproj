@@ -19,6 +19,7 @@
 		35AE8C7605511205A5E3FD31 /* AnkiMediaServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E732BA54E00EA38613613122 /* AnkiMediaServer.swift */; };
 		4C9AD83D4089A97D99D8D834 /* Stereo.metal in Sources */ = {isa = PBXBuildFile; fileRef = C118C4C675EAC796129D2013 /* Stereo.metal */; };
 		4E513EFC2DD345C5C01FBB48 /* LiveSessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = D346E402C777D43386BE6D4E /* LiveSessionModel.swift */; };
+		4F24171B629CC195E771BFD4 /* speedy.c in Sources */ = {isa = PBXBuildFile; fileRef = F2BA445855AD5A2812C08468 /* speedy.c */; settings = {COMPILER_FLAGS = "-DKISS_FFT -Dkiss_fft_scalar=float -UDEBUG -w"; }; };
 		50379B232058CBB4000EE86E /* capacitor.config.json in Resources */ = {isa = PBXBuildFile; fileRef = 50379B222058CBB4000EE86E /* capacitor.config.json */; };
 		504EC3081FED79650016851F /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504EC3071FED79650016851F /* AppDelegate.swift */; };
 		504EC30D1FED79650016851F /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30B1FED79650016851F /* Main.storyboard */; };
@@ -26,12 +27,16 @@
 		504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC3101FED79650016851F /* LaunchScreen.storyboard */; };
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
 		5959FA6E5FB2AC407987D2D1 /* ArchiveExtractorPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DF5C3F132ED80A31C3CE8D0 /* ArchiveExtractorPlugin.swift */; };
+		5AE243991A0C4DF25D96B100 /* sonic.c in Sources */ = {isa = PBXBuildFile; fileRef = 18D7B29A9CF62414AF366CA3 /* sonic.c */; settings = {COMPILER_FLAGS = "-DSONIC_INTERNAL -w"; }; };
 		5CB75FAF0840E754F6E0EBEB /* LiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B2FCAF3399E64682C1BBD19 /* LiveView.swift */; };
 		5E9D13301ACBB1805E711F6E /* StereoRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 190BF058F2B37BB4482A8FEC /* StereoRenderer.swift */; };
 		5FE71FFECDFFD7431C3CC2FA /* demo-video.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = CE6A2FA73646C6BDA732F40E /* demo-video.mp4 */; };
 		763A6A097EB909AC131545C6 /* AudioSlicerPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */; };
 		77A1B2C3D4E5F60718293A4B /* AutoTranscribePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */; };
 		89FA94E6170CADEA9D06609A /* KadokiLockWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10CF8B633B1A1CE39687EF4 /* KadokiLockWidget.swift */; };
+		8E60C14E1A34E9B535E2E79B /* KadokiReadEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D3FA1B1B9EBF0D83BD4DE0 /* KadokiReadEngine.swift */; };
+		9C7EF869A099728BD538EBA5 /* kiss_fft.c in Sources */ = {isa = PBXBuildFile; fileRef = F34EE787CCD18F537D8D0E50 /* kiss_fft.c */; settings = {COMPILER_FLAGS = "-Dkiss_fft_scalar=float -w"; }; };
+		9EEFB05EDE94CC3691A6989B /* soniclib.c in Sources */ = {isa = PBXBuildFile; fileRef = 9CFAA4E29A898E6C6A5FA8A8 /* soniclib.c */; settings = {COMPILER_FLAGS = "-UDEBUG -w"; }; };
 		A084ECDBA7D38E1E42DFC39D /* Pods_App.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */; };
 		A0CC3AF059D6FA7B7337F11F /* DepthEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 698541F6F81A7831A8ADCFFE /* DepthEstimator.swift */; };
 		A11CE0FF2B0000000016851F /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A11CE0FE2B0000000016851F /* PrivacyInfo.xcprivacy */; };
@@ -121,13 +126,17 @@
 /* Begin PBXFileReference section */
 		117998D12F0CF62C2821B4A5 /* libkadokiremux-xros.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; path = "libkadokiremux-xros.a"; sourceTree = "<group>"; };
 		11DC002FECA73D02592DD93A /* KadokiVideoIOS.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoIOS.swift; sourceTree = "<group>"; };
+		15D3FA1B1B9EBF0D83BD4DE0 /* KadokiReadEngine.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiReadEngine.swift; sourceTree = "<group>"; };
 		185C6E878D8E8340EF596D5B /* WatchKaraoke.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchKaraoke.swift; sourceTree = "<group>"; };
+		18D7B29A9CF62414AF366CA3 /* sonic.c */ = {isa = PBXFileReference; includeInIndex = 1; path = sonic.c; sourceTree = "<group>"; };
 		190BF058F2B37BB4482A8FEC /* StereoRenderer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StereoRenderer.swift; sourceTree = "<group>"; };
+		1E0078D68380ADC679D555B7 /* _kiss_fft_guts.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = _kiss_fft_guts.h; sourceTree = "<group>"; };
 		2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoLayer.swift; sourceTree = "<group>"; };
 		2DF5C3F132ED80A31C3CE8D0 /* ArchiveExtractorPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ArchiveExtractorPlugin.swift; sourceTree = "<group>"; };
 		2FAD9762203C412B000D30F8 /* config.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = config.xml; sourceTree = "<group>"; };
 		2FDDB295D144E056F5A721F4 /* demo-video.srt */ = {isa = PBXFileReference; includeInIndex = 1; path = "demo-video.srt"; sourceTree = "<group>"; };
 		40456775542510E4F6C3DFD4 /* DepthAnythingV2SmallF16.mlpackage */ = {isa = PBXFileReference; includeInIndex = 1; path = DepthAnythingV2SmallF16.mlpackage; sourceTree = "<group>"; };
+		4F37D91C7A2151450FF9CE65 /* kiss_fft.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = kiss_fft.h; sourceTree = "<group>"; };
 		50379B222058CBB4000EE86E /* capacitor.config.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = capacitor.config.json; sourceTree = "<group>"; };
 		504EC3041FED79650016851F /* App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = App.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		504EC3071FED79650016851F /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -144,10 +153,12 @@
 		88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSlicerPlugin.swift; sourceTree = "<group>"; };
 		88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutoTranscribePlugin.swift; sourceTree = "<group>"; };
 		8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = KadokiLockWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		8C3A78BACB8C1D5C68162BE6 /* sonic.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = sonic.h; sourceTree = "<group>"; };
 		8ED7087512EE4319DE456390 /* PdfExportPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PdfExportPlugin.swift; sourceTree = "<group>"; };
 		936ABC0B66FB81ECA48CB6FF /* App-Bridging-Header.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "App-Bridging-Header.h"; sourceTree = "<group>"; };
 		9B2FCAF3399E64682C1BBD19 /* LiveView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
 		9C96FCF6301A0596AB30AADD /* SpatialImagePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpatialImagePlugin.swift; sourceTree = "<group>"; };
+		9CFAA4E29A898E6C6A5FA8A8 /* soniclib.c */ = {isa = PBXFileReference; includeInIndex = 1; path = soniclib.c; sourceTree = "<group>"; };
 		A11CE0FE2B0000000016851F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		A1B2C3D400000000000000B1 /* WatchBridgePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchBridgePlugin.swift; sourceTree = "<group>"; };
 		A1B2C3D400000000000000D1 /* Kadoki Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Kadoki Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -176,9 +187,14 @@
 		C4D103B49D0D447C72EB2637 /* DepthAnythingV3_base_504.mlpackage */ = {isa = PBXFileReference; includeInIndex = 1; path = DepthAnythingV3_base_504.mlpackage; sourceTree = "<group>"; };
 		CE6A2FA73646C6BDA732F40E /* demo-video.mp4 */ = {isa = PBXFileReference; includeInIndex = 1; path = "demo-video.mp4"; sourceTree = "<group>"; };
 		D346E402C777D43386BE6D4E /* LiveSessionModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveSessionModel.swift; sourceTree = "<group>"; };
+		DC4409184709D388114DBA41 /* kiss_fft_log.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = kiss_fft_log.h; sourceTree = "<group>"; };
 		E39F93AC09029512B91BE647 /* Stereo.usda */ = {isa = PBXFileReference; includeInIndex = 1; path = Stereo.usda; sourceTree = "<group>"; };
 		E732BA54E00EA38613613122 /* AnkiMediaServer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiMediaServer.swift; sourceTree = "<group>"; };
 		EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BackgroundAudioPlugin.swift; sourceTree = "<group>"; };
+		F2BA445855AD5A2812C08468 /* speedy.c */ = {isa = PBXFileReference; includeInIndex = 1; path = speedy.c; sourceTree = "<group>"; };
+		F34EE787CCD18F537D8D0E50 /* kiss_fft.c */ = {isa = PBXFileReference; includeInIndex = 1; path = kiss_fft.c; sourceTree = "<group>"; };
+		F5E67DC67EDD8D3087ED9928 /* speedy.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = speedy.h; sourceTree = "<group>"; };
+		FB685BAFF30450427A1B754D /* sonic2.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = sonic2.h; sourceTree = "<group>"; };
 		FC68EB0AF532CFC21C3344DD /* Pods-App.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.debug.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.debug.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -223,6 +239,18 @@
 				5D65E057AFC40831D3F25811 /* iOS */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		3B546CF95E67F3FFFB42E638 /* speedy */ = {
+			isa = PBXGroup;
+			children = (
+				F2BA445855AD5A2812C08468 /* speedy.c */,
+				9CFAA4E29A898E6C6A5FA8A8 /* soniclib.c */,
+				F5E67DC67EDD8D3087ED9928 /* speedy.h */,
+				FB685BAFF30450427A1B754D /* sonic2.h */,
+			);
+			name = speedy;
+			path = speedy;
 			sourceTree = "<group>";
 		};
 		504EC2FB1FED79650016851F = {
@@ -280,6 +308,11 @@
 				CE6A2FA73646C6BDA732F40E /* demo-video.mp4 */,
 				2FDDB295D144E056F5A721F4 /* demo-video.srt */,
 				11DC002FECA73D02592DD93A /* KadokiVideoIOS.swift */,
+				18D7B29A9CF62414AF366CA3 /* sonic.c */,
+				15D3FA1B1B9EBF0D83BD4DE0 /* KadokiReadEngine.swift */,
+				8C3A78BACB8C1D5C68162BE6 /* sonic.h */,
+				3B546CF95E67F3FFFB42E638 /* speedy */,
+				A0238808DD2CC0D021A4539D /* kissfft */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -309,6 +342,18 @@
 				AF51FD2D460BCFE21FA515B2 /* Pods-App.release.xcconfig */,
 			);
 			name = Pods;
+			sourceTree = "<group>";
+		};
+		A0238808DD2CC0D021A4539D /* kissfft */ = {
+			isa = PBXGroup;
+			children = (
+				F34EE787CCD18F537D8D0E50 /* kiss_fft.c */,
+				4F37D91C7A2151450FF9CE65 /* kiss_fft.h */,
+				1E0078D68380ADC679D555B7 /* _kiss_fft_guts.h */,
+				DC4409184709D388114DBA41 /* kiss_fft_log.h */,
+			);
+			name = kissfft;
+			path = kissfft;
 			sourceTree = "<group>";
 		};
 		A1B2C3D400000000000000C1 /* KadokiWatch */ = {
@@ -604,6 +649,11 @@
 				D94ADCA0457E5EB7EF492C99 /* CurvedPanel.swift in Sources */,
 				2C531BE4057E98EED353C5B4 /* DepthAnythingV3_base_504.mlpackage in Sources */,
 				E04A373FE0634D55B8A4B4BE /* KadokiVideoIOS.swift in Sources */,
+				5AE243991A0C4DF25D96B100 /* sonic.c in Sources */,
+				8E60C14E1A34E9B535E2E79B /* KadokiReadEngine.swift in Sources */,
+				4F24171B629CC195E771BFD4 /* speedy.c in Sources */,
+				9EEFB05EDE94CC3691A6989B /* soniclib.c in Sources */,
+				9C7EF869A099728BD538EBA5 /* kiss_fft.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -862,6 +912,12 @@
 					"demo-video.mp4",
 					"demo-video.srt",
 				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/App",
+					"$(SRCROOT)/App/speedy",
+					"$(SRCROOT)/App/kissfft",
+				);
 				INFOPLIST_FILE = App/Info.plist;
 				"INFOPLIST_FILE[sdk=xros*]" = "App/Info-visionOS.plist";
 				"INFOPLIST_FILE[sdk=xrsimulator*]" = "App/Info-visionOS.plist";
@@ -974,6 +1030,12 @@
 				"EXCLUDED_SOURCE_FILE_NAMES[sdk=xros*]" = (
 					"demo-video.mp4",
 					"demo-video.srt",
+				);
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/App",
+					"$(SRCROOT)/App/speedy",
+					"$(SRCROOT)/App/kissfft",
 				);
 				INFOPLIST_FILE = App/Info.plist;
 				"INFOPLIST_FILE[sdk=xros*]" = "App/Info-visionOS.plist";

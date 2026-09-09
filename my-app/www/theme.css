@@ -1171,6 +1171,7 @@ body.mode-card .subtitle-text.card-rise { animation: cardRiseIn 0.5s ease-out; }
 .stats-block[data-mode="card"]  .stats-block-title { color: var(--accent-card); }
 .stats-block[data-mode="read"]  .stats-block-title { color: var(--accent-read); }
 .stats-block[data-mode="audio"] .stats-block-title { color: var(--accent-audio); }
+.stats-block[data-mode="video"] .stats-block-title { color: var(--accent-cyan, #00ffcc); }
 .stats-block-status {
   font-size: .65rem;
   color: var(--text-faint, #5a5a5a);
@@ -1179,6 +1180,7 @@ body.mode-card .subtitle-text.card-rise { animation: cardRiseIn 0.5s ease-out; }
 .stats-block[data-running="1"][data-mode="card"]  .stats-block-status { color: var(--accent-card); }
 .stats-block[data-running="1"][data-mode="read"]  .stats-block-status { color: var(--accent-read); }
 .stats-block[data-running="1"][data-mode="audio"] .stats-block-status { color: var(--accent-audio); }
+.stats-block[data-running="1"][data-mode="video"] .stats-block-status { color: var(--accent-cyan, #00ffcc); }
 
 /* ---- Stats panel rows (pigments-style numeric readout) ---- */
 .stat-row {
@@ -1752,3 +1754,13 @@ body.kv-card-video.kv-ios-landscape .kv-cs-row.kv-cur { font-size: 23px; padding
 
 /* Episode/subtitle browser (iPhone/iPad): reached via "Episodes…" in the
    real hamburger menu (shell.js) — no header button of its own. */
+
+/* Audio / video mode: no system text selection or long-press callout on the
+   page — the hold-to-scrub gesture (2026-09-09) was fighting the WebView's
+   own press-and-hold selection (loupe + whole-page highlight). Word lookups
+   here are tap-driven (click on .dict-frag), never selection-driven. */
+#audiobookModeView, #audiobookModeView * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+  -webkit-touch-callout: none !important;
+}

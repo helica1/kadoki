@@ -56,7 +56,7 @@
     const now = performance.now();
     const frameDt = Math.min(100, now - (state._tickTs || now));
     state._tickTs = now;
-    const rate = window.audioPlaybackRate || 1;
+    const rate = 1;   // the editor preview always plays at 1× (see preview())
     const sinceEvent = Math.max(0, now - (state.playheadLastTs || now));
     if (!Number.isFinite(state.playheadDispMs)) state.playheadDispMs = state.playheadMs;
     // 1) free-run at constant velocity while position events are flowing (stop
@@ -622,7 +622,16 @@
   let _ppBtn = null, _previewing = false;
   function _setPlayIcon(p) { _previewing = !!p; if (_ppBtn) { try { _ppBtn.textContent = p ? '❚❚' : '▶'; } catch (_) {} } }
   function stopPreview() {
-    try { const bg = window.Capacitor?.Plugins?.BackgroundAudio; if (bg) bg.pause(); } catch (_) {}
+    try {
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (bg) {
+        bg.pause();
+        // The 1× preview set the plugin's rate; give the book its listening
+        // speed back so a later resume doesn't crawl at 1×.
+        const r = window.audioPlaybackRate || 1;
+        if (r !== 1 && typeof bg.setRate === 'function') { try { bg.setRate({ rate: r }); } catch (_) {} }
+      }
+    } catch (_) {}
     cancelPreview();
     _setPlayIcon(false);
   }
@@ -846,8 +855,8 @@
               // Heavier low-pass (was .4) so a single late/early native event
               // can't jolt the speed, then clamp to a band around the requested
               // rate so a noisy delta can't fling the playhead (the jitter).
-              state.playheadRate = (state.playheadRate || (window.audioPlaybackRate || 1)) * 0.85 + inst * 0.15;
-              const want = window.audioPlaybackRate || 1;
+              state.playheadRate = (state.playheadRate || 1) * 0.85 + inst * 0.15;
+              const want = 1;   // preview plays at 1×
               state.playheadRate = Math.max(want * 0.6, Math.min(want * 1.5, state.playheadRate));
             }
           }
@@ -971,7 +980,9 @@
       const startMsInt = Math.round(startMs);
       console.log('[wf] preview play startMs=' + startMsInt + ' targetEnd=' + targetEnd);
       try {
-        await bg.play({ url, startMs: startMsInt, rate: window.audioPlaybackRate || 1 });
+        // Always 1× in the Anki editor: the clip is being AUDITIONED for the
+        // card, and the listening speed would distort what gets checked.
+        await bg.play({ url, startMs: startMsInt, rate: 1 });
       } catch (e) {
         console.warn('preview play:', e);
         return;

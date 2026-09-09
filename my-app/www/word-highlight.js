@@ -136,6 +136,18 @@
   // event correction bends the speed, never snaps), plus the visual lead.
 
   let lastPos = -1, lastTs = 0, playing = false, rate = 1;
+  let _accWall = 0, _accPos = 0;   // rate learning accumulators (see the position listener)
+  let _evN = 0, _evSum = 0, _evMax = 0, _evDiagAt = 0, _snapN = 0;   // diag counters
+  // Nominal rate as the prior: the clock starts right after a rate change
+  // instead of slewing (cap = half speed) until enough events accumulate.
+  try {
+    const r0 = parseFloat(window.audioPlaybackRate); if (r0 > 0) rate = Math.min(3, Math.max(0.5, r0));
+    window.addEventListener('playback:rate', (e) => {
+      const d = e && e.detail;
+      const r = parseFloat((d && typeof d === 'object') ? (d.rate ?? d.value) : (d ?? window.audioPlaybackRate));
+      if (r > 0) { rate = Math.min(3, Math.max(0.5, r)); _accWall = 0; _accPos = 0; }
+    });
+  } catch (_) {}
   let dispMs = -1, dispAt = 0;
   let listenersOn = false;
 
@@ -149,6 +161,7 @@
         let pos = ev?.positionMs;
         if (!Number.isFinite(pos)) return;
         const now = performance.now();
+        if (resumePending && ev?.playing) { resumePending = false; playing = true; dispMs = -1; }
         // Self-heal a stale paused flag: a missed/eaten 'state' event around a
         // mode switch left `playing` false forever — position events kept
         // arriving but tick() refused to run, so the reader glow stayed parked
@@ -157,19 +170,39 @@
         if (!playing && lastPos >= 0 && now - lastTs < 5000 && pos > lastPos + 40) playing = true;
         const age = Number(ev?.ts) > 0 ? Date.now() - Number(ev.ts) : 0;
         if (playing && age > 0 && age < 2000) pos += age * rate;
-        if (lastPos >= 0 && lastTs > 0) {
+        if (lastPos >= 0 && lastTs > 0 && playing) {
           const dWall = now - lastTs, dPos = pos - lastPos;
-          if (dWall > 400 && dWall < 3000 && dPos > 0 && dPos < dWall * 3.2) {
-            rate = Math.min(3, Math.max(0.5, 0.7 * rate + 0.3 * (dPos / dWall)));
+          // Accumulate ACROSS events: position events arrive every ~150 ms, so
+          // the old per-gap ">400 ms" rule never fired — `rate` stayed 1.0, the
+          // display clock free-ran at 1× under 1.4-1.6× speech, slewed at its
+          // half-speed cap, and snapped ahead ~⅓ of a line whenever the error
+          // passed SNAP_MS (the "freezes, then skips the top of the line").
+          if (dWall > 0 && dWall < 3000 && dPos >= 0 && dPos < dWall * 3.2) { _accWall += dWall; _accPos += dPos; }
+          else { _accWall = 0; _accPos = 0; }
+          if (_accWall >= 400) {
+            rate = Math.min(3, Math.max(0.5, 0.6 * rate + 0.4 * (_accPos / _accWall)));
+            _accWall = 0; _accPos = 0;
           }
         }
+        try {   // diag: event cadence + clock snaps, every 5 s
+          if (window._diag && lastTs > 0) {
+            const g = now - lastTs; _evN++; _evSum += g; if (g > _evMax) _evMax = g;
+            if (now - _evDiagAt > 5000) {
+              window._diag('[paged-diag] kw events n=' + _evN + ' avgGap=' + Math.round(_evSum / Math.max(1, _evN)) + 'ms maxGap=' + Math.round(_evMax) + 'ms snaps=' + _snapN + ' rate=' + rate.toFixed(2) + ' playing=' + playing);
+              _evDiagAt = now; _evN = 0; _evSum = 0; _evMax = 0; _snapN = 0;
+            }
+          }
+        } catch (_) {}
         lastPos = pos; lastTs = now;
         kick();
       });
     } catch (_) {}
     try {
       p.addListener('state', (s) => {
-        if (s && typeof s.playing === 'boolean') { playing = s.playing; kick(); }
+        if (s && typeof s.playing === 'boolean') {
+          if (s.playing && resumePending) { resumePending = false; lastTs = performance.now(); dispMs = -1; }
+          playing = s.playing; kick();
+        }
       });
     } catch (_) {}
     try {
@@ -187,11 +220,23 @@
   // clamp here was the "variable 1s lag"). Small disagreements with the event
   // clock slew smoothly; anything beyond SNAP_MS snaps — correct beats silky.
   const SNAP_MS = 400;
+  // Reader drag-scrub: while a scrub is active the finger IS the clock —
+  // positionGlow follows scrubMs directly (no lead, no slew), so the
+  // indicator moves with zero audio-bridge latency.
+  let scrubMs = -1;
+  // After a scrub lands with resume, the JS clock must not free-run before
+  // native has actually resumed (bridge + fade ≈ 30-80 ms): it ran ahead,
+  // then the first position events dragged it back at half speed — the
+  // "pointer takes a moment to catch up" on restart. Park until the 'state'
+  // (or first position) event, then start the clock from that instant.
+  let resumePending = false;
   function clockMs() {
+    if (scrubMs >= 0) return scrubMs;
     if (lastPos < 0) return -1;
     const now = performance.now();
     const target = playing ? lastPos + (now - lastTs) * rate : lastPos;
     if (dispMs < 0 || !playing || Math.abs(target - dispMs) > SNAP_MS) {
+      if (dispMs >= 0 && playing) _snapN++;
       dispMs = target; dispAt = now;
       return dispMs + leadMs();
     }
@@ -206,8 +251,60 @@
 
   // ── fractional fill position ─────────────────────────────────────────────
 
+  // Token-timing repair (whisper DTW on Android; harmless on good data): the
+  // per-token stamps bunch — several tokens share one instant, or a token
+  // gets a zero-length span — so the fill parked, then leapt a word. Runs of
+  // adjacent tokens (gap < 40 ms) that contain such a token are re-laid out
+  // across the run's span, half by the original stamps and half by character
+  // count; well-timed tokens and real pauses are left exactly as they were.
+  function smoothQuads(w) {
+    try {
+      const n = w.length >> 2;
+      if (n < 2) return w;
+      const q = [];
+      for (let i = 0; i < n; i++) q.push({ off: w[i * 4], len: w[i * 4 + 1], s: w[i * 4 + 2], e: w[i * 4 + 3] });
+      q.sort((a, b) => a.off - b.off);
+      for (let i = 0; i < n; i++) {            // monotonic, non-negative spans
+        if (i > 0 && q[i].s < q[i - 1].e) q[i].s = q[i - 1].e;
+        if (q[i].e < q[i].s) q[i].e = q[i].s;
+      }
+      const MIN_PER_CHAR = 30, GAP_RUN = 40;
+      let i = 0, changed = false;
+      while (i < n) {
+        let j = i;
+        while (j + 1 < n && q[j + 1].s - q[j].e < GAP_RUN) j++;
+        let bad = false, chars = 0;
+        for (let k = i; k <= j; k++) { chars += q[k].len; if (q[k].e - q[k].s < MIN_PER_CHAR * q[k].len) bad = true; }
+        if (bad && j > i && chars > 0) {
+          const span = q[j].e - q[i].s;
+          if (span > 0) {
+            let sumD = 0; for (let k = i; k <= j; k++) sumD += (q[k].e - q[k].s);
+            let t = q[i].s;
+            for (let k = i; k <= j; k++) {
+              const uni = span * q[k].len / chars;
+              const dtw = sumD > 0 ? span * (q[k].e - q[k].s) / sumD : uni;
+              const d = 0.5 * uni + 0.5 * dtw;
+              q[k].s = Math.round(t); t += d; q[k].e = Math.round(t);
+            }
+            q[j].e = q[i].s + span;
+            changed = true;
+          }
+        }
+        i = j + 1;
+      }
+      if (!changed) return w;
+      const out = new Array(n * 4);
+      for (let k = 0; k < n; k++) { out[k * 4] = q[k].off; out[k * 4 + 1] = q[k].len; out[k * 4 + 2] = q[k].s; out[k * 4 + 3] = q[k].e; }
+      return out;
+    } catch (_) { return w; }
+  }
+  function smoothedW(cue) {
+    if (cue._wsmSrc !== cue.w) { cue._wsmSrc = cue.w; cue._wsm = smoothQuads(cue.w); }
+    return cue._wsm;
+  }
+
   function fillPosAt(cue, rel) {
-    const w = cue.w, n = w.length >> 2;
+    const w = smoothedW(cue), n = w.length >> 2;
     let a = -1, lo = 0, hi = n - 1;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
@@ -458,7 +555,7 @@
       _rStyleAt = n;
       try {
         const v = window.appearance?.get?.('read')?.karaokeStyle;
-        _rStyle = ['underline', 'dot', 'ruler', 'comet', 'beam'].includes(v) ? v : 'glow';
+        _rStyle = ['underline', 'dot', 'ruler', 'comet', 'beam', 'bracket', 'marker', 'ember', 'twin'].includes(v) ? v : 'glow';
       } catch (_) { _rStyle = 'glow'; }
     }
     return _rStyle;
@@ -494,7 +591,219 @@
     return rulerEl;
   }
   function hideRuler() { if (rulerEl) rulerEl.style.display = 'none'; }
-  function hideAllReaderOverlays() { hideGlow(); hidePills(); hideDot(); hideUnderline(); hideRuler(); hideTrail(); hideBeam(); }
+  function hideAllReaderOverlays() {
+    hideGlow(); hidePills(); hideDot(); hideUnderline(); hideRuler(); hideTrail(); hideBeam();
+    hideBracket(); hideMarker(); hideEmber(); hideTwin();
+  }
+
+  // ── motion helpers shared by every style ─────────────────────────────────
+  // The hot "rect" is a whole character cell, so the raw target advances in
+  // one-character STEPS as the voice moves — an exponential chase of a
+  // stepping target still reads as hop-hop-hop. Two fixes: (1) a CONTINUOUS
+  // target, interpolated between the cell being spoken and the next one by
+  // the fractional fill; (2) a time-based glide (k = 1 − e^(−dt/τ)) instead
+  // of a per-frame constant, so 30 fps and 120 fps devices move the same.
+  // The cell is measured inside the character's OWN text node: a range that
+  // reaches into the NEXT character's node crosses any <rt> in between, and
+  // the ruby box (tall and narrow in vertical text) then wins the
+  // largest-rect pick — which pulled every indicator sideways toward the
+  // furigana ("the beam curves in to trace the furigana").
+  function _charRect(rd, i) {
+    const a = rd.positions[i];
+    if (!a || !a.node || !a.node.isConnected) return null;
+    try {
+      const r = document.createRange();
+      const len = a.node.nodeValue.length;
+      const s0 = Math.min(a.off, Math.max(0, len - 1));
+      r.setStart(a.node, s0);
+      r.setEnd(a.node, Math.min(len, s0 + 1));
+      let best = null;
+      for (const rc of r.getClientRects()) {
+        if (rc.width < 0.5 || rc.height < 0.5) continue;
+        if (!best || rc.width * rc.height > best.width * best.height) best = rc;
+      }
+      return best;
+    } catch (_) { return null; }
+  }
+  // Continuous hot point: centre of the spoken cell slid toward the next
+  // cell by the fractional fill. Falls back to `rect` (the hot span's cell)
+  // when either neighbour is missing or on another line/column.
+  function _hotPoint(rd, fill, rect) {
+    const L = rd.cue.text.length;
+    const i = Math.max(0, Math.min(L - 1, Math.floor(fill)));
+    const f = Math.max(0, Math.min(1, fill - i));
+    const r0 = _charRect(rd, i) || rect;
+    const r1 = (f > 0.001 && i + 1 < L) ? _charRect(rd, i + 1) : null;
+    let cx = r0.left + r0.width / 2, cy = r0.top + r0.height / 2;
+    if (r1) {
+      const cx1 = r1.left + r1.width / 2, cy1 = r1.top + r1.height / 2;
+      const lim = Math.max(r0.width, r0.height) * 2.5;
+      if (Math.abs(cx1 - cx) + Math.abs(cy1 - cy) < lim) { cx += (cx1 - cx) * f; cy += (cy1 - cy) * f; }
+    }
+    return { cx, cy, w: r0.width, h: r0.height, rect: r0 };
+  }
+  // Time-based glide toward (tx,ty); snaps on a jump larger than `snap`.
+  // State lives on rd.gx/gy (+ rd._gt) so every style shares one chase.
+  // While the PAGE is moving (auto page-turn, a swipe), overlays must stick
+  // to the text instead of gliding: a glide toward a target that is itself
+  // sliding lands visibly on the wrong column and then "corrects" as the
+  // scroll settles. Glide only when the page is still.
+  let _lastScrollTs = 0;
+  function _pageMoving() { return performance.now() - _lastScrollTs < 140; }
+  function _glide(rd, tx, ty, snap, tauMs, immediate) {
+    const now = performance.now();
+    const dt = Number.isFinite(rd._gt) ? Math.min(100, now - rd._gt) : 16;
+    rd._gt = now;
+    if (immediate || _pageMoving() || !Number.isFinite(rd.gx)) { rd.gx = tx; rd.gy = ty; return; }
+    const dx = tx - rd.gx, dy = ty - rd.gy;
+    if (Math.abs(dx) + Math.abs(dy) > snap) { rd.gx = tx; rd.gy = ty; return; }
+    const k = 1 - Math.exp(-dt / (tauMs || 110));
+    rd.gx += dx * k; rd.gy += dy * k;
+  }
+  function _accent(rd) { return rd.accent || rgbStr(accentRGB('--accent-read', '#4caf50')); }
+  let _kwAnimCss = false;
+  function ensureAnimCss() {
+    if (_kwAnimCss) return;
+    _kwAnimCss = true;
+    const st = document.createElement('style');
+    st.id = 'kwAnimStyles';
+    st.textContent =
+      '@keyframes kwBreathe { 0%,100% { transform: scale(1); opacity: .82; } 50% { transform: scale(1.09); opacity: 1; } }' +
+      '@keyframes kwSmoke { 0% { transform: translate3d(0,0,0) scale(.5); opacity: 0; } ' +
+        '14% { opacity: .5; } ' +
+        '55% { transform: translate3d(calc(var(--kw-sx, 0px) * .55), -22px, 0) scale(1.35); opacity: .28; } ' +
+        '100% { transform: translate3d(var(--kw-sx, 0px), -48px, 0) scale(2.3); opacity: 0; } }' +
+      '@keyframes kwSway { from { transform: translate3d(-4px,0,0); } to { transform: translate3d(4px,0,0); } }' +
+      '@keyframes kwSheen { 0%,100% { opacity: .55; } 50% { opacity: 1; } }' +
+      '.kw-paused { animation: kwSheen 3.4s ease-in-out infinite; }';
+    document.head.appendChild(st);
+  }
+
+  // G — focus brackets: two corner marks (⌜ ⌟) framing the spoken character,
+  // gliding as one reticle. Nothing over the glyphs; the eye locks onto the
+  // frame the way it locks onto a camera's focus box.
+  let brEls = [];
+  function ensureBracket() {
+    const host = document.getElementById('readingPagedView') || document.body;
+    if (brEls.length && !brEls[0].isConnected) { for (const d of brEls) host.appendChild(d); }
+    for (let i = brEls.length; i < 2; i++) brEls.push(_mkOv('', 2550, 'width:12px;height:12px;box-sizing:border-box;'));
+    return brEls;
+  }
+  function hideBracket() { for (const d of brEls) d.style.display = 'none'; }
+  function drawBracket(rd, hp, immediate) {
+    const els = ensureBracket();
+    const A = _accent(rd);
+    const pad = 3, leg = Math.max(9, Math.min(14, Math.round(Math.min(hp.w, hp.h) * 0.42)));
+    const w = hp.w + pad * 2, h = hp.h + pad * 2;
+    // Frame the cell being spoken, not the interpolated point — a reticle
+    // that sits between two characters never looks lined up. The glide
+    // (τ 120ms) carries it from cell to cell as a smooth hop.
+    const r0 = hp.rect;
+    _glide(rd, r0.left + r0.width / 2, r0.top + r0.height / 2, Math.max(w, h) * 4, 120, immediate);
+    const x = rd.gx - w / 2, y = rd.gy - h / 2;
+    const geo = [
+      { dx: x, dy: y, b: 'border-top:2px solid rgba(' + A + ',.95);border-left:2px solid rgba(' + A + ',.95);border-radius:4px 0 0 0;' },
+      { dx: x + w - leg, dy: y + h - leg, b: 'border-bottom:2px solid rgba(' + A + ',.95);border-right:2px solid rgba(' + A + ',.95);border-radius:0 0 4px 0;' },
+    ];
+    for (let i = 0; i < 2; i++) {
+      const d = els[i], g = geo[i];
+      if (d._kwA !== A + leg) {
+        d._kwA = A + leg;
+        d.style.cssText += g.b + 'width:' + leg + 'px;height:' + leg + 'px;' +
+          'filter:drop-shadow(0 0 4px rgba(' + A + ',.55));';
+      }
+      d.style.transform = 'translate3d(' + g.dx.toFixed(1) + 'px,' + g.dy.toFixed(1) + 'px,0)';
+      if (d.style.display !== 'block') d.style.display = 'block';
+    }
+  }
+
+  // H — highlighter: a short translucent marker swipe that slides along the
+  // line with the voice, feathered at both ends — its tail covers the last
+  // few characters spoken, its head sits just ahead of the current one.
+  let mkEl = null;
+  function ensureMarker() {
+    if (mkEl && mkEl.isConnected) return mkEl;
+    mkEl = _mkOv('kwMarker', 2537, 'border-radius:7px;');
+    return mkEl;
+  }
+  function hideMarker() { if (mkEl) mkEl.style.display = 'none'; }
+  function drawMarker(rd, hp, immediate) {
+    const el = ensureMarker();
+    const g = _lineGeom(rd._pa);
+    const A = _accent(rd);
+    const cell = g.vert ? hp.h : hp.w;
+    const len = cell * 3.6, lead = cell * 0.55;
+    // Anchor = the swipe's HEAD (just past the spoken char); the body trails.
+    _glide(rd, hp.cx, hp.cy, cell * 8, 120, immediate);
+    let x, y, w, h, axis;
+    if (g.vert) { w = hp.w + 6; h = len; x = rd.gx - w / 2; y = rd.gy + lead - len; axis = 'to bottom'; }
+    else { w = len; h = hp.h + 4; x = rd.gx + lead - len; y = rd.gy - h / 2; axis = 'to right'; }
+    const key = A + '|' + w.toFixed(0) + '|' + h.toFixed(0) + '|' + axis;
+    if (el._kwA !== key) {
+      el._kwA = key;
+      el.style.width = w.toFixed(1) + 'px';
+      el.style.height = h.toFixed(1) + 'px';
+      el.style.background = 'linear-gradient(' + axis + ', rgba(' + A + ',0) 0%, rgba(' + A + ',.10) 30%, ' +
+        'rgba(' + A + ',.20) 72%, rgba(' + A + ',.24) 86%, rgba(' + A + ',0) 100%)';
+    }
+    el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
+    if (el.style.display !== 'block') el.style.display = 'block';
+  }
+
+  // J — ember: the glow reborn as a living thing — a warm pool of light that
+  // breathes under the characters while soft wisps of smoke curl up off it
+  // and dissolve. Breathing, rise and sway are CSS keyframes on children
+  // (compositor-only); the pool itself glides on the continuous hot point.
+  let emEl = null;
+  function ensureEmber() {
+    if (emEl && emEl.isConnected) return emEl;
+    ensureAnimCss();
+    emEl = _mkOv('kwEmber', 2550, 'overflow:visible;');
+    const core = document.createElement('div');
+    core.className = 'kw-core';
+    core.style.cssText = 'position:absolute;inset:0;border-radius:50%;animation:kwBreathe 2.6s ease-in-out infinite;';
+    emEl.appendChild(core);
+    // x frac of pool width, rise s, delay s, wisp px, drift px, sway s
+    const spec = [[-0.2, 3.4, 0.0, 15, -12, 1.9], [0.16, 3.9, 1.2, 18, 10, 2.3], [0.0, 3.1, 2.1, 13, 4, 1.6],
+                  [-0.08, 4.3, 0.6, 20, -6, 2.7], [0.1, 3.6, 2.8, 16, 14, 2.1]];
+    for (const [fx, dur, dl, sz, dx, sw] of spec) {
+      const sway = document.createElement('div');
+      sway.className = 'kw-smoke';
+      sway.dataset.fx = String(fx);
+      sway.style.cssText = 'position:absolute;width:0;height:0;' +
+        'animation:kwSway ' + sw + 's ease-in-out infinite alternate;animation-delay:-' + (dl * 0.5).toFixed(2) + 's;';
+      const w = document.createElement('div');
+      w.className = 'kw-wisp';
+      w.style.cssText = 'position:absolute;left:-' + (sz / 2) + 'px;top:-' + (sz / 2) + 'px;width:' + sz + 'px;height:' + sz + 'px;' +
+        'border-radius:50%;filter:blur(3px);--kw-sx:' + dx + 'px;' +
+        'animation:kwSmoke ' + dur + 's ease-out infinite;animation-delay:-' + dl + 's;';
+      sway.appendChild(w); emEl.appendChild(sway);
+    }
+    return emEl;
+  }
+  function hideEmber() { if (emEl) emEl.style.display = 'none'; }
+  function drawEmber(rd, hp, immediate) {
+    const el = ensureEmber();
+    const A = _accent(rd);
+    const w = hp.w * 3.1, h = hp.h + hp.w * 1.9;
+    _glide(rd, hp.cx, hp.cy, hp.w * 7, 120, immediate);
+    if (Math.abs(w - (rd.gw || 0)) > 1 || Math.abs(h - (rd.gh || 0)) > 1 || el._kwA !== A) {
+      rd.gw = w; rd.gh = h; el._kwA = A;
+      el.style.width = w.toFixed(1) + 'px';
+      el.style.height = h.toFixed(1) + 'px';
+      const core = el.querySelector('.kw-core');
+      if (core) core.style.background = 'radial-gradient(closest-side, rgba(' + A + ',0.38), rgba(' + A + ',0.14) 50%, rgba(' + A + ',0) 74%)';
+      for (const sm of el.querySelectorAll('.kw-smoke')) {
+        const fx = parseFloat(sm.dataset.fx) || 0;
+        sm.style.left = (w / 2 + fx * w).toFixed(1) + 'px';
+        sm.style.top = (h * 0.42).toFixed(1) + 'px';
+        const wisp = sm.firstChild;
+        if (wisp) wisp.style.background = 'radial-gradient(circle, rgba(' + A + ',.62) 0%, rgba(' + A + ',.26) 42%, rgba(' + A + ',0) 70%)';
+      }
+    }
+    el.style.transform = 'translate3d(' + (rd.gx - w / 2).toFixed(1) + 'px,' + (rd.gy - h / 2).toFixed(1) + 'px,0)';
+    if (el.style.display !== 'block') el.style.display = 'block';
+  }
 
   // First laid-out char position of the bound cue (positions can have holes).
   function _firstPos(rd) { for (const p of rd.positions) { if (p && p.node) return p; } return null; }
@@ -532,17 +841,16 @@
   // C — marker dot: a small karaoke dot gliding alongside the current word.
   // Sits on the furigana-free side (left of the column in vertical text,
   // below the line in horizontal), so it never covers glyphs or readings.
-  function drawDot(rd, rect, comet) {
+  function drawDot(rd, hp, comet, immediate) {
     const el = ensureDot();
+    const rect = hp.rect;
     const g = _lineGeom(rd._pa);
     const A = rd.accent || rgbStr(accentRGB('--accent-read', '#4caf50'));
     const c = _gapCenter(rect, g);
-    let x = c.x - 6, y = c.y - 6;
-    if (Number.isFinite(rd.gx)) {
-      const dx = x - rd.gx, dy = y - rd.gy;
-      if (Math.abs(dx) + Math.abs(dy) < Math.max(rect.width, rect.height) * 6) { x = rd.gx + dx * 0.3; y = rd.gy + dy * 0.3; }
-    }
-    rd.gx = x; rd.gy = y;
+    // Gap-side coordinate from the cell, along-line coordinate from the
+    // CONTINUOUS hot point — the dot slides instead of stepping.
+    _glide(rd, (g.vert ? c.x : hp.cx) - 6, (g.vert ? hp.cy : c.y) - 6, Math.max(rect.width, rect.height) * 6, 100, immediate);
+    const x = rd.gx, y = rd.gy;
     if (el._kwA !== A) {
       el._kwA = A;
       el.style.background = 'radial-gradient(circle at 40% 35%, rgba(' + A + ',1), rgba(' + A + ',0.75))';
@@ -593,8 +901,20 @@
     return beamEl;
   }
   function hideBeam() { if (beamEl) beamEl.style.display = 'none'; }
-  function drawBeam(rd, rect) {
+  // Smoothing here is heavier (τ 170ms) so per-token speed changes in the
+  // word timings blur out; the lag that would cost is cancelled by aiming
+  // the node at where the voice will be τ ms from now.
+  const BEAM_TAU = 170;
+  function drawBeam(rd, hp, immediate) {
     const el = ensureBeam();
+    const rect = hp.rect;
+    if (!immediate && Number.isFinite(rd._rel)) {
+      const L = rd.cue.text.length;
+      const ahead = Math.max(0, Math.min(L, fillPosAt(rd.cue, rd._rel + BEAM_TAU)));
+      const hpA = _hotPoint(rd, ahead, rect);
+      // Same line/column only — across a break the lookahead would aim off-bar.
+      if (Math.abs(hpA.cx - hp.cx) + Math.abs(hpA.cy - hp.cy) < Math.max(hp.w, hp.h) * 4) hp = hpA;
+    }
     const g = _lineGeom(rd._pa);
     const A = rd.accent || rgbStr(accentRGB('--accent-read', '#4caf50'));
     const cr = g.chunk ? g.chunk.getBoundingClientRect() : rect;
@@ -602,26 +922,153 @@
     let x, y, w, h, frac;
     if (g.vert) {
       x = c.x - 2; w = 4; y = cr.top; h = Math.max(10, cr.height);
-      frac = (rect.top + rect.height / 2 - cr.top) / Math.max(1, cr.height);
+      frac = (hp.cy - cr.top) / Math.max(1, cr.height);
     } else {
       x = cr.left; w = Math.max(10, cr.width); y = c.y - 2; h = 4;
-      frac = (rect.left + rect.width / 2 - cr.left) / Math.max(1, cr.width);
+      frac = (hp.cx - cr.left) / Math.max(1, cr.width);
     }
-    if (Number.isFinite(rd.gx)) {
-      const dx = x - rd.gx, dy = y - rd.gy;
-      if (Math.abs(dx) + Math.abs(dy) < Math.max(w, h) * 2) { x = rd.gx + dx * 0.4; y = rd.gy + dy * 0.4; }
-    }
-    rd.gx = x; rd.gy = y;
+    _glide(rd, x, y, Math.max(w, h) * 2, 90, immediate);
+    x = rd.gx; y = rd.gy;
+    // The bright node itself eases along the bar (time-based, like the bar).
     frac = Math.max(0.02, Math.min(0.98, frac));
-    const f = (frac * 100).toFixed(1);
+    if (!immediate && !_pageMoving() && Number.isFinite(rd._bf) && Math.abs(frac - rd._bf) < 0.25) {
+      const k = 1 - Math.exp(-(Math.min(100, performance.now() - (rd._bft || 0))) / BEAM_TAU);
+      frac = rd._bf + (frac - rd._bf) * k;
+    }
+    rd._bf = frac; rd._bft = performance.now();
+    const f = (frac * 100).toFixed(2);
     const axis = g.vert ? 'to bottom' : 'to right';
+    // Softer, wider node (bell-shaped falloff) — sub-pixel motion reads as a
+    // drifting light rather than a sliding edge.
     el.style.background = 'linear-gradient(' + axis + ', rgba(' + A + ',0.14), rgba(' + A + ',0.14) ' +
-      'calc(' + f + '% - 26px), rgba(' + A + ',0.95) ' + f + '%, rgba(' + A + ',0.14) calc(' + f + '% + 26px), rgba(' + A + ',0.14))';
+      'calc(' + f + '% - 36px), rgba(' + A + ',0.42) calc(' + f + '% - 14px), rgba(' + A + ',0.95) ' + f + '%, ' +
+      'rgba(' + A + ',0.42) calc(' + f + '% + 14px), rgba(' + A + ',0.14) calc(' + f + '% + 36px), rgba(' + A + ',0.14))';
     if (el._kwA !== A) { el._kwA = A; el.style.boxShadow = '0 0 8px rgba(' + A + ',0.18)'; }
     el.style.width = w.toFixed(1) + 'px';
     el.style.height = h.toFixed(1) + 'px';
     el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
     if (el.style.display !== 'block') el.style.display = 'block';
+  }
+
+  // J — twin beams: the margin beam on BOTH sides of the line (bright node
+  // sliding on each), plus a soft wash over the line itself. The whole trio
+  // drifts through the hues very slowly (compositor hue-rotate, 45 s); while
+  // PAUSED the wash breathes with an inset sheen so a parked place still
+  // reads as alive. The original single beam (F) is untouched.
+  let twinEls = null;
+  function ensureTwin() {
+    if (twinEls && twinEls.band.isConnected) return twinEls;
+    ensureAnimCss();
+    twinEls = {
+      band: _mkOv('kwTwinBand', 2537, 'border-radius:8px;'),
+      a: _mkOv('', 2540, 'border-radius:2px;'),
+      b: _mkOv('', 2540, 'border-radius:2px;'),
+    };
+    return twinEls;
+  }
+  // Slow hue drift, recomputed every 500 ms in JS: an animated CSS
+  // hue-rotate filter re-composited three layers every frame for an hour.
+  function _hueShift(rgbStrIn, deg) {
+    const p = rgbStrIn.split(',').map(Number);
+    if (p.length < 3 || p.some((x) => !Number.isFinite(x))) return rgbStrIn;
+    let [r, g, b] = p.map((x) => x / 255);
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let h = 0; const l = (mx + mn) / 2; const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+    if (d !== 0) {
+      if (mx === r) h = ((g - b) / d) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
+      h *= 60; if (h < 0) h += 360;
+    }
+    h = (h + deg) % 360;
+    const c = (1 - Math.abs(2 * l - 1)) * sat, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+    let rr = 0, gg = 0, bb = 0;
+    if (h < 60) { rr = c; gg = x; } else if (h < 120) { rr = x; gg = c; } else if (h < 180) { gg = c; bb = x; }
+    else if (h < 240) { gg = x; bb = c; } else if (h < 300) { rr = x; bb = c; } else { rr = c; bb = x; }
+    return [rr, gg, bb].map((v) => Math.round((v + m) * 255)).join(',');
+  }
+  let _twinHueAt = 0, _twinHueA = '';
+  function _twinAccent(base) {
+    const now = performance.now();
+    if (now - _twinHueAt > 500 || !_twinHueA) {
+      _twinHueAt = now;
+      _twinHueA = _hueShift(base, ((now / 1000) % 24) / 24 * 360);   // full cycle every 24 s
+    }
+    return _twinHueA;
+  }
+  function hideTwin() { if (twinEls) { for (const k of ['band', 'a', 'b']) twinEls[k].style.display = 'none'; } }
+  function drawTwin(rd, hp, immediate) {
+    const els = ensureTwin();
+    const rect = hp.rect;
+    const g = _lineGeom(rd._pa);
+    const A = _twinAccent(_accent(rd));
+    const cr = g.chunk ? g.chunk.getBoundingClientRect() : rect;
+    const c = _gapCenter(rect, g);
+    // Lookahead-compensated node (same trick as the single beam).
+    let hpN = hp;
+    if (!immediate && Number.isFinite(rd._rel)) {
+      const L = rd.cue.text.length;
+      const ahead = Math.max(0, Math.min(L, fillPosAt(rd.cue, rd._rel + BEAM_TAU)));
+      const hpA = _hotPoint(rd, ahead, rect);
+      if (Math.abs(hpA.cx - hp.cx) + Math.abs(hpA.cy - hp.cy) < Math.max(hp.w, hp.h) * 4) hpN = hpA;
+    }
+    let bx, by, bw, bh, frac, gapHalf;
+    if (g.vert) {
+      gapHalf = rect.left - c.x;
+      bx = rect.left - 2; bw = rect.width + 4; by = cr.top; bh = Math.max(10, cr.height);
+      frac = (hpN.cy - cr.top) / Math.max(1, cr.height);
+    } else {
+      gapHalf = c.y - rect.bottom;
+      bx = cr.left; bw = Math.max(10, cr.width); by = rect.top - 2; bh = rect.height + 4;
+      frac = (hpN.cx - cr.left) / Math.max(1, cr.width);
+    }
+    _glide(rd, bx, by, Math.max(bw, bh) * 2, 90, immediate);
+    bx = rd.gx; by = rd.gy;
+    frac = Math.max(0.02, Math.min(0.98, frac));
+    if (!immediate && !_pageMoving() && Number.isFinite(rd._bf) && Math.abs(frac - rd._bf) < 0.25) {
+      const k = 1 - Math.exp(-(Math.min(100, performance.now() - (rd._bft || 0))) / BEAM_TAU);
+      frac = rd._bf + (frac - rd._bf) * k;
+    }
+    rd._bf = frac; rd._bft = performance.now();
+    const f = (frac * 100).toFixed(2);
+    const axis = g.vert ? 'to bottom' : 'to right';
+    const beamBg = 'linear-gradient(' + axis + ', rgba(' + A + ',0.14), rgba(' + A + ',0.14) ' +
+      'calc(' + f + '% - 36px), rgba(' + A + ',0.42) calc(' + f + '% - 14px), rgba(' + A + ',0.95) ' + f + '%, ' +
+      'rgba(' + A + ',0.42) calc(' + f + '% + 14px), rgba(' + A + ',0.14) calc(' + f + '% + 36px), rgba(' + A + ',0.14))';
+    const paused = !playing && scrubMs < 0;
+    // Band: soft wash with a slightly brighter pool around the node.
+    const band = els.band;
+    if (band._kwA !== A) {
+      band._kwA = A;
+      band.style.setProperty('--kw-a', A);
+      band.style.boxShadow = 'inset 0 0 0 1px rgba(' + A + ',0.22), 0 0 14px rgba(' + A + ',0.16)';
+    }
+    band.style.background = 'linear-gradient(' + axis + ', rgba(' + A + ',0.13), rgba(' + A + ',0.13) ' +
+      'calc(' + f + '% - 70px), rgba(' + A + ',0.30) ' + f + '%, rgba(' + A + ',0.13) calc(' + f + '% + 70px), rgba(' + A + ',0.13))';
+    if (band._kwP !== paused) {
+      band._kwP = paused;
+      band.classList.toggle('kw-paused', paused);
+    }
+    band.style.width = bw.toFixed(1) + 'px';
+    band.style.height = bh.toFixed(1) + 'px';
+    band.style.transform = 'translate3d(' + bx.toFixed(1) + 'px,' + by.toFixed(1) + 'px,0)';
+    if (band.style.display !== 'block') band.style.display = 'block';
+    // Beams on both sides, mirrored about the line at the gap-centre distance.
+    for (const [k, side] of [['a', -1], ['b', 1]]) {
+      const el = els[k];
+      let x, y, w, h;
+      if (g.vert) {
+        x = (side < 0) ? (bx + 2 - gapHalf - 2) : (bx + 2 + rect.width + gapHalf - 2);
+        y = by; w = 4; h = bh;
+      } else {
+        x = bx; w = bw; h = 4;
+        y = (side < 0) ? (by + 2 - gapHalf - 2) : (by + 2 + rect.height + gapHalf - 2);
+      }
+      el.style.background = beamBg;
+      if (el._kwA !== A) { el._kwA = A; el.style.boxShadow = '0 0 8px rgba(' + A + ',0.18)'; }
+      el.style.width = w.toFixed(1) + 'px';
+      el.style.height = h.toFixed(1) + 'px';
+      el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
+      if (el.style.display !== 'block') el.style.display = 'block';
+    }
   }
 
   // B — progress underline: a faint track along the whole cue with a bright
@@ -759,7 +1206,9 @@
       positionGlow(rd, (Number.isFinite(t) && t >= 0) ? t : rd.cue.startMs, true);
     });
   }
-  try { document.addEventListener('scroll', scheduleRepark, { capture: true, passive: true }); } catch (_) {}
+  try {
+    document.addEventListener('scroll', () => { _lastScrollTs = performance.now(); scheduleRepark(); }, { capture: true, passive: true });
+  } catch (_) {}
 
   // Position the glow over the chars around the fill frontier. `immediate`
   // skips the glide (used for the paused park). Returns false only on a
@@ -790,18 +1239,25 @@
     const pa = rd.positions[a], pb = rd.positions[b];
     if (!pa || !pb || !pa.node || !pa.node.isConnected) { hideAllReaderOverlays(); return false; }
     rd._pa = pa;   // hot-char anchor for the alternative styles' geometry
+    // Hot rect = the cell being spoken, measured in its own text node (never
+    // a multi-node range: that swept in <rt> boxes — see _charRect). Fall
+    // back outward through the hot window if that cell has no box.
     let rect = null;
-    try {
-      const r = document.createRange();
-      r.setStart(pa.node, Math.min(pa.off, pa.node.nodeValue.length));
-      r.setEnd(pb.node, Math.min(pb.off, pb.node.nodeValue.length));
-      // The hot span can straddle a column break — use its largest client rect.
-      for (const rc of r.getClientRects()) {
-        if (rc.width < 0.5 || rc.height < 0.5) continue;
-        if (!rect || rc.width * rc.height > rect.width * rect.height) rect = rc;
-      }
-    } catch (_) {}
-    if (!rect) { hideGlow(); hideDot(); hideRuler(); hideTrail(); hideBeam(); return true; }
+    {
+      const i0 = Math.max(0, Math.min(L - 1, Math.floor(fill)));
+      rect = _charRect(rd, i0);
+      for (let k = a; !rect && k < b; k++) rect = _charRect(rd, k);
+      if (rect) { const q = rd.positions[i0]; if (q && q.node && q.node.isConnected) rd._pa = q; }
+    }
+    if (!rect) { hideAllReaderOverlays(); return true; }
+    // Scrubbing: the finger's word must stay on the page in BOTH directions
+    // (the playback page-turn probe below only looks ahead and is throttled
+    // for playback). The reader throttles this itself.
+    if (scrubMs >= 0 && typeof window.__pagedScrubFollow === 'function') {
+      try { window.__pagedScrubFollow(rect); } catch (_) {}
+    }
+    const hp = _hotPoint(rd, fill, rect);
+    rd._rel = rel;
     // WORD-SYNCED PAGE TURN: hand the paged reader the rect of the word the
     // voice will reach in ~350 ms (one smooth-scroll's worth of warning). If
     // that word lies beyond the page edge, the reader turns NOW and the new
@@ -809,7 +1265,7 @@
     // deferred for word-timed cues (autoScrollForRange deferWordTurn), so
     // this is what turns the page mid-cue. ~4×/s; skipped while paused or
     // during the parked repark (immediate).
-    if (playing && !immediate && typeof window.__pagedWordFollowTurn === 'function') {
+    if ((playing || scrubMs >= 0) && !immediate && typeof window.__pagedWordFollowTurn === 'function') {
       const nowMs = performance.now();
       if (nowMs - _wfLastCheck > 250) {
         _wfLastCheck = nowMs;
@@ -831,23 +1287,23 @@
         } catch (_) {}
       }
     }
-    if (style === 'dot' || style === 'comet') { drawDot(rd, rect, style === 'comet'); return true; }
+    if (style === 'bracket') { drawBracket(rd, hp, immediate); return true; }
+    if (style === 'marker') { drawMarker(rd, hp, immediate); return true; }
+    if (style === 'ember') { drawEmber(rd, hp, immediate); return true; }
+    if (style === 'twin') { drawTwin(rd, hp, immediate); return true; }
+    if (style === 'dot' || style === 'comet') { drawDot(rd, hp, style === 'comet', immediate); return true; }
     if (style === 'underline') { drawUnderline(rd, fill); return true; }
     if (style === 'ruler') { drawRuler(rd, rect); return true; }
-    if (style === 'beam') { drawBeam(rd, rect); return true; }
+    if (style === 'beam') { drawBeam(rd, hp, immediate); return true; }
     const el = ensureGlow();
     // Vertical-rl columns are one char wide — inflate mostly ACROSS the column
     // so the halo reads as a soft pool of light around the characters.
     const w = rect.width * 2.9;
     const h = rect.height + rect.width * 1.7;
-    let x = rect.left + rect.width / 2 - w / 2;
-    let y = rect.top + rect.height / 2 - h / 2;
-    if (!immediate && Number.isFinite(rd.gx)) {
-      const dx = x - rd.gx, dy = y - rd.gy;
-      // Glide toward the target; a big jump (next column/page, seek) snaps.
-      if (Math.abs(dx) + Math.abs(dy) < rect.width * 6) { x = rd.gx + dx * 0.3; y = rd.gy + dy * 0.3; }
-    }
-    rd.gx = x; rd.gy = y;
+    // Glide toward the CONTINUOUS hot point (time-based); a big jump (next
+    // column/page, seek) snaps.
+    _glide(rd, hp.cx - w / 2, hp.cy - h / 2, rect.width * 6, 110, immediate);
+    const x = rd.gx, y = rd.gy;
     if (Math.abs(w - rd.gw) > 1 || Math.abs(h - rd.gh) > 1) {
       rd.gw = w; rd.gh = h;
       el.style.width = w.toFixed(1) + 'px';
@@ -860,9 +1316,18 @@
     return true;
   }
 
+  let _bindDiagAt = 0;
   function readerCuePainted(range, cue) {
     ensureStyles();
     attachOnce();
+    try {   // diag: how far into the cue the clock already is when the reader binds
+      if (window._diag && cue && Number.isFinite(cue.startMs)) {
+        const c = clockMs();
+        const lag = (c >= 0) ? Math.round(c - cue.startMs) : null;
+        const nowD = performance.now();
+        if (nowD - _bindDiagAt > 900) { _bindDiagAt = nowD; window._diag('[paged-diag] kw bind lag=' + lag + 'ms rate=' + rate.toFixed(2) + ' evAge=' + Math.round(nowD - lastTs) + 'ms'); }
+      }
+    } catch (_) {}
     if (!range || !cue || !Array.isArray(cue.w) || !cue.w.length || !cue.text) { clearReader(); return false; }
     const text = cue.text;
     const positions = new Array(text.length + 1);
@@ -906,8 +1371,19 @@
       if (ti < Math.min(text.length, 4)) { clearReader(); return false; }
       for (; ti <= text.length; ti++) positions[ti] = last || { node: range.endContainer, off: range.endOffset };
     } catch (_) { clearReader(); return false; }
+    // Carry the glide state across the re-bind: every cue change built a
+    // fresh reader with gx = NaN, so the indicator SNAPPED to the new cue's
+    // first word instead of gliding — the "sometimes slides, sometimes
+    // snaps" line change (snap whenever a line change coincided with a cue
+    // change). Same style → keep position, node fraction and clock.
+    const prev = reader;
+    const carry = (prev && prev._style) ? prev : null;
     reader = {
-      cue, positions, gx: NaN, gy: NaN, gw: 0, gh: 0,
+      cue, positions,
+      gx: carry ? carry.gx : NaN, gy: carry ? carry.gy : NaN,
+      gw: carry ? carry.gw : 0, gh: carry ? carry.gh : 0,
+      _gt: carry ? carry._gt : undefined, _bf: carry ? carry._bf : undefined, _bft: carry ? carry._bft : undefined,
+      _style: carry ? carry._style : undefined, _trail: carry ? carry._trail : undefined,
       accent: rgbStr(accentRGB('--accent-read', '#4caf50')),
       chunks: chunksOf(cue), chunkAt: 0, pillIdx: -1
     };
@@ -993,14 +1469,20 @@
   }
 
   let _stateProbeAt = 0;
+  let _lastTickAt = 0;
   function tick() {
     rafId = 0;
-    if (document.hidden || !playing) return;   // frozen — kick() resumes
+    if (document.hidden || (!playing && scrubMs < 0)) return;   // frozen — kick() resumes
+    // ~60 fps cap: on a 120 Hz display every frame ran the full rect walk +
+    // style writes twice as often for no visible gain (battery/heat).
+    const nowT = performance.now();
+    if (nowT - _lastTickAt < 14) { rafId = requestAnimationFrame(tick); return; }
+    _lastTickAt = nowT;
     // Inverse stale-flag guard: if we think we're playing but position events
     // dried up (paused scrub tripped the motion heal, or a missed pause state
     // event), probe native instead of rAF-spinning forever on a frozen fill.
     const nowP = performance.now();
-    if (nowP - lastTs > 3000 && nowP - _stateProbeAt > 3000) {
+    if (scrubMs < 0 && nowP - lastTs > 3000 && nowP - _stateProbeAt > 3000) {
       _stateProbeAt = nowP;
       try {
         bg()?.getState?.().then?.((s) => {
@@ -1024,6 +1506,28 @@
     if (document.hidden || (!span && !reader)) return;
     rafId = requestAnimationFrame(tick);
   }
+
+  // ── reader drag-scrub hooks (reading-mode-paged.js) ──────────────────────
+  function scrubTo(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return;
+    scrubMs = ms;
+    kick();
+  }
+  function scrubEnd(ms, isPlaying) {
+    scrubMs = -1;
+    if (Number.isFinite(ms) && ms >= 0) { lastPos = ms; lastTs = performance.now(); }
+    // Park at the landing spot; the clock starts when native confirms play.
+    playing = false;
+    resumePending = !!isPlaying;
+    dispMs = -1;   // re-seed the display clock from the landing position
+    if (reader) {
+      try { positionGlow(reader, Number.isFinite(ms) ? ms : reader.cue.startMs, true); } catch (_) {}
+    }
+    kick();
+  }
+  function hasReader() { return !!reader; }
+  // Best live playhead estimate (ms), -1 when unknown — the scrub anchor.
+  function nowMs() { try { return clockMs(); } catch (_) { return -1; } }
 
   // Mode changes while paused never reach tick() — clear stale surfaces here.
   const modeObserver = new MutationObserver(() => {
@@ -1052,6 +1556,10 @@
     setSpanCue,        // (hostEl, cue) — card/audio: frags live inside hostEl
     readerCuePainted,  // (range, cue) — paged reader after cue highlight paint
     feedPosition,      // (ms, playing) — watchdog backup clock (native truth)
+    scrubTo,           // (ms) — reader drag-scrub: the finger drives the clock
+    scrubEnd,          // (ms, playing) — scrub released: re-seed the clock
+    nowMs,             // () — live playhead estimate (scrub anchor)
+    hasReader,         // () — a word-timed cue is bound (indicator can draw)
     clearSpan,
     clearReader,
     // Preferences pokes this after a style change so a PAUSED (parked)

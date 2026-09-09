@@ -433,12 +433,57 @@
            ['dot', window.i18n.t('pj.karaoke_style_dot', 'C · Marker dot')],
            ['ruler', window.i18n.t('pj.karaoke_style_ruler', 'D · Line ruler')],
            ['comet', window.i18n.t('pj.karaoke_style_comet', 'E · Comet trail')],
-           ['beam', window.i18n.t('pj.karaoke_style_beam', 'F · Margin beam')]].forEach(([v, t]) => {
+           ['beam', window.i18n.t('pj.karaoke_style_beam', 'F · Margin beam')],
+           ['bracket', window.i18n.t('pj.karaoke_style_bracket', 'G · Focus brackets')],
+           ['marker', window.i18n.t('pj.karaoke_style_marker', 'H · Highlighter swipe')],
+           ['ember', window.i18n.t('pj.karaoke_style_ember', 'I · Ember')],
+           ['twin', window.i18n.t('pj.karaoke_style_twin', 'J · Twin beams + wash')]].forEach(([v, t]) => {
             const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
           });
           const cur = get().karaokeStyle;
-          sel.value = ['glow', 'underline', 'dot', 'ruler', 'comet', 'beam'].includes(cur) ? cur : 'glow';
+          sel.value = ['glow', 'underline', 'dot', 'ruler', 'comet', 'beam', 'bracket', 'marker', 'ember', 'twin'].includes(cur) ? cur : 'glow';
           sel.addEventListener('change', () => { apply('read', { karaokeStyle: sel.value }); try { window.wordHighlight?.restyle?.(); } catch (_) {} });
+          return sel;
+        })()));
+        // Drag-scrub gesture (reading-mode-paged.js scrubBegin/Move/End).
+        block.appendChild(row(window.i18n.t('pj.scrub_gesture', 'Scrub gesture (drag in subtitle zone)'), (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['audio', window.i18n.t('pj.scrub_audio', 'Visual + audio grains')],
+           ['visual', window.i18n.t('pj.scrub_visual', 'Visual only')],
+           ['off', window.i18n.t('pj.scrub_off', 'Off (flick = one subtitle)')]].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          const cur = get().scrubGesture;
+          sel.value = ['audio', 'visual', 'off'].includes(cur) ? cur : 'audio';
+          sel.addEventListener('change', () => { apply('read', { scrubGesture: sel.value }); });
+          return sel;
+        })()));
+        // Read-mode speech engine (iOS): Sonic pitch-synchronous time-stretch in
+        // the foreground reader; audio mode / background stay on AVAudioPlayer.
+        block.appendChild(row(window.i18n.t('pj.speech_engine', 'Read-mode speech engine (iOS)'), (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['default', window.i18n.t('pj.speech_engine_default', 'Standard')],
+           ['sonic', window.i18n.t('pj.speech_engine_sonic', 'Sonic (speech time-stretch)')],
+           ['speedy', window.i18n.t('pj.speech_engine_speedy', 'Speedy (Sonic + nonlinear)')]].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          const cur = get().speechEngine;
+          sel.value = (cur === 'sonic' || cur === 'speedy') ? cur : 'default';
+          sel.addEventListener('change', () => { apply('read', { speechEngine: sel.value }); try { window._readEngineSync?.(); } catch (_) {} });
+          return sel;
+        })()));
+        // Word timing for SRT titles via on-device transcription (auto-transcribe.js timingOnly).
+        block.appendChild(row(window.i18n.t('pj.srt_wordtime', 'Word timing for subtitle files (on-device)'), (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['1', window.i18n.t('pj.on', 'On')], ['0', window.i18n.t('pj.off', 'Off')]].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          let cur = '1'; try { cur = localStorage.getItem('KADOKI_SRT_WORDTIME') === '0' ? '0' : '1'; } catch (_) {}
+          sel.value = cur;
+          sel.addEventListener('change', () => { try { localStorage.setItem('KADOKI_SRT_WORDTIME', sel.value); } catch (_) {} });
           return sel;
         })()));
         // Follow resolver engine — the revert switch for the sequential cursor.
@@ -1832,6 +1877,51 @@
             status.textContent = '✗ ' + (e?.message || e);
             status.style.color = '#c88';
           }
+        }
+      });
+    }
+    // Outbox: cards that failed to reach the Mac queue durably (blobStore)
+    // and auto-send when it's reachable again; this row shows the pending
+    // count and offers a manual flush.
+    const obBtn = document.getElementById('ankiOutboxFlushBtn');
+    const obStatus = document.getElementById('ankiOutboxStatus');
+    const obRefresh = async () => {
+      if (!obStatus) return;
+      try {
+        const n = await window.ankiOutbox?.count?.();
+        if (n > 0) {
+          obStatus.textContent = window.i18n.fmt('pj.ac_outbox_pending', { n });
+          obStatus.style.color = '#c8a35a';
+        } else {
+          obStatus.textContent = window.i18n.t('pj.ac_outbox_empty', 'nothing queued');
+          obStatus.style.color = '#888';
+        }
+      } catch (_) {}
+    };
+    obRefresh();
+    if (obBtn && !obBtn.dataset.wired) {
+      obBtn.dataset.wired = '1';
+      obBtn.addEventListener('click', async () => {
+        if (obStatus) { obStatus.textContent = '…'; obStatus.style.color = '#888'; }
+        try {
+          const r = await window.ankiOutbox.flush();
+          if (obStatus) {
+            if (r.offline) {
+              obStatus.textContent = '✗ ' + window.i18n.fmt('pj.ac_outbox_offline', { n: r.left });
+              obStatus.style.color = '#c88';
+            } else if (r.error) {
+              obStatus.textContent = '✗ ' + r.error + (r.left ? ' (' + r.left + ')' : '');
+              obStatus.style.color = '#c88';
+            } else if (r.sent > 0) {
+              obStatus.textContent = '✓ ' + window.i18n.fmt('pj.ac_outbox_sent', { n: r.sent });
+              obStatus.style.color = 'var(--accent-read,#4caf50)';
+            } else {
+              obStatus.textContent = window.i18n.t('pj.ac_outbox_empty', 'nothing queued');
+              obStatus.style.color = '#888';
+            }
+          }
+        } catch (e) {
+          if (obStatus) { obStatus.textContent = '✗ ' + (e?.message || e); obStatus.style.color = '#c88'; }
         }
       });
     }

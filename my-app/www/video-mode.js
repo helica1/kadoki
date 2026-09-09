@@ -24,7 +24,7 @@
   // Build stamp — shown once per boot when the video player first appears,
   // so device tests can't silently run a stale binary (installs do NOT
   // restart a running app). Bump on every video-feature change.
-  const KV_BUILD = 'kv47';
+  const KV_BUILD = 'kv50';
   let _stamped = false;
   const VIDEO_RE = /\.(mp4|m4v|mov|3gp|mkv)$/i;
   // Keep in sync with app.js's modal marker list (the ".kai-modal is the
@@ -63,8 +63,14 @@
   // AVPlayerLayer under the webview, no stereo — see KadokiVideoIOS.swift).
   // Vision reports platform 'ios' too, so this is one combined gate; Android
   // stays off (no native video layer there yet).
+  // Native picture layer: visionOS (RealityKit plane), iOS (AVPlayerLayer
+  // under the WebView) and Android (ExoPlayer TextureView under the WebView).
+  function isPhonePlatform() {
+    const p = window.Capacitor?.getPlatform?.();
+    return p === 'ios' || p === 'android';
+  }
   function nativeVideoOk() {
-    return !!window.KADOKI_VISION_NATIVE || (window.Capacitor?.getPlatform?.() === 'ios');
+    return !!window.KADOKI_VISION_NATIVE || isPhonePlatform();
   }
   // iPhone (not iPad, not Vision): the header has no room for a permanent
   // VIDEO pill — it appears only while a video Title is active, where it
@@ -361,7 +367,7 @@
   // single-line cue, so theme.css keys extra rules off this same class).
   function iosCinemaLandscapeActive() {
     return _isVideoTitle && !window.KADOKI_VISION_NATIVE &&
-      (window.Capacitor?.getPlatform?.() === 'ios') &&
+      isPhonePlatform() &&
       (document.body.classList.contains('mode-audio') || cardVideoActive()) &&
       isLandscapeOrientation();
   }
@@ -412,7 +418,13 @@
     const cue = document.getElementById('audiobookCueText');
     if (!cue) return;
     if (!surf || !surf.visible) {
-      cue.style.position = ''; cue.style.top = ''; cue.style.left = ''; cue.style.transform = '';
+      // Only UNPIN when the cinema layout itself is gone. A temporary
+      // occlusion (hamburger menu, a dialog → visible:false, cinema:true)
+      // used to drop the cue back into flow layout — BELOW the hidden cover
+      // slot — and re-pin it a tick (≤600ms) after the overlay closed: the
+      // "subtitle starts too low, then jumps up" glitch.
+      if (surf && surf.cinema && _nativeFrame) return;
+      cue.style.position = ''; cue.style.top = ''; cue.style.bottom = ''; cue.style.left = ''; cue.style.transform = '';
       if (_prevCueOk()) {
         const prev = document.getElementById('audiobookPrevCueText');
         if (prev) { prev.style.position = ''; prev.style.bottom = ''; prev.style.left = ''; prev.style.transform = ''; }
@@ -424,23 +436,37 @@
     // iOS landscape (2026-08-30): always overlay — the video fills the
     // whole screen there now, so there's no reserved "below" strip to sit
     // in any more (see the kv-ios-landscape reserve in theme.css).
+    // Before native has ever answered for this surface, _nativeFrame is a
+    // PREDICTION (sync() aspect-fits the requested rect) so the cue is
+    // pinned in the very same frame the layout appears — never a first
+    // paint in flow layout followed by a jump.
     const f = _nativeFrame;
     if (f && f.h > 1) {
-      const ch = cue.getBoundingClientRect().height || 70;
       const overlay = document.body.classList.contains('kv-subplace-overlay') ||
         (!window.KADOKI_VISION_NATIVE && document.body.classList.contains('kv-ios-landscape'));
-      const top = overlay ? (f.y + f.h - ch - 20) : (f.y + f.h + 10);
       cue.style.position = 'fixed';
       cue.style.left = '50%';
       cue.style.transform = 'translateX(-50%)';
-      const cueTop = Math.round(Math.min(top, window.innerHeight - 70));
-      cue.style.top = cueTop + 'px';
+      if (overlay) {
+        // Overlay: anchor the panel's BOTTOM edge to the film's lower edge.
+        // Height-independent — a taller cue grows UPWARD by construction, so
+        // a new line never renders top-anchored-too-low for a tick before
+        // being re-measured and moved up.
+        const bottom = Math.max(0, Math.round(window.innerHeight - (f.y + f.h) + 20));
+        cue.style.top = '';
+        cue.style.bottom = bottom + 'px';
+      } else {
+        const top = f.y + f.h + 10;
+        cue.style.bottom = '';
+        cue.style.top = Math.round(Math.min(top, window.innerHeight - 70)) + 'px';
+      }
       // Previous-cue panel: bottom-anchored just above the current cue's
       // TOP edge, so it grows upward with its own content height instead
       // of needing to be pre-measured.
       if (_prevCueOk()) {
         const prev = document.getElementById('audiobookPrevCueText');
         if (prev && prev.textContent) {
+          const cueTop = Math.round(cue.getBoundingClientRect().top);
           prev.style.position = 'fixed';
           prev.style.left = '50%';
           prev.style.transform = 'translateX(-50%)';
@@ -465,6 +491,17 @@
 
   let _lastSendTs = 0;
   let _nativeFrame = null;   // authoritative contained rect from native
+  // Last aspect native actually rendered (updated from every frame reply;
+  // 16:9 until then). Used to PREDICT where the picture will land inside a
+  // freshly requested surface rect — native's AVPlayerLayer is .resizeAspect
+  // and centres, so the contained rect is pure geometry.
+  let _videoAspect = 16 / 9;
+  function predictFrame(s) {
+    if (!s || !s.visible || !(s.w > 1 && s.h > 1)) return null;
+    let fw = s.w, fh = s.w / _videoAspect;
+    if (fh > s.h) { fh = s.h; fw = s.h * _videoAspect; }
+    return { x: s.x + (s.w - fw) / 2, y: s.y + (s.h - fh) / 2, w: fw, h: fh, predicted: true };
+  }
   // Card mode's #kvCardAnchor is otherwise a flex:1 placeholder — TALLER
   // than the video actually renders, so native's AVPlayerLayer (always
   // .resizeAspect, which CENTERS within whatever frame it's given) put
@@ -494,7 +531,7 @@
       return;
     }
     const f = _nativeFrame;
-    if (f && f.w > 1 && f.h > 1) _cardAspect = f.w / f.h;
+    if (f && !f.predicted && f.w > 1 && f.h > 1) _cardAspect = f.w / f.h;
     const w = anchor.getBoundingClientRect().width || anchor.parentElement?.getBoundingClientRect().width || 0;
     if (w > 1) anchor.style.height = Math.round(w / _cardAspect) + 'px';
   }
@@ -505,6 +542,21 @@
     sizeCardAnchor();
     const s = computeSurface();
     const key = JSON.stringify(s);
+    // Surface rect changed (title open, mode switch, rotation, overlay
+    // closed): the old frame is stale and the new one is a round trip away.
+    // Pin the cue NOW against a predicted frame so its first paint is
+    // already in the right place; native's reply refines it (same numbers
+    // whenever the aspect guess holds, so no visible move).
+    if (s.visible && key !== _lastSent) {
+      const cur = _lastSurf;
+      const rectChanged = !cur || !cur.visible || cur.x !== s.x || cur.y !== s.y || cur.w !== s.w || cur.h !== s.h;
+      if (!_nativeFrame || rectChanged) {
+        const pf = predictFrame(s);
+        if (pf) _nativeFrame = pf;
+      }
+      _lastSurf = s;
+      try { positionCuePanel(s); } catch (_) {}
+    }
     // While visible, re-send every ~3s even when unchanged: the native side
     // re-asserts the cinema chrome and refreshes the authoritative frame.
     if (!force && key === _lastSent && !(s.visible && Date.now() - _lastSendTs > 3000)) return;
@@ -514,6 +566,7 @@
       Promise.resolve(p.videoSurface(s)).then((r) => {
         if (r && Number.isFinite(r.frameW) && r.frameW > 1) {
           _nativeFrame = { x: r.frameX, y: r.frameY, w: r.frameW, h: r.frameH };
+          if (r.frameH > 1) _videoAspect = r.frameW / r.frameH;
         }
         // Subtitle placement: on Vision it's a native-side USER pref (set on
         // the ornament's settings card) — apply it as-is. On iOS the class
@@ -524,9 +577,26 @@
         if (window.KADOKI_VISION_NATIVE && r && r.subPlacement) {
           document.body.classList.toggle('kv-subplace-overlay', r.subPlacement === 'overlay');
         }
-        if (r && Number.isFinite(r.subSize) && r.subSize > 10) {
+        // Subtitle size: on Vision, for a VIDEO title, it's the ornament's
+        // own native user pref — apply it. Everywhere else the Appearance
+        // panel's audio font-size preference (--font-size-audio, theme.css)
+        // must rule: iOS's plugin branch resolves a FIXED default (24), and
+        // this handshake runs even for plain audiobooks (to keep the video
+        // layer hidden), so stamping that inline (!important) silently
+        // overrode the preference on every title — the "audio font too
+        // small / size setting does nothing" bug. removeProperty also
+        // self-heals a size stamped earlier in the session (the cue element
+        // is a singleton that survives title switches).
+        {
           const cue = document.getElementById('audiobookCueText');
-          if (cue) { cue.style.setProperty('font-size', Math.round(r.subSize) + 'px', 'important'); }
+          if (cue) {
+            if (window.KADOKI_VISION_NATIVE && _isVideoTitle &&
+                r && Number.isFinite(r.subSize) && r.subSize > 10) {
+              cue.style.setProperty('font-size', Math.round(r.subSize) + 'px', 'important');
+            } else {
+              cue.style.removeProperty('font-size');
+            }
+          }
         }
         positionCuePanel(s);
         positionCardSubs(s);
@@ -660,6 +730,9 @@
     _subsObserved = true;
     let t = 0;
     new MutationObserver(() => {
+      // New cue text: re-pin in the same frame it renders (the 600ms poll
+      // alone let a re-measured position land visibly late).
+      try { positionCuePanel(_lastSurf); } catch (_) {}
       clearTimeout(t);
       t = setTimeout(pushSubs, 120);   // after layout + a beat for paint
     }).observe(cue, { childList: true, subtree: true, characterData: true, attributes: true });
@@ -687,7 +760,7 @@
   let _lastStackLandscape = null;
   function cardVideoActive() {
     return _isVideoTitle && !window.KADOKI_VISION_NATIVE &&
-      (window.Capacitor?.getPlatform?.() === 'ios') &&
+      isPhonePlatform() &&
       document.body.classList.contains('mode-card');
   }
   function ensureCardLayout() {
@@ -1351,7 +1424,7 @@
       (async () => {
         try {
           const dm = await bg()?.deviceModel?.();
-          _isPhone = !!(dm && /iPhone/i.test(dm.model || '') && !dm.visionClass);
+          _isPhone = !!(dm && (/iPhone/i.test(dm.model || '') || dm.phone === true) && !dm.visionClass);
         } catch (_) {}
         start(); maybeSeedDemo();
       })();

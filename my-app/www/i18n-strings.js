@@ -43,6 +43,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'ts.time_card': { en: 'Time (cards)', ja: '時間（カード）' },
   'ts.time_read': { en: 'Time (reading)', ja: '時間（読書）' },
   'ts.time_audio': { en: 'Time (audio)', ja: '時間（音声）' },
+  'ts.time_video': { en: 'Time (video)', ja: '時間（動画）' },
   'ts.time_watch': { en: 'Time (watch)', ja: '時間（ウォッチ）' },
   'ts.eta': { en: 'Est. finish', ja: '完了予測' },
   'ts.eta_val': { en: '~{d} days ({date})', ja: 'あと約{d}日（{date}）' },

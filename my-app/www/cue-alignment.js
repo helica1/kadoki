@@ -411,7 +411,10 @@
     if (!raw) return null;
     let obj = null;
     try { obj = JSON.parse(raw); } catch (e) { return null; }
-    if (fingerprint && obj.fingerprint !== fingerprint) return null;
+    if (fingerprint && obj.fingerprint !== fingerprint) {
+      try { window._diag?.('[paged-diag] alignment cache fp mismatch: stored=' + obj.fingerprint); } catch (_) {}
+      return null;
+    }
     return deserializeAlignment(obj);
   }
 
@@ -432,8 +435,17 @@
    * back to srtParser.buildCueChunkMaps for this session.
    */
   async function loadOrBuild(opts) {
-    const { titleId, epubName, srtName, chunks, cues, windowChars, onProgress } = opts || {};
+    const { titleId, epubName, srtName, chunks, cues, windowChars, onProgress, who } = opts || {};
     const flatText = extractFlatText(chunks);
+    // Nothing to align (a caller raced with a context reset and handed us an
+    // empty cue list or no text): answer "no alignment" WITHOUT touching the
+    // cache. Running the matcher here yielded ratio 0 and the caller's
+    // low-ratio branch then CLEARED the good cached alignment — so every
+    // open re-aligned the whole book behind the "Preparing book" modal.
+    if (!cues || !cues.length || !flatText.length) {
+      try { window._diag?.('[paged-diag] alignment skipped (' + (who || '?') + '): cues=' + (cues ? cues.length : 0) + ' chars=' + flatText.length); } catch (_) {}
+      return { alignment: { schemaVersion: SCHEMA_VERSION, cueCount: cues ? cues.length : 0, matched: 0, matchedRatio: 0, totalChars: flatText.length, ranges: new Int32Array(0) }, cached: false, fingerprint: '', empty: true };
+    }
     const fp = computeFingerprint({
       epubName: epubName || '',
       srtName:  srtName  || '',
@@ -442,13 +454,15 @@
     });
     if (titleId) {
       const hit = await loadAlignment(titleId, fp);
+      try { window._diag?.('[paged-diag] alignment cache ' + (hit ? 'HIT' : 'MISS') + ' (' + (who || '?') + ') fp=' + fp); } catch (_) {}
       if (hit) return { alignment: hit, cached: true, fingerprint: fp };
     }
     const alignment = await buildAlignment(flatText, cues, { windowChars, onProgress });
     if (titleId && alignment.matchedRatio >= MIN_MATCHED_RATIO) {
       // Only cache when the result is plausibly useful. Bad alignments
       // shouldn't get re-served from cache on the next launch.
-      try { await saveAlignment(titleId, alignment, fp); } catch (e) {}
+      try { await saveAlignment(titleId, alignment, fp); try { window._diag?.('[paged-diag] alignment cache SAVED fp=' + fp); } catch (_) {} }
+      catch (e) { try { window._diag?.('[paged-diag] alignment cache SAVE FAILED: ' + (e && e.message)); } catch (_) {} }
     }
     return { alignment, cached: false, fingerprint: fp };
   }

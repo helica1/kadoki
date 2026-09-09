@@ -317,6 +317,23 @@
 
   async function fromAudio(cachePath) {
     if (!cachePath) return null;
+    // Android: MediaMetadataRetriever's embedded picture (ID3 APIC / MP4 covr /
+    // FLAC / OGG) via the BackgroundAudio plugin — no Range-fetch parsing.
+    try {
+      if (window.Capacitor?.getPlatform?.() === 'android') {
+        const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+        if (bg && typeof bg.audioCover === 'function') {
+          const r = await bg.audioCover({ path: cachePath });
+          if (r && r.data) {
+            const mime = r.mime || 'image/jpeg';
+            console.log('[cover] native embedded picture ' + mime + ' ' + r.data.length + ' b64 chars');
+            return { dataUri: 'data:' + mime + ';base64,' + r.data, mime };
+          }
+          console.log('[cover] native: no embedded picture; trying the byte parser');
+          try { window._diag?.('[paged-diag] cover: native audioCover found no picture in …' + String(cachePath).slice(-28)); } catch (_) {}
+        }
+      }
+    } catch (e) { console.warn('[cover] native audioCover failed: ' + (e?.message || e)); }
     try {
       const bytes = await readFirstNBytes(urlFor(cachePath), MAX_AUDIO_HEAD_BYTES);
       if (bytes.length < 10) {

@@ -28,7 +28,7 @@ import java.nio.ByteOrder;
 final class PcmWindowReader {
 
     private static final String TAG = "PcmWindowReader";
-    private static final int TIMEOUT_US = 10000;
+    static final int TIMEOUT_US = 10000;
     static final int WHISPER_RATE = 16000;
 
     static final class Window {
@@ -39,7 +39,7 @@ final class PcmWindowReader {
 
     // ----- demuxer abstraction (mirrors AudioSlicerPlugin) -----
 
-    private interface Demuxer {
+    interface Demuxer {
         int getTrackCount();
         MediaFormat getTrackFormat(int i);
         void selectTrack(int i);
@@ -79,7 +79,7 @@ final class PcmWindowReader {
         public void release() { try { ex.release(); } catch (Exception ignored) {} }
     }
 
-    private static int findAudioTrack(Demuxer ex) {
+    static int findAudioTrack(Demuxer ex) {
         try {
             for (int i = 0; i < ex.getTrackCount(); i++) {
                 String mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME);
@@ -89,7 +89,7 @@ final class PcmWindowReader {
         return -1;
     }
 
-    private static Demuxer openDemuxer(Context appCtx, String srcPath) throws Exception {
+    static Demuxer openDemuxer(Context appCtx, String srcPath) throws Exception {
         try {
             NativeDemuxer d = null;
             try {

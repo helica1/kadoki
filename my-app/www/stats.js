@@ -607,7 +607,7 @@
     // 4 s while we still believe audio is live — i.e. exactly the situations
     // that used to accrue phantom time. Costs one bridge call per 4 s in that
     // state and nothing at all in the normal case.
-    if (!_audPollBusy && (timers.audio.runningSince || window._bgPlaying) &&
+    if (!_audPollBusy && (timers.audio.runningSince || timers.video.runningSince || window._bgPlaying) &&
         Date.now() - _audLastSampleTs > 4000) {
       try { audioTruthPoll(); } catch (_) { _audPollBusy = false; }
     }
@@ -856,6 +856,14 @@
   }
   async function handleAppVisible() {
     cancelBackgroundStop();
+    // Foreground truth heal: a play started from the LOCK SCREEN happens with
+    // the WebView suspended, and its state/remoteCommand events may be lost or
+    // dropped as stale on thaw — leaving _bgPlaying false while audio is
+    // audibly playing. tick()'s poll gate can't catch that direction (it only
+    // arms when we already believe audio is live), so poll native truth once
+    // per foreground: heals the mirror, and reconcileMode starts the timer on
+    // the next tick. One bridge call per foreground — no steady-state cost.
+    try { audioTruthPoll(); } catch (_) {}
     const prev = window._autoAudioPrevMode;
     if (!prev) return;
     window._autoAudioPrevMode = null;

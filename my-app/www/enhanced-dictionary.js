@@ -3348,14 +3348,10 @@
         // --- AnkiConnect path (desktop Anki over LAN — priority when configured;
         // the only working route on visionOS, optional everywhere else) ---
         if (window.ankiConnect && await window.ankiConnect.enabled()) {
-            try {
-                await window.ankiConnect.probe();
-            } catch (e) {
-                const host = (typeof window.getAnkiConnectHost === 'function') ? await window.getAnkiConnectHost() : '';
-                const msg = `✗ Desktop Anki unreachable (${host}) — is Anki open on the Mac?`;
-                if (typeof window.showToast === 'function') window.showToast(msg, 5000); else alert(msg);
-                throw new Error('AnkiConnect unreachable');
-            }
+            // No reachability probe up front any more — the COMPLETE note
+            // (media included) is built first, so an unreachable Mac queues
+            // the card in the outbox (window.ankiOutbox) instead of dropping
+            // it. The probe runs right before addNote below.
             // Video Titles: no card image comes through the dict flow, but the
             // frame on screen when the word appeared is exactly what the card
             // wants — grab it natively (AVAssetImageGenerator at the playhead).
@@ -3411,14 +3407,38 @@
                     fields:   [cfg.fields.image]
                 }];
             }
+            // Reachability first (3s fast-fail beats a 30s addNote hang on a
+            // sleeping Mac) — unreachable = card goes to the outbox, done.
+            try {
+                await window.ankiConnect.probe();
+            } catch (e) {
+                const host = (typeof window.getAnkiConnectHost === 'function') ? await window.getAnkiConnectHost() : '';
+                const queued = await window.ankiOutbox?.queueNote?.(note, `Desktop Anki unreachable (${host})`);
+                if (queued) return true;
+                throw new Error('AnkiConnect unreachable');
+            }
             try {
                 await window.ankiConnect.invoke('addNote', { note }, 30000);
                 if (typeof window.showToast === 'function') {
                     window.showToast(dF('dc.added_to_deck', { deck: cfg.deck }, `✓ Added to ${cfg.deck}`) + ' (Mac)', 2200);
                 }
+                // The Mac is clearly up — drain anything a previous failure queued.
+                try { window.ankiOutbox?.flush?.({ silent: true }); } catch (_) {}
                 return true;
             } catch (err) {
                 const msg = err?.message || String(err);
+                if (err?.semantic) {
+                    // Anki answered and REJECTED the note (deck/model renamed,
+                    // bad field): an identical retry can't succeed — surface
+                    // it, don't queue.
+                    if (typeof window.showToast === 'function') window.showToast(`✗ Desktop Anki: ${msg}`, 6000);
+                    else alert(`Desktop Anki: ${msg}`);
+                    throw err;
+                }
+                // Transport died mid-send (sleep, Wi-Fi drop) — never lose the
+                // card: outbox it and report the card as handled.
+                const queued = await window.ankiOutbox?.queueNote?.(note, `Send failed (${msg})`);
+                if (queued) return true;
                 if (typeof window.showToast === 'function') window.showToast(`✗ Desktop Anki: ${msg}`, 6000);
                 else alert(`Desktop Anki: ${msg}`);
                 throw err;

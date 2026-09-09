@@ -6,6 +6,8 @@
 // granular getters and does UTF-8 token merging + cue segmentation itself.
 // Times are whisper native units: centiseconds relative to the fed window.
 #include <jni.h>
+#include <string>
+#include <cctype>
 #include <android/log.h>
 #include <atomic>
 #include <cstdint>
@@ -40,6 +42,32 @@ Java_com_example_app_WhisperEngine_nInit(JNIEnv *env, jclass, jstring modelPath)
     if (!path) return 0;
     whisper_context_params cp = whisper_context_default_params();
     cp.use_gpu = false;
+    // DTW token timestamps: alignment-head cross-attention → dynamic time
+    // warping, much tighter than the default (decoder-probability heuristic)
+    // token times. The aheads preset must match the model architecture —
+    // pick it from the file name; unknown names keep the heuristic.
+    {
+        std::string name(path);
+        for (auto &ch : name) ch = (char)tolower((unsigned char)ch);
+        whisper_alignment_heads_preset preset = WHISPER_AHEADS_NONE;
+        if (name.find("large-v3-turbo") != std::string::npos) preset = WHISPER_AHEADS_LARGE_V3_TURBO;
+        else if (name.find("large-v3") != std::string::npos) preset = WHISPER_AHEADS_LARGE_V3;
+        else if (name.find("large-v2") != std::string::npos) preset = WHISPER_AHEADS_LARGE_V2;
+        else if (name.find("large-v1") != std::string::npos) preset = WHISPER_AHEADS_LARGE_V1;
+        else if (name.find("medium.en") != std::string::npos) preset = WHISPER_AHEADS_MEDIUM_EN;
+        else if (name.find("medium") != std::string::npos) preset = WHISPER_AHEADS_MEDIUM;
+        else if (name.find("small.en") != std::string::npos) preset = WHISPER_AHEADS_SMALL_EN;
+        else if (name.find("small") != std::string::npos) preset = WHISPER_AHEADS_SMALL;
+        else if (name.find("base.en") != std::string::npos) preset = WHISPER_AHEADS_BASE_EN;
+        else if (name.find("base") != std::string::npos) preset = WHISPER_AHEADS_BASE;
+        else if (name.find("tiny.en") != std::string::npos) preset = WHISPER_AHEADS_TINY_EN;
+        else if (name.find("tiny") != std::string::npos) preset = WHISPER_AHEADS_TINY;
+        if (preset != WHISPER_AHEADS_NONE) {
+            cp.dtw_token_timestamps = true;
+            cp.dtw_aheads_preset = preset;
+            LOGI("DTW token timestamps enabled (preset %d)", (int)preset);
+        }
+    }
     whisper_context *w = whisper_init_from_file_with_params(path, cp);
     env->ReleaseStringUTFChars(modelPath, path);
     if (!w) {
@@ -137,16 +165,31 @@ Java_com_example_app_WhisperEngine_nTokBytes(JNIEnv *env, jclass, jlong h, jint 
     return out;
 }
 
+// Token times: DTW (t_dtw = the token's aligned time, -1 when unavailable)
+// wins over the heuristic t0/t1. A token spans from its own DTW time to the
+// next token's DTW time (or the heuristic end for the last one).
 JNIEXPORT jlong JNICALL
 Java_com_example_app_WhisperEngine_nTokT0(JNIEnv *, jclass, jlong h, jint i, jint j) {
     Ctx *c = ctxOf(h);
-    return (c && c->w) ? whisper_full_get_token_data(c->w, i, j).t0 : 0;
+    if (!c || !c->w) return 0;
+    whisper_token_data d = whisper_full_get_token_data(c->w, i, j);
+    return d.t_dtw >= 0 ? d.t_dtw : d.t0;
 }
 
 JNIEXPORT jlong JNICALL
 Java_com_example_app_WhisperEngine_nTokT1(JNIEnv *, jclass, jlong h, jint i, jint j) {
     Ctx *c = ctxOf(h);
-    return (c && c->w) ? whisper_full_get_token_data(c->w, i, j).t1 : 0;
+    if (!c || !c->w) return 0;
+    whisper_token_data d = whisper_full_get_token_data(c->w, i, j);
+    int n = whisper_full_n_tokens(c->w, i);
+    for (int k = j + 1; k < n; k++) {
+        whisper_token_data nx = whisper_full_get_token_data(c->w, i, k);
+        if (nx.id >= whisper_token_eot(c->w)) continue;   // skip special/timestamp tokens
+        if (nx.t_dtw >= 0) return (d.t_dtw >= 0 && nx.t_dtw < d.t_dtw) ? d.t1 : nx.t_dtw;
+        break;
+    }
+    if (d.t_dtw >= 0) return (d.t1 > d.t_dtw) ? d.t1 : d.t_dtw + 5;   // last token: heuristic end (≥ 50 ms)
+    return d.t1;
 }
 
 } // extern "C"

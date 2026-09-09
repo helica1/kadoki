@@ -7,10 +7,6 @@
 // Shared common.* keys (common.error, etc.) live in i18n-strings.js — do NOT redefine.
 window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   // deep-dive (動機・心理)
-  'cu.not_enough_text':       { en: 'There is not enough text yet', ja: '本文がまだ十分にありません' },
-  'cu.analysis_failed':       { en: 'Analysis failed: {msg}', ja: '分析に失敗しました: {msg}' },
-  'cu.motivation_psychology': { en: 'Motivation & Psychology', ja: '動機・心理' },
-  'cu.analyze_motivation':    { en: 'Analyze motivation & psychology', ja: '動機・心理を分析' },
 
   // image generation control + status
   'cu.generate_image':         { en: 'Generate image', ja: '画像を生成' },

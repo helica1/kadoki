@@ -3,7 +3,7 @@
 // name, role chip, 最新の動き (newest developments first), an expandable 背景
 // section (older developments + stored fields + relationships resolved to
 // surfaces), chapter links into the timeline's chapter view, and the existing
-// deep-dive flow (aiCharsUi.wireDeepDive). Read-only; merged records hidden.
+// Read-only; merged records hidden.
 // All body text is dict-tappable; the kai-summary-text class puts it on the
 // squiggle poll's container list, so character names link back here too.
 (function () {
@@ -132,18 +132,6 @@
       box.appendChild(sectionLabel(window.i18n.t('cs.field_relationships', '関係')));
       box.appendChild(textBody(rels));
     }
-    // Existing deep-dive flow (cached per <charId>@<chunkIdx> in AIDEEP_V1).
-    try {
-      if (window.aiCharsUi && typeof window.aiCharsUi.wireDeepDive === 'function'
-          && window.aiCharacters && window.aiCharacters.matcher) {
-        const m = window.aiCharacters.matcher();
-        if (m) {
-          const host = document.createElement('div');
-          box.appendChild(host);
-          window.aiCharsUi.wireDeepDive(rec, m, host);
-        }
-      }
-    } catch (_) {}
     return box;
   }
 

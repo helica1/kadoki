@@ -28,3 +28,22 @@ add_subdirectory(whisper.cpp EXCLUDE_FROM_ALL)
 
 add_library(whisperjni SHARED whisper_jni.cpp)
 target_link_libraries(whisperjni whisper log)
+
+# ---- Speedy (Google, Apache-2.0) over Sonic (Bill Cox, Apache-2.0) + KISS FFT (BSD-3) ----
+# Read-mode speech time-stretch with nonlinear (MACH1-style) compression — the
+# ExoPlayer audio-processor chain in BackgroundAudioService feeds PCM through
+# this stream (SpeedyAudioProcessor.java). sonic.c is compiled with
+# SONIC_INTERNAL so its symbols become sonicInt*; soniclib.c (the shim) owns
+# the public names. DEBUG must stay undefined here: the shim's debug printf
+# runs per SAMPLE (CMAKE_C_FLAGS_DEBUG above already forces -DNDEBUG).
+add_library(speedyjni SHARED
+    speedy_jni.cpp
+    speedy/sonic.c
+    speedy/soniclib.c
+    speedy/speedy.c
+    speedy/kissfft/kiss_fft.c)
+target_include_directories(speedyjni PRIVATE speedy speedy/kissfft)
+target_compile_definitions(speedyjni PRIVATE KISS_FFT=1 kiss_fft_scalar=float)
+set_source_files_properties(speedy/sonic.c PROPERTIES COMPILE_DEFINITIONS "SONIC_INTERNAL=1")
+target_compile_options(speedyjni PRIVATE -O3 -w -UDEBUG)
+target_link_libraries(speedyjni log)

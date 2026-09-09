@@ -36,7 +36,9 @@
   // mkv plays wherever the remux library ships: visionOS AND iOS device
   // builds (libkadokiremux-xros.a / -ios.a). Android/web still explain.
   function mkvOk() {
-    return !!window.KADOKI_VISION_NATIVE || (window.Capacitor?.getPlatform?.() === 'ios');
+    const p = window.Capacitor?.getPlatform?.();
+    // Android: ExoPlayer demuxes Matroska natively — no remux step needed.
+    return !!window.KADOKI_VISION_NATIVE || p === 'ios' || p === 'android';
   }
   function extUnplayable(ext) {
     return UNPLAYABLE_VIDEO_EXTS.has(ext) || (ext === 'mkv' && !mkvOk());
@@ -50,6 +52,24 @@
   let importing = false;
 
   function stripExt(name) { return (name || '').replace(/\.[^.]+$/, ''); }
+  // Human summary of a batch: "1 video series (12 episodes)", "2 books,
+  // 1 audiobook", "1 video" — instead of calling everything a "book".
+  function describeBatch(list) {
+    const n = { series: 0, episodes: 0, video: 0, book: 0, audiobook: 0 };
+    for (const b of list) {
+      if (Array.isArray(b.series) && b.series.length) { n.series++; n.episodes += b.series.length; }
+      else if (b.audio && VIDEO_EXTS.has(b.audio.ext)) n.video++;
+      else if (b.epub) n.book++;
+      else n.audiobook++;
+    }
+    const parts = [];
+    const pl = (k, one, many) => k === 1 ? `1 ${one}` : `${k} ${many}`;
+    if (n.series) parts.push(pl(n.series, 'video series', 'video series') + ` (${pl(n.episodes, 'episode', 'episodes')})`);
+    if (n.video) parts.push(pl(n.video, 'video', 'videos'));
+    if (n.book) parts.push(pl(n.book, 'book', 'books'));
+    if (n.audiobook) parts.push(pl(n.audiobook, 'audiobook', 'audiobooks'));
+    return parts.join(', ') || `${list.length} item${list.length === 1 ? '' : 's'}`;
+  }
   function baseName(p) { const s = (p || '').split('/'); return s[s.length - 1] || ''; }
   function toast(msg, ms) { try { window.showToast?.(msg, ms || 3000); } catch (_) {} }
 
@@ -287,7 +307,7 @@
 
       if (!fresh.length) {
         hideModal();
-        toast(`Already imported — ${books.length} book${books.length === 1 ? '' : 's'} skipped.`);
+        toast(`Already imported — ${describeBatch(books)} skipped.`);
         return;
       }
 
@@ -295,7 +315,7 @@
       // native confirm() isn't visually stacked under it.)
       hideModal();
       const ok = confirm(
-        `Import ${fresh.length} book${fresh.length === 1 ? '' : 's'} from "${res.rootName || 'folder'}"?` +
+        `Import ${describeBatch(fresh)} from "${res.rootName || 'folder'}"?` +
         (skipped ? `\n(${skipped} already in your library — skipped)` : '')
       );
       if (!ok) return;
@@ -304,7 +324,7 @@
       const partials = fresh.map(b => ({ name: b.name || 'Untitled', attachments: attachmentsFor(b) }));
       const created = await window.titleStore.createMany(partials);
 
-      setProgress(100, `Imported ${fresh.length} book${fresh.length === 1 ? '' : 's'}`);
+      setProgress(100, `Imported ${describeBatch(fresh)}`);
       if (typeof window.populateLibrary === 'function') await window.populateLibrary();
       // A single created VIDEO title (a movie, or a season-as-series): open it
       // right away in the player — that's always the next action anyway.

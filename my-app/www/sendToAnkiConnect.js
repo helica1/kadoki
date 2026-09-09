@@ -293,7 +293,10 @@ async function acInvoke(action, params = {}, timeoutMs = 6000) {
     } finally { clearTimeout(t); }
   }
   if (!json || typeof json !== 'object') throw new Error('bad AnkiConnect reply');
-  if (json.error) throw new Error(json.error);
+  // semantic = Anki itself answered and rejected the request (deck/model
+  // missing, bad fields). Distinguished from transport failures so the
+  // outbox below knows what is worth retrying.
+  if (json.error) { const e = new Error(json.error); e.semantic = true; throw e; }
   return json.result;
 }
 
@@ -306,6 +309,126 @@ window.ankiConnect = {
     return v;
   }
 };
+
+// ── AnkiConnect outbox ─────────────────────────────────────────────
+// A failed LAN send must NEVER lose the card: the fully-built note (fields +
+// base64 media) is persisted here and re-sent automatically once the Mac is
+// reachable again. Storage is the IndexedDB blobStore (works on visionOS,
+// where Capacitor Preferences is localStorage-backed and too small for media
+// payloads). One key holds an ordered JSON array; sends are user-paced and
+// flush() is serialized by _outboxBusy, so read-modify-write is safe.
+const ANKI_OUTBOX_KEY = 'ANKI_OUTBOX_V1';
+const ANKI_OUTBOX_MAX = 200;   // sanity cap — refuse loudly rather than grow unbounded
+let _outboxCount = -1;         // -1 = not loaded yet
+let _outboxBusy = false;
+
+async function _outboxLoad() {
+  try {
+    const raw = await window.blobStore?.get?.(ANKI_OUTBOX_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) { _outboxCount = arr.length; return arr; }
+    }
+  } catch (e) { console.warn('[anki-outbox] load:', e?.message || e); }
+  _outboxCount = 0;
+  return [];
+}
+async function _outboxSave(arr) {
+  _outboxCount = arr.length;
+  if (!arr.length) {
+    try { await window.blobStore?.remove?.(ANKI_OUTBOX_KEY); } catch (_) {}
+    return;
+  }
+  await window.blobStore.set(ANKI_OUTBOX_KEY, JSON.stringify(arr));
+}
+
+// Queue one ready-to-send AnkiConnect note. Returns true when safely stored
+// (callers then treat the card as handled); false = storage itself failed,
+// and the caller keeps its original loud error path.
+async function ankiOutboxQueueNote(note, why) {
+  try {
+    const arr = await _outboxLoad();
+    if (arr.length >= ANKI_OUTBOX_MAX) throw new Error('outbox full (' + arr.length + ' cards)');
+    arr.push({ id: Date.now() + '_' + Math.random().toString(36).slice(2, 8), ts: Date.now(), note });
+    await _outboxSave(arr);
+    if (typeof window.showToast === 'function') {
+      window.showToast('✗ ' + why + ' — card saved to outbox (' + arr.length + ' pending)', 4500);
+    }
+    return true;
+  } catch (e) {
+    const msg = '✗ ' + why + ' — and outbox save FAILED: ' + (e?.message || e);
+    if (typeof window.showToast === 'function') window.showToast(msg, 7000); else alert(msg);
+    return false;
+  }
+}
+
+// Deliver everything queued, oldest first. A transport failure stops the pass
+// (retried later); a SEMANTIC rejection (Anki answered: deck/model missing)
+// keeps the card, records the reason, and moves on — never a silent drop,
+// never a permanently blocked queue. Persists after every success so a crash
+// mid-flush can re-send at most one card (addNote allows duplicates anyway).
+async function ankiOutboxFlush(opts = {}) {
+  if (_outboxBusy) return { sent: 0, left: Math.max(0, _outboxCount), busy: true };
+  _outboxBusy = true;
+  try {
+    const arr = await _outboxLoad();
+    if (!arr.length) return { sent: 0, left: 0 };
+    if (!(await ankiConnectEnabled())) return { sent: 0, left: arr.length, offline: true };
+    try {
+      await acInvoke('version', {}, 3000);
+    } catch (e) {
+      if (!opts.silent && typeof window.showToast === 'function') {
+        window.showToast('✗ Outbox: desktop Anki unreachable (' + arr.length + ' pending)', 4000);
+      }
+      return { sent: 0, left: arr.length, offline: true };
+    }
+    let sent = 0, semanticErr = null;
+    for (let i = 0; i < arr.length; ) {
+      try {
+        await acInvoke('addNote', { note: arr[i].note }, 30000);
+        arr.splice(i, 1); sent++;
+        await _outboxSave(arr);
+      } catch (err) {
+        if (err?.semantic) {
+          arr[i].lastError = err.message || String(err);
+          semanticErr = arr[i].lastError;
+          i++;
+          await _outboxSave(arr);
+        } else {
+          break;   // transport died mid-pass — keep the rest for later
+        }
+      }
+    }
+    if (sent > 0 && typeof window.showToast === 'function') {
+      window.showToast('✓ Sent ' + sent + ' queued card' + (sent === 1 ? '' : 's') + ' to Mac' +
+        (arr.length ? ' (' + arr.length + ' left)' : ''), 3500);
+    }
+    if (semanticErr && !opts.silent && typeof window.showToast === 'function') {
+      window.showToast('✗ Outbox: ' + semanticErr, 5000);
+    }
+    return { sent, left: arr.length, error: semanticErr || undefined };
+  } finally {
+    _outboxBusy = false;
+  }
+}
+
+window.ankiOutbox = {
+  queueNote: ankiOutboxQueueNote,
+  flush: ankiOutboxFlush,
+  count: async () => { if (_outboxCount < 0) await _outboxLoad(); return _outboxCount; },
+};
+
+// Automatic drains: app boot, every foreground return, and a slow retry tick
+// while cards are pending. All silent — a successful delivery still toasts.
+setTimeout(() => { ankiOutboxFlush({ silent: true }); }, 6000);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && _outboxCount !== 0) {
+    setTimeout(() => { ankiOutboxFlush({ silent: true }); }, 1500);
+  }
+});
+setInterval(() => {
+  if (!document.hidden && _outboxCount > 0) ankiOutboxFlush({ silent: true });
+}, 120000);
 
 // Returns the AnkiBridge plugin instance if AnkiDroid is reachable. If the
 // permission hasn't been granted yet, surfaces the system prompt and waits
@@ -601,60 +724,69 @@ async function sendToAnki({ expression, imageData, audioData }) {
   // --- AnkiConnect path (desktop Anki over LAN — priority when configured) ---
   if (await ankiConnectEnabled()) {
     const host = await getAnkiConnectHost();
+    // Build the COMPLETE note before any network I/O so every failure mode
+    // below can hand the exact payload to the outbox instead of dropping it.
+    // Tag video-sourced cards with the episode ("kadoki-video::<basename>").
+    let videoTag = '';
+    try {
+      if (window.kadokiVideoMode?.isVideoTitle?.()) videoTag = await window.kadokiVideoMode.mediaTag();
+    } catch (_) {}
+    const note = {
+      deckName:  cfg.deck,
+      modelName: cfg.model,
+      fields,
+      options: { allowDuplicate: true },
+      tags: ['kadoki', videoTag].filter(Boolean)
+    };
+    if (audioData && cfg.fields.audio) {
+      const aMime = sniffAudioBase64(audioData);
+      note.audio = [{
+        filename: ankiAudioFilename(audioFilename, { mime: aMime }),
+        data:     audioData.split(',')[1],
+        fields:   [cfg.fields.audio]
+      }];
+    }
+    if (imageData && cfg.fields.image) {
+      // Keep the extension honest — Title covers are often PNG.
+      const isPng = /^data:image\/png/i.test(imageData);
+      note.picture = [{
+        filename: isPng ? _replaceExt(imageFilename, 'png') : imageFilename,
+        data:     imageData.split(',')[1],
+        fields:   [cfg.fields.image]
+      }];
+    }
     try {
       // Reachability first with a short timeout: a clear "the Mac is off"
       // beats a long hang followed by a cryptic transport error.
       await acInvoke('version', {}, 3000);
     } catch (e) {
-      if (typeof window.showToast === 'function') {
-        window.showToast(`✗ Desktop Anki unreachable (${host}) — is Anki open on the Mac?`, 5000);
-      } else {
-        alert(`Desktop Anki unreachable (${host}) — is Anki open on the Mac?`);
-      }
+      // Mac asleep / Anki closed / off Wi-Fi — the card is safe in the outbox
+      // and auto-sends when the Mac answers again (boot, foreground, retry tick).
+      await ankiOutboxQueueNote(note, `Desktop Anki unreachable (${host})`);
       return;
     }
     try {
-      // Tag video-sourced cards with the episode ("kadoki-video::<basename>").
-      let videoTag = '';
-      try {
-        if (window.kadokiVideoMode?.isVideoTitle?.()) videoTag = await window.kadokiVideoMode.mediaTag();
-      } catch (_) {}
-      const note = {
-        deckName:  cfg.deck,
-        modelName: cfg.model,
-        fields,
-        options: { allowDuplicate: true },
-        tags: ['kadoki', videoTag].filter(Boolean)
-      };
-      if (audioData && cfg.fields.audio) {
-        const aMime = sniffAudioBase64(audioData);
-        note.audio = [{
-          filename: ankiAudioFilename(audioFilename, { mime: aMime }),
-          data:     audioData.split(',')[1],
-          fields:   [cfg.fields.audio]
-        }];
-      }
-      if (imageData && cfg.fields.image) {
-        // Keep the extension honest — Title covers are often PNG.
-        const isPng = /^data:image\/png/i.test(imageData);
-        note.picture = [{
-          filename: isPng ? _replaceExt(imageFilename, 'png') : imageFilename,
-          data:     imageData.split(',')[1],
-          fields:   [cfg.fields.image]
-        }];
-      }
       // Generous timeout: media base64 upload + collection write on the Mac.
       await acInvoke('addNote', { note }, 30000);
       if (typeof window.showToast === 'function') {
         window.showToast(`✓ Added to ${cfg.deck} (Mac)`, 2200);
       }
+      // The Mac is clearly up — drain anything a previous failure queued.
+      try { ankiOutboxFlush({ silent: true }); } catch (_) {}
     } catch (err) {
       console.error('AnkiConnect addNote error:', err);
       const msg = err?.message || String(err);
-      if (typeof window.showToast === 'function') {
-        window.showToast(`✗ Desktop Anki: ${msg}`, 6000);
+      if (err?.semantic) {
+        // Anki answered and REJECTED the note (deck/model renamed, bad field):
+        // an identical retry can't succeed — surface it, don't queue.
+        if (typeof window.showToast === 'function') {
+          window.showToast(`✗ Desktop Anki: ${msg}`, 6000);
+        } else {
+          alert(`Desktop Anki: ${msg}`);
+        }
       } else {
-        alert(`Desktop Anki: ${msg}`);
+        // Transport died mid-send (sleep, Wi-Fi drop) — the card is intact.
+        await ankiOutboxQueueNote(note, `Send failed (${msg})`);
       }
     }
     return;

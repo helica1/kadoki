@@ -88,10 +88,10 @@
 
   // Time spent, per mode, ADDITIVE (fed 1s at a time by stats.js's tick while
   // that mode's timer runs — 1 tick = 1 real second, so no idempotency needed).
-  // Stored per day as t: { c, r, a } seconds.
+  // Stored per day as t: { c, r, a, v, w } seconds (card/read/audio/video/watch).
   function noteTime(tid, mode, sec) {
     if (!tid || !Number.isFinite(sec) || sec <= 0) return;
-    const f = mode === 'card' ? 'c' : mode === 'read' ? 'r' : mode === 'audio' ? 'a' : mode === 'watch' ? 'w' : null;
+    const f = mode === 'card' ? 'c' : mode === 'read' ? 'r' : mode === 'audio' ? 'a' : mode === 'video' ? 'v' : mode === 'watch' ? 'w' : null;
     if (!f) return;
     load(tid).then((o) => {
       const dk = dayKey();
@@ -131,13 +131,13 @@
       days.push({ day: k, aMs, rCh, aDelta, rDelta });
     }
     // Per-mode time totals (seconds) across all days.
-    const timeSec = { card: 0, read: 0, audio: 0, watch: 0 };
+    const timeSec = { card: 0, read: 0, audio: 0, video: 0, watch: 0 };
     for (const k of keys) {
       const t = o.days[k].t;
-      if (t) { timeSec.card += t.c || 0; timeSec.read += t.r || 0; timeSec.audio += t.a || 0; timeSec.watch += t.w || 0; }
+      if (t) { timeSec.card += t.c || 0; timeSec.read += t.r || 0; timeSec.audio += t.a || 0; timeSec.video += t.v || 0; timeSec.watch += t.w || 0; }
     }
     const active = days.filter((d) => d.aDelta > 0 || d.rDelta > 0 ||
-      (o.days[d.day].t && ((o.days[d.day].t.c || 0) + (o.days[d.day].t.r || 0) + (o.days[d.day].t.a || 0) + (o.days[d.day].t.w || 0) > 60)));
+      (o.days[d.day].t && ((o.days[d.day].t.c || 0) + (o.days[d.day].t.r || 0) + (o.days[d.day].t.a || 0) + (o.days[d.day].t.v || 0) + (o.days[d.day].t.w || 0) > 60)));
     const recent = active.slice(-7);
     const mean = (arr, f) => {
       const v = arr.map(f).filter((x) => x > 0);

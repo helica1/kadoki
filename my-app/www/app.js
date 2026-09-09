@@ -1574,6 +1574,9 @@ window.applyActivePlaybackRate = async function () {
     if (bg?.setRate) await bg.setRate({ rate: r });
   } catch (_) {}
   try { if (currentAudio) currentAudio.playbackRate = r; } catch (_) {}
+  // Let any live speed readout (the reader's top-right +/- control, the
+  // speed dialog) repaint from a single source of truth.
+  try { window.dispatchEvent(new CustomEvent('playback:rate', { detail: { rate: r } })); } catch (_) {}
 };
 
 // Persist all four rate slots + the per-mode flag.
@@ -1665,6 +1668,98 @@ window.setGlobalPlaybackRate = async function (rate) {
   await window.applyActivePlaybackRate();
   await _persistPlaybackRates();
 };
+
+// Step the rate that is CURRENTLY in effect — the active mode's own slot
+// when per-mode speed is on, otherwise the single global rate (kept in
+// step with setGlobalPlaybackRate's slot-normalising so the two entry
+// points never disagree). Snaps to the speed dialog's 0.05 grid and its
+// 0.5–3.0 range. Returns the new effective rate.
+window.nudgeActivePlaybackRate = async function (delta) {
+  const STEP = 0.05, MIN = 0.5, MAX = 3.0;
+  const cur = window.getActivePlaybackRate();
+  let r = cur + (parseFloat(delta) || 0);
+  r = Math.max(MIN, Math.min(MAX, Math.round(r / STEP) * STEP));
+  r = Math.round(r * 100) / 100;
+  if (window._playbackPerMode) {
+    window._playbackRates[_currentModeForSpeed()] = r;
+  } else {
+    window._playbackRates.global = r;
+    window._playbackRates.card = r;
+    window._playbackRates.read = r;
+    window._playbackRates.audio = r;
+  }
+  await window.applyActivePlaybackRate();
+  await _persistPlaybackRates();
+  return r;
+};
+
+// ===================== CONTAINER PATH REBASE (iOS) =====================
+// iOS app data lives under /var/mobile/Containers/Data/Application/<UUID>/…
+// and the UUID CHANGES on every developer (devicectl/Xcode) install — App
+// Store updates keep it. Absolute cachePaths persisted in the title store
+// (auto-generated SRTs, synced media) then point into a container that no
+// longer exists, the fetch silently fails, and the reader falls back to a
+// stale cue cache (2026-09-08: a complete 12k-cue auto SRT "vanished" and
+// every play landed at the old cache's frontier). Rebase such paths onto
+// the CURRENT container at load time.
+window._containerRoot = null;
+window.getContainerRoot = async function () {
+  if (window._containerRoot) return window._containerRoot;
+  try {
+    const fs = window.Capacitor?.Plugins?.Filesystem;
+    if (!fs?.getUri) return null;
+    const u = await fs.getUri({ directory: 'DATA', path: '' });
+    const uri = String(u?.uri || '').replace(/^file:\/\//, '');
+    const m = /^(.*\/Containers\/Data\/Application\/[0-9A-Fa-f-]+\/)/.exec(uri);
+    if (m) window._containerRoot = m[1];
+  } catch (_) {}
+  return window._containerRoot;
+};
+window.rebaseContainerPath = async function (p) {
+  try {
+    if (!p || typeof p !== 'string') return p;
+    const m = /^(.*\/Containers\/Data\/Application\/)([0-9A-Fa-f-]+)(\/.*)$/.exec(p);
+    if (!m) return p;
+    const root = await window.getContainerRoot();
+    if (!root) return p;
+    const rm = /^(.*\/Containers\/Data\/Application\/)([0-9A-Fa-f-]+)\/$/.exec(root);
+    if (!rm || rm[2] === m[2]) return p;
+    const out = rm[1] + rm[2] + m[3];
+    try { window.debugLog?.('[container] rebased ' + m[2].slice(0, 8) + '→' + rm[2].slice(0, 8) + ' ' + m[3].slice(-40)); } catch (_) {}
+    return out;
+  } catch (_) { return p; }
+};
+setTimeout(() => { try { window.getContainerRoot(); } catch (_) {} }, 800);
+
+// ===================== READ-MODE SPEECH ENGINE (iOS) =====================
+// Appearance → Read → "Read-mode speech engine" = Sonic: the native plugin
+// plays through KadokiReadEngine (pitch-synchronous time-stretch) while the
+// READER is the visible view; audio mode and anything backgrounded stay on
+// AVAudioPlayer. Keep the plugin's preferred engine in step with mode +
+// visibility; with a file loaded the plugin hands off at the current position.
+window._readEngineLast = null;
+window._readEngineSync = async function () {
+  try {
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    if (!bg || typeof bg.setEngine !== 'function') return;
+    const prefV = window.appearance?.get?.('read')?.speechEngine;
+    const pref = prefV === 'sonic' || prefV === 'speedy';
+    const nonlinear = prefV === 'speedy';
+    const inRead = document.body.classList.contains('mode-read') && !document.hidden;
+    const want = (pref && inRead) ? 'speech' : 'default';
+    // Android: the Speedy chain is always the player; only `nonlinear` is
+    // mode-gated (Speedy in the reader, plain Sonic elsewhere).
+    const nlWanted = nonlinear && inRead;
+    const key = want + (nlWanted ? '+nl' : '');
+    if (key === window._readEngineLast) return;
+    window._readEngineLast = key;
+    const r = await bg.setEngine({ engine: want, nonlinear: nlWanted });
+    try { window.debugLog?.('[engine] want=' + want + ' switched=' + (r && r.switched) + ' active=' + (r && r.active)); } catch (_) {}
+  } catch (_) {}
+};
+window.addEventListener('shell:mode-change', () => { setTimeout(() => window._readEngineSync(), 0); });
+document.addEventListener('visibilitychange', () => { window._readEngineSync(); });
+setTimeout(() => { try { window._readEngineSync(); } catch (_) {} }, 1500);
 
 // Legacy slider handler (the bottom audiobook speed slider was
 // removed 2026-05-30, but kept here for any reference that survived
@@ -5236,21 +5331,48 @@ window.toggleReadingPlayback = function () {
       //      beginning on a fresh open into READ mode (place-scare).
       const readCueMs = (typeof window._pagedReadCueStartMs === 'function')
         ? window._pagedReadCueStartMs() : null;
+      // 1b. The page the user is LOOKING AT, resolved like "set playhead"
+      //     (alignment map → position-bounded text match). Covers the cold
+      //     boot where the cursor is still unknown — the card fallback below
+      //     could be card 0 there (= the start of the book).
+      const visMs = (typeof window._pagedVisibleCueStartMs === 'function') ? window._pagedVisibleCueStartMs() : null;
       const cardMs = window.allNotes?.[window.currentCardIndex]?.audiobookStartMs;
-      const startCueMs = Number.isFinite(readCueMs) ? readCueMs
+      let startCueMs = Number.isFinite(readCueMs) ? readCueMs
+        : Number.isFinite(visMs) ? visMs
         : Number.isFinite(window._currentReadingCueStartMs) ? window._currentReadingCueStartMs
         : Number.isFinite(cardMs) ? cardMs
         : null;
+      let startSrc = Number.isFinite(readCueMs) ? 'cursor' : Number.isFinite(visMs) ? 'visible'
+        : Number.isFinite(window._currentReadingCueStartMs) ? 'legacy' : Number.isFinite(cardMs) ? 'card' : 'none';
+      // GROUND TRUTH = the page on screen. Any remembered cursor that disagrees
+      // with what the user is LOOKING AT by more than 45 s is stale — a cold
+      // boot restored the view but not the cursor, an earlier session's cue
+      // survived a title reload, etc. Play what the user sees.
+      const VIS_TOL_MS = 45000;
+      if (Number.isFinite(visMs) && Number.isFinite(startCueMs) && Math.abs(visMs - startCueMs) > VIS_TOL_MS) {
+        try { window.debugLog?.('[reader-play] cursor ' + Math.round(startCueMs) + ' disagrees with visible page ' + Math.round(visMs) + ' (src=' + startSrc + ') → visible wins'); } catch (_) {}
+        startCueMs = visMs; startSrc = 'visible-override';
+      }
       const hasCue = Number.isFinite(startCueMs);
       const startMs = hasCue ? Math.max(0, Math.round(startCueMs) - (window.AUDIO_START_OFFSET_MS || 0)) : 0;
       const url = audiobookPath.startsWith('file://') ? audiobookPath : 'file://' + audiobookPath;
-      console.log('[reader-play] audiobookPath=' + audiobookPath + ' startMs=' + startMs);
+      console.log('[reader-play] audiobookPath=' + audiobookPath + ' startMs=' + startMs + ' src=' + startSrc);
+      try { window.debugLog?.('[reader-play] start=' + startMs + ' src=' + startSrc + ' cursor=' + readCueMs + ' vis=' + visMs + ' card=' + cardMs + '@' + window.currentCardIndex); } catch (_) {}
+      try { window._diag?.('[paged-diag] reader-play start=' + startMs + ' src=' + startSrc + ' cursor=' + readCueMs + ' vis=' + visMs + ' card=' + cardMs + '@' + window.currentCardIndex + ' readCue=' + (window._pagedReadCueIdx ? window._pagedReadCueIdx() : '?')); } catch (_) {}
       bg.getState().then(s => {
         console.log('[reader-play] state.playing=' + s.playing + ' state.ready=' + s.ready);
+        try { window._diag?.('[paged-diag] reader-play state playing=' + s.playing + ' ready=' + s.ready + ' pos=' + s.positionMs + ' engine=' + s.engine); } catch (_) {}
         if (s.playing) {
           bg.pause();
-        } else if (s.ready) {
+        } else if (s.ready && !(Number.isFinite(visMs) && Number.isFinite(s.positionMs) && Math.abs(s.positionMs - visMs) > VIS_TOL_MS)) {
           bg.resume();
+        } else if (s.ready) {
+          // A loaded-but-paused player parked FAR from the page on screen
+          // (a stale restore, an EOF clamp): resuming it is a place-jump.
+          // Restart from the visible line instead.
+          const ms = Math.max(0, Math.round(visMs) - (window.AUDIO_START_OFFSET_MS || 0));
+          try { window.debugLog?.('[reader-play] ready@' + s.positionMs + ' far from visible ' + Math.round(visMs) + ' → play from visible'); } catch (_) {}
+          bg.play({ url, startMs: ms, rate: window.audioPlaybackRate || 1 }).catch(() => {});
         } else {
           // Pause any deck-mode card audio first so we don't get a
           // cacophony of two sources.
@@ -5262,6 +5384,28 @@ window.toggleReadingPlayback = function () {
             if (!hasCue && typeof window.abBestColdStartMs === 'function') {
               try { ms = await window.abBestColdStartMs(audiobookPath, 0); } catch (_) {}
             }
+            // SANITY FLOOR (never-lose-place): a resolved start at the very
+            // beginning of the audio while the reader is visibly DEEP in the
+            // book is a bogus resolution (stale card 0, cursor 0, a title
+            // phrase matched at its first occurrence) — never a real intent.
+            // Re-resolve from the visible page, else the durable saved spot.
+            try {
+              const frac = window._pagedVisibleFrac?.();
+              if (ms < 5000 && Number.isFinite(frac) && frac > 0.03) {
+                let alt = null;
+                const vis = window._pagedVisibleCueStartMs?.();
+                if (Number.isFinite(vis) && vis > 5000) alt = Math.max(0, Math.round(vis) - (window.AUDIO_START_OFFSET_MS || 0));
+                if (alt == null && typeof window.abBestColdStartMs === 'function') {
+                  const d = await window.abBestColdStartMs(audiobookPath, 0);
+                  if (d > 5000) alt = d;
+                }
+                if (alt != null) {
+                  console.warn('[reader-play] floor: start ' + ms + 'ms rejected at ' + Math.round(frac * 100) + '% of book → ' + alt + 'ms');
+                  try { window.debugLog?.('[reader-play] floor ' + ms + '→' + alt + ' frac=' + frac.toFixed(3) + ' src=' + startSrc); } catch (_) {}
+                  ms = alt;
+                }
+              }
+            } catch (_) {}
             bg.play({ url, startMs: ms, rate: window.audioPlaybackRate || 1 })
               .then(() => console.log('[reader-play] bg.play resolved @' + ms))
               .catch(err => console.warn('[reader-play] bg.play err: ' + err?.message));

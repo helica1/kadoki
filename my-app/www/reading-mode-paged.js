@@ -149,6 +149,102 @@
         opacity: 0;
         pointer-events: none;
       }
+      /* Playback-speed −/+ control — READ MODE ONLY. Mirrors the progress
+         strip on the other side of the Dynamic Island: same safe-area band,
+         right-aligned. Top offset is computed directly (no translateY) —
+         see #pagedPlayheadBtn's note about fixed-element hit-testing on
+         iOS WKWebView. Hidden wherever that band doesn't exist (landscape /
+         wide layouts swap the strip inline; no-notch devices get
+         data-no-band from ensureSpeedCtl's probe). */
+      #pagedSpeedCtl {
+        position: fixed;
+        top: calc(env(safe-area-inset-top, 0px) / 2 - 17px);
+        right: calc(env(safe-area-inset-right, 0px) + 18px);
+        height: 34px;
+        display: inline-flex;
+        align-items: stretch;
+        padding: 0;
+        margin: 0;
+        /* Borderless — bare glyphs in the band, like the counter opposite.
+           (Pill variant: 1px accent border + rgba(13,13,13,.92) fill.) */
+        border: 0;
+        border-radius: 999px;
+        background: transparent;
+        z-index: 9001;
+        direction: ltr;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        overflow: hidden;
+        transition: opacity .18s ease;
+      }
+      #pagedSpeedCtl button {
+        appearance: none;
+        -webkit-appearance: none;
+        background: transparent;
+        border: 0;
+        margin: 0;
+        padding: 0 12px;
+        min-width: 40px;
+        color: var(--accent-read, #4caf50);
+        font: 600 21px/1 var(--font-sans, system-ui);
+        cursor: pointer;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #pagedSpeedCtl button:active { opacity: .5; }
+      #pagedSpeedCtl .ps-val {
+        display: inline-flex;
+        align-items: center;
+        padding: 0 3px;
+        min-width: 36px;
+        justify-content: center;
+        color: #ddd;
+        font: 600 10.5px/1 var(--font-sans, system-ui);
+        font-variant-numeric: tabular-nums;
+        letter-spacing: .03em;
+        cursor: pointer;
+      }
+      #pagedSpeedCtl .ps-val:active { opacity: .5; }
+      body.chrome-hidden #pagedSpeedCtl,
+      body:not(.mode-read) #pagedSpeedCtl,
+      #pagedSpeedCtl[data-no-band="1"] {
+        opacity: 0;
+        pointer-events: none;
+      }
+      /* On-device transcription progress (auto-subtitled titles): shown while
+         the playhead waits on the transcriber, e.g. right after opening a new
+         title or after a set-playhead into untranscribed audio. */
+      #pagedSyncPill {
+        position: fixed;
+        left: 50%;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 14px);
+        transform: translateX(-50%);
+        display: none;
+        flex-direction: column;
+        align-items: center;
+        gap: 5px;
+        padding: 7px 14px 8px;
+        border-radius: 999px;
+        background: rgba(13, 13, 13, .88);
+        border: 1px solid rgba(255, 255, 255, .10);
+        color: #ddd;
+        font-size: .74rem;
+        letter-spacing: .01em;
+        z-index: 9001;
+        direction: ltr;
+        pointer-events: none;
+        max-width: 86vw;
+        white-space: nowrap;
+      }
+      #pagedSyncPill.on { display: inline-flex; }
+      #pagedSyncPill .psy-track { width: 150px; height: 3px; border-radius: 2px; background: rgba(255,255,255,.14); overflow: hidden; }
+      #pagedSyncPill .psy-fill { height: 100%; width: 0; border-radius: 2px; background: var(--accent-audio, #b794f6); transition: width .3s linear; }
+      #pagedSyncPill .psy-fill.idle { width: 38%; animation: pagedSyncSlide 1.2s ease-in-out infinite alternate; }
+      @keyframes pagedSyncSlide { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
+      @media (orientation: landscape), (min-width: 600px) {
+        #pagedSpeedCtl { display: none !important; }
+      }
       /* Wide layouts — landscape, OR a wide foldable/tablet (≥600px) in any
          orientation: the standalone top-left strip wastes the extra horizontal
          room (and in landscape gets cut off by the rotated Dynamic Island), so
@@ -410,6 +506,78 @@
   // display:none was discarding the layout and re-running it on every read-entry —
   // the Android "settling" lag (iOS renders horizontal, so it was cheap there).
   // "Hidden" = no view yet, or visibility:hidden (display:none kept for back-compat).
+  // ── transcription progress pill (read mode) ──
+  let _syncPillEl = null;
+  function _syncPillTick() {
+    try {
+      let st = null;
+      const show = !_readerHidden() && !document.hidden && document.body.classList.contains('mode-read');
+      if (show) { try { st = window.autoTranscribe?.progressState?.(); } catch (_) { st = null; } }
+      if (!st) { if (_syncPillEl) _syncPillEl.classList.remove('on'); return; }
+      if (!_syncPillEl) {
+        _syncPillEl = document.createElement('div');
+        _syncPillEl.id = 'pagedSyncPill';
+        _syncPillEl.innerHTML = '<span class="psy-label"></span><div class="psy-track"><div class="psy-fill"></div></div>';
+        document.body.appendChild(_syncPillEl);
+      }
+      const pct = Math.round((st.progress || 0) * 100);
+      const t = (k, d) => (window.i18n?.t?.(k, d) || d);
+      let label = t('at.generating', 'Generating subtitles on device…');
+      if (pct > 0) label += ' ' + pct + '%';
+      if (st.coveragePct >= 0) label += ' · ' + t('at.overall', 'overall') + ' ' + st.coveragePct + '%';
+      _syncPillEl.querySelector('.psy-label').textContent = label;
+      const fill = _syncPillEl.querySelector('.psy-fill');
+      if (pct > 0) { fill.classList.remove('idle'); fill.style.width = pct + '%'; }
+      else { fill.classList.add('idle'); fill.style.width = ''; }
+      _syncPillEl.classList.add('on');
+    } catch (_) {}
+  }
+  setInterval(_syncPillTick, 900);
+
+  // Audio duration pre-warm: the uncovered-region estimate (set-playhead /
+  // PLAY past the transcription frontier) needs the full duration, which
+  // used to arrive only once the player had loaded the file — a fresh title
+  // opened straight into read mode had none. Ask native for it right away.
+  function _probeDurLater(path) {
+    try {
+      if (_knownDurMs([]) > 60000) return;
+      const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (!bg || typeof bg.probeDuration !== 'function' || !path) return;
+      const tid = window._activeTitleId;
+      bg.probeDuration({ path }).then((r) => {
+        const ms = Math.floor(Number(r && r.durationMs) || 0);
+        if (ms > 60000 && tid && tid === window._activeTitleId) { window._abKnownDur = { tid, ms }; _rememberDurMs(ms); }
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  // Audio time (ms) of the page on screen, for the transcriber's first job:
+  // alignment map / aligner extrapolation / char-fraction × duration.
+  window._pagedReadPosHintMs = function () {
+    try {
+      const ch = _visibleEdgeChunk();
+      if (!ch) return null;
+      const cues = pagedCues?.length ? pagedCues : (window.__abCues || []);
+      const i = chunks.indexOf(ch);
+      if (pagedChunkToCue && pagedChunkToCue[i] >= 0 && cues[pagedChunkToCue[i]]) return cues[pagedChunkToCue[i]].startMs;
+      const e = _estAudioMsFor(ch, cues);
+      return (e && Number.isFinite(e.est)) ? e.est : null;
+    } catch (_) { return null; }
+  };
+  let _hintTimer = null;
+  function _scheduleReadHint() {
+    if (_hintTimer) clearTimeout(_hintTimer);
+    _hintTimer = setTimeout(() => {
+      _hintTimer = null;
+      try {
+        const tid = window._activeTitleId;
+        if (!tid || !window.autoTranscribe?.isActiveFor?.(tid) || !window.autoTranscribe.hintPosition) return;
+        const h = window._pagedReadPosHintMs();
+        if (Number.isFinite(h) && h > 0) window.autoTranscribe.hintPosition(h);
+      } catch (_) {}
+    }, 2500);
+  }
+
   function _readerHidden() {
     return !viewEl || viewEl.style.visibility === 'hidden' || viewEl.style.display === 'none';
   }
@@ -1047,11 +1215,41 @@
   // Duration comes from the title-stamped _abKnownDur cache (audio engine /
   // transcriber) — NEVER from async getters (a Promise compared to a number
   // silently disabled an earlier version of this guard).
+  // Known audio duration for the active title (ms), 0 if unknown. Sources, in
+  // order: the live title-stamped value; the per-title value persisted the
+  // last time the engine reported one (a cold boot before any play has no
+  // live duration — that gap silently disabled the uncovered-region logic
+  // below and every "play here" past the transcription frontier resolved to
+  // the LAST transcribed cue instead: the 2026-09-08 "always lands at 62k"
+  // place-loss); finally an aligner-derived estimate (frontier ms ÷ the
+  // book fraction the frontier maps to).
+  function _knownDurMs(cues) {
+    try {
+      const tid = window._activeTitleId;
+      const kd = window._abKnownDur;
+      if (kd && kd.tid === tid && kd.ms > 0) return kd.ms;
+      if (tid) {
+        const v = parseInt(localStorage.getItem('KADOKI_ABDUR_' + tid) || '0', 10);
+        if (v > 60000) return v;
+      }
+      const lastEnd = (cues && cues.length) ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
+      if (lastEnd > 60000 && window.autoAlign?.progressAt) {
+        const fr = window.autoAlign.progressAt(lastEnd);
+        if (Number.isFinite(fr) && fr > 0.05) return Math.round(lastEnd / fr);
+      }
+    } catch (_) {}
+    return 0;
+  }
+  function _rememberDurMs(ms) {
+    try { if (ms > 60000 && window._activeTitleId) localStorage.setItem('KADOKI_ABDUR_' + window._activeTitleId, String(Math.floor(ms))); } catch (_) {}
+  }
+  // Position estimate for a chunk + whether it lies BEYOND the cue coverage
+  // (partially transcribed book). `est` prefers the aligner's anchor-
+  // extrapolated time (msForProgress) over the plain char-fraction × duration.
   function _estAudioMsFor(chunk, cues) {
     try {
-      const kd = window._abKnownDur;
-      const durMs = (kd && kd.tid === window._activeTitleId && kd.ms > 0) ? kd.ms : 0;
-      if (!(durMs > 60000) || !chunks?.length || !chunk) return null;
+      if (!chunks?.length || !chunk) return null;
+      const durMs = _knownDurMs(cues);
       const lastC = chunks[chunks.length - 1];
       let total = (parseInt(lastC.dataset.charOffset || '0', 10) || 0) +
                   (parseInt(lastC.dataset.charLen || '0', 10) || 0);
@@ -1060,11 +1258,16 @@
       try { total = Math.max(total, window.autoAlign?.textLen?.() || 0); } catch (_) {}
       const off = parseInt(chunk?.dataset?.charOffset || '-1', 10);
       if (!(total > 0) || off < 0) return null;
-      const est = (off / total) * durMs;
+      const frac = off / total;
+      let est = null;
+      try { const m = window.autoAlign?.msForProgress?.(frac); if (Number.isFinite(m) && m >= 0) est = m; } catch (_) {}
+      if (est == null) { if (!(durMs > 60000)) return null; est = frac * durMs; }
+      if (durMs > 60000) est = Math.min(est, durMs);
       const lastEnd = (cues && cues.length) ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
+      const fullyCovered = durMs > 60000 && lastEnd >= durMs * 0.92;
       return {
         est, durMs, lastEnd,
-        uncovered: lastEnd < durMs * 0.92 && est > lastEnd + 45000,
+        uncovered: !fullyCovered && est > lastEnd + 45000,
       };
     } catch (_) { return null; }
   }
@@ -1126,27 +1329,43 @@
         if (normalizeJP(cues[i]?.text || '').length >= 12) candidateIdxs.push(i);
       }
     }
-    // Strict containment first.
-    let best = null, bestDist = Infinity;
+    // Strict containment first — over ALL candidates (the old early return on
+    // the first hit in ascending index order picked the EARLIEST cue whenever
+    // the tapped phrase recurs in the book). Longest cue text wins; ties break
+    // toward the chunk's expected cue index.
+    const expIdx = _expectedCueForChunk(chunkIdx);
+    const idxDist = (i) => (expIdx >= 0 ? Math.abs(i - expIdx) : 0);
+    let best = null, bestDist = Infinity, bestD = Infinity;
+    let contain = null, containLen = -1, containD = Infinity;
     for (const ci of candidateIdxs) {
       const cue = cues[ci];
       if (expMs != null && Number.isFinite(cue?.startMs) &&
           Math.abs(cue.startMs - expMs) > TAP_TIME_BOUND_MS) continue;
       const normCue = normalizeJP(cue?.text || '');
       if (!normCue) continue;
-      const start = normFlat.indexOf(normCue);
-      if (start < 0) continue;
-      const end = start + normCue.length;
-      if (normIdx >= start && normIdx < end) {
-        return { cue, idx: ci, normStart: start, normEnd: end };
-      }
-      // Track nearest by distance for tight-window fallback.
-      const dist = Math.min(Math.abs(normIdx - start), Math.abs(normIdx - end - 1));
-      if (dist < bestDist) {
-        best = { cue, idx: ci, normStart: start, normEnd: end };
-        bestDist = dist;
+      // Walk every occurrence: the tapped one may not be the first.
+      let start = normFlat.indexOf(normCue);
+      while (start >= 0) {
+        const end = start + normCue.length;
+        if (normIdx >= start && normIdx < end) {
+          const d = idxDist(ci);
+          if (normCue.length > containLen || (normCue.length === containLen && d < containD)) {
+            contain = { cue, idx: ci, normStart: start, normEnd: end };
+            containLen = normCue.length; containD = d;
+          }
+        } else {
+          // Track nearest by distance for tight-window fallback.
+          const dist = Math.min(Math.abs(normIdx - start), Math.abs(normIdx - end - 1));
+          const d = idxDist(ci);
+          if (dist < bestDist || (dist === bestDist && d < bestD)) {
+            best = { cue, idx: ci, normStart: start, normEnd: end };
+            bestDist = dist; bestD = d;
+          }
+        }
+        start = normFlat.indexOf(normCue, start + 1);
       }
     }
+    if (contain) return contain;
     // Tight fallback: tap landed on punctuation/whitespace between cues.
     // Within 6 normalized chars of a cue boundary → use it. Beyond that,
     // give up — but caller will still get a one-sentence fallback (not
@@ -1210,6 +1429,7 @@
         const sentence = extractSentenceAround(flatText, charIndex) ||
                          (chunk?.textContent || '').slice(0, 200).trim();
         const nearest = findNearestChunkCue(chunk, flatText, charIndex);
+      try { window._diag?.('[paged-diag] bindCueLookupContext chunk#' + chunks.indexOf(chunk) + ' tap=' + charIndex + ' → ' + JSON.stringify(nearest) + ' mapped=' + (pagedChunkToCue ? pagedChunkToCue[chunks.indexOf(chunk)] : 'nomap')); } catch (_) {}
         let bookFrac = null;
         try {
           const lastC = chunks[chunks.length - 1];
@@ -1253,7 +1473,61 @@
   //   3. proportional by chunk index in chunks
   //   4. currently-playing cue (when audio is following)
   //   5. first cue with finite times (last resort)
+  // Expected cue index for a chunk, WITHOUT text matching: the alignment
+  // map when this chunk is mapped, interpolation between the nearest mapped
+  // neighbours when it isn't, the aligner's time estimate for map-less auto
+  // titles, proportional position as the last resort. Used to BOUND and
+  // TIE-BREAK text-search candidates: identical cue text recurs in a novel
+  // (a title phrase like ハサミ男, stock lines, names), and "first cue whose
+  // text appears in this chunk" silently picked the EARLIEST occurrence —
+  // the "set playhead landed a couple pages back" / "started from the
+  // beginning" place-loss.
+  function _expectedCueForChunk(chunkIdx) {
+    try {
+      const cues = pagedCues?.length ? pagedCues : (window.__abCues || []);
+      if (!cues.length || !chunks?.length || !(chunkIdx >= 0)) return -1;
+      if (pagedChunkToCue && pagedChunkToCue.length === chunks.length) {
+        if (pagedChunkToCue[chunkIdx] >= 0) return pagedChunkToCue[chunkIdx];
+        let lo = -1, hi = -1;
+        for (let i = chunkIdx - 1; i >= 0; i--) if (pagedChunkToCue[i] >= 0) { lo = i; break; }
+        for (let i = chunkIdx + 1; i < chunks.length; i++) if (pagedChunkToCue[i] >= 0) { hi = i; break; }
+        if (lo >= 0 && hi >= 0) {
+          const a = pagedChunkToCue[lo], b = pagedChunkToCue[hi];
+          return Math.round(a + (b - a) * (chunkIdx - lo) / Math.max(1, hi - lo));
+        }
+        if (lo >= 0) return pagedChunkToCue[lo];
+        if (hi >= 0) return pagedChunkToCue[hi];
+      }
+      const expMs = expectedMsAtChunkPos(chunks[chunkIdx], 0);
+      const lastEnd = cues.length ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
+      if (expMs != null) {
+        if (expMs > lastEnd + 45000) return -1;   // beyond coverage: no cue is "expected" there
+        let lo = 0, hi = cues.length - 1, k = 0;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if ((cues[mid]?.startMs ?? Infinity) <= expMs) { k = mid; lo = mid + 1; } else hi = mid - 1;
+        }
+        return k;
+      }
+      // Proportional guess — only meaningful when the cues cover the book.
+      const durMs = _knownDurMs(cues);
+      if (durMs > 60000 && lastEnd < durMs * 0.92) return -1;
+      return Math.round(chunkIdx / Math.max(1, chunks.length - 1) * (cues.length - 1));
+    } catch (_) { return -1; }
+  }
+  // Candidate window around an expected cue index (±4% of the list, floor 30).
+  function _cueWindow(expIdx, n) {
+    if (!(expIdx >= 0)) return null;
+    const span = Math.max(30, Math.round(n * 0.04));
+    return { lo: Math.max(0, expIdx - span), hi: Math.min(n - 1, expIdx + span), span };
+  }
+
   function findNearestChunkCue(chunk, flatText, charIndex) {
+    const _res = _findNearestChunkCueImpl(chunk, flatText, charIndex);
+    try { window._diag?.('[paged-diag] findNearestChunkCue chunk#' + (chunk ? chunks.indexOf(chunk) : -1) + ' tap=' + charIndex + ' expected#' + _expectedCueForChunk(chunk ? chunks.indexOf(chunk) : -1) + ' → ' + JSON.stringify(_res)); } catch (_) {}
+    return _res;
+  }
+  function _findNearestChunkCueImpl(chunk, flatText, charIndex) {
     // Source of truth for cues: our own pagedCues, OR — when our load
     // failed silently — the legacy reader's abCues exposed via window.
     const cues = (pagedCues?.length ? pagedCues : (window.__abCues || []));
@@ -1272,53 +1546,48 @@
       ? expectedMsAtChunkPos(chunk, hasTap ? charIndex : 0) : null;
 
     // --- Strategy 0: UNCOVERED region of a partially-transcribed book ---
-    // MUST RUN FIRST (round 2: "works for small adjustments, totally off
-    // after a 10k-char jump"): when the tapped position lies beyond the cue
-    // list's coverage, NO cue-based strategy can be right — the text search
-    // false-positives on repeated phrases anywhere in the partial list, and
-    // the aligner estimate clamps to its anchor frontier (~the last
-    // transcribed minute). Estimate from the BOOK CHAR FRACTION over the
-    // FULL audio duration instead; seeking there makes the transcriber
-    // restart at that spot and backfill, so real cues follow shortly.
-    try {
-      const tid = window._activeTitleId;
-      // SYNC duration only — durationFor() is ASYNC and comparing its
-      // Promise to a number silently disabled this whole strategy (the
-      // "Set playhead does nothing after a big jump" bug). _abKnownDur is
-      // title-stamped and fed by the audio engine + transcriber.
-      const kd = window._abKnownDur;
-      const durMs = (kd && kd.tid === tid && kd.ms > 0) ? kd.ms : 0;
-      const lastEnd = cues.length ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
-      if (durMs > 60000 && lastEnd < durMs * 0.92 && chunks?.length && chunk) {
-        const lastC = chunks[chunks.length - 1];
-        let total = (parseInt(lastC.dataset.charOffset || '0', 10) || 0) +
-                    (parseInt(lastC.dataset.charLen || '0', 10) || 0);
-        try { total = Math.max(total, window.autoAlign?.textLen?.() || 0); } catch (_) {}
-        const off = parseInt(chunk.dataset.charOffset || '-1', 10);
-        if (total > 0 && off >= 0) {
-          const est = (off / total) * durMs;
-          if (est > lastEnd + 45000) {
-            log('findNearestChunkCue: UNCOVERED — char-fraction estimate ' + Math.round(est / 1000) + 's (coverage ends ' + Math.round(lastEnd / 1000) + 's)');
-            return { idx: -1, startMs: Math.max(0, Math.round(est) - 4000), endMs: null, est: true };
-          }
-        }
+    // MUST RUN FIRST: when the position lies beyond the cue list's coverage,
+    // NO cue-based strategy can be right — the text search false-positives
+    // on repeated phrases, and every "nearest cue by time" clamps to the
+    // LAST transcribed cue (the frontier). Estimate the audio time from the
+    // book position instead; seeking there makes the transcriber restart at
+    // that spot and backfill, so real cues follow shortly.
+    {
+      const e0 = _estAudioMsFor(chunk, cues);
+      if (e0 && e0.uncovered) {
+        log('findNearestChunkCue: UNCOVERED — estimate ' + Math.round(e0.est / 1000) + 's (coverage ends ' + Math.round(e0.lastEnd / 1000) + 's)');
+        return { idx: -1, startMs: Math.max(0, Math.round(e0.est) - 4000), endMs: null, est: true };
       }
-    } catch (_) {}
-
+    }
 
     // --- Strategy 1: best cue whose text appears in this chunk ---
-    // Algorithm (v6):
-    //   For each cue, find ALL its occurrences in the normalized chunk
-    //   text (a cue text like "そして" can appear many times). For each
-    //   (cue, occurrence) pair, compute distance to the tap. Then:
-    //     A. Among pairs that CONTAIN the tap (dist=0), prefer the one
-    //        whose cue text is LONGEST — that's the most-specific match.
-    //        A short common cue like "そう" trivially contains many
-    //        taps; a full-sentence cue containing the same tap is the
-    //        right answer.
-    //     B. If no pair contains the tap, pick the smallest distance.
+    // v7: position-aware. (a) A MAPPED chunk with no tap answers straight
+    // from the alignment map — its first cue IS the start of the visible
+    // column, no text search needed. (b) Text-search candidates are bounded
+    // to a window around the chunk's EXPECTED cue index (long cue texts,
+    // ≥12 chars, are allowed from anywhere — effectively unique), and every
+    // tie (same length, same distance, same in-chunk position) breaks toward
+    // the expected index. v6 returned the FIRST cue in list order whose
+    // text occurred in the chunk, so any phrase that recurs in the book
+    // resolved to its EARLIEST occurrence.
+    //   With a tap: among occurrences CONTAINING the tap prefer the LONGEST
+    //   cue text (most specific), then the nearest expected index; else the
+    //   occurrence nearest the tap.
+    //   Without a tap (set playhead from view): the occurrence EARLIEST in
+    //   the chunk (the top of the visible column), then longest, then
+    //   nearest expected index.
     // Ruby-stripped: textContent interleaves furigana readings, which both
     // hid cue occurrences AND disagreed with tapNormIdx's flatText coords.
+    const chunkIdx0 = (chunk && chunks) ? chunks.indexOf(chunk) : -1;
+    const expIdx = _expectedCueForChunk(chunkIdx0);
+    if (!hasTap && cuesSource === 'paged' && chunkIdx0 >= 0 && pagedChunkToCue &&
+        pagedChunkToCue[chunkIdx0] >= 0) {
+      const mi = pagedChunkToCue[chunkIdx0], mc = cues[mi];
+      if (mc && Number.isFinite(mc.startMs) && Number.isFinite(mc.endMs)) {
+        log('findNearestChunkCue: mapped chunk → cue#' + mi + ' (no tap, alignment map)');
+        return { idx: mi, startMs: mc.startMs, endMs: mc.endMs };
+      }
+    }
     const normChunk = chunk ? chunkNormNoRuby(chunk) : '';
     if (normChunk) {
       let tapNormIdx = -1;
@@ -1329,8 +1598,14 @@
           if (!STRIP.test(flatText[i])) tapNormIdx++;
         }
       }
-      let bestContain = null, bestContainLen = -1;
-      let bestNearby  = null, bestNearbyDist = Infinity;
+      const win = _cueWindow(expIdx, cues.length);
+      const idxDist = (i) => (expIdx >= 0 ? Math.abs(i - expIdx) : 0);
+      // Cues mapped to THIS chunk (paged source) are always candidates.
+      const mappedHere = new Set();
+      if (cuesSource === 'paged' && pagedCueToChunk && chunkIdx0 >= 0) {
+        for (let i = 0; i < pagedCueToChunk.length; i++) if (pagedCueToChunk[i] === chunkIdx0) mappedHere.add(i);
+      }
+      let bestContain = null, bestNearby = null, bestFirst = null;
       let matchCount = 0;
       for (let i = 0; i < cues.length; i++) {
         const c = cues[i];
@@ -1338,39 +1613,41 @@
         if (expMs != null && Math.abs(c.startMs - expMs) > TAP_TIME_BOUND_MS) continue;
         const norm = normalizeJP(c?.text || '');
         if (!norm || norm.length < 3) continue;
+        if (win && !mappedHere.has(i) && (i < win.lo || i > win.hi) && norm.length < 12) continue;
         // Walk all occurrences of this cue's text in the chunk.
         let from = 0;
         while (from <= normChunk.length) {
           const pos = normChunk.indexOf(norm, from);
           if (pos < 0) break;
           matchCount++;
+          const cand = { idx: i, startMs: c.startMs, endMs: c.endMs, normLen: norm.length, pos, d: idxDist(i) };
           if (!hasTap) {
-            log('findNearestChunkCue: text-match cue#' + i + ' (no tap, first match)');
-            return { idx: i, startMs: c.startMs, endMs: c.endMs };
-          }
-          const end = pos + norm.length;
-          if (tapNormIdx >= pos && tapNormIdx < end) {
-            // Contains tap — keep the longest cue text among contains.
-            if (norm.length > bestContainLen) {
-              bestContain = { idx: i, startMs: c.startMs, endMs: c.endMs, normLen: norm.length };
-              bestContainLen = norm.length;
-            }
+            // Earliest in the chunk, then longest, then nearest expected.
+            if (!bestFirst || pos < bestFirst.pos ||
+                (pos === bestFirst.pos && (norm.length > bestFirst.normLen ||
+                 (norm.length === bestFirst.normLen && cand.d < bestFirst.d)))) bestFirst = cand;
           } else {
-            const dist = Math.min(Math.abs(tapNormIdx - pos), Math.abs(tapNormIdx - end));
-            if (dist < bestNearbyDist) {
-              bestNearby = { idx: i, startMs: c.startMs, endMs: c.endMs };
-              bestNearbyDist = dist;
+            const end = pos + norm.length;
+            if (tapNormIdx >= pos && tapNormIdx < end) {
+              if (!bestContain || norm.length > bestContain.normLen ||
+                  (norm.length === bestContain.normLen && cand.d < bestContain.d)) bestContain = cand;
+            } else {
+              const dist = Math.min(Math.abs(tapNormIdx - pos), Math.abs(tapNormIdx - end));
+              cand.dist = dist;
+              if (!bestNearby || dist < bestNearby.dist ||
+                  (dist === bestNearby.dist && cand.d < bestNearby.d)) bestNearby = cand;
             }
           }
           from = pos + 1; // next occurrence
         }
       }
-      const winner = bestContain || bestNearby;
+      const winner = hasTap ? (bestContain || bestNearby) : bestFirst;
       if (winner) {
-        const kind = bestContain ? ('contains, len=' + bestContainLen) : ('nearby, dist=' + bestNearbyDist);
-        log('findNearestChunkCue: text-match cue#' + winner.idx +
-            ' (best of ' + matchCount + ' candidates, ' + kind + ')');
-        return winner;
+        const kind = !hasTap ? ('first-in-chunk pos=' + winner.pos)
+          : bestContain ? ('contains, len=' + winner.normLen) : ('nearby, dist=' + winner.dist);
+        log('findNearestChunkCue: text-match cue#' + winner.idx + ' (best of ' + matchCount +
+            ' candidates, ' + kind + ', expected#' + expIdx + (win ? ' ±' + win.span : '') + ')');
+        return { idx: winner.idx, startMs: winner.startMs, endMs: winner.endMs };
       }
     }
 
@@ -1396,7 +1673,15 @@
     // --- Strategy 2.5: aligner time estimate (map-less auto titles) ---
     // Better than proportional: the anchor mapping accounts for frontmatter
     // and narration-speed drift. Nearest cue by startMs to the expected ms.
+    // Beyond the last cue → that is the uncovered case again (strategy 0
+    // lacked a duration/aligner answer): return the estimate, never the
+    // frontier cue.
     if (expMs != null) {
+      const lastEndX = cues.length ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
+      if (expMs > lastEndX + 45000) {
+        log('findNearestChunkCue: aligner estimate ' + Math.round(expMs / 1000) + 's beyond coverage ' + Math.round(lastEndX / 1000) + 's — estimate');
+        return { idx: -1, startMs: Math.max(0, Math.round(expMs) - 4000), endMs: null, est: true };
+      }
       let lo = 0, hi = cues.length - 1, k = -1;
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
@@ -1892,6 +2177,15 @@
       }
       lastHighlightedCue = -1;             // let the next live audio-follow paint fire
       window._lastAudioCueIdx = want; window._lastAudioCueTitleId = window._activeTitleId;      // keep the shared cursor at the intended cue (title-stamped)
+      // The reader deliberately LANDED here — make the read cursor agree, the
+      // same rule centerOnActiveCard applies on a card→read entry. Without
+      // this, an audio→read entry that follows the playhead paints the green
+      // line at the audio cue while lastReadCueIdx silently keeps the
+      // PREVIOUS read session's spot; a quick read→card switch then syncs the
+      // card from that stale cursor (syncCardToCurrentCue prefers the read
+      // cursor when paused) and jumps the card far from where the user was —
+      // the "switch to card jumped to the middle of the book" place-loss.
+      lastReadCueIdx = want;
       lastProgrammaticScrollTime = Date.now();
       try { scrollChunkNearRightWithContext(chunk, 3, { allowFarJump: true }); } catch (_) {}
       log('[scroll-trace] ensureGreenOnEnter want=' + want + ' matchCue=' + matchCue + ' painted=' + !!r);
@@ -2598,7 +2892,7 @@
   // whether audio is playing or paused. Base = the active (highlighted) cue =
   // the audio playhead, like the other modes' transport; falls back to the read
   // cursor if the playhead is unknown. dir: +1 next subtitle, -1 previous.
-  function readerCueSwipe(dir) {
+  function readerCueSwipe(dir, seekImpl) {
     try {
       // "Reverse horizontal swipe direction" pref: flip here (single entry) so
       // every call site gets the flipped mapping. Page-turn physics untouched.
@@ -2616,7 +2910,8 @@
       if (bg && cue && Number.isFinite(cue.startMs)) {
         window._audioStatsSeekTs = Date.now();   // swiped-over span wasn't heard — stats anchor, don't credit
         const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
-        try { bg.seek({ ms, fadeMs: 70 }); } catch (_) {}   // brief fade, like the other modes
+        if (typeof seekImpl === 'function') { try { seekImpl(ms, dir); } catch (_) {} }
+        else { try { bg.seek({ ms, fadeMs: 40, rampFrom: dir < 0 ? 1 : 0 }); } catch (_) {} }   // brief fade; back = re-listen at 1× then ramp up
       }
       window._lastAudioCueIdx = target; window._lastAudioCueTitleId = window._activeTitleId;
       // Advance the module read cursor too: the programmatic follow-scroll
@@ -2639,6 +2934,247 @@
 
   // True while a read-mode subtitle swipe is holding the highlight: the playhead
   // hasn't yet reached the swiped-to cue, so a position-derived paint of an
+  // ===================== DRAG SCRUB (read mode) ==============================
+  // A horizontal DRAG in the subtitle zone (top 2/3) scrubs the audiobook:
+  // the finger drives the playhead (screen width = SPAN_MS of audio), the
+  // karaoke indicator follows the finger with no audio round trip (the
+  // finger IS the clock — wordHighlight.scrubTo), cue paints + page turns go
+  // through the normal follow path (__onPagedCueUpdate), and the native
+  // TURNTABLE engine (BackgroundAudioPlugin.swift KadokiScrubEngine) voices
+  // the finger: it chases the target position with platter inertia and
+  // resamples continuously, so speed/direction are smooth, reverse works and
+  // a resting finger is silent. A quick FLICK (< FLICK_MS) is still the one-subtitle
+  // step. Release seeks the real playhead there and resumes only if audio
+  // was playing before the drag. Nothing is persisted until release.
+  // Pref: Appearance → Read → Scrub gesture: audio (default) / visual / off.
+  // SPAN_MS: audio covered by ONE SCREEN WIDTH of drag — SMALLER = less
+  // sensitive (20 s was "a little too fast", 30/60 s were mistakes in the
+  // wrong direction). AUDIO_MIN_GAP_MS: max rate of target updates to native
+  // (touch events arrive at 60-120 Hz; the engine chases the latest target).
+  // CURVE: gentle acceleration — the rate per point grows linearly with the
+  // distance already travelled, so a short rub is fine-grained and a long
+  // drag reaches (1 + CURVE)× the base rate at a full screen width.
+  const SCRUB = { START_PX: 14, SPAN_MS: 2250, CURVE: 1.5, FLICK_MS: 220, AUDIO_MIN_GAP_MS: 8, AUDIO_MIN_DELTA_MS: 4 };
+  let _scrubS = null;
+  let _scrubPainting = false;   // true only while the scrub itself calls __onPagedCueUpdate
+  function _scrubMode() {
+    try {
+      const v = window.appearance?.get?.('read')?.scrubGesture;
+      return (v === 'off' || v === 'visual') ? v : 'audio';
+    } catch (_) { return 'audio'; }
+  }
+  function _scrubCues() {
+    // The reader's cue list only if it belongs to the ACTIVE title (audio-mode
+    // scrubs can run before the reader has loaded this title).
+    const own = pagedCues?.length && window._pagedCuesTitleId === window._activeTitleId;
+    return own ? pagedCues : (window.__abCues || []);
+  }
+  function _nearestCueBefore(cues, t) {
+    let lo = 0, hi = cues.length - 1, k = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if ((cues[mid]?.startMs ?? Infinity) <= t) { k = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return k;
+  }
+  function _cueAtScrubTime(cues, t) {
+    let idx = -1;
+    try { if (window.srtParser?.findCueAtTime) idx = window.srtParser.findCueAtTime(cues, t); } catch (_) {}
+    if (!(idx >= 0)) idx = _nearestCueBefore(cues, t);
+    return idx;
+  }
+  // Anchor = the live playhead at the moment the drag commits. Native truth
+  // fetched at touchstart (touchState) wins; the karaoke clock is the
+  // fallback while playing; then the position mirror; then the cue start.
+  function _scrubAnchorMs(touchState) {
+    let ms = -1;
+    if (touchState && touchState.ready && Number.isFinite(touchState.positionMs) && touchState.positionMs >= 0) ms = touchState.positionMs;
+    if (ms < 0) { try { const n = window.wordHighlight?.nowMs?.(); if (Number.isFinite(n) && n >= 0) ms = n; } catch (_) {} }
+    if (ms < 0 && Number.isFinite(window._lastBgPosMs) && window._lastBgPosMs >= 0) ms = window._lastBgPosMs;
+    if (ms < 0) {
+      const cues = _scrubCues();
+      let ci = window._lastAudioCueIdx;
+      if (!(Number.isFinite(ci) && ci >= 0)) ci = lastReadCueIdx;
+      if (ci >= 0 && cues[ci] && Number.isFinite(cues[ci].startMs)) ms = cues[ci].startMs;
+    }
+    return ms;
+  }
+  // hooks (optional): a non-reader surface (audio/video mode) supplies its
+  // own cue painter + landing handler; the reader defaults stay otherwise.
+  //   hooks.paint(idx, cue, t)  — show cue idx for scrub time t
+  //   hooks.land(idx, t)        — finger released at t (cue idx)
+  //   hooks.cancel()            — flick turned into a one-cue step
+  function scrubBegin(touchState, dim, commitT, hooks) {
+    const cues = _scrubCues();
+    if (!cues.length) return null;
+    const anchor = _scrubAnchorMs(touchState);
+    if (!(anchor >= 0)) return null;
+    const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+    let dur = (touchState && touchState.durationMs > 0) ? touchState.durationMs : 0;
+    if (!(dur > 0)) {
+      const kd = window._abKnownDur;
+      if (kd && kd.tid === window._activeTitleId && kd.ms > 0) dur = kd.ms;
+    }
+    if (!(dur > 0)) { const l = cues[cues.length - 1]; dur = (l.endMs || l.startMs || 0) + 5000; }
+    const mode = _scrubMode();
+    const s = {
+      anchor, ms: anchor, dur, dim: dim || 360, t0: commitT || Date.now(),
+      wasPlaying: !!(touchState && typeof touchState.playing === 'boolean' ? touchState.playing : window._bgPlaying),
+      mode, native: !!(bg && typeof bg.scrub === 'function' && typeof bg.scrubEnd === 'function'),
+      // Android has no turntable engine yet — its scrub() plays a short
+      // grain per call, so targets go out on the old grain cadence there.
+      grains: (window.Capacitor?.getPlatform?.() === 'android'),
+      bg, lastIdx: -1, grainAt: 0, grainMs: -1, hooks: hooks || null,
+      spanMs: (hooks && hooks.spanMs > 0) ? hooks.spanMs : SCRUB.SPAN_MS,
+      prevAudioIdx: window._lastAudioCueIdx, prevReadIdx: lastReadCueIdx, prevHl: lastHighlightedCue,
+    };
+    window._readerScrubbing = true;
+    window._audioStatsSeekTs = Date.now();    // scrubbed-over spans are not "heard"
+    try { window.abMarkUserNav?.(); } catch (_) {}
+    window._readerCueHlGuardUntil = 0;         // no post-swipe hold: the finger decides
+    if (!hooks) lastUserScrollTime = 0;        // the scrub owns the page; let the follow-scroll move it
+    if (mode === 'audio' && s.native) {
+      try {
+        bg.scrubBegin({ ms: Math.round(anchor) }).then((r) => {
+          if (r && typeof r.wasPlaying === 'boolean') s.wasPlaying = r.wasPlaying;
+          if (r && r.engine === false) log('scrub: native engine unavailable (visual only)');
+          if (r && r.engine === true) s.grains = false;   // Android: turntable engine present → touch-rate targets
+        }).catch(() => {});
+      } catch (_) {}
+    }
+    _scrubS = s;
+    log('scrub: begin anchor=' + Math.round(anchor) + 'ms mode=' + mode + ' native=' + s.native + ' playing=' + s.wasPlaying);
+    scrubMove(0);
+    return s;
+  }
+  function scrubMove(dx) {
+    const s = _scrubS; if (!s) return;
+    let dir = -1;                               // swipe LEFT = forward (page-turn / cue-swipe convention)
+    try { if (window._hSwipeReversed && window._hSwipeReversed()) dir = 1; } catch (_) {}
+    const dim = Math.max(120, s.dim);
+    const gain = (s.spanMs || SCRUB.SPAN_MS) / dim;
+    const curve = 1 + SCRUB.CURVE * Math.min(2, Math.abs(dx) / dim);   // capped 2 screens out
+    let t = s.anchor + dir * dx * gain * curve;
+    t = Math.max(0, Math.min(s.dur, t));
+    s.ms = t; s.lastDx = dx;
+    const cues = _scrubCues();
+    const idx = _cueAtScrubTime(cues, t);
+    const now0 = Date.now();
+    // Repaint on a cue change, and RETRY (≤ every 150 ms) while a word-timed
+    // cue has no bound indicator — a failed/late paint used to leave the
+    // pointer frozen for the rest of that cue while the audio kept moving.
+    const cueHasW = !!(idx >= 0 && Array.isArray(cues[idx]?.w) && cues[idx].w.length);
+    const unbound = cueHasW && window.wordHighlight?.hasReader && !window.wordHighlight.hasReader();
+    if (idx >= 0 && (idx !== s.lastIdx || (unbound && now0 - (s.paintAt || 0) > 150))) {
+      s.lastIdx = idx; s.paintAt = now0;
+      if (s.hooks && typeof s.hooks.paint === 'function') {
+        window._abScrubPainting = true;
+        try { s.hooks.paint(idx, cues[idx], t); } catch (_) {}
+        window._abScrubPainting = false;
+      } else {
+        lastHighlightedCue = -1;
+        _scrubPainting = true;
+        try { window.__onPagedCueUpdate?.(idx, cues[idx], t); } catch (_) {}
+        _scrubPainting = false;
+      }
+    }
+    try { window.wordHighlight?.scrubTo?.(t); } catch (_) {}
+    if (s.mode === 'audio' && s.native) {
+      const now = Date.now();
+      {
+        if (!s.audioOn) {
+          // First audible update: land the read head ON the finger (no chase
+          // from the anchor), then chase from there.
+          s.audioOn = true; s.grainAt = now; s.grainMs = t;
+          try { s.bg.scrub({ ms: Math.round(t), snap: true }); } catch (_) {}
+        } else if (s.grains) {
+          if (now - s.grainAt >= 90 && Math.abs(t - s.grainMs) >= 30) {
+            s.grainAt = now; s.grainMs = t;
+            try { s.bg.scrub({ ms: Math.round(t), grainMs: 120 }); } catch (_) {}
+          }
+        } else if (now - s.grainAt >= SCRUB.AUDIO_MIN_GAP_MS && Math.abs(t - s.grainMs) >= SCRUB.AUDIO_MIN_DELTA_MS) {
+          s.grainAt = now; s.grainMs = t;
+          try { s.bg.scrub({ ms: Math.round(t) }); } catch (_) {}
+        }
+      }
+    }
+  }
+  // Land the playhead at `ms` (default: where the finger left it) and resume
+  // iff audio was playing before the drag. `cancel` = a flick that turned
+  // out to be a one-subtitle step: land back on the anchor, no cursor writes.
+  // Returns a one-shot "land here" function for a flick: the caller
+  // (readerCueSwipe) seeks with it so the neighbouring cue is reached in ONE
+  // native transition instead of scrub-end-at-anchor THEN seek.
+  function scrubEnd(cancel) {
+    const s = _scrubS; if (!s) return null;
+    _scrubS = null;
+    window._readerScrubbing = false;
+    const t = Math.round(cancel ? s.anchor : s.ms);
+    const bg = s.bg;
+    // dir: +1 = a forward flick (no ramp — skipping ahead should not slow
+    // down); anything else = re-hearing → resume at 1× and ease back up.
+    const landVia = (ms, dir) => {
+      const rampFrom = (dir > 0) ? 0 : 1;
+      if (s.mode === 'audio' && s.native) {
+        try { bg.scrubEnd({ ms, resume: s.wasPlaying, rampFrom }).catch(() => {}); } catch (_) {}
+      } else if (bg) {
+        try { bg.seek({ ms, fadeMs: s.wasPlaying ? 40 : 0, rampFrom }); } catch (_) {}
+      }
+      try { window.wordHighlight?.scrubEnd?.(ms, s.wasPlaying); } catch (_) {}
+      // Safety net (Android grain path reported "playback stops" after a
+      // scrub): if audio should be running but native says it isn't half a
+      // second later, resume it. Harmless on iOS (state is already playing).
+      if (s.wasPlaying && bg && typeof bg.getState === 'function') {
+        setTimeout(async () => {
+          try {
+            if (_scrubS) return;   // a new scrub began — it owns the transport
+            const st = await bg.getState();
+            if (st && st.ready && !st.playing) {
+              try { window.debugLog?.('[scrub] resume safety net fired'); } catch (_) {}
+              try { window._diag?.('[paged-diag] scrub resume safety net fired'); } catch (_) {}
+              await bg.resume({ fadeMs: 60 });
+            }
+          } catch (_) {}
+        }, 500);
+      }
+    };
+    window._audioStatsSeekTs = Date.now();
+    log('scrub: end at ' + t + 'ms (' + (cancel ? 'cancel' : 'land') + ') resume=' + s.wasPlaying);
+    if (cancel) {
+      // The visual scrub's paints moved the shared cursors with the finger;
+      // put them back so the follow-up one-cue step starts from the anchor.
+      window._lastAudioCueIdx = s.prevAudioIdx;
+      if (s.hooks) { try { s.hooks.cancel?.(); } catch (_) {} }
+      else { lastReadCueIdx = s.prevReadIdx; lastHighlightedCue = -1; }
+      return landVia;
+    }
+    landVia(t);
+    const cues = _scrubCues();
+    const idx = _cueAtScrubTime(cues, t);
+    if (s.hooks) {
+      window._lastAudioCueIdx = idx; window._lastAudioCueTitleId = window._activeTitleId;
+      try { s.hooks.land?.(idx, t); } catch (_) {}
+      return;
+    }
+    if (idx >= 0) {
+      window._lastAudioCueIdx = idx; window._lastAudioCueTitleId = window._activeTitleId;
+      lastReadCueIdx = idx;
+      if (typeof window.persistReadCue === 'function') { try { window.persistReadCue(idx); } catch (_) {} }
+      lastHighlightedCue = -1;
+      try { window._resetAbCueGate?.(); } catch (_) {}
+    }
+  }
+  window._pagedScrubActive = () => !!_scrubS;
+  // Generic drag-scrub for other surfaces (audio / video mode): same engine,
+  // same gain curve, same landing + ramp — the surface supplies the painter.
+  window.kadokiScrub = {
+    begin: (o) => scrubBegin(o && o.touchState, o && o.dim, o && o.commitT, o && o.hooks),
+    move: (dx) => scrubMove(dx),
+    end: (cancel) => scrubEnd(!!cancel),
+    active: () => !!_scrubS,
+    mode: () => _scrubMode(),
+  };
+
   // EARLIER cue should be suppressed (else the previous cue flashes green).
   // Releases as soon as the playhead reaches the target, or after a failsafe.
   function _readerCueHlGuarded(idx) {
@@ -2657,6 +3193,7 @@
     let sx = 0, sy = 0, anchor = 0;
     let committed = false;
     let cueMode = false, cueDx = 0;   // top-2/3 horizontal swipe = subtitle nav (enriched titles)
+    let touchState = null, scrubTried = false, commitT = 0;   // drag-scrub: native playhead snapshot + gate
     let lastX = 0, lastT = 0, vel = 0, peakVel = 0;
     let samples = [];        // recent {x,t} for a windowed release-velocity estimate
     let commitYFrac = -1;    // fractional Y of the gesture in the reader (diagnostic: <0.67 = cueMode zone)
@@ -2666,6 +3203,26 @@
       _cancelPhysAnim();
       sx = t.clientX; sy = t.clientY; anchor = scrollEl.scrollLeft;
       committed = false; physDragging = false; cueMode = false; cueDx = 0;
+      touchState = null; scrubTried = false; commitT = 0;
+      // Drag-scrub anchor: snapshot native truth at finger-down so a scrub
+      // that commits ~50-100 ms later already knows the exact playhead.
+      if (_scrubMode() !== 'off') {
+        try {
+          const bgp = window.Capacitor?.Plugins?.BackgroundAudio;
+          if (bgp?.getState && _readerCueSwipeAvailable()) {
+            bgp.getState().then((st) => { touchState = st; }).catch(() => {});
+            // Warm the turntable engine now (decode + start, silent) so a drag
+            // that commits ~50-100 ms later is audible on its first pixel.
+            if (_scrubMode() === 'audio' && window._bgPlaying && typeof bgp.scrubPrime === 'function') {
+              let guess = -1;
+              try { const n = window.wordHighlight?.nowMs?.(); if (Number.isFinite(n) && n >= 0) guess = n; } catch (_) {}
+              if (guess < 0 && Number.isFinite(window._lastBgPosMs)) guess = window._lastBgPosMs;
+              const args = guess >= 0 ? { ms: Math.round(guess) } : {};
+              bgp.scrubPrime(args).catch(() => {});
+            }
+          }
+        } catch (_) {}
+      }
       // Captured NOW (page settled at the anchor) — during the drag the masks
       // update to the peeked position, which would skew the page step.
       anchorMaskTotal = (_maskLW || 0) + (_maskRW || 0);
@@ -2687,7 +3244,12 @@
           const _rect = scrollEl.getBoundingClientRect();
           const _localY = sy - _rect.top;
           commitYFrac = _rect.height > 0 ? (_localY / _rect.height) : -1;
-          cueMode = (_localY >= 0 && _localY < _rect.height * (2 / 3)) && _readerCueSwipeAvailable();
+          commitT = Date.now();
+          // ZONE (2026-09-08): while the PLAYHEAD IS RUNNING the WHOLE screen is
+          // the subtitle swipe / scrub zone; paused → the whole screen turns
+          // pages as normal. (Was: top 2/3 = cues, bottom 1/3 = page.)
+          cueMode = !!window._bgPlaying && _readerCueSwipeAvailable();
+          void _localY;
           // A committed horizontal PAGE drag is the user actively reading — start
           // (or keep alive) the read timer even for a slight jiggle that springs
           // back (NOT for a cue-nav swipe, which isn't a page move). The native
@@ -2699,11 +3261,16 @@
         else return; // vertical-first or still a tap → leave it to the other handlers
       }
       if (cueMode) {
-        // Don't rubber-band/peek the page; just block native scroll, remember the
-        // direction, and fire the cue nav on release (a discrete swipe like card
-        // mode, not a drag-follow).
+        // Don't rubber-band/peek the page; block native scroll and remember the
+        // direction. Past START_PX the drag becomes a SCRUB (finger = playhead);
+        // a quick flick still resolves as the discrete one-cue step on release.
         if (e.cancelable) e.preventDefault();
         cueDx = dx;
+        if (!_scrubS && !scrubTried && Math.abs(dx) >= SCRUB.START_PX && _scrubMode() !== 'off') {
+          scrubTried = true;
+          try { scrubBegin(touchState, scrollEl.clientWidth || cw || 360, commitT); } catch (err) { log('scrub begin err: ' + (err?.message || err)); }
+        }
+        if (_scrubS) { try { scrubMove(dx); } catch (_) {} }
         return;
       }
       if (e.cancelable) e.preventDefault();
@@ -2733,7 +3300,18 @@
         // Discrete subtitle swipe: navigate one cue by direction (swipe-left =
         // forward = next subtitle, matching the page-turn + card mode). A small
         // committed jiggle below the gesture threshold is a no-op.
-        const _cueFired = Math.abs(cueDx) > 30;
+        let _cueFired = Math.abs(cueDx) > 30;
+        if (_scrubS) {
+          // A drag that stayed under FLICK_MS is a flick → one-cue step (cancel
+          // the scrub back to its anchor first); anything longer lands where the
+          // finger let go.
+          const quick = (Date.now() - (_scrubS.t0 || 0)) < SCRUB.FLICK_MS && _cueFired;
+          if (quick) {
+            const land = scrubEnd(true);                 // one transition: straight to the neighbour cue
+            readerCueSwipe(cueDx < 0 ? 1 : -1, land || undefined);
+            _cueFired = false;
+          } else { scrubEnd(false); _cueFired = false; }
+        }
         if (_cueFired) readerCueSwipe(cueDx < 0 ? 1 : -1);
         // Diagnostic (Perf log): a swipe that the user expected to turn a page but
         // landed in the top-2/3 subtitle zone shows up here (yf < 0.67) instead of
@@ -2886,6 +3464,11 @@
   // or restore unless read mode + laid out + a real line is on screen — so a
   // dump-to-0 / garbage save is structurally impossible.
   const KEY_BOOKMARK_PREFIX = 'PAGED_BOOKMARK_';
+  // EXACT line: the cue (subtitle) index the reader was on, saved with the
+  // bookmark. The bookmark alone is a CHUNK (paragraph) index, and reopening
+  // took that paragraph's FIRST cue — a rewind of a line or two every time.
+  const KEY_READ_CUE_PREFIX = 'PAGED_READ_CUE_';
+  let _bookmarkCueIdx = -1;
   const BOOKMARK_SETTLE_MS = 5000;
   let _bookmarkChunkIdx = -1;
   let _bookmarkTimer = null;
@@ -3056,6 +3639,19 @@
   function _persistBookmark() {
     if (!currentName || _bookmarkChunkIdx < 0) return;       // never persist garbage
     try { setPref(KEY_BOOKMARK_PREFIX + currentName, String(_bookmarkChunkIdx)); } catch (_) {}
+    // Exact cue, only when it belongs to (or sits right beside) the bookmarked
+    // paragraph — a cursor left elsewhere by the audio follow must not win.
+    try {
+      let cue = -1;
+      if (Number.isFinite(lastReadCueIdx) && lastReadCueIdx >= 0) {
+        const c = (pagedCueToChunk && lastReadCueIdx < pagedCueToChunk.length) ? pagedCueToChunk[lastReadCueIdx] : -1;
+        if (c < 0 || Math.abs(c - _bookmarkChunkIdx) <= 2) cue = lastReadCueIdx;
+      }
+      if (cue >= 0) {
+        _bookmarkCueIdx = cue;
+        setPref(KEY_READ_CUE_PREFIX + currentName, JSON.stringify({ cue, chunk: _bookmarkChunkIdx, ts: Date.now() }));
+      }
+    } catch (_) {}
   }
 
   // Guard for the RAW-scrollLeft save: refuse to write unless the view is live,
@@ -3330,6 +3926,89 @@
     progressEl.addEventListener('click', fire);
     progressEl.addEventListener('touchend', fire, { passive: false });
     document.body.appendChild(progressEl);
+    ensureSpeedCtl();
+  }
+
+  // Top-right −/+ playback-speed control (read mode only; CSS hides it in
+  // every other mode). Steps the rate currently in effect via app.js's
+  // nudgeActivePlaybackRate (per-mode slot or global, whichever is live);
+  // tapping the readout opens the full speed dialog. Repaints off the
+  // 'playback:rate' event so a change made anywhere else stays in sync.
+  function ensureSpeedCtl() {
+    if (document.getElementById('pagedSpeedCtl')) return;
+    const ctl = document.createElement('div');
+    ctl.id = 'pagedSpeedCtl';
+    ctl.setAttribute('role', 'group');
+    ctl.setAttribute('aria-label', 'Playback speed');
+    const minus = document.createElement('button');
+    minus.type = 'button'; minus.textContent = '−';
+    minus.setAttribute('aria-label', 'Slower');
+    const val = document.createElement('span');
+    val.className = 'ps-val';
+    const plus = document.createElement('button');
+    plus.type = 'button'; plus.textContent = '+';
+    plus.setAttribute('aria-label', 'Faster');
+    ctl.appendChild(minus); ctl.appendChild(val); ctl.appendChild(plus);
+    const fmt = (r) => {
+      const n = Number(r) || 1;
+      let t = n.toFixed(2);
+      if (t.endsWith('0')) t = t.slice(0, -1);   // 1.30 → 1.3, 1.00 → 1.0
+      return t + '×';
+    };
+    const paint = () => {
+      const r = (typeof window.getActivePlaybackRate === 'function')
+        ? window.getActivePlaybackRate() : (window.audioPlaybackRate || 1);
+      val.textContent = fmt(r);
+    };
+    // Same double-fire guard the strip uses (touchend + synthetic click).
+    let busy = false;
+    const step = (delta) => async (e) => {
+      try { e.stopPropagation(); } catch (_) {}
+      try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+      if (busy) return;
+      busy = true;
+      try {
+        if (typeof window.nudgeActivePlaybackRate === 'function') {
+          await window.nudgeActivePlaybackRate(delta);
+        }
+      } catch (_) {}
+      paint();
+      setTimeout(() => { busy = false; }, 120);
+    };
+    minus.addEventListener('click', step(-0.05));
+    plus.addEventListener('click', step(+0.05));
+    val.addEventListener('click', (e) => {
+      try { e.stopPropagation(); } catch (_) {}
+      if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog();
+    });
+    // Swipes that start on the control must never reach the page-turn /
+    // send-to-Anki gesture layer.
+    ['touchstart', 'touchmove', 'touchend', 'pointerdown'].forEach((t) => {
+      ctl.addEventListener(t, (e) => { try { e.stopPropagation(); } catch (_) {} }, { passive: true });
+    });
+    window.addEventListener('playback:rate', paint);
+    window.addEventListener('shell:mode-change', () => setTimeout(paint, 0));
+    paint();
+    document.body.appendChild(ctl);
+    // No status-bar band to live in (Android without edge-to-edge, older
+    // iPhones with a short inset): hide rather than overlap the header.
+    const probe = () => {
+      try {
+        let el = document.getElementById('pagedSafeTopProbe');
+        if (!el) {
+          el = document.createElement('div');
+          el.id = 'pagedSafeTopProbe';
+          el.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:env(safe-area-inset-top, 0px);visibility:hidden;pointer-events:none;';
+          document.body.appendChild(el);
+        }
+        const band = el.offsetHeight || 0;
+        ctl.dataset.noBand = band >= 34 ? '0' : '1';
+      } catch (_) {}
+    };
+    probe();
+    setTimeout(probe, 300);
+    window.addEventListener('resize', probe);
+    window.addEventListener('orientationchange', () => setTimeout(probe, 250));
   }
 
   // Top-right safe-area button — sets audio playhead to the cue under
@@ -4556,6 +5235,7 @@
       // book's settle timer against this one (the title-flip place-loss). The
       // real value for THIS book is loaded from its pref further down.
       _bookmarkChunkIdx = -1;
+      _bookmarkCueIdx = -1;
       _clearBookmarkTimer();
       // Reset the cue cursor + suppress scroll-saves for the WHOLE load: the
       // DOM collapse below fires scroll events whose 400ms debounced save
@@ -4941,6 +5621,12 @@
       const _bmRaw = await getPref(KEY_BOOKMARK_PREFIX + name);
       const _bmIdx = (_bmRaw != null && _bmRaw !== '') ? parseInt(_bmRaw) : -1;
       _bookmarkChunkIdx = (Number.isFinite(_bmIdx) && _bmIdx >= 0) ? _bmIdx : -1;
+      _bookmarkCueIdx = -1;
+      try {
+        const rc = JSON.parse(await getPref(KEY_READ_CUE_PREFIX + name) || 'null');
+        // Trust the exact cue only if it was saved for THIS bookmark paragraph.
+        if (rc && Number.isFinite(rc.cue) && rc.cue >= 0 && Number.isFinite(rc.chunk) && rc.chunk === _bookmarkChunkIdx) _bookmarkCueIdx = rc.cue;
+      } catch (_) {}
       await setPref(KEY_LAST_NAME, name);
       suppressScrollSave = true;
       lastProgrammaticScrollTime = Date.now(); // this restore is not "reading"
@@ -5043,6 +5729,7 @@
         srt   = srt   || await window.getSrtPairingForDeck(deck);
       }
     }
+    try { window._diag?.('[paged-diag] loadAudiobookCues audio=' + (audio ? '…' + String(audio.path).slice(-24) : 'none') + ' srt=' + (srt ? '…' + String(srt.path).slice(-24) : 'none') + ' tid=' + window._activeTitleId + ' chunks=' + chunks.length); } catch (_) {}
     if (!audio || !srt) {
       // Audio + no SRT + on-device transcription support: no SRT will exist
       // until the transcriber finishes, so adopt the audio context and start
@@ -5054,8 +5741,10 @@
       if (audio && !srt && window.autoTranscribe && await window.autoTranscribe.available()) {
         pagedAudioPath = audio.path;
         window._pagedAudioPath = audio.path;
+        _probeDurLater(audio.path);
         try { window.abAdoptAutoAudio?.(audio.path, audio.name); } catch (_) {}
         window.autoTranscribe.activate({ audioPath: audio.path, audioName: audio.name });
+        _scheduleReadHint();   // once the bookmark/layout settle: job → the page on screen
         log('auto-transcribe context adopted for paged reader (no SRT)');
         return true;
       }
@@ -5075,6 +5764,7 @@
     }
     pagedAudioPath = audio.path;
     window._pagedAudioPath = audio.path; // the visible reader's CURRENT-title audiobook
+    _probeDurLater(audio.path);
 
     try {
       // Synced SRT (no uri) whose CACHE file was OS-evicted → re-download from Drive
@@ -5089,6 +5779,19 @@
           const s2 = t2?.attachments?.srt; if (s2 && s2.cachePath) srt.path = s2.cachePath;
         } catch (_) {}
       }
+      // Stale app-container path (developer reinstall) → rebase, and repair
+      // the stored attachment so every other consumer sees the live path.
+      try {
+        const rb = await window.rebaseContainerPath?.(srt.path);
+        if (rb && rb !== srt.path) {
+          try { window._diag?.('[paged-diag] SRT path rebased to current container'); } catch (_) {}
+          srt.path = rb;
+          const srtAtt2 = activeTitle?.attachments?.srt;
+          if (srtAtt2 && window._activeTitleId && window.titleStore?.attach) {
+            window.titleStore.attach(window._activeTitleId, 'srt', Object.assign({}, srtAtt2, { cachePath: rb })).catch(() => {});
+          }
+        }
+      } catch (_) {}
       const url = window.Capacitor?.convertFileSrc
         ? window.Capacitor.convertFileSrc(srt.path) : 'file://' + srt.path;
       const res = await fetch(url);
@@ -5096,9 +5799,15 @@
       const text = await res.text();
       pagedCues = window.srtParser.parseSrt(text);
       log(`Loaded ${pagedCues.length} SRT cues for paged reader`);
+      try { window._diag?.('[paged-diag] SRT loaded cues=' + pagedCues.length + ' last=' + (pagedCues.length ? Math.round(pagedCues[pagedCues.length - 1].endMs / 1000) + 's' : '-') + ' chunks=' + chunks.length); } catch (_) {}
       // Auto-generated SRT: copy cached word timings back on (karaoke).
       try { window.autoTranscribe?.enrichWordTimes?.(window._activeTitleId, pagedCues); } catch (_) {}
-    } catch (e) { log('SRT load failed:', e.message); return false; }
+      try { window.abStartSrtWordTiming?.(audio, pagedCues); } catch (_) {}
+    } catch (e) {
+      log('SRT load failed:', e.message);
+      try { window._diag?.('[paged-diag] SRT load FAILED: ' + (e?.message || e) + ' path=…' + String(srt.path).slice(-48)); } catch (_) {}
+      return false;
+    }
 
     // Build cue→chunk mapping. Preferred path: the new preprocessing
     // module (cue-alignment.js) builds a stable cue→char-range
@@ -5114,6 +5823,15 @@
     // overlaps a ruby run).
     for (const c of chunks) c.dataset.norm = chunkNormNoRuby(c);
     if (!chunks.length || !pagedCues.length) return true;
+    // The reader's chunks belong to the LAST EPUB it rendered. A video or
+    // audio-only title has no book, so `chunks` are another title's text —
+    // aligning 673 video cues against a 191k-char novel took seconds behind
+    // a "Preparing book / Indexing text…" modal on EVERY open (and could
+    // only miss). No book for this title → no maps; the cue list stands alone.
+    if (currentTitleId && window._activeTitleId && currentTitleId !== window._activeTitleId) {
+      try { window._diag?.('[paged-diag] loadAudiobookCues: chunks belong to ' + currentTitleId + ', active ' + window._activeTitleId + ' → skip alignment'); } catch (_) {}
+      return true;
+    }
 
     let used = 'none';
     let freshAlignment = false; // true → this run computed a fresh alignment (not cached)
@@ -5143,7 +5861,7 @@
         const t0 = performance.now();
         const { alignment, cached } =
           await window.cueAlignment.loadOrBuild({
-            titleId, epubName, srtName, chunks, cues: pagedCues,
+            titleId, epubName, srtName, chunks, cues: pagedCues, who: 'paged',
             onProgress: progress ? (p) => progress.update(p) : null
           });
         const dt = Math.round(performance.now() - t0);
@@ -5159,14 +5877,19 @@
           used = cached ? 'align-cache' : 'align-fresh';
         } else {
           log(`Paged alignment ratio too low (${ratio.toFixed(2)} < ${window.cueAlignment.MIN_MATCHED_RATIO}); falling back to legacy matcher`);
-          try { await window.cueAlignment.clearAlignment(titleId); } catch (e) {}
+          // Evict only a CACHED low-ratio alignment; a fresh one was never
+          // saved, and clearing after a racy fresh miss destroyed the good
+          // cache (→ "align-fresh" on every open).
+          if (cached) { try { await window.cueAlignment.clearAlignment(titleId); } catch (e) {} }
         }
       } catch (e) {
         log('Paged alignment error; falling back:', e.message);
+        try { window._diag?.('[paged-diag] paged alignment error: ' + (e && e.message)); } catch (_) {}
       } finally {
         if (progress) { try { progress.close(); } catch (e) {} }
       }
     }
+    try { window._diag?.('[paged-diag] alignment used=' + used + ' chunks=' + chunks.length); } catch (_) {}
     if (used === 'none' && window.srtParser?.buildCueChunkMaps) {
       const maps = window.srtParser.buildCueChunkMaps(pagedCues, chunks, normalizeJP);
       pagedCueToChunk = maps.cueToChunk;
@@ -5253,6 +5976,21 @@
     log(`onPositionUpdate: cue ${idx} @ ${positionMs}ms`);
     if (idx < 0) { clearCueHighlight(); return; }
     paintCueHighlight(idx);
+    // The reader is VISIBLY following the playhead onto this line — keep the
+    // read cursor (lastReadCueIdx) in agreement, same as ensureGreenOnEnter /
+    // centerOnActiveCard do for deliberate landings. Without this, a listen
+    // inside read mode advanced the highlight but left the cursor at the old
+    // read spot, so pausing and switching to card synced the card to that
+    // stale cursor (syncCardToCurrentCue prefers it when paused) — a big
+    // backward place-jump. Guards: only while read mode is the visible view
+    // (a hidden-view follow must not clobber the cursor), and same 5s
+    // user-scroll window as paintCueHighlight's auto-scroll — a recent manual
+    // scroll means the user is deliberately elsewhere, and the edge-chunk
+    // credit path owns the cursor there.
+    if (document.body.classList.contains('mode-read') && !_readerHidden() &&
+        Date.now() - lastUserScrollTime >= 5000) {
+      lastReadCueIdx = idx;
+    }
   }
 
   function clearCueHighlight() {
@@ -5514,6 +6252,35 @@
     } catch (_) {}
   };
 
+  // Drag-scrub follow: keep the SPOKEN word on the page in either direction.
+  // The word-follow turn above is tuned for playback (one turn per beat, a
+  // settle guard, a user-scroll grace) and the cue-level scroll skips short
+  // cues — scrubbing BACKWARD through short subtitles could leave the target
+  // on the previous page with the indicator drawn off-screen ("disappears").
+  // Called every frame from the karaoke tick while a scrub is active;
+  // throttled here, ignores the playback guards.
+  let _scrubFollowLast = 0;
+  window.__pagedScrubFollow = function (r) {
+    try {
+      if (!scrollEl || !r || !(r.width > 0)) return;
+      if (document.hidden || _readerHidden()) return;
+      const now = Date.now();
+      if (now - _scrubFollowLast < 260) return;
+      const sr = scrollEl.getBoundingClientRect();
+      if (!sr.width) return;
+      const visLeft = sr.left + (_maskLW || 0);
+      const visRight = sr.right - (_maskRW || 0);
+      if (r.left >= visLeft && r.right <= visRight) return;   // on the page
+      const pad = _furiGutter(sr.width);
+      const delta = r.right - (sr.right - pad);
+      if (Math.abs(delta) < 4) return;
+      _scrubFollowLast = now;
+      lastProgrammaticScrollTime = now;
+      log('[scroll-trace] scrub follow delta=' + Math.round(delta));
+      scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
+    } catch (_) {}
+  };
+
   function isChunkVisible(chunk) {
     const cr = chunk.getBoundingClientRect();
     const sr = scrollEl.getBoundingClientRect();
@@ -5751,8 +6518,18 @@
         const bm = (_bookmarkChunkIdx >= 0 && pagedChunkToCue &&
                     _bookmarkChunkIdx < pagedChunkToCue.length && pagedChunkToCue[_bookmarkChunkIdx] >= 0)
           ? pagedChunkToCue[_bookmarkChunkIdx] : -1;
+        // The EXACT cue saved with the bookmark beats the paragraph's first cue.
+        let exact = -1;
+        try {
+          const n = (pagedCues?.length ? pagedCues : (window.__abCues || [])).length;
+          if (_bookmarkCueIdx >= 0 && _bookmarkCueIdx < n) {
+            const c = (pagedCueToChunk && _bookmarkCueIdx < pagedCueToChunk.length) ? pagedCueToChunk[_bookmarkCueIdx] : -1;
+            if (c < 0 || _bookmarkChunkIdx < 0 || Math.abs(c - _bookmarkChunkIdx) <= 2) exact = _bookmarkCueIdx;
+          }
+        } catch (_) {}
         return (Number.isFinite(stayCue) && stayCue >= 0) ? stayCue
           : (Number.isFinite(jumpCue) && jumpCue >= 0) ? jumpCue
+          : (exact >= 0) ? exact
           : bm;
       };
       if (!_cameFromCardEntry && window._pagedCuesTitleId === window._activeTitleId &&
@@ -5798,7 +6575,7 @@
         // audio plays). Keep retrying only while it hasn't painted, under the
         // cap, AND audio isn't driving the highlight live — once _bgPlaying is
         // true, __onPagedCueUpdate owns the paint and retries would fight it.
-        if (!ok && _tries < 20 && !window._bgPlaying) setTimeout(tryPaint, 120);
+        if (!ok && _tries < 45 && !window._bgPlaying) setTimeout(tryPaint, 120);
       };
       tryPaint();
       _revealReaderSettled();
@@ -5959,6 +6736,7 @@
       return;
     }
     const nearest = findNearestChunkCue(chosen);
+    try { window._diag?.('[paged-diag] setPlayheadFromView chunk#' + chunks.indexOf(chosen) + '/' + chunks.length + ' → ' + JSON.stringify(nearest) + ' mapped=' + (pagedChunkToCue ? pagedChunkToCue[chunks.indexOf(chosen)] : 'nomap') + ' cues=' + (pagedCues?.length || 0) + '/' + ((window.__abCues || []).length)); } catch (_) {}
     if (!nearest) {
       try { window.showToast?.('No audio cue here', 1800); } catch (_) {}
       return;
@@ -6010,6 +6788,49 @@
       try { window.showToast?.('Play error: ' + e.message, 2200); } catch (_) {}
       return;
     }
+  };
+
+  // Right-edge visible chunk (the line the user is on in vertical-rl) —
+  // shared by the read-mode PLAY resolvers below. null when hidden/empty.
+  function _visibleEdgeChunk() {
+    if (_readerHidden() || !scrollEl || !chunks?.length) return null;
+    const sr = scrollEl.getBoundingClientRect();
+    let chosen = null, chosenRight = -Infinity;
+    for (const ch of chunks) {
+      const r = ch.getBoundingClientRect();
+      if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
+      if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
+      if (r.right > chosenRight) { chosen = ch; chosenRight = r.right; }
+    }
+    return chosen;
+  }
+  // Audio start (ms) for the page the user is LOOKING AT, resolved exactly
+  // like the "set playhead" button (alignment map → position-bounded text
+  // match → estimates). Read-mode PLAY uses it when the read cursor is
+  // unknown — the old chain fell through to the ACTIVE CARD's start, which
+  // on a cold boot could still be card 0 = the beginning of the book.
+  window._pagedVisibleCueStartMs = function () {
+    try {
+      const chunk = _visibleEdgeChunk();
+      if (!chunk) return null;
+      const nearest = findNearestChunkCue(chunk);
+      return (nearest && Number.isFinite(nearest.startMs)) ? nearest.startMs : null;
+    } catch (_) { return null; }
+  };
+  // How far into the book the visible page is (0..1 by raw chars). NaN when
+  // the reader isn't showing. Lets PLAY reject a "book start" resolution
+  // while the reader is visibly deep in the book.
+  window._pagedVisibleFrac = function () {
+    try {
+      const chunk = _visibleEdgeChunk();
+      if (!chunk) return NaN;
+      const lastC = chunks[chunks.length - 1];
+      const total = (parseInt(lastC.dataset.charOffset || '0', 10) || 0) +
+                    (parseInt(lastC.dataset.charLen || '0', 10) || 0);
+      const off = parseInt(chunk.dataset.charOffset || '-1', 10);
+      if (!(total > 0) || off < 0) return NaN;
+      return Math.max(0, Math.min(1, off / total));
+    } catch (_) { return NaN; }
   };
 
   window.openPagedReader     = openView;
@@ -6176,6 +6997,7 @@
 
   window.pagedPlayFromCue = async function (cueIdx) {
     log('pagedPlayFromCue cueIdx=' + cueIdx);
+    try { const c0 = (pagedCues?.length ? pagedCues : (window.__abCues || []))[cueIdx]; window._diag?.('[paged-diag] pagedPlayFromCue cueIdx=' + cueIdx + ' startMs=' + (c0 && c0.startMs) + ' text=' + ((c0 && c0.text) || '').slice(0, 20) + ' lastAudio=' + window._lastAudioCueIdx + ' readCue=' + lastReadCueIdx); } catch (_) {}
     if (!Number.isFinite(cueIdx)) {
       log('pagedPlayFromCue: invalid cueIdx');
       return false;
@@ -6253,6 +7075,10 @@
   // reader up to wherever the playhead got to while the screen was off.
   window.__pagedForceCueRepaint = function () {
     lastHighlightedCue = -1;
+    // Mid-scrub the native position events that would normally carry the
+    // repaint are blocked (the finger owns the paint) — repaint through the
+    // scrub itself, else the indicator stays gone until the next cue.
+    if (_scrubS) { try { _scrubS.lastIdx = -1; scrubMove(_scrubS.lastDx || 0); } catch (_) {} return; }
     try { updateProgress({ cueIdx: window._lastAudioCueIdx ?? -1 }); } catch (_) {}
   };
 
@@ -6286,6 +7112,7 @@
       try {
         if (s && s.durationMs > 0 && window._activeTitleId) {
           window._abKnownDur = { tid: window._activeTitleId, ms: Math.floor(s.durationMs) };
+          _rememberDurMs(s.durationMs);
         }
       } catch (_) {}
       _wdBusy = false;
@@ -6338,6 +7165,10 @@
   }
 
   window.__onPagedCueUpdate = function (idx, cue, positionMs) {
+    // Drag-scrub in progress: the finger owns the paint. Native position
+    // events (grain starts, or live audio in visual-only mode) would otherwise
+    // repaint the AUDIO cue over the finger's cue several times a second.
+    if (window._readerScrubbing && !_scrubPainting) return;
     try { _maybeExtendSynthBook(idx); } catch (_) {}
     // Update the top-left progress strip regardless of whether the
     // paged reader view is visible — the strip lives at body level
@@ -6544,7 +7375,7 @@
         // wrong forward paint can never be walked back (place invariant).
         if (_lastResolveTrusted) {
           const _jpEnd = (parseInt(chunk.dataset.jpOff) || 0) + (parseInt(chunk.dataset.jpLen) || 0);
-          if (_jpEnd > 0) window.stats?.noteReadPosition?.(_jpEnd);
+          if (_jpEnd > 0 && !window._readerScrubbing) window.stats?.noteReadPosition?.(_jpEnd);
         }
         window.stats?.bumpRead?.();
       } catch (_) {}
@@ -6592,7 +7423,10 @@
     // been painted above; skipping the scroll just leaves the user's
     // position alone. Long cues stay snap-on, so legitimate
     // "user-explored, snap back to playhead" still works.
-    if ((cue.text || '').trim().length < 10) {
+    // (Not while the SCRUB paints: the finger's cue must come on-page, and the
+    // short-cue false-match this guards against can't happen there — the
+    // scrub resolves by index, not by text.)
+    if (!_scrubPainting && (cue.text || '').trim().length < 10) {
       log('[scroll-trace] __onPagedCueUpdate idx=' + idx + ' SKIP short cue len=' + (cue.text||'').length);
       return;
     }

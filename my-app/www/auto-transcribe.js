@@ -52,6 +52,7 @@
   };
   const t = (k, fb, v) => (window.i18n?.t ? window.i18n.t(k, fb, v) : fb);
   const log = (m) => { try { console.log('[autoTrans] ' + m); } catch (_) {} };
+  const diag = (m) => { try { window._diag?.('[paged-diag][autoTrans] ' + m); } catch (_) {} };
 
   const avail = { supported: false, installed: false };
   let availPromise = null;
@@ -60,6 +61,7 @@
   let job = null;      // { id, startMs, fedThroughMs }
   let jobSeq = 0;
   let lastPosMs = -1;
+  let xcribeRate = 0;   // measured audio-ms per wall-ms of the native transcriber (0 = unknown)
   let lastTargetSentAt = 0;
   let lastEnsureAt = 0;
   let persistTimer = null;
@@ -160,6 +162,7 @@
 
   function setStatus(text) {
     if (!window.audiobookActive) return;
+    if (active && active.timingOnly) return;   // timing-only: the SRT owns the display, always
     const cues = active?.cues;
     if (cues && cues.length) return;   // real cues own the display
     const el = document.getElementById('audiobookCueText');
@@ -598,8 +601,9 @@
       startMs = s2;
     }
     const id = 'j' + (++jobSeq);
-    job = { id, startMs, fedThroughMs: startMs };
+    job = { id, startMs, fedThroughMs: startMs, startedAt: Date.now(), lastCuesAt: 0 };
     log('start job ' + id + ' at ' + Math.round(startMs / 1000) + 's');
+    diag('start job ' + id + ' at ' + Math.round(startMs / 1000) + 's (target ' + Math.round((lastPosMs >= 0 ? lastPosMs : startMs) / 1000) + 's)');
     try {
       const r = await p.start({
         jobId: id, srcPath: a.audioPath, startMs,
@@ -610,6 +614,7 @@
       try { if (a.durationMs > 0) window._abKnownDur = { tid: a.titleId, ms: a.durationMs }; } catch (_) {}
     } catch (e) {
       log('job start failed: ' + (e?.message || e));
+      diag('job start FAILED: ' + (e?.message || e) + ' retries=' + ((a.retries || 0) + 1));
       job = null;
       a.retries = (a.retries || 0) + 1;
       if (a.retries > MAX_JOB_RETRIES) {
@@ -621,11 +626,26 @@
 
   function ensureJob(posMs) {
     const a = active;
-    if (!a || a.done || job || a.assetsDownloading) return;
+    if (!a || a.done || job || a.assetsDownloading) { if (a && a.done) diag('ensureJob: title marked done'); return; }
     const now = Date.now();
     if (now - lastEnsureAt < 2000) return;
     lastEnsureAt = now;
     startJob(nextUncovered(a.cov, Math.max(0, posMs)));
+  }
+
+  // Reader-page hint (paged reader, after its layout/bookmark settle): before
+  // any playback, move the job to where the user is READING if that audio is
+  // still untranscribed. Ignored once real position events exist.
+  function hintPosition(ms) {
+    const a = active;
+    if (!a || a.done || a.timingOnly || !Number.isFinite(ms) || ms < 0) return false;
+    if (lastPosMs >= 0) return false;
+    if (coveringRange(a.cov || [], ms)) return false;
+    const j = job;
+    if (j && ms >= j.startMs - 10000 && ms <= j.fedThroughMs + 30000) return false;   // already working here
+    diag('hintPosition: job → ' + Math.round(ms / 1000) + 's (was ' + (j ? Math.round(j.startMs / 1000) + 's' : 'none') + ')');
+    restartAt(Math.max(0, ms - 2000));
+    return true;
   }
 
   function restartAt(ms) {
@@ -643,12 +663,23 @@
   function onCuesEvent(ev) {
     const a = active;
     if (!a || !job || ev?.jobId !== job.id) return;
-    if (Number.isFinite(ev.fedThroughMs)) job.fedThroughMs = ev.fedThroughMs;
+    if (Number.isFinite(ev.fedThroughMs)) {
+      // Measured transcription speed (audio ms per wall ms) for the progress
+      // bar's between-window estimate; whisper windows land every ~15 s.
+      const nowW = Date.now();
+      const since = job.lastCuesAt || job.startedAt || 0;
+      if (since > 0 && nowW - since > 1000 && ev.fedThroughMs > job.fedThroughMs) {
+        const r = (ev.fedThroughMs - job.fedThroughMs) / (nowW - since);
+        if (r > 0.1 && r < 50) xcribeRate = xcribeRate > 0 ? 0.6 * xcribeRate + 0.4 * r : r;
+      }
+      job.lastCuesAt = nowW;
+      job.fedThroughMs = ev.fedThroughMs;
+    }
     const added = mergeCues(ev.cues || []);
     let maxEnd = job.startMs;
     for (const c of (ev.cues || [])) if (c.endMs > maxEnd) maxEnd = c.endMs;
     a.cov = addRange(a.cov, job.startMs, maxEnd);
-    if (added) { schedulePersist(false); scheduleCardRefresh(); }
+    if (added) { schedulePersist(false); if (a.timingOnly) enrichLiveSrt(); else scheduleCardRefresh(); }
     // Frontier ran into a large already-covered region (user seeked back into
     // transcribed audio earlier) — skip the job past it instead of re-feeding.
     const covering = coveringRange(a.cov, job.fedThroughMs + 1500);
@@ -770,6 +801,7 @@
   async function maybeFinalize() {
     const a = active;
     if (!a || a.done || a.finalizing) return false;
+    if (a.timingOnly) { if (isFullyCovered(a.cov, a.durationMs)) { a.done = true; setStatus(''); } return a.done; }
     if (!isFullyCovered(a.cov, a.durationMs) || !a.cues.length) return false;
     a.finalizing = true;
     try {
@@ -971,13 +1003,16 @@
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
 
-  async function activate({ audioPath, audioName }) {
-    if (!hasNativeTranscribe() || !plugin()) return false;
+  async function activate({ audioPath, audioName, timingOnly }) {
+    diag('activate tid=' + window._activeTitleId + ' path=…' + String(audioPath || '').slice(-24) + ' active=' + (active ? (active.titleId + ' done=' + active.done + ' cues=' + active.cues.length + ' job=' + !!job) : 'none'));
+    if (!hasNativeTranscribe() || !plugin()) { diag('activate: no native plugin'); return false; }
     const a = await checkAvail();
-    if (!a.supported) return false;
+    if (!a.supported) { diag('activate: unsupported'); return false; }
     const titleId = window._activeTitleId;
-    if (!titleId || !audioPath) { log('activate skipped: no titleId/audioPath'); return false; }
+    if (!titleId || !audioPath) { log('activate skipped: no titleId/audioPath'); diag('activate: no titleId/audioPath'); return false; }
     if (active && active.titleId === titleId && active.audioPath === audioPath && !active.done) {
+      diag('activate: already active, re-ingest ' + active.cues.length + ' cues (job=' + !!job + ')');
+      if (active.timingOnly) { enrichLiveSrt(); return true; }
       // Already running for this title — refresh the display context in case
       // reading-mode cleared its cue array on a mode round-trip.
       if (active.cues.length && typeof window.abIngestAutoCues === 'function') {
@@ -996,15 +1031,20 @@
       hasEpub = !!tl?.find(x => x.id === titleId)?.attachments?.epub;
     } catch (_) {}
 
+    // TIMING-ONLY (2026-09-09): the title HAS subtitles (an SRT). Transcribe
+    // anyway — purely to harvest WORD TIMINGS, which are then aligned onto
+    // the SRT cue text (enrichSrtWordTimes) for karaoke. Never replaces the
+    // displayed cues, never attaches an SRT, never runs the book aligner.
     active = {
       titleId, audioPath, audioName: audioName || '',
       sig: '', durationMs: 0, cues: [], cov: [], done: false, retries: 0,
-      assetsDownloading: false, cardAnchorMs: null, hasBookText: hasEpub
+      assetsDownloading: false, cardAnchorMs: null, hasBookText: hasEpub && !timingOnly,
+      timingOnly: !!timingOnly
     };
     const me = active;
-    setStatus(t('at.generating', 'Generating subtitles on device…'));
+    if (!timingOnly) setStatus(t('at.generating', 'Generating subtitles on device…'));
     const isAndroid = window.Capacitor?.getPlatform?.() === 'android';
-    try {
+    if (!timingOnly) try {
       window.showToast?.(hasEpub
         ? t('at.toast_book', 'No native subtitles — generating on device and matching to the book text')
         : (isAndroid
@@ -1117,7 +1157,8 @@
     }
     if (active !== me) return false;
 
-    if (me.cues.length && typeof window.abIngestAutoCues === 'function') {
+    if (me.timingOnly) { enrichLiveSrt(); }
+    else if (me.cues.length && typeof window.abIngestAutoCues === 'function') {
       window.abIngestAutoCues(me.cues);
     }
     // Cache-adopted cues from a pre-alignment session are plain ASR text —
@@ -1133,7 +1174,16 @@
         if (st && Number.isFinite(st.positionMs) && st.positionMs > 0) pos = st.positionMs;
       } catch (_) {}
     }
-    if (active !== me) return false;
+    // Still nothing (fresh open into READ mode, no playback yet): the page the
+    // reader is showing is the best guess — otherwise the job started at the
+    // first gap from 0 s and a reader parked at 105k chars waited on the whole
+    // book (Android whisper: "takes some time to settle down and find the
+    // subtitles").
+    if (!(pos >= 0)) {
+      try { const h = window._pagedReadPosHintMs?.(); if (Number.isFinite(h) && h > 0) { pos = Math.max(0, h - 2000); diag('activate: seeding from reader page hint ' + Math.round(h / 1000) + 's'); } } catch (_) {}
+    }
+    if (active !== me) { diag('activate: superseded before ensureJob'); return false; }
+    diag('activate: ' + me.cues.length + ' cues, cov=' + JSON.stringify(me.cov.map(r => r.map(x => Math.round(x / 1000)))) + ' dur=' + me.durationMs + ' pos=' + pos + ' sig=' + me.sig);
     ensureJob(pos >= 0 ? pos : 0);
     return true;
   }
@@ -1158,7 +1208,7 @@
   // (no active transcription for the title, finished, or `ms` is covered).
   function syncState(ms) {
     const a = active;
-    if (!a || a.done || !Number.isFinite(ms)) return null;
+    if (!a || a.done || a.timingOnly || !Number.isFinite(ms)) return null;   // timing-only: never a "syncing" screen
     const cov = a.cov || [];
     if (coveringRange(cov, ms)) return null;
     const j = job;
@@ -1166,6 +1216,12 @@
     if (j && ms >= j.startMs - 1000) {
       const span = Math.max(1, (ms + 1500) - j.startMs);
       progress = Math.max(0, Math.min(0.98, (j.fedThroughMs - j.startMs) / span));
+      // Between windows the fed-through frontier stands still for ~15 s; show
+      // the expected progress from the measured transcriber speed so the bar
+      // moves honestly instead of parking (user: "stuck on 3%").
+      const rateEst = xcribeRate > 0 ? xcribeRate : 1.5;
+      const expected = Math.max(0, (j.fedThroughMs - j.startMs) + (Date.now() - (j.lastCuesAt || j.startedAt || Date.now())) * rateEst);
+      progress = Math.max(progress, Math.min(0.95, expected / span));
     }
     let coveredMs = 0;
     for (const r of cov) coveredMs += Math.max(0, r[1] - r[0]);
@@ -1179,7 +1235,155 @@
     };
   }
 
+  // ── SRT word-timing enrichment by ALIGNMENT ─────────────────────────────
+  // For a title that has its own SRT: take the transcriber's cues (with
+  // word timings) overlapping each SRT cue in time, lay their characters on
+  // a timeline, and align the SRT cue's characters to that timeline with a
+  // global DP (match +2 / mismatch −1 / gap −1). Matched characters take the
+  // ASR time; unmatched ones are interpolated between neighbours. Human
+  // subtitles condense speech, so a ≥45 % match is enough to accept.
+  const _STRIP_RE = /[\s　「」『』、。・…！？!?,.;:()（）\-—–~〜]/;
+  function _normChars(text) {
+    const out = []; const idx = [];
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (_STRIP_RE.test(ch)) continue;
+      const code = ch.charCodeAt(0);   // katakana → hiragana: script choice must not break matches
+      const n = (code >= 0x30A1 && code <= 0x30F6) ? String.fromCharCode(code - 0x60) : ch;
+      out.push(n); idx.push(i);
+    }
+    return { chars: out, idx };
+  }
+  function _asrTimeline(autoCues, fromMs, toMs) {
+    const chars = [], times = [];
+    for (const c of autoCues) {
+      if (!c || !Array.isArray(c.w) || !c.w.length) continue;
+      if (c.endMs < fromMs || c.startMs > toMs) continue;
+      const text = String(c.text || '');
+      const tByRaw = new Map();
+      for (let q = 0; q + 3 < c.w.length; q += 4) {
+        const off = c.w[q] | 0, len = c.w[q + 1] | 0, s0 = c.startMs + c.w[q + 2], e0 = c.startMs + c.w[q + 3];
+        for (let k = 0; k < len; k++) tByRaw.set(off + k, s0 + (e0 - s0) * (k + 0.5) / Math.max(1, len));
+      }
+      const nc = _normChars(text);
+      for (let k = 0; k < nc.chars.length; k++) {
+        const tm = tByRaw.get(nc.idx[k]);
+        if (Number.isFinite(tm)) { chars.push(nc.chars[k]); times.push(tm); }
+      }
+    }
+    return { chars, times };
+  }
+  function _alignChars(a, b) {   // global alignment → matched pairs [i, j]
+    const n = a.length, m = b.length;
+    if (!n || !m || n * m > 250000) return [];
+    const W = m + 1;
+    const S = new Int32Array((n + 1) * W);
+    for (let i = 1; i <= n; i++) S[i * W] = -i;
+    for (let j = 1; j <= m; j++) S[j] = -j;
+    for (let i = 1; i <= n; i++) {
+      for (let j = 1; j <= m; j++) {
+        const d = S[(i - 1) * W + (j - 1)] + (a[i - 1] === b[j - 1] ? 2 : -1);
+        const u = S[(i - 1) * W + j] - 1, l = S[i * W + (j - 1)] - 1;
+        S[i * W + j] = d > u ? (d > l ? d : l) : (u > l ? u : l);
+      }
+    }
+    const pairs = [];
+    let i = n, j = m;
+    while (i > 0 && j > 0) {
+      const cur = S[i * W + j];
+      if (cur === S[(i - 1) * W + (j - 1)] + (a[i - 1] === b[j - 1] ? 2 : -1)) {
+        if (a[i - 1] === b[j - 1]) pairs.push([i - 1, j - 1]);
+        i--; j--;
+      } else if (cur === S[(i - 1) * W + j] - 1) i--;
+      else j--;
+    }
+    pairs.reverse();
+    return pairs;
+  }
+  function alignWordTimesOnto(targetCues, autoCues) {
+    if (!Array.isArray(targetCues) || !Array.isArray(autoCues) || !autoCues.length) return 0;
+    let n = 0;
+    for (const c of targetCues) {
+      if (!c || (Array.isArray(c.w) && c.w.length && !c._wSynth) || !Number.isFinite(c.startMs)) continue;
+      const tl = _asrTimeline(autoCues, c.startMs - 800, c.endMs + 800);
+      if (tl.chars.length < 3) continue;
+      const nc = _normChars(String(c.text || ''));
+      if (nc.chars.length < 2) continue;
+      const pairs = _alignChars(nc.chars, tl.chars);
+      if (pairs.length < Math.max(2, nc.chars.length * 0.45)) continue;
+      const tm = new Array(nc.chars.length).fill(null);
+      for (const [i, j] of pairs) tm[i] = tl.times[j];
+      let prev = c.startMs;
+      for (let i = 0; i < tm.length; i++) {
+        if (tm[i] != null) { prev = tm[i]; continue; }
+        let k = i; while (k < tm.length && tm[k] == null) k++;
+        const next = k < tm.length ? tm[k] : Math.max(prev, c.endMs - 150);
+        const span = k - i + 1;
+        for (let q = i; q < k; q++) tm[q] = prev + (next - prev) * (q - i + 1) / span;
+        i = k - 1;
+      }
+      const w = [];
+      let last = 0;
+      for (let i = 0; i < tm.length; i++) {
+        let t0 = Math.max(0, Math.round(tm[i] - c.startMs));
+        if (t0 < last) t0 = last;
+        const t1 = i + 1 < tm.length ? Math.max(t0 + 20, Math.round(tm[i + 1] - c.startMs)) : Math.max(t0 + 60, Math.round(c.endMs - c.startMs));
+        w.push(nc.idx[i], 1, t0, t1);
+        last = t0;
+      }
+      c.w = w; c._wAligned = true; delete c._wSynth;
+      n++;
+    }
+    return n;
+  }
+  function enrichLiveSrt() {
+    const a = active;
+    if (!a || !a.timingOnly || !a.cues.length) return;
+    let n = 0;
+    try { if (Array.isArray(window.__abCues) && window.__abCues.length) n += alignWordTimesOnto(window.__abCues, a.cues); } catch (_) {}
+    try { if (Array.isArray(window.pagedCues) && window.pagedCues.length && window._pagedCuesTitleId === a.titleId) n += alignWordTimesOnto(window.pagedCues, a.cues); } catch (_) {}
+    if (n) {
+      log('aligned word times onto ' + n + ' subtitle cues');
+      try { window._diag?.('[paged-diag] aligned word times onto ' + n + ' subtitle cues'); } catch (_) {}
+      try { window._resetAbCueGate?.(); } catch (_) {}
+      try { window.abRefreshSpanTiming?.(); } catch (_) {}   // the line on screen gets real timing NOW
+    }
+  }
+  async function enrichSrtWordTimes(titleId, cues) {
+    if (!titleId || !Array.isArray(cues) || !cues.length) return 0;
+    const src = (active && active.titleId === titleId) ? { cues: active.cues } : await loadCacheObj(titleId);
+    if (!src || !Array.isArray(src.cues) || !src.cues.length) return 0;
+    const n = alignWordTimesOnto(cues, src.cues);
+    if (n) log('cold-aligned word times onto ' + n + ' subtitle cues');
+    return n;
+  }
+  function srtWordTimingWanted() {
+    try { return localStorage.getItem('KADOKI_SRT_WORDTIME') !== '0'; } catch (_) { return true; }
+  }
+
+  // Read-mode progress pill: non-null while the ACTIVE title's playhead (or,
+  // before any playback, the job's start) still waits on the transcriber.
+  function progressState() {
+    const a = active;
+    if (!a || a.done || a.timingOnly) return null;
+    if (window._activeTitleId && a.titleId !== window._activeTitleId) return null;
+    const j = job;
+    if (lastPosMs < 0) {
+      if (!j) return null;
+      let coveredMs = 0;
+      for (const r of (a.cov || [])) coveredMs += Math.max(0, r[1] - r[0]);
+      const dur = a.durationMs || 0;
+      return { covered: false, progress: 0, jobRunning: true, frontierMs: j.fedThroughMs,
+               coveragePct: dur > 0 ? Math.max(0, Math.min(100, Math.round(100 * coveredMs / dur))) : -1 };
+    }
+    return syncState(lastPosMs);
+  }
+
   window.autoTranscribe = {
+    progressState,      // () → null when nothing to wait on, else {progress, coveragePct, jobRunning}
+    hintPosition,       // (ms) → before playback: move the job to the reader's page if untranscribed
+    enrichSrtWordTimes, // (titleId, cues) → align cached transcription word times onto SRT cues
+    srtWordTimingWanted,// () → pref: harvest word timings for SRT titles via transcription
     syncState,          // (ms) → null if transcribed/inactive, else {progress, coveragePct, ...}
     available,          // async: device supports on-device ja transcription
     activate,           // ({audioPath, audioName}) → begin/resume for the active title

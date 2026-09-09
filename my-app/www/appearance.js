@@ -38,7 +38,8 @@
              // Toggles (default = preserve current behavior): show the SRT-card
              // waveform + the blurred ambient cover backdrop; show the upcoming
              // subtitle (grayed) is opt-in OFF.
-             showWaveform: true, showNextSub: false, showBgImage: true,
+             // (2026-09-09 release defaults = the author's daily settings)
+             showWaveform: false, showNextSub: true, showBgImage: true,
              // Movie-style subtitles: overlay the line on the lower part of the
              // card picture in a translucent black box (subs2srs decks) instead
              // of stacking it above the frame. Opt-in OFF — it changes the card
@@ -60,7 +61,7 @@
              // progress line beside the text · 'dot' C = marker dot ·
              // 'ruler' D = full-line band. All are overlays — text paint is
              // never touched (the ::highlight jiggle rule).
-             karaokeStyle: 'glow',
+             karaokeStyle: 'twin',   // release default (2026-09-09); was 'glow'
              // Audio-follow resolver: 'cursor' (sequential lock, default) or
              // 'classic' (per-cue search) — the revert switch for the 2026-08-26
              // sequential-cursor engine (reading-mode-paged.js _fcAdvance).
@@ -72,10 +73,14 @@
              // white-on-black in the dark theme. Only images the reader
              // CLASSIFIES as line art invert (.kadoki-bw — bimodal, not
              // grayscale/color, which would look like film negatives). Opt-in.
-             invertBwImages: false },
+             invertBwImages: true,
+             // Read-mode drag-scrub gesture ('audio' | 'visual' | 'off') and the
+             // iOS read-mode speech engine ('default' | 'sonic' | 'speedy').
+             scrubGesture: 'audio',
+             speechEngine: 'speedy' },
     audio: { fontSize: '1.875rem', align: 'center', fontFamily: 'serif',
              imageDisplay: 'block', imageOpacity: 0.6, imageAlign: 'center',
-             showWaveform: true, showNextSub: false },
+             showWaveform: false, showNextSub: false },
     // Dictionary popup — font only (not a reading "mode"). Default 'system'
     // preserves the popup's original look; the picker also offers serif/sans +
     // any imported custom TTF/OTF font.

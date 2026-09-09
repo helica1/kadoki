@@ -28,6 +28,9 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.audio.AudioSink;
+import androidx.media3.exoplayer.audio.DefaultAudioSink;
 
 /**
  * Foreground service that runs Media3 ExoPlayer so audio keeps playing while the
@@ -539,7 +542,22 @@ public class BackgroundAudioService extends Service {
             return;
         }
         try {
-            ExoPlayer p = new ExoPlayer.Builder(getApplicationContext()).build();
+            // Audio sink with the Speedy/Sonic processor chain: playback-speed
+            // changes go through native Sonic (pitch-preserved) and, in read
+            // mode, Google Speedy's nonlinear compression (setNonlinear).
+            final SpeedyAudioProcessor.Chain chain = new SpeedyAudioProcessor.Chain();
+            chain.speedy.setNonlinear(nonlinearWanted);
+            speedyChain = chain;
+            DefaultRenderersFactory rf = new DefaultRenderersFactory(getApplicationContext()) {
+                @Override protected AudioSink buildAudioSink(Context c, boolean enableFloatOutput, boolean enableAudioTrackPlaybackParams) {
+                    return new DefaultAudioSink.Builder(c)
+                        .setAudioProcessorChain(chain)
+                        .setEnableFloatOutput(false)
+                        .setEnableAudioTrackPlaybackParams(false)
+                        .build();
+                }
+            };
+            ExoPlayer p = new ExoPlayer.Builder(getApplicationContext(), rf).build();
             exo = p;
             AudioAttributes attrs = new AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA)
@@ -560,6 +578,15 @@ public class BackgroundAudioService extends Service {
             // manifest). The old MediaPlayer relied solely on the foreground
             // service; this is strictly more robust.
             p.setWakeMode(C.WAKE_MODE_LOCAL);
+            // Video Titles: no frames are decoded until the native surface is
+            // shown (KadokiVideoAndroidHost re-enables the track) — audio-only
+            // listening and background playback never pay for video decode.
+            if (isVideoUrl(url)) {
+                try {
+                    p.setTrackSelectionParameters(p.getTrackSelectionParameters().buildUpon()
+                        .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true).build());
+                } catch (Exception ignored) {}
+            }
             p.addListener(playerListener);
             p.setPlaybackParameters(new PlaybackParameters(pendingRate > 0 ? pendingRate : 1.0f));
             // Start muted when we intend to fade in (see onFirstReady); the
@@ -608,8 +635,67 @@ public class BackgroundAudioService extends Service {
         }
     }
 
+    // ---- Speedy nonlinear gate (read mode only; see JS _readEngineSync) ----
+    private volatile boolean nonlinearWanted = false;
+    private SpeedyAudioProcessor.Chain speedyChain = null;
+    public void setNonlinear(boolean on) {
+        nonlinearWanted = on;
+        SpeedyAudioProcessor.Chain c = speedyChain;
+        if (c != null) c.speedy.setNonlinear(on);
+        Log.d(TAG, "speedy nonlinear=" + on);
+    }
+    public boolean isNonlinear() { return nonlinearWanted; }
+
+    // ---- Rate ramp: re-listen at 1× → hold until the playhead passes
+    // holdUntilMs (the pre-scrub/pre-seek spot) → ease back up over RAMP_MS.
+    private static final long RAMP_MS = 4000, HOLD_MAX_MS = 45000;
+    private Runnable rateRamp = null;
+    private void stopRateRamp() {
+        if (rateRamp != null) { playerHandler.removeCallbacks(rateRamp); rateRamp = null; }
+        setLiveSpeed(0f);
+    }
+    // Ramp speed lives INSIDE the Speedy stream (no sink drain/flush per step).
+    private void setLiveSpeed(float r) {
+        SpeedyAudioProcessor.Chain c = speedyChain;
+        if (c != null) { try { c.setLiveSpeed(r); } catch (Exception ignored) {} }
+    }
+    private void startRateRamp(final float from, final float to, final long holdUntilMs) {
+        stopRateRamp();
+        if (to <= from + 0.03f) return;
+        final long started = android.os.SystemClock.uptimeMillis();
+        final long[] rampT0 = { -1 };
+        // Declared parameters stay at the target rate; only the live speed moves.
+        setLiveSpeed(from);
+        rateRamp = new Runnable() {
+            @Override public void run() {
+                ExoPlayer mp = exo;
+                if (mp == null || rateRamp != this) return;
+                long now = android.os.SystemClock.uptimeMillis();
+                if (rampT0[0] < 0) {
+                    long pos = getPositionMs();
+                    boolean playing = false;
+                    try { playing = mp.isPlaying(); } catch (Exception ignored) {}
+                    if (holdUntilMs <= 0 || pos >= holdUntilMs - 200 || now - started > HOLD_MAX_MS || (!playing && now - started > 2000)) rampT0[0] = now;
+                    else { setLiveSpeed(from); playerHandler.postDelayed(this, 80); return; }
+                }
+                double x = Math.min(1.0, (now - rampT0[0]) / (double) RAMP_MS);
+                float e = (float) (x * x * (3 - 2 * x));
+                setLiveSpeed(from + (to - from) * e);
+                if (x >= 1.0) { setLiveSpeed(0f); rateRamp = null; return; }
+                playerHandler.postDelayed(this, 80);
+            }
+        };
+        playerHandler.post(rateRamp);
+    }
+    private void setExoSpeed(float r) {
+        ExoPlayer p = exo;
+        if (p == null) return;
+        try { p.setPlaybackParameters(new PlaybackParameters(r)); } catch (Exception ignored) {}
+    }
+
     private void applyRate(float rate) {
         if (rate <= 0) return;
+        stopRateRamp();
         pendingRate = rate;
         ExoPlayer p = exo;
         if (p == null) return;
@@ -853,6 +939,15 @@ public class BackgroundAudioService extends Service {
     // The url currently loaded — exposed via getState so JS can confirm "same
     // audio" before adopting the native playhead as truth on resume.
     public String getCurrentUrl() { return currentUrl; }
+    ExoPlayer getExo() { return exo; }
+    /** Video Titles: same extension gate as iOS (KadokiVideoPlayer.isVideoUrl). ExoPlayer plays mkv natively — no remux. */
+    static boolean isVideoUrl(String url) {
+        if (url == null) return false;
+        String u = url.toLowerCase(java.util.Locale.ROOT);
+        int q = u.indexOf('?'); if (q >= 0) u = u.substring(0, q);
+        return u.endsWith(".mp4") || u.endsWith(".m4v") || u.endsWith(".mov") || u.endsWith(".3gp") || u.endsWith(".mkv") || u.endsWith(".webm");
+    }
+    public boolean isVideoLoaded() { return exo != null && isVideoUrl(currentUrl); }
 
     public int getPositionMs() {
         // Refresh the cache when called on the player (main) looper — the
@@ -935,6 +1030,140 @@ public class BackgroundAudioService extends Service {
     public void setRate(float rate) {
         if (rate <= 0) return;
         runOnPlayer(() -> applyRate(rate));
+    }
+
+    // ---- Drag scrub (reader) — turntable engine (KadokiScrubEngine) ----
+    //
+    // Mirrors the iOS plugin: scrubPrime warms the engine at finger-down,
+    // scrubBegin mutes+pauses ExoPlayer and hands the voice to the engine,
+    // scrubTarget feeds finger positions, scrubEnd lands ExoPlayer at the
+    // finger and resumes (with the 1× re-listen ramp when asked).
+    private KadokiScrubEngine scrubEngine = null;
+    private volatile boolean scrubActive = false;
+    private boolean scrubWasPlaying = false;
+    private long scrubAnchorMs = -1;
+    private int scrubGen = 0;
+    private long scrubLastEmit = 0;
+
+    private KadokiScrubEngine engineFor(String url) {
+        if (url == null) return null;
+        String path = url.startsWith("file://") ? url.substring(7) : url;
+        try { path = java.net.URLDecoder.decode(path, "UTF-8"); } catch (Exception ignored) {}
+        if (scrubEngine != null && !scrubEngine.path.equals(path)) { scrubEngine.release(); scrubEngine = null; }
+        if (scrubEngine == null) scrubEngine = new KadokiScrubEngine(getApplicationContext(), path);
+        return scrubEngine;
+    }
+
+    /** Playback follow: keep the scrub engine's decoded window around the playhead (UI visible, playing). */
+    public void scrubFollow(long ms) {
+        if (scrubActive || currentUrl == null || !prepared) return;
+        try { KadokiScrubEngine e = engineFor(currentUrl); if (e != null) e.follow(ms); } catch (Exception ignored) {}
+    }
+
+    public boolean scrubPrime(long ms) {
+        if (scrubActive) return true;
+        KadokiScrubEngine e = engineFor(currentUrl);
+        if (e == null) return false;
+        long at = ms >= 0 ? ms : getPositionMs();
+        boolean ok = e.prime(at);
+        final int gen = ++scrubGen;
+        playerHandler.postDelayed(() -> { if (!scrubActive && scrubGen == gen && scrubEngine != null) scrubEngine.end(); }, 2500);
+        return ok;
+    }
+
+    public boolean scrubBegin(long ms) {
+        final ExoPlayer mp = exo;
+        // ExoPlayer may only be touched on its looper: the old off-thread
+        // isPlaying() threw, read as "not playing", and the player was never
+        // paused — it kept playing UNDER the scrub engine (two voices, and the
+        // playhead ran on). `wantPlaying` is the service's own intent flag.
+        boolean playing = wantPlaying && mp != null && prepared;
+        scrubWasPlaying = playing;
+        scrubAnchorMs = getPositionMs();
+        scrubActive = true;
+        stopRateRamp();
+        final int gen = ++scrubGen;
+        runOnPlayer(() -> {
+            cancelFade();
+            boolean pl = scrubWasPlaying;
+            try { if (mp != null && mp.isPlaying()) pl = true; } catch (Exception ignored) {}
+            scrubWasPlaying = pl;
+            if (mp != null && pl) {
+                rampVolume(1f, 0f, 12);
+                playerHandler.postDelayed(() -> { if (scrubActive && scrubGen == gen) { try { mp.pause(); } catch (Exception ignored) {} } }, 18);
+            }
+        });
+        KadokiScrubEngine e = engineFor(currentUrl);
+        boolean ok = e != null && e.begin(ms >= 0 ? ms : scrubAnchorMs);
+        Log.d(TAG, "scrubBegin anchor=" + scrubAnchorMs + " engine=" + ok + " wasPlaying=" + playing);
+        return ok;
+    }
+
+    public void scrubTarget(long ms, boolean snap) {
+        if (!scrubActive || scrubEngine == null) return;
+        scrubEngine.setTarget(ms, snap);
+        repeatSeekGuardUntil = android.os.SystemClock.uptimeMillis() + 1000; repeatLastPosMs = -1; repeatLastChapIdx = -1;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - scrubLastEmit > 120) {
+            scrubLastEmit = now;
+            cachedPositionMs = (int) ms;
+            if (listener != null) listener.onPositionUpdate((int) ms, getDurationMs());
+        }
+    }
+
+    public void scrubEnd(long ms, boolean resume, float rampFrom) {
+        final int gen = ++scrubGen;
+        scrubActive = false;
+        if (scrubEngine != null) scrubEngine.end();
+        runOnPlayer(() -> {
+            final ExoPlayer mp = exo;
+            if (mp == null || !prepared) return;
+            repeatSeekGuardUntil = android.os.SystemClock.uptimeMillis() + 1000; repeatLastPosMs = -1; repeatLastChapIdx = -1;
+            tryRun(() -> {
+                cancelFade();
+                if (ms >= 0) { mp.seekTo(ms); cachedPositionMs = (int) ms; }
+                if (resume) {
+                    // Let the engine go silent first (12 ms ramp), then start
+                    // ExoPlayer at the landing point — no two-voice blip.
+                    playerHandler.postDelayed(() -> {
+                        if (scrubGen != gen || scrubActive || exo != mp) return;
+                        try {
+                            clearSuppression();
+                            mp.setVolume(0f);
+                            mp.play();
+                            rampVolume(0f, 1f, 50);
+                            wantPlaying = true;
+                            if (rampFrom > 0 && pendingRate > rampFrom + 0.03f) startRateRamp(rampFrom, pendingRate, scrubAnchorMs);
+                            startInForeground("Playing");
+                            updatePlaybackState();
+                            if (listener != null) { listener.onPlayingStateChanged(true); listener.onPositionUpdate(getPositionMs(), getDurationMs()); }
+                        } catch (Exception ignored) {}
+                    }, 20);
+                } else {
+                    mp.setVolume(0f);
+                    mp.pause();
+                    mp.setVolume(1f);
+                    wantPlaying = false;
+                    showPausedNotification("Paused");
+                    updatePlaybackState();
+                    saveLastPositionNow();
+                    if (listener != null) { listener.onPlayingStateChanged(false); listener.onPositionUpdate(getPositionMs(), getDurationMs()); }
+                }
+            });
+        });
+    }
+
+    // Backward seek from a cue swipe (no scrub): optional 1× re-listen ramp.
+    public void seekToMsRamp(int ms, int fadeMs, float rampFrom) {
+        final long preMs = getPositionMs();
+        seekToMs(ms, fadeMs);
+        if (rampFrom > 0 && pendingRate > rampFrom + 0.03f) {
+            playerHandler.postDelayed(() -> {
+                ExoPlayer mp = exo; boolean playing = false;
+                try { playing = mp != null && mp.isPlaying(); } catch (Exception ignored) {}
+                if (playing) startRateRamp(rampFrom, pendingRate, preMs);
+            }, Math.max(0, fadeMs) + 10);
+        }
     }
 
     public void setMetadata(String title, String subtitle) {

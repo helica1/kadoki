@@ -514,129 +514,8 @@
   // dictEnableLookupIn() wraps the text per-char, then markContainer() adds
   // .kchar-name on top — names → character popup, everything else → dict.)
 
-  // ---- deep dive (動機・心理) — Sonnet over consumed text, cached ------------
-  // Stored per (character, latest merged chapter): the analysis naturally
-  // refreshes as chapters are processed, and re-opening at the same point is
-  // free. The book-text block carries cache_control, so deep-diving several
-  // characters in one sitting shares one prompt-cache write.
-  const DEEP_PREFIX = 'AIDEEP_V1_';
-  const DEEP_SYSTEM =
-    'あなたは文学に詳しい読書アシスタントです。提供された本文(物語の冒頭から読者の現在位置まで)' +
-    'のみに基づいて、指定された登場人物の動機と心理を日本語で分析してください。本文に書かれた' +
-    '出来事の解釈や行間を読むことは大いに歓迎します。ただし、この作品についての外部知識と、' +
-    '本文より先の展開の予測は一切禁止。' +
-    '出力形式: 「・」で始まる箇条書きを5〜8項目。各項目は1〜2文、可能なら根拠となる本文の' +
-    '短い引用「…」を含める。各項目のあいだに空行を1行入れる。長い段落の塊は禁止。' +
-    'マークダウン記法(-、*、#)は使わない。';
-
-  async function loadDeep(titleId) {
-    try {
-      const raw = window.blobStore ? await window.blobStore.get(DEEP_PREFIX + titleId) : null;
-      const p = raw ? JSON.parse(raw) : null;
-      return (p && p.v === 1 && p.entries) ? p : { v: 1, entries: {} };
-    } catch (_) { return { v: 1, entries: {} }; }
-  }
-  async function saveDeep(titleId, key, entry) {
-    try {
-      const box = await loadDeep(titleId);
-      box.entries[key] = entry;
-      const keys = Object.keys(box.entries);
-      if (keys.length > 100) {
-        keys.sort((a, b) => (box.entries[a].ts || 0) - (box.entries[b].ts || 0));
-        for (const k of keys.slice(0, keys.length - 100)) delete box.entries[k];
-      }
-      if (window.blobStore) await window.blobStore.set(DEEP_PREFIX + titleId, JSON.stringify(box));
-    } catch (_) {}
-  }
-  function deepKey(rec, m) {
-    const idx = (m && m.state && Number.isFinite(m.state.chunkIdx)) ? m.state.chunkIdx : -1;
-    return rec.id + '@' + idx;
-  }
-
-  let _deepBusy = false;
-  async function runDeepDive(rec, m, host, btn) {
-    if (_deepBusy) return;
-    const titleId = window._activeTitleId;
-    if (!titleId || !window.ai || !window.ai.isEnabled()) return;
-    _deepBusy = true;
-    if (btn) btn.remove();
-    const out = document.createElement('div');
-    out.style.cssText = BODY_STYLE + 'white-space:pre-wrap;margin-top:4px;';
-    out.innerHTML = '<span class="kai-dots" style="color:#8a7fb8;"><span>·</span><span>·</span><span>·</span></span>';
-    const metaEl = document.createElement('div');
-    metaEl.style.cssText = 'color:#555;font-size:.64rem;margin-top:6px;';
-    host.appendChild(out);
-    host.appendChild(metaEl);
-    let started = false;
-    try {
-      const book = window.aiCharacters.contextText(60000);
-      if (!book || book.length < 400) throw new Error(window.i18n.t('cu.not_enough_text', '本文がまだ十分にありません'));
-      const aliasNote = (rec.aliases || []).filter(a => a !== rec.surface).join('、');
-      const r = await window.ai.request({
-        feature: 'char-deep',
-        model: (window.ai && window.ai.modelFor) ? window.ai.modelFor('deep') : undefined,
-        system: DEEP_SYSTEM,
-        maxTokens: 1400,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'text', text: '本文(冒頭〜現在位置):\n\n' + book,
-              cache_control: { type: 'ephemeral' } },
-            { type: 'text',
-              text: '\n\n人物「' + rec.surface + '」' +
-                    (aliasNote ? '(別名: ' + aliasNote + ')' : '') +
-                    'について、現在までの動機と心理を分析してください。' },
-          ],
-        }],
-        onText: (d) => {
-          if (!started) { started = true; out.textContent = ''; }
-          out.textContent += d;
-        },
-      });
-      metaEl.textContent = r.model + ' · ~$' + r.costUsd.toFixed(3);
-      if (typeof window.dictEnableLookupIn === 'function') window.dictEnableLookupIn(out);
-      markContainer(out, m);
-      saveDeep(titleId, deepKey(rec, m), {
-        ts: Date.now(), text: r.text, model: r.model, costUsd: r.costUsd,
-      });
-    } catch (e) {
-      out.innerHTML = '';
-      out.style.color = '#e08a8a';
-      out.textContent = window.i18n.fmt('cu.analysis_failed', { msg: (e && e.message ? e.message : e) });
-    } finally {
-      _deepBusy = false;
-    }
-  }
-
-  // Fills the popup's deep-dive area: cached analysis if present, otherwise
-  // the analyze button (skipped for stubs — not enough material yet).
-  async function wireDeepDive(rec, m, host) {
-    const titleId = window._activeTitleId;
-    if (!titleId || rec.isStub || !window.ai || !window.ai.isEnabled()) return;
-    let cached = null;
-    try { cached = (await loadDeep(titleId)).entries[deepKey(rec, m)] || null; } catch (_) {}
-    if (!host.isConnected) return;                 // popup closed while loading
-    if (cached && cached.text) {
-      const title = document.createElement('div');
-      title.style.cssText = 'font-size:.68rem;color:#8a93c4;letter-spacing:.08em;margin:10px 0 2px;';
-      title.textContent = window.i18n.t('cu.motivation_psychology', '動機・心理');
-      const out = document.createElement('div');
-      out.style.cssText = BODY_STYLE + 'white-space:pre-wrap;';
-      out.textContent = cached.text;
-      host.appendChild(title);
-      host.appendChild(out);
-      if (typeof window.dictEnableLookupIn === 'function') window.dictEnableLookupIn(out);
-      markContainer(out, m);
-      return;
-    }
-    const btn = document.createElement('button');
-    btn.style.cssText =
-      'margin-top:12px;width:100%;background:#1d1830;border:1px solid #4a3c72;border-radius:8px;' +
-      'color:#cdbcf5;font-size:.84rem;padding:9px 12px;cursor:pointer;';
-    btn.textContent = '✦ ' + window.i18n.t('cu.analyze_motivation', '動機・心理を分析');
-    btn.addEventListener('click', () => runDeepDive(rec, m, host, btn));
-    host.appendChild(btn);
-  }
+  // (2026-09-09 release cleanup) The per-character "analyze motivation &
+  // psychology" deep-dive was removed from the popup and the Characters screen.
 
   // Audio auto-pause while the character popup is up — same behavior (and
   // same preference) as the dict popup: fade out on open, fade back on close.
@@ -864,8 +743,6 @@
         imgPoll = setInterval(() => { try { if (window.aiImages && window.aiImages.pollPending) window.aiImages.pollPending(tid); } catch (_) {} }, 9000);
       }
     } catch (_) {}
-    const deepHost = document.createElement('div');
-    card.appendChild(deepHost);
     const foot = document.createElement('div');
     foot.style.cssText = 'color:#555;font-size:.66rem;margin-top:14px;';
     foot.textContent = window.i18n.t('cu.up_to_position', '現在の読書位置までの情報のみ表示しています');
@@ -892,12 +769,10 @@
       if (typeof window.dictEnableLookupIn === 'function') window.dictEnableLookupIn(el);
       markContainer(el, m);
     });
-    wireDeepDive(rec, m, deepHost);
   }
 
   // §8 chip contract + Characters-screen reuse: open the character popup by
-  // id or alias; wireDeepDive renders the cached-or-button deep-dive flow
-  // into an arbitrary host (the Characters screen embeds it per card).
+  // id or alias.
   function openPopupFor(idOrAlias) {
     try {
       const m = window.aiCharacters && window.aiCharacters.matcher();
@@ -915,5 +790,5 @@
       return true;
     } catch (_) { return false; }
   }
-  window.aiCharsUi = { openPopupFor, wireDeepDive, markContainer, markNow, remark: remarkSoon, buildCharImages, buildSquiggleToggle, nameRubyHtml };
+  window.aiCharsUi = { openPopupFor, markContainer, markNow, remark: remarkSoon, buildCharImages, buildSquiggleToggle, nameRubyHtml };
 })();

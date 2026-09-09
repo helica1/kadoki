@@ -1302,6 +1302,17 @@ body.dimmed .card-image {
             </button>
             <span id="ankiConnectStatus" style="font-size:.78rem;color:#888;"></span>
           </div>
+          <div class="prefs-row" style="justify-content:flex-start;gap:10px;">
+            <button id="ankiOutboxFlushBtn" type="button"
+                    data-i18n="ph.ankioutbox_flush"
+                    style="background:transparent;color:var(--accent-cyan,#00ffcc);
+                           border:1px solid var(--accent-cyan,#00ffcc);
+                           padding:8px 14px;border-radius:8px;font-weight:600;
+                           font-family:var(--font-sans);font-size:.82rem;cursor:pointer;">
+              Send queued cards
+            </button>
+            <span id="ankiOutboxStatus" style="font-size:.78rem;color:#888;"></span>
+          </div>
           <div style="font-size:.72rem;color:#777;margin:6px 2px 0;line-height:1.5;"
                data-i18n="ph.ankiconnect_help">
             Sends cards straight to Anki running on your Mac over Wi-Fi (needs the
@@ -1377,6 +1388,11 @@ body.dimmed .card-image {
               deinflector (github.com/yomidevs/yomitan), licensed
               <b>GPL-3.0-or-later</b>.</p>
             <p style="margin:6px 0;"><b>JSZip</b> is used under its MIT license.</p>
+            <p style="margin:6px 0;">The read-mode speech engine uses the <b>Sonic</b>
+              library by Bill Cox (github.com/waywardgeek/sonic) and Google's
+              <b>Speedy</b> nonlinear speedup (github.com/google/speedy), both
+              licensed <b>Apache-2.0</b>, and <b>KISS FFT</b> by Mark Borgerding,
+              licensed <b>BSD-3-Clause</b>.</p>
             <p style="margin:6px 0;color:#777;">Dictionaries and media you import
               stay on your device and are not redistributed by this app.</p>
           </div>
@@ -1665,6 +1681,29 @@ body.dimmed .card-image {
             <span id="statsAudioRate" class="stat-value">—</span>
           </div>
         </div>
+        <!-- VIDEO — a video Title played in audio/card-video layout (its own
+             stats.js bucket; playhead-accrued exactly like audio, reported
+             separately so a show never inflates audiobook time). Hidden
+             until it has ever accrued anything. -->
+        <div id="statsVideo" class="stats-block" data-mode="video" style="display:none;">
+          <div class="stats-block-header">
+            <span class="stats-block-title">Video</span>
+            <button onclick="window.resetReadingTimerFor && window.resetReadingTimerFor('video')" title="Reset video stats" style="background:transparent;border:none;color:var(--text-muted,#666);font-size:.66rem;letter-spacing:.1em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:2px 6px;">Reset</button>
+            <span class="stats-block-status">●</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Time watching</span>
+            <span id="statsVideoTime" class="stat-value">0:00</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Chars heard</span>
+            <span id="statsVideoChars" class="stat-value">0</span>
+          </div>
+          <div class="stat-row stat-row-last">
+            <span class="stat-label">Chars / hr</span>
+            <span id="statsVideoRate" class="stat-value">—</span>
+          </div>
+        </div>
         <!-- AI MATERIAL — time spent on the Characters / Timeline / Scenes pages -->
         <div id="statsAi" class="stats-block" data-mode="ai">
           <div class="stats-block-header">
@@ -1754,6 +1793,23 @@ body.dimmed .card-image {
                 <div class="stat-row stat-row-last">
                   <span class="stat-label">Chars / hr</span>
                   <span id="statsYAudioRate" class="stat-value">—</span>
+                </div>
+              </div>
+              <div id="statsYVideo" class="stats-block" data-mode="video" style="display:none;">
+                <div class="stats-block-header">
+                  <span class="stats-block-title">Video</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Time watching</span>
+                  <span id="statsYVideoTime" class="stat-value">0:00</span>
+                </div>
+                <div class="stat-row">
+                  <span class="stat-label">Chars heard</span>
+                  <span id="statsYVideoChars" class="stat-value">0</span>
+                </div>
+                <div class="stat-row stat-row-last">
+                  <span class="stat-label">Chars / hr</span>
+                  <span id="statsYVideoRate" class="stat-value">—</span>
                 </div>
               </div>
               <div class="stats-block" data-mode="ai">
@@ -1901,12 +1957,9 @@ body.dimmed .card-image {
   <script src="ai-scenes.js"></script>
   <script src="ai-daily-images.js"></script>
   <script src="ai-export.js"></script>
-  <!-- Yomitan deinflector port lives on disk but is NOT loaded — its
-       IIFE built a 834-rule descriptor at script-load (~2 s on iOS
-       JavaScriptCore) and per-tap iteration through Yomitan's rule set
-       made greedyDeinflect 14+ s per tap on uninflected nouns. The
-       local deinflect.json table in enhanced-dictionary.js covers the
-       same common inflections at <1 ms per call. -->
+  <!-- Deinflection: the local deinflect.json table in enhanced-dictionary.js
+       (<1 ms per call). The full Yomitan deinflector port was removed
+       2026-09-09 — never loaded (2 s descriptor build, 14 s taps). -->
   <script src="enhanced-dictionary.js"></script>
   <script src="local-audio.js"></script>
   <script src="srt-parser.js"></script>
@@ -1941,6 +1994,9 @@ body.dimmed .card-image {
 
     // Make debugLog available globally
     window.debugLog = debugLog;
+    // Device diagnostics ([paged-diag] lines): console only, and only when
+    // localStorage KADOKI_DEBUG is set — silent in release.
+    try { window._diag = localStorage.getItem('KADOKI_DEBUG') ? function () { console.warn.apply(console, arguments); } : null; } catch (e) { window._diag = null; }
 
     // -------- Background audio test + minimal controls --------
     // Picks an audio file, plays it via the native foreground service, and
@@ -2292,6 +2348,7 @@ body.dimmed .card-image {
         if (tsec.card > 60) rows.push([t('ts.time_card', 'Time (cards)'), fmtSec(tsec.card)]);
         if (tsec.read > 60) rows.push([t('ts.time_read', 'Time (reading)'), fmtSec(tsec.read)]);
         if (tsec.audio > 60) rows.push([t('ts.time_audio', 'Time (audio)'), fmtSec(tsec.audio)]);
+        if (tsec.video > 60) rows.push([t('ts.time_video', 'Time (video)'), fmtSec(tsec.video)]);
         if (tsec.watch > 60) rows.push([t('ts.time_watch', 'Time (watch)'), fmtSec(tsec.watch)]);
         // ETA from the dominant modality (audio when it has a pace, else read).
         let etaDays = null;
@@ -2854,7 +2911,31 @@ body.dimmed .card-image {
     // memory pressure); the URI bookmark survives, so we can rebuild the
     // cache file on demand. EPUB doesn't need this because the reader's
     // loadEpubFromUri flow already calls materializeToCache fresh on open.
+    // Cover self-heal on title open (both platforms — Android has no FileAccess
+    // plugin, so the import-time extraction never ran there and audio-only
+    // titles stayed on letter avatars): embedded art from the audiobook (or
+    // EPUB) fills a missing cover in the background, once per title per session.
+    const _coverTriedIds = new Set();
     async function rehydrateTitleCachePaths(title) {
+      const t = await _rehydrateTitleCachePathsImpl(title);
+      try {
+        const id = t && t.id;
+        const a = (t && t.attachments) || {};
+        if (id && !_coverTriedIds.has(id) && !a.cover?.dataUri && (a.audiobook?.cachePath || a.epub?.uri)) {
+          _coverTriedIds.add(id);
+          setTimeout(async () => {
+            try {
+              await silentAutoExtractCover(id);
+              const t2 = (await window.titleStore.list()).find(x => x.id === id);
+              try { window._diag?.('[paged-diag] cover self-heal ' + id + ' → ' + (t2?.attachments?.cover?.dataUri ? 'attached (' + t2.attachments.cover.dataUri.length + ' chars)' : 'none')); } catch (_) {}
+              if (t2?.attachments?.cover?.dataUri && typeof populateLibrary === 'function') await populateLibrary();
+            } catch (e) { try { window._diag?.('[paged-diag] cover self-heal failed: ' + (e && e.message)); } catch (_) {} }
+          }, 1500);
+        }
+      } catch (e) {}
+      return t;
+    }
+    async function _rehydrateTitleCachePathsImpl(title) {
       const fa = window.Capacitor?.Plugins?.FileAccess;
       if (!fa || !window.titleStore) return title;
       const a = title.attachments || {};

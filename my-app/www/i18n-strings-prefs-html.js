@@ -18,6 +18,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'ph.sec_anki_connect': { en: 'Anki: Desktop Anki (Mac)', ja: 'Anki: デスクトップAnki（Mac）' },
   'ph.ankiconnect_host': { en: 'Mac address (AnkiConnect)', ja: 'Macのアドレス（AnkiConnect）' },
   'ph.ankiconnect_test': { en: 'Test connection', ja: '接続テスト' },
+  'ph.ankioutbox_flush': { en: 'Send queued cards', ja: '待機中のカードを送信' },
   'ph.ankiconnect_help': { en: 'Sends cards straight to Anki running on your Mac over Wi-Fi (needs the AnkiConnect add-on with webBindAddress 0.0.0.0). When set, this route is used everywhere instead of AnkiMobile/AnkiDroid — leave empty to use the on-device apps. On Vision Pro this is the only way to send.', ja: 'Wi-Fi経由でMac上のAnkiに直接カードを送信します（AnkiConnectアドオン、webBindAddress 0.0.0.0が必要）。設定するとAnkiMobile/AnkiDroidの代わりにこの経路が常に使われます。空欄でデバイス上のアプリを使用。Vision Proではこれが唯一の送信方法です。' },
   'ph.sec_anki_swipe': { en: 'Anki: Swipe-Up and Scene Save', ja: 'Anki: スワイプアップとシーン保存' },
   'ph.sec_anki_dict': { en: 'Anki: dictionary add-word', ja: 'Anki: 辞書からの単語追加' },

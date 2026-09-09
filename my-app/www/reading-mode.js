@@ -1256,6 +1256,20 @@
     }
     setRunning('statsAudio', s.isRunning('audio'));
 
+    // Video Titles — own bucket (stats.js `video`): shown once it has ever
+    // accrued, or while a video is running right now.
+    try {
+      const vSec = (typeof s.getVideoSec === 'function') ? s.getVideoSec() : 0;
+      const vChars = (typeof s.getVideoChars === 'function') ? s.getVideoChars() : 0;
+      const vRun = s.isRunning('video');
+      const vBlock = document.getElementById('statsVideo');
+      if (vBlock) vBlock.style.display = (vSec >= 1 || vChars > 0 || vRun) ? '' : 'none';
+      setText('statsVideoTime', formatSec(vSec));
+      setText('statsVideoChars', vChars.toLocaleString());
+      setText('statsVideoRate', (vSec < 1 || vChars === 0) ? '—' : Math.round(vChars / (vSec / 3600)).toLocaleString());
+      setRunning('statsVideo', vRun);
+    } catch (_) {}
+
     // AI material (Characters / Timeline / Scenes pages) — time only.
     const aiSec = (typeof s.getAiSec === 'function') ? s.getAiSec() : 0;
     setText('statsAiTime', formatSec(aiSec));
@@ -1512,6 +1526,12 @@
     setText('statsYAudioTime',  formatSec(a.sec || 0));
     setText('statsYAudioChars', (a.chars || 0).toLocaleString());
     setText('statsYAudioRate',  rate(a.sec || 0, a.chars || 0));
+    const v = snap.modes.video || {};
+    const vBlock = document.getElementById('statsYVideo');
+    if (vBlock) vBlock.style.display = ((v.sec || 0) >= 60 || (v.chars || 0) > 0) ? '' : 'none';
+    setText('statsYVideoTime',  formatSec(v.sec || 0));
+    setText('statsYVideoChars', (v.chars || 0).toLocaleString());
+    setText('statsYVideoRate',  rate(v.sec || 0, v.chars || 0));
     setText('statsYAiTime',     formatSec(ai.sec || 0));
   }
 
@@ -2401,6 +2421,13 @@
       abChunkToCue = null;
       return 0;
     }
+    // Stale chunks (rendered for a previous title): never align this title's
+    // cues against them — see the paged reader's identical guard.
+    if (window._legacyEpubTitleId && window._activeTitleId && window._legacyEpubTitleId !== window._activeTitleId) {
+      try { window._diag?.('[paged-diag] legacy alignment skipped: chunks are ' + window._legacyEpubTitleId + ', active ' + window._activeTitleId); } catch (_) {}
+      abCueToChunk = null; abChunkToCue = null;
+      return 0;
+    }
     // Try the new preprocessing first.
     if (window.cueAlignment?.loadOrBuild) {
       let progress = null;
@@ -2424,7 +2451,7 @@
         }
         const t0 = performance.now();
         const { alignment, cached } = await window.cueAlignment.loadOrBuild({
-          titleId, epubName, srtName: srtName || '', chunks, cues: abCues,
+          titleId, epubName, srtName: srtName || '', chunks, cues: abCues, who: 'legacy',
           onProgress: progress ? (p) => progress.update(p) : null
         });
         const dt = Math.round(performance.now() - t0);
@@ -2438,9 +2465,13 @@
           return alignment.matched;
         }
         rlog(`Legacy alignment ratio too low; falling back to legacy matcher`);
-        try { await window.cueAlignment.clearAlignment(titleId); } catch (e) {}
+        // Only a CACHED low-ratio alignment is worth evicting. A fresh one was
+        // never saved — and clearing here after a fresh miss threw away the
+        // good cache whenever this ran with racy inputs.
+        if (cached) { try { await window.cueAlignment.clearAlignment(titleId); } catch (e) {} }
       } catch (e) {
         rlog('Legacy alignment error; falling back:', e.message);
+        try { window._diag?.('[paged-diag] legacy alignment error: ' + (e && e.message)); } catch (_) {}
       } finally {
         if (progress) { try { progress.close(); } catch (e) {} }
       }
@@ -2494,6 +2525,7 @@
     abAudioName = audio.name;
     window._audiobookSrcPath = audio.path;
     try {
+      try { const rb = await window.rebaseContainerPath?.(srt.path); if (rb) srt.path = rb; } catch (_) {}
       const url = window.Capacitor?.convertFileSrc
         ? window.Capacitor.convertFileSrc(srt.path) : 'file://' + srt.path;
       const res = await fetch(url);
@@ -2503,6 +2535,7 @@
       abLastSrtName = srt.name || '';
       // Auto-generated SRT: copy cached word timings back on (karaoke).
       try { window.autoTranscribe?.enrichWordTimes?.(window._activeTitleId, abCues); } catch (_) {}
+      try { window.abStartSrtWordTiming?.(audio, abCues); } catch (_) {}
     } catch (e) {
       // Dead pairing (SRT detached / file gone): clear it and fall through
       // to on-device transcription when available, instead of a dead mode.
@@ -2581,6 +2614,7 @@
     // local server serves the file via its allowed origin (raw file:// won't
     // work for arbitrary paths inside the WebView fetch sandbox).
     try {
+      try { const rb = await window.rebaseContainerPath?.(srt.path); if (rb) srt.path = rb; } catch (_) {}
       const url = (window.Capacitor && typeof window.Capacitor.convertFileSrc === 'function')
         ? window.Capacitor.convertFileSrc(srt.path)
         : 'file://' + srt.path;
@@ -2592,6 +2626,7 @@
       rlog(`SRT: ${abCues.length} cues from ${srt.name}`);
       // Auto-generated SRT: copy cached word timings back on (karaoke).
       try { window.autoTranscribe?.enrichWordTimes?.(window._activeTitleId, abCues); } catch (_) {}
+      try { window.abStartSrtWordTiming?.(audio, abCues); } catch (_) {}
     } catch (e) {
       // Dead pairing (SRT detached in the title builder, stale cache path):
       // clear it and fall through to on-device transcription when available
@@ -2654,17 +2689,10 @@
   // a shared counter meant the second call (previous) always invalidated
   // the first (current) before its async loop finished — current never
   // finished tokenizing, so it never got .kword wrappers, hover, or taps.
-  const _kwDiag = (msg) => {   // TEMP: one-shot pipeline diagnostic (remove once glow confirmed)
-    try {
-      if (window._kwDiagged || !window.KADOKI_VISION) return;
-      window._kwDiagged = true;
-      window.showToast && window.showToast('kw: ' + msg, 4500);
-    } catch (_) {}
-  };
   async function abApplyWordChunks(cueEl) {
     if (!window.KADOKI_VISION) return;
     if (!cueEl) return;
-    if (typeof window.dictSegmentWord !== 'function') { _kwDiag('no segmenter'); cueEl._kwDone = true; return; }
+    if (typeof window.dictSegmentWord !== 'function') { cueEl._kwDone = true; return; }
     const tok = (cueEl._kwToken = (cueEl._kwToken || 0) + 1);
     // Vision video panel (2026-08-30): the word-chip wrapping this function
     // adds (per-word padding) makes the panel measurably taller/wider than
@@ -2833,7 +2861,7 @@
     // between cues, derive prev/next from the live position. swipe-RIGHT (dx>0)
     // → previous, swipe-LEFT (dx<0) → next.
     _abNavByDx = (dx) => navByDx(dx);   // transport-bar buttons reuse the swipe's cue-step logic
-    const navByDx = (dx) => {
+    const navByDx = (dx, seekImpl) => {
       // "Reverse horizontal swipe direction" pref: flip ONCE here so every
       // internal branch (current-cue step + both in-gap derivations) stays
       // consistent with the flipped mapping.
@@ -2860,7 +2888,9 @@
       window._lastAudioCueIdx = target; window._lastAudioCueTitleId = window._activeTitleId;
       window._audioStatsSeekTs = Date.now();   // swiped-over span wasn't heard — stats anchor, don't credit
       const ms = Math.max(0, Math.round(cue.startMs) - (window.AUDIO_START_OFFSET_MS || 0));
-      try { bg.seek({ ms, fadeMs: 40 }); } catch (_) {}   // brief fade so the jump doesn't click
+      const dir = dx > 0 ? -1 : 1;
+      if (typeof seekImpl === 'function') { try { seekImpl(ms, dir); } catch (_) {} }       // scrub-flick: land straight there
+      else { try { bg.seek({ ms, fadeMs: 40, rampFrom: dir < 0 ? 1 : 0 }); } catch (_) {} }   // brief fade; back = 1× re-listen ramp
       // Show the target subtitle immediately (works even while paused), then HOLD
       // it ~0.55s so the lagging position events (fade + lead-in + poll) can't
       // flicker the cue back to the old/previous line while the playhead catches
@@ -2869,9 +2899,37 @@
       try { abUpdateCueDisplay(Math.round(cue.startMs)); } catch (_) {}
       _abSeekGuardUntil = Date.now() + 550;
     };
+    // HOLD-TO-SCRUB (2026-09-09): press and hold ~HOLD_MS with the finger
+    // still, then drag horizontally → the same turntable scrub as read mode
+    // (swipe left = forward). Video Titles scrub the picture too (native
+    // seeks the AVPlayer at the finger) and show the PREVIOUS subtitle above
+    // the current one for context. A plain quick swipe stays the one-cue jump.
+    // (2026-09-09 round 2: no hold any more — ANY horizontal drag scrubs from
+    // its first pixels; round 3: previous-subtitle panel removed again; a quick flick (< FLICK_MS, > 30 px) resolves on
+    // release as the one-cue step, landing in a single transition.)
+    const SCRUB_START_PX = 8, FLICK_MS = 220, SPAN_MS_AUDIO = 9000;   // doubled 2026-09-09 (user); ≈ half a screen ≈ two subtitles
+    let scrubOn = false, touchState = null, scrubStartT = 0, scrubDx = 0;
+    const clearHold = () => {};
+    const scrubHooks = {
+      paint: (idx, cue, t) => { try { window.abScrubPaintCue?.(idx, cue, t); } catch (_) {} },
+      land: (idx, t) => {
+        try { window.abScrubClearPrev?.(); } catch (_) {}
+        _abSeekGuardUntil = 0;
+        abCurrentCueIdx = -2;                        // let the next position event re-render
+        try { if (Number.isFinite(t)) abUpdateCueDisplay(Math.round(t)); } catch (_) {}
+      },
+      cancel: () => { try { window.abScrubClearPrev?.(); } catch (_) {} abCurrentCueIdx = -2; },
+    };
+    const endScrub = (cancel) => {
+      if (!scrubOn) return;
+      scrubOn = false;
+      document.body.classList.remove('kv-scrubbing');
+      try { window.kadokiScrub?.end(!!cancel); } catch (_) {}
+    };
     view.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
       fired = false;
+      clearHold(); scrubOn = false; touchState = null;
       // Bail only on interactive controls that own their own gestures
       // (transport buttons + scrub bar). We DON'T bail on #audiobookCueText
       // anymore: a horizontal swipe that starts on the subtitle text must
@@ -2889,6 +2947,13 @@
       startY = e.touches[0].clientY;
       startT = Date.now();
       started = true;
+      // Finger-down: snapshot the playhead + warm the engine (like the reader).
+      const scrubMode = (window.kadokiScrub && window.kadokiScrub.mode) ? window.kadokiScrub.mode() : 'off';
+      if (scrubMode !== 'off' && window.kadokiScrub && abCues.length) {
+        const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+        try { bg?.getState?.().then((st) => { touchState = st; }).catch(() => {}); } catch (_) {}
+        try { if (scrubMode === 'audio' && window._bgPlaying && typeof bg?.scrubPrime === 'function') bg.scrubPrime({}).catch(() => {}); } catch (_) {}
+      }
     }, { passive: true });
     // Responsiveness: fire the cue jump the INSTANT a horizontal swipe is
     // recognized mid-gesture, rather than waiting for the finger to lift. The
@@ -2896,10 +2961,23 @@
     // lag/choppiness. `fired` latches so one swipe = one cue and touchend
     // doesn't double-fire.
     view.addEventListener('touchmove', (e) => {
-      if (!started || fired || !e.touches?.[0]) return;
+      if (!started || !e.touches?.[0]) return;
       const t = e.touches[0];
       const dx = t.clientX - startX, dy = t.clientY - startY;
       const ax = Math.abs(dx), ay = Math.abs(dy);
+      if (scrubOn) { scrubDx = dx; try { window.kadokiScrub?.move(dx); } catch (_) {} return; }
+      if (fired) return;
+      const scrubMode = (window.kadokiScrub && window.kadokiScrub.mode) ? window.kadokiScrub.mode() : 'off';
+      if (scrubMode !== 'off' && window.kadokiScrub && abCues.length && ax >= SCRUB_START_PX && ax >= ay) {
+        scrubOn = true; scrubStartT = Date.now(); scrubDx = dx;
+        document.body.classList.add('kv-scrubbing');
+        const dim = view.clientWidth || window.innerWidth || 360;
+        const hooks = Object.assign({ spanMs: SPAN_MS_AUDIO }, scrubHooks);
+        const ok = window.kadokiScrub?.begin({ touchState, dim, commitT: scrubStartT, hooks });
+        if (!ok) { scrubOn = false; document.body.classList.remove('kv-scrubbing'); }
+        else { try { window.kadokiScrub?.move(dx); } catch (_) {} }
+        return;
+      }
       if (ax > 30 && ax > ay * 1.5) { fired = true; navByDx(dx); }
     }, { passive: true });
     // iOS WKWebView: when a gesture starts inside a scrollable element
@@ -2911,6 +2989,21 @@
     // `touchcancel` to the same handler is the belt-and-suspenders so a swipe
     // is still acted on even if iOS ends the sequence with cancel.
     const onAudiobookSwipeEnd = (e) => {
+      if (scrubOn) {
+        started = false;
+        // Quick flick → one-cue step, landing straight there (single transition).
+        const quick = (Date.now() - scrubStartT) < FLICK_MS && Math.abs(scrubDx) > 30;
+        scrubOn = false;
+        document.body.classList.remove('kv-scrubbing');
+        if (quick) {
+          let land = null;
+          try { land = window.kadokiScrub?.end(true); } catch (_) {}
+          navByDx(scrubDx, land || undefined);
+        } else {
+          try { window.kadokiScrub?.end(false); } catch (_) {}
+        }
+        return;
+      }
       if (!started) return;
       started = false;
       if (fired) return; // horizontal cue jump already handled live in touchmove
@@ -2947,6 +3040,83 @@
   // everything else — see BackgroundAudio.deviceModel). Big gaze-sized
   // buttons: cue back / play-pause / cue forward, plus the 辞書 pill that
   // toggles dictionary interactivity on the subtitle text. NO seek bar, ever.
+  // ── SRT word timing via on-device transcription (2026-09-09) ────────────
+  // A title with its own SRT gets the same karaoke as auto-transcribed ones:
+  // the transcriber runs in TIMING-ONLY mode (never replaces the SRT) and
+  // its word times are aligned onto the SRT text. Cold-aligns from the cache
+  // first so a re-open has timings immediately.
+  window.abStartSrtWordTiming = async function (audio, cues) {
+    try {
+      const at = window.autoTranscribe;
+      if (!at || !audio?.path || !Array.isArray(cues) || !cues.length) return;
+      if (!at.srtWordTimingWanted?.()) return;
+      if (!(await at.available())) return;
+      const tid = window._activeTitleId;
+      try { await at.enrichSrtWordTimes(tid, cues); } catch (_) {}
+      if (window._activeTitleId !== tid) return;
+      at.activate({ audioPath: audio.path, audioName: audio.name, timingOnly: true });
+    } catch (_) {}
+  };
+
+  // ── Drag-scrub painter for audio/video mode (kadokiScrub hooks) ──────────
+  // Shows cue idx as the current subtitle (karaoke span bound so the word
+  // fill follows the scrub clock) and the PREVIOUS cue above it — pinned by
+  // video-mode.js positionCuePanel so the current line never moves.
+  // Word timings for the karaoke fill. Real ones (cue.w, from transcription)
+  // when present; otherwise SYNTHESIZED per character, spread evenly over
+  // the cue's duration (Japanese morae are close to uniform) — good enough
+  // for a live indicator under the finger. Scrub-only: playback keeps the
+  // block-style subtitle for SRTs without timings.
+  function _cueWithWordTimes(cue) {
+    if (!cue || (Array.isArray(cue.w) && cue.w.length)) return cue;
+    const text = String(cue.text || '');
+    const dur = Math.max(300, (cue.endMs || cue.startMs + 2000) - cue.startMs);
+    const idxs = [];
+    for (let i = 0; i < text.length; i++) if (!/[\s　「」『』、。・…！？!?,.;:()（）]/.test(text[i])) idxs.push(i);
+    if (!idxs.length) return cue;
+    const lead = Math.min(120, dur * 0.05), tail = Math.min(200, dur * 0.08);
+    const per = (dur - lead - tail) / idxs.length;
+    const w = [];
+    for (let k = 0; k < idxs.length; k++) w.push(idxs[k], 1, Math.round(lead + k * per), Math.round(lead + (k + 1) * per));
+    return Object.assign({}, cue, { w, _wSynth: true });
+  }
+  window.abScrubPaintCue = function (idx, cue, t) {
+    try {
+      if (!abCues.length || !(idx >= 0) || !abCues[idx]) return;
+      abCurrentCueIdx = idx;
+      const cueEl = document.getElementById('audiobookCueText');
+      if (cueEl) {
+        renderAudiobookCueTokens(cueEl, abCues[idx].text, idx);
+        const cw = _cueWithWordTimes(abCues[idx]);
+        try { window.wordHighlight?.setSpanCue(cueEl, cw); } catch (_) {}
+        try { window._diag?.('[paged-diag] scrub paint cue#' + idx + ' w=' + (cw && cw.w ? cw.w.length / 4 : 0) + (cw && cw._wSynth ? ' synth' : (abCues[idx]._wAligned ? ' aligned' : ' native'))); } catch (_) {}
+      }
+      // (2026-09-09, user) No previous-subtitle panel while scrubbing: the
+      // finger already walks the cue list in the regular spot, so the line
+      // above was redundant. Release lands the video at the finger (the
+      // highlighted word), not at the cue start — see scrubEnd/landVia.
+      const nextEl = document.getElementById('audiobookNextCueText');
+      if (nextEl) { const nx = abCues[idx + 1]; nextEl.textContent = (nx && nx.text) ? nx.text : ''; }
+    } catch (_) {}
+  };
+  // Alignment just landed word times on the cue currently on screen → re-bind
+  // the karaoke span so the fill switches from synthetic/none to REAL timing
+  // immediately (during a scrub or playback), not at the next cue change.
+  window.abRefreshSpanTiming = function () {
+    try {
+      const idx = abCurrentCueIdx;
+      if (!(idx >= 0) || !abCues[idx]) return;
+      const cueEl = document.getElementById('audiobookCueText');
+      if (!cueEl || String(cueEl.dataset.cueIdx) !== String(idx)) return;
+      if (!(Array.isArray(abCues[idx].w) && abCues[idx].w.length)) return;
+      window.wordHighlight?.setSpanCue(cueEl, abCues[idx]);
+      try { window._diag?.('[paged-diag] span re-bound with aligned timing cue#' + idx); } catch (_) {}
+    } catch (_) {}
+  };
+  window.abScrubClearPrev = function () {
+    try { const p = document.getElementById('audiobookPrevCueText'); if (p) { p.innerHTML = ''; delete p.dataset.cueIdx; } } catch (_) {}
+  };
+
   let _abNavByDx = null;          // assigned by installAudiobookSwipeHandler
   let _abTpBound = false;
   let _kvDetected = false;
@@ -2962,10 +3132,11 @@
       else {
         const bg = window.Capacitor?.Plugins?.BackgroundAudio;
         if (!bg || typeof bg.deviceModel !== 'function') {
-          try { if (!window._kvToasted) { window._kvToasted = true; window.showToast && window.showToast('hw: no deviceModel', 3000); } } catch (_) {}
           return;
         }
         const r = await bg.deviceModel();
+        // Debug builds: device diagnostics on without the localStorage flag.
+        try { if (r && r.debugBuild && !window._diag) window._diag = function () { console.warn.apply(console, arguments); }; } catch (_) {}
         // Compat mode fakes utsname ("iPad13,4" observed on device) — match on
         // the deeper signals instead; ANY hit means visionOS. A REAL machine
         // string means the NATIVE visionOS build: the transport is a system
@@ -3001,9 +3172,7 @@
         pushMode();
         kvInstallCardNavZones();
       }
-    } catch (e) {
-      try { if (!window._kvToasted) { window._kvToasted = true; window.showToast && window.showToast('hw err: ' + ((e && e.message) || e), 3500); } } catch (_) {}
-    }
+    } catch (_) {}
   }
   // Card-mode gaze nav zones (Vision native only): three big transparent
   // buttons — left = previous card, bottom-center = replay, right = next.
@@ -3447,7 +3616,17 @@
       console.log('[abUpdate] abCues empty; pos=' + positionMs);
       return;
     }
-    const idx = window.srtParser.findCueAtTime(abCues, positionMs);
+    // Drag-scrub in progress: the finger owns the cue display (abScrubPaintCue).
+    if (window._readerScrubbing && !window._abScrubPainting) return;
+    let idx = window.srtParser.findCueAtTime(abCues, positionMs);
+    // READ mode: bind the NEXT line ~200 ms early. The 150 ms position poll +
+    // bridge + paint meant every line bound 150-340 ms late (measured), so the
+    // fill started a few characters down. Bound early, the indicator waits at
+    // the top of the new line and the fill starts on the beat.
+    if (!document.hidden && document.body.classList.contains('mode-read') && idx >= 0 && idx + 1 < abCues.length) {
+      const nx = abCues[idx + 1];
+      if (nx && positionMs + 200 >= nx.startMs) idx = idx + 1;
+    }
     // Hold the swipe target until the playhead catches up (see _abSeekGuardUntil),
     // so a mid-playback swipe doesn't flicker between cues while the seek lands.
     if (_abSeekGuardUntil > 0) {
@@ -3468,6 +3647,27 @@
         const el = document.getElementById('audiobookCueText');
         if (el) abRenderSyncIndicator(el, st);
         return;
+      }
+    } else {
+      // READ mode (or screen off), playhead in UNTRANSCRIBED audio: findCueAtTime
+      // answers the last cue ≤ position — the transcription FRONTIER — and the
+      // paged reader dutifully followed it, yanking the view back to the
+      // frontier text after every set-playhead into uncovered audio (Android
+      // whisper needs seconds to catch up; user: "starts playing at 1.6k
+      // chars"). No cue is right here: hold the reader where it is and let the
+      // backfilled cues drive the follow once they land.
+      // Only a GENUINE gap holds: past the last cue's end with no next cue in
+      // sight. The transcriber's coverage has small seams between its 30 s
+      // windows (last cue end → window end); holding there delayed every
+      // line after a seam by 1.5-5 s (measured "kw bind lag").
+      let st = null;
+      try { st = window.autoTranscribe?.syncState?.(positionMs); } catch (_) { st = null; }
+      if (st) {
+        const cur = idx >= 0 ? abCues[idx] : null;
+        const nx = idx >= 0 ? abCues[idx + 1] : abCues[0];
+        const pastCur = !cur || positionMs > (cur.endMs || cur.startMs) + 800;
+        const noNext = !nx || nx.startMs - positionMs > 4000;
+        if (pastCur && noNext) { _abSyncShown = true; return; }
       }
     }
     if (idx === abCurrentCueIdx && !_abSyncShown) return;
@@ -3491,18 +3691,21 @@
         cueEl.textContent = '…';
       }
     }
-    // PREVIOUS cue (visionOS video Titles only — user request: "I often
-    // have to pause, rewind etc. to catch something just said"). Briefly
-    // brought to iOS's plain video/audio tab 2026-08-30 for parity, then
-    // reverted the SAME day per user feedback — "remove the preceding
-    // subtitle in video mode, the user can use card mode if they want to
-    // see it" — card mode already shows surrounding context there, so this
-    // stays Vision-only. Fully tappable like the current cue —
-    // renderAudiobookCueTokens stamps THIS cue's own index on the host,
-    // which is what makes a lookup from here correctly pull ITS audio for
-    // Anki (see the click handler below) instead of the currently-playing
-    // line's.
-    if (!_hidden && window.KADOKI_VISION_NATIVE && document.body.classList.contains('kadoki-video-title')) {
+    // PREVIOUS cue (visionOS video Titles — user request: "I often have to
+    // pause, rewind etc. to catch something just said"). PAUSED 2026-08-30:
+    // gaze-hover worked on both the current and previous panel in stereo/3D
+    // mode, but a dictionary tap on the previous line always resolved to
+    // the CURRENT line's word instead — root cause not yet found (native
+    // tap-routing diagnostics added, then the user reported the diagnostic
+    // toast never even fired, which rules out a simple JS mis-route and
+    // needs a slower proper look). Disabled via this one flag rather than
+    // ripping the feature out — the DOM element, positioning math, CSS, and
+    // native RealityKit "subsPrev" attachment all stay in place and
+    // harmlessly no-op while prevEl never gets any content (CSS :empty
+    // hides it; the native attachment's own `!prevSubText.isEmpty` guard
+    // disables it) — flip this back to true to resume debugging.
+    const PREV_SUBTITLE_ENABLED = false;
+    if (PREV_SUBTITLE_ENABLED && !_hidden && window.KADOKI_VISION_NATIVE && document.body.classList.contains('kadoki-video-title')) {
       const prevEl = document.getElementById('audiobookPrevCueText');
       if (prevEl) {
         if (idx > 0 && abCues[idx - 1]) {
@@ -3620,6 +3823,12 @@
     const imgEl = document.getElementById('audiobookCardImage');
     if (!imgEl) return;
     let src = '';
+    // Title changed: drop the PREVIOUS title's cover right now — the lookup
+    // below is async, and the old image sat on screen until it resolved
+    // (the "flash of the last title's cover" on every switch).
+    if (_abCoverCacheTitleId !== window._activeTitleId) {
+      try { imgEl.removeAttribute('src'); imgEl.style.display = 'none'; } catch (_) {}
+    }
     try {
       if (window._activeTitleId && window.titleStore?.list) {
         if (_abCoverCacheTitleId === window._activeTitleId) {
@@ -3921,6 +4130,22 @@
       const bg = window.Capacitor?.Plugins?.BackgroundAudio;
       if (!bg || typeof bg.getState !== 'function') return;
       const s = await bg.getState();
+      // Heal the play-state mirror FIRST, before any early return. A play
+      // started from the LOCK SCREEN happens while the WebView is suspended:
+      // the 'state'/'remoteCommand' events either replay stale (and the
+      // remote-play replay is deliberately dropped) or are lost outright, so
+      // window._bgPlaying stays false while audio is audibly playing. Every
+      // downstream gate reads that mirror — the stats timer never starts
+      // (audioTruthPoll only heals the OPPOSITE desync), the transport button
+      // stays on PLAY, and card-mode entry skips its live-playhead adoption
+      // (a place-jump). getState() is native truth; adopt it in BOTH
+      // directions, and repaint the transport button to match.
+      if (s && typeof s.playing === 'boolean' && s.playing !== !!window._bgPlaying) {
+        window._bgPlaying = s.playing;
+        try { window.debugLog?.('[ab] foreground state heal → playing=' + s.playing); } catch (_) {}
+        const _ppBtn = document.getElementById('audiobookPlayPause');
+        if (_ppBtn) _ppBtn.textContent = s.playing ? 'PAUSE' : 'PLAY';
+      }
       if (!s || !s.ready || !(Number(s.positionMs) > 0)) return;
       // The native playhead IS the source of truth (we already gated on
       // ready && positionMs>0). Adopt it EXACTLY — in both directions — so the
@@ -5342,6 +5567,7 @@
     title.textContent = name;
     currentEpubName = name;
     currentEpubUri = uri;
+    window._legacyEpubTitleId = window._activeTitleId || null;   // whose text these chunks are
     rlog(`EPUB rendered: ${sections.length} sections`);
 
     chunks = chunkRenderedContent(content);

@@ -62,6 +62,11 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "resume",      returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stop",        returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "seek",        returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "scrubPrime",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "scrubBegin",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "scrub",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "scrubEnd",    returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setEngine",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setRate",     returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getState",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getLastSavedPosition", returnType: CAPPluginReturnPromise),
@@ -71,6 +76,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setChapterRepeat",  returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "skipToNextChapter", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deviceModel",       returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "probeDuration",     returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "tpState",           returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "dictPanel",         returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "panelWindow",       returnType: CAPPluginReturnPromise),
@@ -396,6 +402,29 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     // JS match ANY of them: the real system's SystemVersion.plist ProductName
     // (the file is the host OS's), low-level sysctl targets, and a probe for
     // a visionOS-only UIKit class.
+    static var isDebugBuild: Bool {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// Full duration of an audio file WITHOUT loading it into the player —
+    /// the reader's uncovered-region estimate (set-playhead past the
+    /// transcription frontier) needs it the moment a title opens.
+    @objc func probeDuration(_ call: CAPPluginCall) {
+        let raw = call.getString("path") ?? ""
+        guard !raw.isEmpty else { call.resolve(["durationMs": 0]); return }
+        let url: URL = raw.hasPrefix("file://") ? (URL(string: raw) ?? URL(fileURLWithPath: raw)) : URL(fileURLWithPath: raw)
+        let asset = AVURLAsset(url: url)
+        asset.loadValuesAsynchronously(forKeys: ["duration"]) {
+            let d = asset.duration
+            let ms = d.isNumeric ? Int(CMTimeGetSeconds(d) * 1000.0) : 0
+            call.resolve(["durationMs": max(0, ms)])
+        }
+    }
+
     @objc func deviceModel(_ call: CAPPluginCall) {
         var systemInfo = utsname()
         uname(&systemInfo)
@@ -448,6 +477,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "hwProduct": sysctlStr("hw.product"),
             "productName": (sv?["ProductName"] as? String) ?? "",
             "visionClass": NSClassFromString("UIWindowSceneGeometryPreferencesVision") != nil,
+            "debugBuild": Self.isDebugBuild,
             "simDemo": simDemo,
             "demoDir": demoDir,
             "sim3d": ProcessInfo.processInfo.environment["KADOKI_SIM_3D"] == "1",
@@ -517,6 +547,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     /// right after open (pause) would be undone by the still-pending
     /// asyncAfter pause. (Android's cancelFade already handles this.)
     private var fadeGeneration = 0
+    // Scrub session (reader drag-scrub): grains are short audible slices at
+    // the finger position. scrubGen cancels a grain's scheduled fade-out/
+    // pause when a newer grain (or scrubEnd) supersedes it.
+    private var scrubGen = 0
+    private var scrubActive = false
+    private var scrubWasPlaying = false
 
     // MARK: - Native chapter-repeat
     // Detect natural chapter boundary crossings from inside the position Timer
@@ -775,6 +811,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         currentUrlStr = urlStr   // remember what JS asked us to play (for getState "same audio" check)
+        stopRateRamp()
         ensureSessionActive()    // lazy activation (session is deactivated on stop)
         // call.getInt/getDouble — getDouble is reliable for fractional JSON Numbers.
         let startMs = call.getDouble("startMs") ?? 0
@@ -837,6 +874,27 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             DispatchQueue.main.async { KadokiVideoIOSHost.shared.clear() }
             #endif
 
+            if preferredEngine == "speech", let e = makeReadEngine(url: url) {
+                e.rate = rate
+                e.currentTime = max(0, startMs / 1000.0)
+                fadeGeneration += 1
+                let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
+                if fadeMs > 0 {
+                    e.volume = 0.0
+                    e.play()
+                    e.setVolume(1.0, fadeDuration: fadeMs / 1000.0)
+                } else {
+                    e.volume = 1.0
+                    e.play()
+                }
+                self.player = e
+                self.currentRate = rate
+                startPositionTimer()
+                emitState(playing: true)
+                updateNowPlaying()
+                call.resolve()
+                return
+            }
             let p = try AVAudioPlayer(contentsOf: url)
             p.enableRate = true
             p.rate = rate
@@ -976,6 +1034,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // ramp; the same fadeGeneration token defers the fade-in to a pause/play
         // that races in, but the seek itself always lands.
         let fadeMs = call.getDouble("fadeMs") ?? 0
+        let rampFrom = Float(call.getDouble("rampFrom") ?? 0)
+        let wantRamp = p.isPlaying && rampFrom > 0 && currentRate > rampFrom + 0.03
+        let preMs = p.currentTime * 1000          // where the listener WAS: hold 1× until back here
         if p.isPlaying && fadeMs > 0 {
             fadeGeneration += 1
             let gen = fadeGeneration
@@ -984,6 +1045,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             DispatchQueue.main.asyncAfter(deadline: .now() + secs) { [weak self] in
                 guard let self = self, let p = self.player else { return }
                 p.currentTime = target               // always land the seek
+                if wantRamp { self.startRateRamp(from: rampFrom, to: self.currentRate, seconds: Self.RAMP_SECONDS, holdUntilMs: preMs) }
                 self.updateNowPlaying()
                 self.postLiveTick(ms: Int(target * 1000), playing: p.isPlaying)
                 guard self.fadeGeneration == gen else { return } // a pause/play raced in — it owns the volume
@@ -991,15 +1053,287 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             }
         } else {
             p.currentTime = target
+            if wantRamp { startRateRamp(from: rampFrom, to: currentRate, seconds: Self.RAMP_SECONDS, holdUntilMs: preMs) }
             updateNowPlaying()
             postLiveTick(ms: Int(target * 1000), playing: p.isPlaying)
         }
         call.resolve()
     }
 
+    // MARK: - Drag scrub (reader) — turntable engine
+    //
+    // A scrub session hands the voice to KadokiScrubEngine (AVAudioEngine +
+    // AVAudioSourceNode over a decoded PCM window): the finger sets a TARGET
+    // position and the render callback chases it with platter-like inertia,
+    // resampling continuously (Hermite) at whatever signed speed that implies.
+    // No seeks, no fades, no grains — reverse and slow-motion are free, and
+    // a resting finger is silence. The main AVAudioPlayer is muted+paused for
+    // the session and re-armed at the landing position on scrubEnd.
+    private var scrubEngine: KadokiScrubEngine?
+    private var scrubLastEmitTs: TimeInterval = 0
+    private var scrubPrimeGen = 0
+
+    // MARK: - Rate ramp (re-listen at 1× → back up to the listening speed)
+    //
+    // After a scrub release or a backward subtitle swipe the user is re-hearing
+    // something they missed: start at `from` (1×) and ease back up to the
+    // listening rate over a few seconds. Small steps on the main runloop —
+    // AVAudioPlayer's time-pitch unit and Sonic both take rate changes without
+    // clicks. Any explicit setRate / new play cancels the ramp.
+    private var rateRampTimer: Timer?
+    private var scrubAnchorMs: Double = -1      // playhead when the scrub began (the span being re-heard ends here)
+    private static let RAMP_SECONDS = 4.0
+    private static let HOLD_MAX_SECONDS = 45.0
+    private func stopRateRamp() { rateRampTimer?.invalidate(); rateRampTimer = nil }
+    /// Hold `from` (1×) until the playhead passes `holdUntilMs` — i.e. the
+    /// whole re-heard span plays at 1× — THEN ease up to `to` over RAMP_SECONDS.
+    /// holdUntilMs ≤ 0 (or already behind) → ramp right away.
+    private func startRateRamp(from: Float, to: Float, seconds: Double, holdUntilMs: Double = -1) {
+        stopRateRamp()
+        guard let p = player, to > from + 0.03 else { return }
+        p.rate = from
+        let started = Date()
+        var rampT0: Date? = (holdUntilMs > 0 && p.currentTime * 1000 < holdUntilMs - 200) ? nil : Date()
+        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] tm in
+            guard let self = self, let p = self.player else { tm.invalidate(); return }
+            if rampT0 == nil {
+                let pos = p.currentTime * 1000
+                let waited = Date().timeIntervalSince(started)
+                if pos >= holdUntilMs - 200 || waited > Self.HOLD_MAX_SECONDS || !p.isPlaying && waited > 2 {
+                    rampT0 = Date()
+                } else {
+                    p.rate = from
+                    return
+                }
+            }
+            let x = min(1.0, Date().timeIntervalSince(rampT0!) / seconds)
+            let e = Float(x * x * (3 - 2 * x))              // smoothstep: gentle start and finish
+            p.rate = from + (to - from) * e
+            if x >= 1.0 { tm.invalidate(); self.rateRampTimer = nil; p.rate = to }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        rateRampTimer = timer
+    }
+
+    // Finger-down warm-up: create/start the engine and decode a small window
+    // around the live playhead BEFORE the drag commits, so scrubBegin has
+    // nothing left to do on the critical path. Idles out if no drag follows.
+    @objc func scrubPrime(_ call: CAPPluginCall) {
+        guard let p = player, !scrubActive, let url = Self.fileURL(from: currentUrlStr) else { call.resolve(["ok": false]); return }
+        let ms = call.getDouble("ms") ?? (p.currentTime * 1000)
+        if scrubEngine == nil || scrubEngine?.url != url { scrubEngine = KadokiScrubEngine(url: url) }
+        guard let e = scrubEngine else { call.resolve(["ok": false]); return }
+        ensureSessionActive()
+        let ok = e.prime(atMs: ms)
+        scrubPrimeGen += 1
+        let gen = scrubPrimeGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            guard let self = self, !self.scrubActive, self.scrubPrimeGen == gen else { return }
+            self.scrubEngine?.end()
+        }
+        call.resolve(["ok": ok])
+    }
+
+    // MARK: - Engine selection (read-mode Sonic vs AVAudioPlayer)
+    //
+    // "speech" = KadokiReadEngine (Sonic time-stretch, foreground read mode);
+    // "default" = AVAudioPlayer. JS keeps this in step with the shell mode and
+    // visibility (app.js _readEngineSync); switching with a file loaded hands
+    // off at the current position with a short cross-fade. Video always uses
+    // the AVPlayer engine.
+    private var preferredEngine = "default"
+    private var preferredNonlinear = false   // Speedy on top of Sonic
+    private func activeEngineName() -> String {
+        if player is KadokiReadEngine { return "speech" }
+        if player is KadokiVideoPlayer { return "video" }
+        return player == nil ? "none" : "default"
+    }
+
+    @objc func setEngine(_ call: CAPPluginCall) {
+        let want = (call.getString("engine") ?? "default") == "speech" ? "speech" : "default"
+        let changed = want != preferredEngine
+        preferredEngine = want
+        preferredNonlinear = call.getBool("nonlinear") ?? preferredNonlinear
+        if let e = player as? KadokiReadEngine, e.nonlinear != preferredNonlinear { e.nonlinear = preferredNonlinear }
+        var switched = false
+        if changed, let p = player, let url = Self.fileURL(from: currentUrlStr), !KadokiVideoPlayer.isVideoUrl(url) {
+            let isRead = p is KadokiReadEngine
+            if isRead != (want == "speech") { switched = switchEngine(toRead: want == "speech", url: url) }
+        }
+        call.resolve(["engine": preferredEngine, "nonlinear": preferredNonlinear, "switched": switched, "active": activeEngineName()])
+    }
+
+    private func makeReadEngine(url: URL) -> KadokiReadEngine? {
+        guard let e = KadokiReadEngine(url: url) else { return nil }
+        e.nonlinear = preferredNonlinear
+        e.onEnded = { [weak self] in self?.handleNaturalEnd() }
+        e.onError = { [weak self] msg in self?.handlePlaybackError(message: msg) }
+        return e
+    }
+
+    private func switchEngine(toRead: Bool, url: URL) -> Bool {
+        guard let old = player, !scrubActive else { return false }
+        let pos = old.currentTime
+        let wasPlaying = old.isPlaying
+        let rate = currentRate
+        var newP: KadokiPlayback
+        if toRead {
+            guard let e = makeReadEngine(url: url) else { return false }
+            e.rate = rate
+            e.currentTime = pos
+            newP = e
+        } else {
+            guard let p = try? AVAudioPlayer(contentsOf: url) else { return false }
+            p.enableRate = true
+            p.rate = rate
+            p.delegate = self
+            p.prepareToPlay()
+            p.currentTime = max(0, min(p.duration, pos))
+            newP = p
+        }
+        fadeGeneration += 1
+        stopPositionTimer()
+        if wasPlaying {
+            old.setVolume(0.0, fadeDuration: 0.03)
+            newP.volume = 0.0
+            newP.play()
+            newP.setVolume(1.0, fadeDuration: 0.06)
+        } else {
+            newP.volume = 1.0
+        }
+        player = newP
+        let retiring = old
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { retiring.stop() }
+        if wasPlaying { startPositionTimer() }
+        updateNowPlaying()
+        NSLog("[BackgroundAudio] engine → %@ at %.2fs playing=%d", toRead ? "speech" : "default", pos, wasPlaying ? 1 : 0)
+        return true
+    }
+
+    @objc func scrubBegin(_ call: CAPPluginCall) {
+        guard let p = player else { call.resolve(["ok": false]); return }
+        let anchorMs = call.getDouble("ms") ?? (p.currentTime * 1000)
+        scrubActive = true
+        scrubWasPlaying = p.isPlaying
+        scrubAnchorMs = p.currentTime * 1000
+        stopRateRamp()
+        fadeGeneration += 1          // supersede any pending faded pause/seek
+        scrubGen += 1
+        let gen = scrubGen
+        stopPositionTimer()
+        // The engine is the voice now: dip + pause the main player.
+        if p.isPlaying {
+            p.setVolume(0.0, fadeDuration: 0.012)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.018) { [weak self] in
+                guard let self = self, self.scrubActive, self.scrubGen == gen else { return }
+                self.player?.pause()
+            }
+        }
+        var engineOk = false
+        if let url = Self.fileURL(from: currentUrlStr) {
+            if scrubEngine == nil || scrubEngine?.url != url { scrubEngine = KadokiScrubEngine(url: url) }
+            if let e = scrubEngine {
+                ensureSessionActive()
+                engineOk = e.begin(atMs: anchorMs)
+            }
+        }
+        NSLog("[BackgroundAudio] scrubBegin anchor=%.0fms engine=%d wasPlaying=%d", anchorMs, engineOk ? 1 : 0, scrubWasPlaying ? 1 : 0)
+        call.resolve([
+            "ok": true,
+            "engine": engineOk,
+            "wasPlaying": scrubWasPlaying,
+            "positionMs": Int(p.currentTime * 1000),
+            "durationMs": Int(p.duration * 1000)
+        ])
+    }
+
+    // Finger position update — called at touch-event rate. `snap` lands the
+    // read head exactly on the target (first audible update of a drag) instead
+    // of chasing it from the anchor.
+    private var scrubVideoSeekTs: TimeInterval = 0
+    @objc func scrub(_ call: CAPPluginCall) {
+        guard scrubActive, let p = player else { call.resolve(); return }
+        let ms = max(0, min(p.duration * 1000, call.getDouble("ms") ?? 0))
+        let snap = call.getBool("snap") ?? false
+        scrubEngine?.setTarget(ms: ms, snap: snap)
+        // Video Titles: scrub the PICTURE too — seek the (paused) AVPlayer to
+        // the finger at ~12 Hz so frames follow; the engine carries the sound.
+        if let v = p as? KadokiVideoPlayer {
+            let now = Date().timeIntervalSince1970
+            if now - scrubVideoSeekTs > 0.08 {
+                scrubVideoSeekTs = now
+                v.currentTime = ms / 1000.0
+            }
+        }
+        repeatGuardUntil = Date().timeIntervalSince1970 + 0.6; lastTickMs = -1; lastChapterIdx = -1
+        // Position events at a sane cadence for the JS follow (which ignores
+        // them mid-scrub anyway) and the watch/lock-screen mirrors.
+        let now = Date().timeIntervalSince1970
+        if now - scrubLastEmitTs > 0.12 {
+            scrubLastEmitTs = now
+            emitPosition(positionMs: Int(ms), durationMs: Int(p.duration * 1000), playing: true)
+        }
+        call.resolve()
+    }
+
+    @objc func scrubEnd(_ call: CAPPluginCall) {
+        scrubGen += 1
+        let wasActive = scrubActive
+        scrubActive = false
+        scrubEngine?.end()
+        guard let p = player else { call.resolve(); return }
+        let resume = call.getBool("resume") ?? scrubWasPlaying
+        let rampFrom = Float(call.getDouble("rampFrom") ?? 0)
+        if let ms = call.getDouble("ms") {
+            p.currentTime = max(0, min(p.duration, ms / 1000.0))
+        }
+        fadeGeneration += 1
+        repeatGuardUntil = Date().timeIntervalSince1970 + 0.6; lastTickMs = -1; lastChapterIdx = -1
+        let posMs = Int(p.currentTime * 1000)
+        if resume {
+            // The scrub engine is still fading out (12 ms ramp) at the FINGER
+            // position; starting the player at the LANDING position underneath
+            // it was a two-voice blip. Let the engine go silent first.
+            let gen = scrubGen
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                guard let self = self, self.scrubGen == gen, !self.scrubActive, let p = self.player else { return }
+                self.ensureSessionActive()
+                p.volume = 0.0
+                p.play()
+                p.setVolume(1.0, fadeDuration: 0.05)
+                if rampFrom > 0 && self.currentRate > rampFrom + 0.03 {
+                    // Re-hear the scrubbed-over span at 1×, then ease back up.
+                    self.startRateRamp(from: rampFrom, to: self.currentRate, seconds: Self.RAMP_SECONDS, holdUntilMs: self.scrubAnchorMs)
+                }
+                self.startPositionTimer()
+                self.emitState(playing: true)
+                self.emitPosition(positionMs: Int(p.currentTime * 1000), durationMs: Int(p.duration * 1000), playing: true)
+                self.updateNowPlaying()
+            }
+        } else {
+            p.pause()
+            p.volume = 1.0
+            stopPositionTimer()
+            saveLastPositionNow()
+            emitState(playing: false)
+            emitPosition(positionMs: posMs, durationMs: Int(p.duration * 1000), playing: false)
+            updateNowPlaying()
+        }
+        call.resolve(["ok": wasActive, "positionMs": posMs, "playing": resume])
+    }
+
+    private static func fileURL(from urlStr: String) -> URL? {
+        if urlStr.isEmpty { return nil }
+        if urlStr.hasPrefix("file://") {
+            return URL(string: urlStr) ?? URL(fileURLWithPath: String(urlStr.dropFirst(7)))
+        }
+        return URL(fileURLWithPath: urlStr)
+    }
+
     @objc func setRate(_ call: CAPPluginCall) {
         let rate = Float(call.getDouble("rate") ?? 1.0)
         guard rate > 0 else { call.reject("rate must be > 0"); return }
+        stopRateRamp()
         currentRate = rate
         player?.rate = rate
         updateNowPlaying()
@@ -1112,7 +1446,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "ready":      p != nil,
             "positionMs": positionMs,
             "durationMs": durationMs,
-            "url":        (p != nil) ? currentUrlStr : ""
+            "url":        (p != nil) ? currentUrlStr : "",
+            "engine":     activeEngineName()
         ])
     }
 
@@ -1521,4 +1856,337 @@ extension BackgroundAudioPlugin: AVSpeechSynthesizerDelegate {
     // silently never fire.
     public func speechSynthesizer(_ s: AVSpeechSynthesizer, didFinish u: AVSpeechUtterance) { DispatchQueue.main.async { [weak self] in self?.pendingSpeechCompletion?() } }
     public func speechSynthesizer(_ s: AVSpeechSynthesizer, didCancel u: AVSpeechUtterance) { DispatchQueue.main.async { [weak self] in self?.pendingSpeechCompletion?() } }
+}
+
+
+// MARK: - KadokiScrubEngine
+//
+// Turntable-style scrub: a decoded float-PCM window around the anchor, read
+// by an AVAudioSourceNode at a fractional position that advances by a signed
+// velocity every sample (4-point Hermite interpolation). The finger sets
+// `target`; each render buffer computes the velocity that would close the
+// gap in TAU seconds (platter inertia), ramps to it across the buffer (no
+// zipper), and integrates. Speed and direction are therefore continuous —
+// reverse playback and slow motion fall out for free, pitch follows speed
+// like vinyl, and a resting finger converges and goes silent. Gain ramps in
+// on the first target and out on end(), so start/stop never click.
+//
+// Window: `begin` decodes ±INITIAL_SEC synchronously (hardware AAC decode ≈
+// tens of ms), then a background queue grows it to ±GROW_SEC in stages and
+// re-centres it if the finger runs past an edge. Buffers are swapped by
+// reference under a short lock (Swift arrays are COW), so the render thread
+// never waits on a decode. Graph: source → mainMixer → output; an AUv3
+// effect could be inserted between source and mixer later.
+final class KadokiScrubEngine {
+    let url: URL
+    private let engine = AVAudioEngine()
+    private var source: AVAudioSourceNode!
+    private let file: AVAudioFile
+    let sampleRate: Double
+    private let totalFrames: Int64
+    private let lock = NSLock()
+    private var bufL: [Float] = []
+    private var bufR: [Float] = []
+    // Previous window kept alive until the NEXT swap so the render thread's
+    // reference is never the last one (a multi-MB free on the audio thread
+    // would glitch).
+    private var retiredL: [Float] = []
+    private var retiredR: [Float] = []
+    private var winStart: Int64 = 0
+    private var pos: Double = 0
+    private var target: Double = 0
+    private var vel: Double = 0
+    private var gain: Float = 0
+    private var gainTarget: Float = 0
+    private var snapPending = false
+    private let decodeQ = DispatchQueue(label: "kadoki.scrub.decode", qos: .userInteractive)
+    private var decodeGen = 0
+    private var decodeBusy = false
+    private var lastEnsureAt: TimeInterval = 0
+    private static let PRIME_SEC = 3.0            // synchronous: ready in a few ms
+    private static let INITIAL_SEC = 12.0
+    private static let GROW_SEC: [Double] = [12, 40, 80]
+    private static let TAU_SEC = 0.032
+    // Speed cap: beyond this the sound is a squeal, not scrubbing. A gap the
+    // cap couldn't close quickly SNAPS instead (SNAP_SEC), with a 12 ms gain
+    // dip, so a fast throw never leaves the head chasing at full squeal for
+    // seconds after the finger has stopped.
+    private static let MAX_SPEED = 8.0
+    private static let SNAP_SEC = 0.7
+    // Fast passes are where the squeal lives: duck the level as |speed| rises
+    // (full ≤1.5×, ~0.2 by ~6×) and roll off the top end with a one-pole
+    // low-pass whose cutoff falls with speed — the scratch keeps its texture,
+    // the shriek goes. Both ramp per buffer (no zipper).
+    private var vGain: Float = 1
+    private var lpL: Float = 0, lpR: Float = 0
+    private var snapArmed = false     // jump the head once the gain has ramped to zero
+    private static let GAIN_RAMP_SEC = 0.012
+
+    init?(url: URL) {
+        self.url = url
+        guard let f = try? AVAudioFile(forReading: url) else { return nil }
+        file = f
+        sampleRate = f.processingFormat.sampleRate
+        totalFrames = KadokiReadEngine.trustedLength(url: url, file: f)   // VBR-safe (see there)
+        guard let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else { return nil }
+        source = AVAudioSourceNode(format: fmt) { [weak self] _, _, frameCount, abl -> OSStatus in
+            self?.render(frameCount, abl)
+            return noErr
+        }
+        engine.attach(source)
+        engine.connect(source, to: engine.mainMixerNode, format: fmt)
+        engine.mainMixerNode.outputVolume = 1.0
+    }
+
+    var currentMs: Double { lock.lock(); defer { lock.unlock() }; return pos / sampleRate * 1000 }
+
+    // True when the running engine already holds decoded audio around `frame`.
+    private func isWarm(at frame: Int64) -> Bool {
+        guard engine.isRunning else { return false }
+        lock.lock(); let ws = winStart, len = Int64(bufL.count); lock.unlock()
+        let m = Int64(1.5 * sampleRate)
+        return frame - m >= ws && frame + m <= ws + len
+    }
+
+    /// Finger-down warm-up: silent, started, PRIME_SEC decoded around `ms`,
+    /// growing in the background. Cheap to call repeatedly.
+    @discardableResult
+    func prime(atMs ms: Double) -> Bool {
+        let anchor = Int64(max(0, min(Double(totalFrames), ms / 1000 * sampleRate)))
+        if isWarm(at: anchor) {
+            lock.lock(); gainTarget = 0; decodeGen += 1; lock.unlock()
+            return true
+        }
+        // Seed only (±PRIME_SEC, a few ms). Growing the window here cost up to
+        // 160 s of MP3 decode on EVERY touch in the reader (page turns
+        // included) — a measurable share of a long session's heat. The
+        // window grows once a drag actually begins (begin()).
+        return start(anchor: anchor, grow: false)
+    }
+
+    @discardableResult
+    func begin(atMs ms: Double) -> Bool {
+        let anchor = Int64(max(0, min(Double(totalFrames), ms / 1000 * sampleRate)))
+        if isWarm(at: anchor) {
+            // Primed: just re-aim. No decode, no engine start.
+            lock.lock()
+            pos = Double(anchor); target = Double(anchor); vel = 0; gain = 0; gainTarget = 0; snapPending = false
+            decodeGen += 1
+            let gen = decodeGen
+            lock.unlock()
+            decodeQ.async { [weak self] in
+                guard let self = self else { return }
+                for h in Self.GROW_SEC { if !self.grow(toHalfSec: h, gen: gen) { break } }
+            }
+            return true
+        }
+        return start(anchor: anchor, grow: true)
+    }
+
+    private func start(anchor: Int64, grow: Bool) -> Bool {
+        lock.lock()
+        pos = Double(anchor); target = Double(anchor); vel = 0; gain = 0; gainTarget = 0; snapPending = false
+        lpL = 0; lpR = 0; vGain = 1; snapArmed = false
+        decodeGen += 1
+        let gen = decodeGen
+        lock.unlock()
+        let t0 = Date()
+        loadWindow(center: anchor, halfSec: Self.PRIME_SEC, gen: gen)
+        NSLog("[ScrubEngine] prime window %.0f ms", Date().timeIntervalSince(t0) * 1000)
+        if !engine.isRunning {
+            engine.prepare()
+            do { try engine.start() } catch {
+                NSLog("[ScrubEngine] engine start failed: %@", error.localizedDescription)
+                return false
+            }
+        }
+        if grow {
+            decodeQ.async { [weak self] in
+                guard let self = self else { return }
+                for h in Self.GROW_SEC { if !self.grow(toHalfSec: h, gen: gen) { break } }
+            }
+        }
+        return true
+    }
+
+    func setTarget(ms: Double, snap: Bool) {
+        let f = max(0, min(Double(totalFrames), ms / 1000 * sampleRate))
+        lock.lock()
+        target = f
+        if snap { snapPending = true }
+        gainTarget = 1.0
+        let ws = winStart, len = bufL.count, gen = decodeGen
+        lock.unlock()
+        // Re-centre when the finger nears an edge of the decoded window.
+        let margin = 2.0 * sampleRate
+        let now = Date().timeIntervalSince1970
+        if (f < Double(ws) + margin || f > Double(ws + Int64(len)) - margin) && !decodeBusy && now - lastEnsureAt > 0.15 {
+            lastEnsureAt = now
+            let inside = f >= Double(ws) && f < Double(ws + Int64(len))
+            decodeQ.async { [weak self] in
+                guard let self = self else { return }
+                if inside { _ = self.grow(toHalfSec: Self.GROW_SEC.last ?? 60, gen: gen) }
+                else { self.loadWindow(center: Int64(f), halfSec: Self.INITIAL_SEC, gen: gen)
+                       for h in Self.GROW_SEC { if !self.grow(toHalfSec: h, gen: gen) { break } } }
+            }
+        }
+    }
+
+    func end() {
+        lock.lock(); gainTarget = 0; decodeGen += 1; let endGen = decodeGen; lock.unlock()
+        // Stay running (silent) for a while: consecutive swipes reuse the live
+        // engine and never pay an audio-unit stop/start, which can pop.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock()
+            let stillEnded = (self.decodeGen == endGen)
+            self.lock.unlock()
+            guard stillEnded else { return }     // a new prime()/begin() raced in
+            self.engine.stop()
+            // Release on THIS (main) thread, after the render callback is gone.
+            self.lock.lock()
+            let dropL = self.bufL, dropR = self.bufR, dropRL = self.retiredL, dropRR = self.retiredR
+            self.bufL = []; self.bufR = []; self.retiredL = []; self.retiredR = []
+            self.lock.unlock()
+            _ = (dropL.count, dropR.count, dropRL.count, dropRR.count)
+        }
+    }
+
+    // MARK: decode
+
+    private func readFrames(from start: Int64, count: Int) -> ([Float], [Float])? {
+        guard count > 0, start >= 0, start < totalFrames else { return nil }
+        let n = AVAudioFrameCount(min(Int64(count), totalFrames - start))
+        guard let pcm = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: n) else { return nil }
+        do {
+            file.framePosition = start
+            try file.read(into: pcm, frameCount: n)
+        } catch {
+            NSLog("[ScrubEngine] read failed @%lld: %@", start, error.localizedDescription)
+            return nil
+        }
+        let got = Int(pcm.frameLength)
+        guard got > 0, let ch = pcm.floatChannelData else { return nil }
+        let l = Array(UnsafeBufferPointer(start: ch[0], count: got))
+        let r = pcm.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: got)) : l
+        return (l, r)
+    }
+
+    private func loadWindow(center: Int64, halfSec: Double, gen: Int) {
+        decodeBusy = true; defer { decodeBusy = false }
+        let half = Int64(halfSec * sampleRate)
+        let start = max(0, center - half)
+        let end = min(totalFrames, center + half)
+        guard let (l, r) = readFrames(from: start, count: Int(end - start)) else { return }
+        lock.lock()
+        if gen == decodeGen { retiredL = bufL; retiredR = bufR; bufL = l; bufR = r; winStart = start }
+        lock.unlock()
+    }
+
+    // Grow the window symmetrically around the CURRENT read position to
+    // ±halfSec. Returns false when cancelled (a newer session began).
+    private func grow(toHalfSec halfSec: Double, gen: Int) -> Bool {
+        decodeBusy = true; defer { decodeBusy = false }
+        lock.lock()
+        guard gen == decodeGen else { lock.unlock(); return false }
+        let curL = bufL, curR = bufR, ws = winStart, p = Int64(pos)
+        lock.unlock()
+        let half = Int64(halfSec * sampleRate)
+        let wantStart = max(0, p - half), wantEnd = min(totalFrames, p + half)
+        let curEnd = ws + Int64(curL.count)
+        var back: ([Float], [Float])? = nil, fwd: ([Float], [Float])? = nil
+        if wantStart < ws { back = readFrames(from: wantStart, count: Int(ws - wantStart)) }
+        if wantEnd > curEnd { fwd = readFrames(from: curEnd, count: Int(wantEnd - curEnd)) }
+        if back == nil && fwd == nil { return true }
+        var nl: [Float] = [], nr: [Float] = []
+        nl.reserveCapacity((back?.0.count ?? 0) + curL.count + (fwd?.0.count ?? 0))
+        nr.reserveCapacity(nl.capacity)
+        var newStart = ws
+        if let b = back, b.0.count == Int(ws - wantStart) { nl.append(contentsOf: b.0); nr.append(contentsOf: b.1); newStart = wantStart }
+        nl.append(contentsOf: curL); nr.append(contentsOf: curR)
+        if let f = fwd { nl.append(contentsOf: f.0); nr.append(contentsOf: f.1) }
+        lock.lock()
+        // Only swap if nothing replaced the window meanwhile (same start/len).
+        let same = (gen == decodeGen) && winStart == ws && bufL.count == curL.count
+        if same { retiredL = bufL; retiredR = bufR; bufL = nl; bufR = nr; winStart = newStart }
+        lock.unlock()
+        return same
+    }
+
+    // MARK: render (audio thread)
+
+    private func render(_ n: AVAudioFrameCount, _ abl: UnsafeMutablePointer<AudioBufferList>) {
+        let buffers = UnsafeMutableAudioBufferListPointer(abl)
+        guard buffers.count >= 1, let m0 = buffers[0].mData else { return }
+        let outL = m0.assumingMemoryBound(to: Float.self)
+        let outR = (buffers.count > 1 && buffers[1].mData != nil) ? buffers[1].mData!.assumingMemoryBound(to: Float.self) : outL
+        let count = Int(n)
+        lock.lock()
+        let l = bufL, r = bufR, ws = Double(winStart), tgt = target, gT = gainTarget
+        let snap = snapPending; snapPending = false
+        lock.unlock()
+        let len = l.count
+        var g = gain
+        // A jump is never instantaneous: arm it, ramp the gain to zero, THEN
+        // move the head, then ramp back — an immediate jump with g=0 in the
+        // same sample was a step (click) at the end of every fast throw.
+        if snap || abs(tgt - pos) > Self.SNAP_SEC * sampleRate { snapArmed = true }
+        var desired = (tgt - pos) / (Self.TAU_SEC * sampleRate)
+        if desired > Self.MAX_SPEED { desired = Self.MAX_SPEED } else if desired < -Self.MAX_SPEED { desired = -Self.MAX_SPEED }
+        if abs(tgt - pos) < 0.75 { desired = 0 }
+        let v0 = vel
+        let dv = (desired - v0) / Double(count)
+        let gStep = Float(1.0 / (Self.GAIN_RAMP_SEC * sampleRate))
+        // Speed-dependent duck + low-pass, ramped across this buffer.
+        let sp = abs(desired)
+        let vgTarget: Float = sp <= 1.5 ? 1.0 : Float(max(0.2, 1.0 - (sp - 1.5) / 5.5))
+        let vg0 = vGain
+        let dvg = (vgTarget - vg0) / Float(count)
+        let fc = min(18000.0, max(1400.0, 12000.0 / max(1.0, sp)))
+        let a = Float(1.0 - exp(-2.0 * Double.pi * fc / sampleRate))
+        var yl = lpL, yr = lpR
+        l.withUnsafeBufferPointer { lp in
+            r.withUnsafeBufferPointer { rp in
+                for i in 0..<count {
+                    if snapArmed && g <= 0.0005 { pos = tgt; vel = 0; snapArmed = false }
+                    else { vel = v0 + dv * Double(i + 1); pos += vel }
+                    var sl: Float = 0, sr: Float = 0
+                    let rel = pos - ws
+                    let avail = len >= 4 && rel >= 1 && rel < Double(len - 2)
+                    if avail {
+                        let i0 = Int(rel)
+                        let f = Float(rel - Double(i0))
+                        sl = Self.hermite(lp[i0 - 1], lp[i0], lp[i0 + 1], lp[i0 + 2], f)
+                        sr = Self.hermite(rp[i0 - 1], rp[i0], rp[i0 + 1], rp[i0 + 2], f)
+                    }
+                    yl += a * (sl - yl)
+                    yr += a * (sr - yr)
+                    // Ramp toward silence while a jump is armed or the head has run
+                    // off the decoded window (was an abrupt cut = click), else
+                    // toward the session gain.
+                    let wantG: Float = (snapArmed || !avail) ? 0 : gT
+                    if g < wantG { g = min(wantG, g + gStep) } else if g > wantG { g = max(wantG, g - gStep) }
+                    let vg = vg0 + dvg * Float(i + 1)
+                    outL[i] = yl * g * vg
+                    outR[i] = yr * g * vg
+                }
+            }
+        }
+        lpL = yl; lpR = yr
+        vGain = vgTarget
+        gain = g
+        // Keep the read head inside the file.
+        if pos < 0 { pos = 0; vel = 0 }
+        if pos > Double(totalFrames) { pos = Double(totalFrames); vel = 0 }
+    }
+
+    @inline(__always)
+    private static func hermite(_ xm1: Float, _ x0: Float, _ x1: Float, _ x2: Float, _ t: Float) -> Float {
+        let c = (x1 - xm1) * 0.5
+        let v = x0 - x1
+        let w = c + v
+        let a = w + v + (x2 - x0) * 0.5
+        let b = w + a
+        return ((((a * t) - b) * t + c) * t + x0)
+    }
 }

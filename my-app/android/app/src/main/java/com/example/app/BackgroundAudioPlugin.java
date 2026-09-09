@@ -5,6 +5,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.WindowManager;
+import android.graphics.RectF;
+import android.content.res.Configuration;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -33,6 +35,7 @@ public class BackgroundAudioPlugin extends Plugin {
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private Runnable positionPoll;
+    private int followTick = 0;   // scrub-engine warm window: every 4th poll (~600 ms)
     private boolean polling = false;
     // Foreground/visible state. The 150ms position poll only needs to be tight
     // while the UI is visible (smooth subtitle highlighting). Backgrounded /
@@ -98,6 +101,7 @@ public class BackgroundAudioPlugin extends Plugin {
     // App came to the foreground → tighten the position poll for smooth UI.
     @Override
     public void handleOnResume() {
+        try { KadokiVideoAndroidHost.shared().onResume(); } catch (Exception ignored) {}
         uiVisible = true;
         super.handleOnResume();
     }
@@ -106,6 +110,7 @@ public class BackgroundAudioPlugin extends Plugin {
     // Also flush a durable position snapshot so a background kill keeps place.
     @Override
     public void handleOnPause() {
+        try { KadokiVideoAndroidHost.shared().onPause(); } catch (Exception ignored) {}
         uiVisible = false;
         BackgroundAudioService s = BackgroundAudioService.getInstance();
         if (s != null) s.saveLastPositionNow();
@@ -160,7 +165,9 @@ public class BackgroundAudioPlugin extends Plugin {
                     polling = false;
                     return;
                 }
-                emitPosition(s.getPositionMs(), s.getDurationMs());
+                int posNow = s.getPositionMs();
+                emitPosition(posNow, s.getDurationMs());
+                if (uiVisible && (++followTick % 4) == 0) { try { s.scrubFollow(posNow); } catch (Exception ignored) {} }
                 // Tight (150ms) while the UI is visible for instant subtitle
                 // highlighting; slow (~1s) when backgrounded/screen-off where
                 // nobody sees it — see pollIntervalMs / uiVisible.
@@ -254,9 +261,176 @@ public class BackgroundAudioPlugin extends Plugin {
         // Optional fade for a click-free seek (subtitle swipes / lock-screen
         // prev-next pass fadeMs); absent → instant seek (e.g. scrub-bar drag).
         Integer fadeMs = call.getInt("fadeMs");
+        Double ramp = call.getDouble("rampFrom");
         BackgroundAudioService s = BackgroundAudioService.getInstance();
-        if (s != null) s.seekToMs(ms, fadeMs != null ? fadeMs : 0);
+        if (s != null) s.seekToMsRamp(ms, fadeMs != null ? fadeMs : 0, ramp != null ? ramp.floatValue() : 0f);
         call.resolve();
+    }
+
+    // Drag scrub (reader): turntable engine in BackgroundAudioService. Direct
+    // service calls (like seek), not intents — latency matters.
+    @PluginMethod
+    public void scrubPrime(PluginCall call) {
+        Double msD = call.getDouble("ms");
+        BackgroundAudioService s = BackgroundAudioService.getInstance();
+        JSObject r = new JSObject();
+        r.put("ok", s != null && s.scrubPrime(msD != null ? msD.longValue() : -1));
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void scrubBegin(PluginCall call) {
+        Double msD = call.getDouble("ms");
+        BackgroundAudioService s = BackgroundAudioService.getInstance();
+        JSObject r = new JSObject();
+        if (s == null) { r.put("ok", false); call.resolve(r); return; }
+        int pos = s.getPositionMs();
+        boolean was = s.isCurrentlyPlaying();
+        boolean engine = s.scrubBegin(msD != null ? msD.longValue() : -1);
+        r.put("ok", true);
+        r.put("engine", engine);
+        r.put("wasPlaying", was);
+        r.put("positionMs", pos);
+        r.put("durationMs", s.getDurationMs());
+        call.resolve(r);
+    }
+
+    @PluginMethod
+    public void scrub(PluginCall call) {
+        Double msD = call.getDouble("ms");
+        Boolean snap = call.getBoolean("snap");
+        BackgroundAudioService s = BackgroundAudioService.getInstance();
+        if (s != null && msD != null) s.scrubTarget(msD.longValue(), snap != null && snap);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void scrubEnd(PluginCall call) {
+        Double msD = call.getDouble("ms");
+        Boolean resume = call.getBoolean("resume");
+        Double ramp = call.getDouble("rampFrom");
+        BackgroundAudioService s = BackgroundAudioService.getInstance();
+        if (s != null) s.scrubEnd(msD != null ? msD.longValue() : -1, resume != null && resume, ramp != null ? ramp.floatValue() : 0f);
+        JSObject r = new JSObject();
+        r.put("ok", s != null);
+        call.resolve(r);
+    }
+
+    // ---- Video Titles: native picture under the transparent WebView ----
+    // Same contract as the iOS plugin: JS sends the anchor rect (CSS px) +
+    // visibility; native places the surface and answers with the contained
+    // picture rect so JS can pin the subtitle under it.
+    @PluginMethod
+    public void videoSurface(PluginCall call) {
+        final boolean visible = Boolean.TRUE.equals(call.getBoolean("visible", false));
+        final boolean cinema = Boolean.TRUE.equals(call.getBoolean("cinema", visible));
+        final boolean landscape = Boolean.TRUE.equals(call.getBoolean("landscape", false));
+        Double x = call.getDouble("x"), y = call.getDouble("y"), w = call.getDouble("w"), h = call.getDouble("h");
+        final RectF rect = new RectF(
+            x != null ? x.floatValue() : 0f, y != null ? y.floatValue() : 0f,
+            (x != null ? x.floatValue() : 0f) + (w != null ? w.floatValue() : 0f),
+            (y != null ? y.floatValue() : 0f) + (h != null ? h.floatValue() : 0f));
+        final BackgroundAudioService s = BackgroundAudioService.getInstance();
+        final boolean active = s != null && s.isVideoLoaded();
+        if (getActivity() == null) { JSObject r0 = new JSObject(); r0.put("active", false); call.resolve(r0); return; }
+        getActivity().runOnUiThread(() -> {
+            KadokiVideoAndroidHost host = KadokiVideoAndroidHost.shared();
+            try {
+                host.install(getActivity(), getBridge().getWebView());
+                if (s != null && active) host.adopt(s.getExo()); else host.adopt(null);
+                RectF f = host.update(getActivity(), rect, visible && active, cinema && active, landscape);
+                JSObject r = new JSObject();
+                r.put("active", active);
+                r.put("frameX", (double) f.left); r.put("frameY", (double) f.top);
+                r.put("frameW", (double) f.width()); r.put("frameH", (double) f.height());
+                r.put("subPlacement", "below");
+                r.put("subSize", 24);
+                call.resolve(r);
+            } catch (Exception e) {
+                JSObject r = new JSObject(); r.put("active", false); r.put("error", String.valueOf(e.getMessage()));
+                call.resolve(r);
+            }
+        });
+    }
+
+    @PluginMethod
+    public void videoSubs(PluginCall call) { call.resolve(); }   // native subtitle mirror is visionOS-only
+
+    @PluginMethod
+    public void tpState(PluginCall call) { call.resolve(); }     // transport ornament is visionOS-only
+
+    /** Full audio duration without loading the player (reader's uncovered-region estimate). */
+    @PluginMethod
+    public void probeDuration(PluginCall call) {
+        final String raw = call.getString("path");
+        if (raw == null || raw.isEmpty()) { JSObject r = new JSObject(); r.put("durationMs", 0); call.resolve(r); return; }
+        final String path = raw.startsWith("file://") ? raw.substring(7) : raw;
+        new Thread(() -> {
+            long ms = 0;
+            try { ms = PcmWindowReader.probeDurationMs(getContext(), path); } catch (Throwable ignored) {}
+            JSObject r = new JSObject();
+            r.put("durationMs", (double) Math.max(0, ms));
+            call.resolve(r);
+        }, "kadoki-probe-dur").start();
+    }
+
+    /** Embedded cover picture of an audio file (ID3 APIC / MP4 covr / FLAC / OGG) as base64. */
+    @PluginMethod
+    public void audioCover(PluginCall call) {
+        final String raw = call.getString("path");
+        if (raw == null || raw.isEmpty()) { call.resolve(new JSObject()); return; }
+        final String path = raw.startsWith("file://") ? raw.substring(7) : raw;
+        new Thread(() -> {
+            JSObject res = new JSObject();
+            android.media.MediaMetadataRetriever mmr = new android.media.MediaMetadataRetriever();
+            try {
+                if (path.startsWith("content://")) mmr.setDataSource(getContext(), android.net.Uri.parse(path));
+                else mmr.setDataSource(path);
+                byte[] pic = mmr.getEmbeddedPicture();
+                if (pic != null && pic.length > 0) {
+                    boolean png = pic.length > 4 && (pic[0] & 0xFF) == 0x89 && pic[1] == 'P' && pic[2] == 'N' && pic[3] == 'G';
+                    res.put("data", android.util.Base64.encodeToString(pic, android.util.Base64.NO_WRAP));
+                    res.put("mime", png ? "image/png" : "image/jpeg");
+                }
+            } catch (Throwable ignored) {
+            } finally { try { mmr.release(); } catch (Throwable ignored) {} }
+            call.resolve(res);
+        }, "kadoki-audio-cover").start();
+    }
+
+    @PluginMethod
+    public void deviceModel(PluginCall call) {
+        JSObject r = new JSObject();
+        r.put("model", Build.MODEL);
+        r.put("hwProduct", Build.PRODUCT);
+        r.put("productName", "Android");
+        r.put("visionClass", false);
+        boolean dbg = false;
+        try { dbg = (getContext().getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0; } catch (Throwable ignored) {}
+        r.put("debugBuild", dbg);
+        r.put("simDemo", false);
+        boolean phone = true;
+        try {
+            Configuration c = getContext().getResources().getConfiguration();
+            phone = c.smallestScreenWidthDp < 600;
+        } catch (Exception ignored) {}
+        r.put("phone", phone);
+        call.resolve(r);
+    }
+
+    // Read-mode speech engine switch. Android always plays through the
+    // Speedy/Sonic chain; `nonlinear` (Speedy) is gated to read mode by JS.
+    @PluginMethod
+    public void setEngine(PluginCall call) {
+        Boolean nl = call.getBoolean("nonlinear");
+        BackgroundAudioService s = BackgroundAudioService.getInstance();
+        if (s != null && nl != null) s.setNonlinear(nl);
+        JSObject r = new JSObject();
+        r.put("engine", "chain");
+        r.put("nonlinear", nl != null && nl);
+        r.put("switched", false);
+        r.put("active", s != null ? "chain" : "none");
+        call.resolve(r);
     }
 
     @PluginMethod
