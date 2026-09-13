@@ -229,7 +229,7 @@
     /* Library Page Styles */
     /* Card-tab pane: below the header, tabs stay live (shell.js closes it on a tab tap). */
     #libraryPage.library-pane { top: calc(env(safe-area-inset-top, 0px) + 48px); height: auto; bottom: 0; z-index: 8900; padding-top: 10px; }
-    #libraryPage.library-pane .library-header { margin-top: 0; padding-top: 0; }
+    #libraryPage.library-pane .library-header { margin: -10px -20px 20px; padding: 10px 20px 12px; }
     #libraryPage.library-pane .close-library { display: none; }
     #libraryPage {
       position: fixed;
@@ -258,9 +258,19 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 20px;
       border-bottom: 1px solid var(--border, #2a2a2a);
-      padding-bottom: 12px;
+      /* PINNED. #libraryPage is the scroll container, so sticky works here.
+         The negative margins pull the bar out over the container's own
+         padding and the re-added padding puts the buttons back where they
+         were — without that, rows would scroll through the gap above and to
+         the sides of the bar. Otherwise closing the library from deep in a
+         long list meant scrolling all the way back to the top. */
+      position: sticky;
+      top: 0;
+      z-index: 6;
+      background: black;
+      margin: calc(-1 * (20px + env(safe-area-inset-top, 0px))) -20px 20px;
+      padding: calc(20px + env(safe-area-inset-top, 0px)) 20px 12px;
     }
 
     .library-header h2 {
@@ -366,7 +376,10 @@
       border-radius: 12px; padding: 12px; cursor: pointer;
       -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
     }
-    .pinned-card:active { filter: brightness(1.12); }
+    /* Deliberately NO :active brightness here (nor on .deck-item-content).
+       These fill the scrollable area, and :active fires on the touch that
+       starts a scroll — the list visibly brightened while scrolling. Press
+       feedback stays on the small buttons, which are not drag targets. */
     .pinned-cover img, .pinned-avatar { width: 100%; aspect-ratio: 1 / 1; border-radius: 8px; object-fit: cover; display: block; }
     .pinned-avatar {
       background: var(--panel, #161616); color: var(--text-faint, #777); display: flex; align-items: center;
@@ -396,8 +409,7 @@
       transition: transform 0.22s cubic-bezier(.2,.7,.3,1), background 0.15s;
       touch-action: pan-y;         /* let vertical scroll through; we handle horizontal */
     }
-    .deck-item:hover .deck-item-content,
-    .deck-item:active .deck-item-content {
+    .deck-item:hover .deck-item-content {
       background: var(--panel-elev, #1c1c1c);
     }
     /* Action layer revealed behind the content on a left-swipe. */
@@ -441,7 +453,6 @@
     /* Row tap feedback (no transform here — the swipe writes inline
        translateX on this element; a brightness lift is conflict-free). */
     .deck-item-content { transition: filter .18s ease; }
-    .deck-item-content:active { filter: brightness(1.12); }
 
     .title-chip {
       display: inline-block;
