@@ -4,6 +4,12 @@ All notable changes to Kadoki are documented here. Newest first.
 
 <!-- Keep a running list here as changes are made. At release time, rename this
      heading to the version number and start a fresh empty Unreleased section. -->
+## Unreleased
+
+### Fixed
+- **Read mode runs cooler.** Subtitle generation no longer works further ahead than it needs to on battery, stops properly when you ask it to, and now respects heat and Low Power Mode even while playback is paused. Word timings finishing at that moment are still kept.
+- **Smoother, lighter reading follow.** The highlight reuses its measurements while the page is still and re-measures while you scroll, scrub, turn pages or change fonts. Appearance and audio quality are unchanged.
+
 ## v1.8.0 — 2026-09-09
 
 ### Added

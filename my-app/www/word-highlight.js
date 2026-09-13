@@ -624,9 +624,52 @@
   // the ruby box (tall and narrow in vertical text) then wins the
   // largest-rect pick — which pulled every indicator sideways toward the
   // furigana ("the beam curves in to trace the furigana").
+  // Cache only the current cue's measurements, not book-wide geometry.
+  // Overlay transforms live outside readingPagedInner, so observing the
+  // text subtree does not invalidate this cache on our own animation frames.
+  let _geometryEpoch = 0;
+  let _geometryHost = null;
+  let _geometryMutations = null, _geometryResize = null;
+  function invalidateReaderGeometry() { _geometryEpoch++; scheduleRepark(); }
+  function observeReaderGeometry() {
+    const host = document.getElementById('readingPagedInner');
+    if (host === _geometryHost) return;
+    _geometryMutations?.disconnect(); _geometryResize?.disconnect();
+    _geometryHost = host;
+    if (!host) return;
+    _geometryMutations = new MutationObserver(invalidateReaderGeometry);
+    _geometryMutations.observe(host, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['style', 'class'] });
+    // Column width, writing mode and drag transforms can be set on ancestors.
+    for (const id of ['readingPagedView', 'readingPagedContent']) {
+      const el = document.getElementById(id);
+      if (el) _geometryMutations.observe(el, { attributes: true, attributeFilter: ['style', 'class'] });
+    }
+    if (typeof ResizeObserver !== 'undefined') {
+      _geometryResize = new ResizeObserver(invalidateReaderGeometry);
+      _geometryResize.observe(host);
+      if (host.parentElement) _geometryResize.observe(host.parentElement);
+    }
+    _geometryEpoch++;
+  }
+  function beginReaderGeometry(rd, immediate) {
+    const now = performance.now();
+    // During scrolling/scrubbing measure each frame, but reuse duplicate
+    // reads within that frame. The 250 ms fallback also covers geometry
+    // changes outside the observed subtree (e.g. an ancestor stylesheet).
+    if (!rd._rects || immediate || _pageMoving() || scrubMs >= 0 ||
+        rd._geometryEpoch !== _geometryEpoch || now - rd._geometryAt >= 250) {
+      rd._rects = new Map(); rd._chunkRects = new Map();
+      rd._geometryEpoch = _geometryEpoch; rd._geometryAt = now;
+    }
+  }
+  function chunkRect(rd, chunk) {
+    if (!rd._chunkRects.has(chunk)) rd._chunkRects.set(chunk, chunk.getBoundingClientRect());
+    return rd._chunkRects.get(chunk);
+  }
   function _charRect(rd, i) {
     const a = rd.positions[i];
     if (!a || !a.node || !a.node.isConnected) return null;
+    if (rd._rects?.has(i)) return rd._rects.get(i);
     try {
       const r = document.createRange();
       const len = a.node.nodeValue.length;
@@ -638,6 +681,7 @@
         if (rc.width < 0.5 || rc.height < 0.5) continue;
         if (!best || rc.width * rc.height > best.width * best.height) best = rc;
       }
+      if (best) rd._rects?.set(i, best);
       return best;
     } catch (_) { return null; }
   }
@@ -829,7 +873,7 @@
     const host = pa.node.parentElement;
     const chunk = host ? (host.closest('.reading-chunk') || host) : null;
     const now = Date.now();
-    if (chunk && chunk._kwGeo && now - chunk._kwGeo.t < 2000) return chunk._kwGeo;
+    if (chunk && chunk._kwGeo && chunk._kwGeo.epoch === _geometryEpoch && now - chunk._kwGeo.t < 2000) return chunk._kwGeo;
     let vert = true, pitch = 0;
     try {
       const cs = getComputedStyle(chunk || document.body);
@@ -837,7 +881,7 @@
       pitch = parseFloat(cs.lineHeight);
       if (!Number.isFinite(pitch) || pitch <= 0) pitch = (parseFloat(cs.fontSize) || 18) * 1.75;
     } catch (_) {}
-    const g = { chunk, vert, pitch, t: now };
+    const g = { chunk, vert, pitch, t: now, epoch: _geometryEpoch };
     if (chunk) chunk._kwGeo = g;
     return g;
   }
@@ -974,7 +1018,7 @@
     }
     const g = _lineGeom(rd._pa);
     const A = rd.accent || rgbStr(accentRGB('--accent-read', '#4caf50'));
-    const cr = g.chunk ? g.chunk.getBoundingClientRect() : rect;
+    const cr = g.chunk ? chunkRect(rd, g.chunk) : rect;
     const c = _gapCenter(rect, g);
     let x, y, w, h, frac;
     if (g.vert) {
@@ -1054,7 +1098,7 @@
     const rect = hp.rect;
     const g = _lineGeom(rd._pa);
     const A = _twinAccent(_accent(rd));
-    const cr = g.chunk ? g.chunk.getBoundingClientRect() : rect;
+    const cr = g.chunk ? chunkRect(rd, g.chunk) : rect;
     const c = _gapCenter(rect, g);
     // Lookahead-compensated node (same trick as the single beam).
     let hpN = hp;
@@ -1238,6 +1282,8 @@
   function clearReader() {
     hideAllReaderOverlays();
     reader = null;
+    _geometryMutations?.disconnect(); _geometryResize?.disconnect();
+    _geometryHost = null;
   }
 
   // While PAUSED no tick runs, but the glow is position:fixed — any scroll
@@ -1257,13 +1303,18 @@
     });
   }
   try {
-    document.addEventListener('scroll', () => { _lastScrollTs = performance.now(); scheduleRepark(); }, { capture: true, passive: true });
+    document.addEventListener('scroll', () => { _lastScrollTs = performance.now(); invalidateReaderGeometry(); }, { capture: true, passive: true });
+    window.addEventListener('resize', invalidateReaderGeometry, { passive: true });
+    window.visualViewport?.addEventListener('resize', invalidateReaderGeometry, { passive: true });
+    window.visualViewport?.addEventListener('scroll', invalidateReaderGeometry, { passive: true });
+    document.fonts?.addEventListener('loadingdone', invalidateReaderGeometry);
   } catch (_) {}
 
   // Position the glow over the chars around the fill frontier. `immediate`
   // skips the glide (used for the paused park). Returns false only on a
   // dead target (caller clears).
   function positionGlow(rd, t, immediate) {
+    beginReaderGeometry(rd, immediate);
     const L = rd.cue.text.length;
     if (!L) { hideAllReaderOverlays(); return true; }
     const style = readerStyle();
@@ -1460,6 +1511,7 @@
       accent: rgbStr(accentRGB('--accent-read', '#4caf50')),
       chunks: chunksOf(cue), chunkAt: 0, pillIdx: -1
     };
+    observeReaderGeometry();
     // Upgrade to dictionary-word chunks asynchronously (heuristic paints now).
     try { upgradeChunks(reader); } catch (_) {}
     if (playing) { kick(); return true; }
@@ -1604,11 +1656,15 @@
 
   // Mode changes while paused never reach tick() — clear stale surfaces here.
   const modeObserver = new MutationObserver(() => {
+    invalidateReaderGeometry();
     const inRead = document.body.classList.contains('mode-read');
     if (!inRead && reader) clearReader();
     if (inRead && span) clearSpan();
   });
-  try { modeObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] }); } catch (_) {}
+  try {
+    modeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'style'] });
+    modeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'style'] });
+  } catch (_) {}
 
   // Backup clock feed (reader follow-watchdog, native-truth getState poll):
   // adopts the position + playing state when this module's OWN listeners have

@@ -2,6 +2,7 @@ import Foundation
 import Capacitor
 import AVFoundation
 import Speech
+import UIKit
 
 /**
  * AutoTranscribePlugin — on-device subtitle generation for audio-only titles.
@@ -10,11 +11,12 @@ import Speech
  * transcribe a local audiobook file into SRT-style cues, streamed to JS as
  * they finalize. The JS orchestrator (auto-transcribe.js) owns pacing policy,
  * cue caching, and the "write a real .srt on completion" step; this plugin
- * only knows how to run ONE feed-paced transcription job at a time.
+ * serializes native jobs and enforces battery/thermal limits independently
+ * of JS playback events. Finalized word timings keep their existing format.
  *
  *   checkAvailability()            → { supported, installed }
  *   ensureAssets()                 → { installed }   (emits "assetProgress" {fraction})
- *   start({jobId, srcPath, startMs, targetMs, aheadMs})
+ *   start({jobId, srcPath, startMs, targetMs, aheadMs, powerUnlimited?})
  *                                  → { started, durationMs }
  *   setTarget({jobId, targetMs})   → {}   (playhead update for pacing)
  *   stop({jobId})                  → {}
@@ -24,13 +26,11 @@ import Speech
  *          w = flat word-timing array [off, len, startMs, endMs, ...] — one
  *          quad per recognizer token, offsets/lengths in UTF-16 units into
  *          `text`, times ABSOLUTE file ms (JS rebases them cue-relative)
- *   "done" { jobId, reason: "eof" | "stopped" | "error", error?, fedThroughMs }
+ *   "done" { jobId, reason: "eof" | "stopped" | "parked" | "error", error?, fedThroughMs }
  *
- * Pacing: the feed loop stops yielding buffers while
- * fedThroughMs > targetMs + aheadMs, polling once a second. A backfill job
- * (region behind the playhead) therefore runs at full speed automatically —
- * its frontier is below target — and a lookahead job idles once it is
- * aheadMs ahead. aheadMs <= 0 disables pacing entirely.
+ * Input is pulled one four-second chunk at a time (no unbounded producer
+ * queue). Battery input is capped at ten minutes ahead even for older JS.
+ * Stop cancels pending analysis; only natural EOF finalizes all input.
  *
  * Timestamps from the analyzer are relative to the FED sequence (we seek the
  * file to startMs before feeding), so every emitted cue adds the job's base
@@ -54,6 +54,7 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
 
     private var jobBox: AnyObject?
     private let jobLock = NSLock()
+    private var jobTail: Task<Void, Never>?
 
     private static let localeId = "ja_JP"
 
@@ -140,6 +141,7 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
         let startMs  = call.getDouble("startMs") ?? 0
         let targetMs = call.getDouble("targetMs") ?? startMs
         let aheadMs  = call.getDouble("aheadMs") ?? 600_000
+        let powerUnlimited = call.getBool("powerUnlimited") ?? false
 
         let url = URL(fileURLWithPath: stripFileScheme(srcPath))
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -147,11 +149,9 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
-        // One job at a time — replace any running job.
-        stopCurrentJob()
-
         let job = TranscribeJob(
             id: jobId, url: url, baseMs: max(0, startMs), aheadMs: aheadMs,
+            powerUnlimited: powerUnlimited,
             onCues: { [weak self] cues, fedMs in
                 self?.notifyListeners("cues", data: [
                     "jobId": jobId, "cues": cues, "fedThroughMs": fedMs
@@ -173,9 +173,12 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
         }
 
         jobLock.lock()
+        // Keep a completion chain even when stop has been requested: an old
+        // analyzer must finish teardown before its replacement can start.
+        (jobBox as? TranscribeJob)?.cancel()
         jobBox = job
+        jobTail = job.begin(after: jobTail)
         jobLock.unlock()
-        job.begin()
 
         call.resolve(["started": true, "durationMs": durationMs])
     }
@@ -206,7 +209,7 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
         guard let job = job else { return }
         if let only = onlyId, job.id != only { return }
         job.cancel()
-        clearJob(job: job, ifId: job.id)
+        // onDone clears the slot only after native teardown is complete.
     }
 
     private func clearJob(job: AnyObject?, ifId: String) {
@@ -278,6 +281,7 @@ final class TranscribeJob: @unchecked Sendable {
     private let url: URL
     private let baseMs: Double
     private let aheadMs: Double
+    private let powerUnlimited: Bool
     private let onCues: ([[String: Any]], Double) -> Void
     private let onDone: (String, String?, Double) -> Void
 
@@ -285,8 +289,11 @@ final class TranscribeJob: @unchecked Sendable {
     private var _targetMs: Double = 0
     private var _cancelled = false
     private var _fedThroughMs: Double = 0
-
-    private var task: Task<Void, Never>?
+    private var _analyzer: SpeechAnalyzer?
+    private var _cancelTask: Task<Void, Never>?
+    private var _powerStopped = false
+    private var _charging = false
+    private var _feedError: String?
 
     // Cue segmentation tuning (Japanese subtitle conventions: short lines,
     // splits preferred at speech gaps or sentence punctuation).
@@ -295,13 +302,14 @@ final class TranscribeJob: @unchecked Sendable {
     private static let hardMaxChars = 84
     private static let sentenceEnders: Set<Character> = ["。", "！", "？", "!", "?", "…", "」", "』"]
 
-    init(id: String, url: URL, baseMs: Double, aheadMs: Double,
+    init(id: String, url: URL, baseMs: Double, aheadMs: Double, powerUnlimited: Bool,
          onCues: @escaping ([[String: Any]], Double) -> Void,
          onDone: @escaping (String, String?, Double) -> Void) {
         self.id = id
         self.url = url
         self.baseMs = baseMs
         self.aheadMs = aheadMs
+        self.powerUnlimited = powerUnlimited
         self.onCues = onCues
         self.onDone = onDone
     }
@@ -312,8 +320,62 @@ final class TranscribeJob: @unchecked Sendable {
     private var targetMs: Double {
         stateLock.lock(); defer { stateLock.unlock() }; return _targetMs
     }
-    func cancel() {
-        stateLock.lock(); _cancelled = true; stateLock.unlock()
+    func cancel(forPower: Bool = false) {
+        stateLock.lock()
+        _cancelled = true
+        _powerStopped = _powerStopped || forPower
+        cancelAnalyzerLocked()
+        stateLock.unlock()
+    }
+    // Called only with stateLock held. Cancellation also interrupts EOF
+    // finalization; setting a flag in the input loop alone cannot do that.
+    private func cancelAnalyzerLocked() {
+        if let analyzer = _analyzer, _cancelTask == nil {
+            _cancelTask = Task { await analyzer.cancelAndFinishNow() }
+        }
+    }
+    private func installAnalyzer(_ analyzer: SpeechAnalyzer) {
+        stateLock.lock()
+        _analyzer = analyzer
+        if _cancelled { cancelAnalyzerLocked() }
+        stateLock.unlock()
+    }
+    private func cancellationTask() -> Task<Void, Never>? {
+        stateLock.lock(); defer { stateLock.unlock() }; return _cancelTask
+    }
+    private func releaseAnalyzer() {
+        stateLock.lock(); _analyzer = nil; _cancelTask = nil; stateLock.unlock()
+    }
+    private var stopReason: String {
+        stateLock.lock(); defer { stateLock.unlock() }; return _powerStopped ? "parked" : "stopped"
+    }
+    private func setFeedError(_ message: String) {
+        stateLock.lock(); _feedError = message; stateLock.unlock()
+    }
+    private var feedError: String? {
+        stateLock.lock(); defer { stateLock.unlock() }; return _feedError
+    }
+    private func setCharging(_ charging: Bool) {
+        stateLock.lock(); _charging = charging; stateLock.unlock()
+    }
+    private var inputAheadMs: Double {
+        stateLock.lock(); defer { stateLock.unlock() }
+        if powerUnlimited || _charging { return aheadMs }
+        return aheadMs > 0 ? min(aheadMs, 600_000) : 600_000
+    }
+    private func checkPower() async {
+        guard !powerUnlimited else { return }
+        let charging = await MainActor.run {
+            UIDevice.current.isBatteryMonitoringEnabled = true
+            let state = UIDevice.current.batteryState
+            return state == .charging || state == .full
+        }
+        setCharging(charging)
+        let thermal = ProcessInfo.processInfo.thermalState
+        if thermal == .serious || thermal == .critical ||
+            (ProcessInfo.processInfo.isLowPowerModeEnabled && !charging) {
+            cancel(forPower: true)
+        }
     }
     private var cancelled: Bool {
         stateLock.lock(); defer { stateLock.unlock() }; return _cancelled
@@ -325,14 +387,18 @@ final class TranscribeJob: @unchecked Sendable {
         stateLock.lock(); defer { stateLock.unlock() }; return _fedThroughMs
     }
 
-    func begin() {
-        task = Task.detached(priority: .utility) { [self] in
+    func begin(after predecessor: Task<Void, Never>?) -> Task<Void, Never> {
+        Task.detached(priority: .utility) { [self] in
+            await predecessor?.value
+            if cancelled { onDone(stopReason, nil, baseMs); return }
             await run()
         }
     }
 
     private func run() async {
         setFed(baseMs)
+        await checkPower()
+        if cancelled { onDone(stopReason, nil, fedThroughMs); return }
         guard let locale = await firstJaLocale() else {
             onDone("error", "Japanese locale unavailable", fedThroughMs)
             return
@@ -374,14 +440,27 @@ final class TranscribeJob: @unchecked Sendable {
             return
         }
 
-        let (inputSequence, inputBuilder) = AsyncStream.makeStream(of: AnalyzerInput.self)
+        if cancelled { onDone(stopReason, nil, fedThroughMs); return }
+        installAnalyzer(analyzer)
+        // The analyzer requests each chunk. Never yield a whole hour into an
+        // unbounded AsyncStream: stop would otherwise leave a large backlog.
+        let inputSequence = AsyncStream<AnalyzerInput>(unfolding: { [self] in
+            await nextInput(from: audioFile, converter: converter, format: analyzerFormat)
+        })
+        let powerTask = Task { [self] in
+            while !Task.isCancelled && !cancelled {
+                await checkPower()
+                do { try await Task.sleep(nanoseconds: 5_000_000_000) }
+                catch { break }
+            }
+        }
 
         // Results consumer — collects finalized phrases, segments them into
         // subtitle-sized cues, emits batches to JS.
         let resultsTask = Task { [self] in
             do {
                 for try await result in transcriber.results {
-                    if Task.isCancelled { break }
+                    if Task.isCancelled || cancelled { break }
                     guard result.isFinal else { continue }
                     let cues = segmentResult(result.text)
                     if !cues.isEmpty {
@@ -389,67 +468,73 @@ final class TranscribeJob: @unchecked Sendable {
                     }
                 }
             } catch {
-                NSLog("[AutoTranscribe] results stream error: \(error.localizedDescription)")
+                if !cancelled {
+                    setFeedError("Speech results failed: \(error.localizedDescription)")
+                    await analyzer.cancelAndFinishNow()
+                }
             }
         }
 
         do {
-            try await analyzer.start(inputSequence: inputSequence)
+            if !cancelled {
+                try await analyzer.start(inputSequence: inputSequence)
+                // Cancellation calls cancelAndFinishNow concurrently, so a
+                // stop during this await discards pending analysis promptly.
+                if !cancelled { try await analyzer.finalizeAndFinishThroughEndOfInput() }
+            }
         } catch {
-            inputBuilder.finish()
-            resultsTask.cancel()
-            onDone("error", "Analyzer start failed: \(error.localizedDescription)", fedThroughMs)
-            return
+            if !cancelled { setFeedError("Speech analysis failed: \(error.localizedDescription)") }
+            await analyzer.cancelAndFinishNow()
         }
+        powerTask.cancel()
+        await powerTask.value
+        await cancellationTask()?.value
+        if cancelled || feedError != nil { resultsTask.cancel() }
+        _ = await resultsTask.result
+        releaseAnalyzer()
+        if cancelled { onDone(stopReason, nil, fedThroughMs) }
+        else if let err = feedError { onDone("error", err, fedThroughMs) }
+        else { onDone("eof", nil, fedThroughMs) }
+    }
 
-        // Feed loop — 4 s source chunks, paced against the playhead target.
-        let chunkFrames = AVAudioFrameCount(sampleRate * 4.0)
-        var fedSourceFrames: AVAudioFramePosition = 0
-        var feedError: String? = nil
-
-        while !cancelled {
-            if aheadMs > 0 && fedThroughMs > targetMs + aheadMs {
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+    // AsyncStream invokes this serially. Backpressure never drops audio or
+    // changes the sequence-relative clock used by the word-timing parser.
+    private func nextInput(from audioFile: AVAudioFile, converter: AVAudioConverter,
+                           format: AVAudioFormat) async -> AnalyzerInput? {
+        while !cancelled && feedError == nil {
+            // EOF must terminate even when it lands exactly on the buffer
+            // ceiling; otherwise a paused book never finalizes its last words.
+            let remaining = audioFile.length - audioFile.framePosition
+            if remaining <= 0 { return nil }
+            let ahead = inputAheadMs
+            if ahead > 0 && fedThroughMs >= targetMs + ahead {
+                do { try await Task.sleep(nanoseconds: 500_000_000) }
+                catch { return nil }
                 continue
             }
-            let remaining = audioFile.length - audioFile.framePosition
-            if remaining <= 0 { break }
+            let sampleRate = audioFile.processingFormat.sampleRate
+            let chunkFrames = AVAudioFrameCount(sampleRate * 4.0)
             let toRead = AVAudioFrameCount(min(AVAudioFramePosition(chunkFrames), remaining))
-            guard let buf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: toRead) else {
-                feedError = "Buffer allocation failed"
-                break
+            guard let buf = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: toRead) else {
+                setFeedError("Buffer allocation failed")
+                return nil
             }
             do {
                 try audioFile.read(into: buf, frameCount: toRead)
             } catch {
-                feedError = "Audio read failed: \(error.localizedDescription)"
-                break
+                setFeedError("Audio read failed: \(error.localizedDescription)")
+                return nil
             }
-            if buf.frameLength == 0 { break }
-            guard let converted = Self.convert(buf, with: converter, to: analyzerFormat) else {
-                feedError = "Audio conversion failed"
-                break
+            if buf.frameLength == 0 { return nil }
+            guard let converted = Self.convert(buf, with: converter, to: format) else {
+                setFeedError("Audio conversion failed")
+                return nil
             }
-            inputBuilder.yield(AnalyzerInput(buffer: converted))
-            fedSourceFrames += AVAudioFramePosition(buf.frameLength)
-            setFed(baseMs + Double(fedSourceFrames) / sampleRate * 1000.0)
+            if cancelled { return nil }
+            setFed(Double(audioFile.framePosition) / sampleRate * 1000.0)
+            return AnalyzerInput(buffer: converted)
         }
-
-        inputBuilder.finish()
-        do {
-            try await analyzer.finalizeAndFinishThroughEndOfInput()
-        } catch {
-            NSLog("[AutoTranscribe] finalize error: \(error.localizedDescription)")
-        }
-        _ = await resultsTask.result
-
-        if let err = feedError {
-            onDone("error", err, fedThroughMs)
-        } else if cancelled {
-            onDone("stopped", nil, fedThroughMs)
-        } else {
-            onDone("eof", nil, fedThroughMs)
-        }
+        return nil
     }
 
     private func firstJaLocale() async -> Locale? {

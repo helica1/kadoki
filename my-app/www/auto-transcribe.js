@@ -29,11 +29,8 @@
 (function () {
   'use strict';
 
-  // Transcribe up to an HOUR ahead of the playhead: the Apple Watch carries a
-  // static cue bundle, so a big buffer means subtitles stay current through a
-  // whole walk/run away from the phone (watch.js auto-refreshes the watch's
-  // cues as this frontier advances). Total energy is unchanged — the same
-  // audio gets transcribed either way — it's just front-loaded.
+  // Charging / explicit unlimited mode can prepare an hour for the Watch.
+  // Battery jobs use AHEAD_HIGH_MS instead; don't enqueue work we will discard.
   const LOOKAHEAD_MS = 60 * 60 * 1000;
   const CACHE_PREFIX = 'AUTO_CUES_V1_';
   const DEDUPE_MS = 300;                 // incoming cue within this of an existing start = duplicate
@@ -58,19 +55,30 @@
   const POWER_TTL_MS  = 20000;
   let _power = { charging: false, thermal: 'nominal', lowPower: false, level: -1, at: 0 };
   let _powerBusy = false, _parked = false;
+  let _nativePowerHold = false, _powerAnchorMs = 0;
   function unlimited() { try { return localStorage.getItem('AT_POWER_UNLIMITED') === '1'; } catch (_) { return false; } }
   function refreshPower(force) {
     const now = Date.now();
     if (_powerBusy || (!force && now - _power.at < POWER_TTL_MS)) return;
     _powerBusy = true;
     Promise.resolve(window.Capacitor?.Plugins?.BackgroundAudio?.powerState?.())
-      .then((r) => { if (r) _power = { charging: !!r.charging, thermal: String(r.thermal || 'nominal'), lowPower: !!r.lowPower, level: Number(r.level), at: Date.now() }; else _power.at = Date.now(); })
+      .then((r) => {
+        if (r) {
+          _power = { charging: !!r.charging, thermal: String(r.thermal || 'nominal'), lowPower: !!r.lowPower, level: Number(r.level), at: Date.now() };
+          _nativePowerHold = false;
+        }
+        else _power.at = Date.now();
+        // Enforce the fresh snapshot even if playback is paused and no
+        // position event will arrive. Native iOS has its own backstop too.
+        if (active && !active.done) maybeParkForPower(powerPosition());
+      })
       .catch(() => { _power.at = Date.now(); })
       .finally(() => { _powerBusy = false; });
   }
   // kind: 'ahead' (keep up with the playhead) | 'backfill' (the rest of the book)
   function powerAllows(kind) {
     if (unlimited()) return true;
+    if (_nativePowerHold) return false;
     if (_power.thermal === 'serious' || _power.thermal === 'critical') return false;
     if (_power.lowPower && !_power.charging) return false;
     return kind === 'backfill' ? !!_power.charging : true;
@@ -81,24 +89,27 @@
     const r = coveringRange(a.cov || [], pos);
     return r ? Math.max(0, r[1] - pos) : 0;
   }
-  // Parked work is re-evaluated on a slow tick: plugging in (or the phone
-  // cooling off) must resume the backfill even with nothing playing, which
-  // the position-event path alone would never notice.
-  setInterval(() => {
+  function powerPosition() { return lastPosMs >= 0 ? lastPosMs : _powerAnchorMs; }
+  // Check running jobs as well as parked ones. This must not depend on
+  // position callbacks: recognition can run before PLAY or while paused.
+  function powerTick() {
     try {
       const a = active;
-      if (!a || a.done || job || a.timingOnly) return;
-      if (document.hidden && !window._bgPlaying) return;
+      if (!a || a.done) return;
       refreshPower();
+      const pos = powerPosition();
+      if (job) { maybeParkForPower(pos); return; }
+      if (document.hidden && !window._bgPlaying) return;
       if (!_parked) return;
-      if (!powerAllows('backfill') && !(aheadCoveredMs(lastPosMs >= 0 ? lastPosMs : 0) < AHEAD_LOW_MS && powerAllows('ahead'))) return;
+      if (!powerAllows('backfill') && !(aheadCoveredMs(pos) < AHEAD_LOW_MS && powerAllows('ahead'))) return;
       lastEnsureAt = 0;   // bypass the 2 s throttle for this deliberate retry
-      ensureJob(lastPosMs >= 0 ? lastPosMs : 0);
+      ensureJob(pos);
     } catch (_) {}
-  }, 30000);
+  }
+  setInterval(powerTick, 5000);
 
   function powerInfo() {
-    return { charging: _power.charging, thermal: _power.thermal, lowPower: _power.lowPower, parked: _parked, unlimited: unlimited(),
+    return { charging: _power.charging, thermal: _power.thermal, lowPower: _power.lowPower, parked: _parked && !job, stopping: !!job?.stopping, unlimited: unlimited(),
              aheadMs: aheadCoveredMs(lastPosMs >= 0 ? lastPosMs : 0) };
   }
 
@@ -653,7 +664,7 @@
   async function startJob(startMs) {
     const a = active;
     const p = plugin();
-    if (!a || a.done || !p) return;
+    if (!a || a.done || !p || job) return;
     const dur = a.durationMs || 0;
     if (dur > 0 && startMs >= dur - 500) {
       // Nothing ahead — try the earliest gap (behind), or finish.
@@ -661,6 +672,13 @@
       if (dur > 0 && s2 >= dur - 500) { await maybeFinalize(); return; }
       startMs = s2;
     }
+    // Every entry path (seek/retry/EOF as well as ensureJob) obeys power
+    // policy. Previously restartAt could bypass the backfill/thermal gate.
+    const pos = lastPosMs >= 0 ? lastPosMs : startMs;
+    _powerAnchorMs = pos;
+    const kind = startMs < pos - 10000 || startMs > pos + AHEAD_HIGH_MS || aheadCoveredMs(pos) >= AHEAD_HIGH_MS ? 'backfill' : 'ahead';
+    if (!powerAllows(kind)) { _parked = true; return; }
+    _parked = false;
     const id = 'j' + (++jobSeq);
     job = { id, startMs, fedThroughMs: startMs, startedAt: Date.now(), lastCuesAt: 0 };
     log('start job ' + id + ' at ' + Math.round(startMs / 1000) + 's');
@@ -669,11 +687,14 @@
       const r = await p.start({
         jobId: id, srcPath: a.audioPath, startMs,
         targetMs: lastPosMs >= 0 ? lastPosMs : startMs,
-        aheadMs: LOOKAHEAD_MS
+        aheadMs: unlimited() || _power.charging ? LOOKAHEAD_MS : AHEAD_HIGH_MS,
+        powerUnlimited: unlimited()
       });
+      if (active !== a || job?.id !== id) return;
       if (r?.durationMs > 0 && !(a.durationMs > 0)) a.durationMs = Math.floor(r.durationMs);
       try { if (a.durationMs > 0) window._abKnownDur = { tid: a.titleId, ms: a.durationMs }; } catch (_) {}
     } catch (e) {
+      if (active !== a || job?.id !== id) return;
       log('job start failed: ' + (e?.message || e));
       diag('job start FAILED: ' + (e?.message || e) + ' retries=' + ((a.retries || 0) + 1));
       job = null;
@@ -693,6 +714,7 @@
     lastEnsureAt = now;
     refreshPower();   // fire-and-forget; the snapshot below is at most POWER_TTL_MS old
     const at = Math.max(0, posMs);
+    _powerAnchorMs = at;
     const start = nextUncovered(a.cov, at);
     // Work that isn't keeping the playhead supplied — a gap far ahead, or the
     // fill-the-rest pass — is backfill, and backfill needs power.
@@ -706,17 +728,43 @@
     startJob(start);
   }
   // Park a RUNNING job once the buffer ahead of the playhead is full (battery
-  // only). The native job is stopped, not queued for restart — onPosition
-  // brings it back when the buffer drains past AHEAD_LOW_MS.
+  // only). Keep its identity until native teardown finishes so already
+  // finalized results arriving during stop are still cached.
   function maybeParkForPower(pos) {
     if (!job || unlimited()) return false;
+    if (job.stopping) return true;
     const ahead = aheadCoveredMs(pos);
     const thermal = _power.thermal === 'serious' || _power.thermal === 'critical' || (_power.lowPower && !_power.charging);
     if (!thermal && (_power.charging || ahead < AHEAD_HIGH_MS)) return false;
     diag('parking transcriber: ' + Math.round(ahead / 1000) + 's buffered, thermal=' + _power.thermal + ' charging=' + _power.charging);
-    const j = job; job = null; pendingRestartMs = null; _parked = true;
-    try { plugin()?.stop({ jobId: j.id }); } catch (_) {}
+    pendingRestartMs = null; _parked = true;
+    requestJobStop('power');
     return true;
+  }
+
+  const STOP_TIMEOUT_MS = 20000;
+  function requestJobStop(reason) {
+    const j = job;
+    if (!j || j.stopping) return;
+    j.stopping = reason;
+    // Waiting for the native 'done' is what lets late results still be kept,
+    // but it must never be an unbounded wait: startJob refuses to run while a
+    // job slot is occupied, so a 'done' that never arrives would wedge
+    // transcription for the rest of the session.
+    try { clearTimeout(j.stopTimer); } catch (_) {}
+    j.stopTimer = setTimeout(() => {
+      if (job !== j) return;
+      diag('stop (' + reason + ') never reported done after ' + (STOP_TIMEOUT_MS / 1000) + 's — releasing the job slot');
+      job = null;
+      if (pendingRestartMs != null) { const t = pendingRestartMs; pendingRestartMs = null; startJob(t); }
+    }, STOP_TIMEOUT_MS);
+    // stop resolves before the native done event. Do not release job here.
+    const failed = (e) => {
+      if (job === j) { j.stopping = null; _parked = false; try { clearTimeout(j.stopTimer); } catch (_) {} }
+      log('job stop failed: ' + (e?.message || e));
+    };
+    try { Promise.resolve(plugin().stop({ jobId: j.id })).catch(failed); }
+    catch (e) { failed(e); }
   }
 
   // Reader-page hint (paged reader, after its layout/bookmark settle): before
@@ -738,9 +786,7 @@
     const p = plugin();
     if (!p || !active || active.done) return;
     pendingRestartMs = Math.max(0, ms);
-    const j = job;
-    job = null;
-    if (j) { try { p.stop({ jobId: j.id }); } catch (_) {} }
+    if (job) { requestJobStop('seek'); }
     else { const target = pendingRestartMs; pendingRestartMs = null; startJob(target); }
   }
 
@@ -766,6 +812,7 @@
     for (const c of (ev.cues || [])) if (c.endMs > maxEnd) maxEnd = c.endMs;
     a.cov = addRange(a.cov, job.startMs, maxEnd);
     if (added) { schedulePersist(false); if (a.timingOnly) enrichLiveSrt(); else scheduleCardRefresh(); }
+    if (maybeParkForPower(powerPosition())) return;
     // Frontier ran into a large already-covered region (user seeked back into
     // transcribed audio earlier) — skip the job past it instead of re-feeding.
     const covering = coveringRange(a.cov, job.fedThroughMs + 1500);
@@ -778,23 +825,28 @@
   async function onDoneEvent(ev) {
     const a = active;
     if (!a) return;
-    if (!job || ev?.jobId !== job.id) {
-      // A replaced/stopped job finishing late — only honor a queued restart.
-      if (pendingRestartMs != null && !job) {
-        const target = pendingRestartMs; pendingRestartMs = null;
-        startJob(target);
-      }
-      return;
-    }
+    if (!job || ev?.jobId !== job.id) return;
     const j = job;
+    try { clearTimeout(j.stopTimer); } catch (_) {}
     job = null;
     log('job ' + j.id + ' done: ' + ev.reason + (ev.error ? ' (' + ev.error + ')' : ''));
+    // A native thermal stop is independent of JS timers. Refresh the power
+    // snapshot before allowing a retry; never mark unfinished audio covered.
+    if (ev.reason === 'parked') {
+      _parked = true; _nativePowerHold = true; pendingRestartMs = null; refreshPower(true); schedulePersist(true); return;
+    }
+    if (pendingRestartMs != null) {
+      const target = pendingRestartMs; pendingRestartMs = null;
+      startJob(target); return;
+    }
+    if (j.stopping === 'power') { _parked = true; schedulePersist(true); return; }
     if (ev.reason === 'eof') {
       const end = a.durationMs > 0 ? a.durationMs : (ev.fedThroughMs || j.fedThroughMs);
       a.cov = addRange(a.cov, j.startMs, end);
       if (!(a.durationMs > 0) && ev.fedThroughMs > 0) a.durationMs = Math.floor(ev.fedThroughMs);
       schedulePersist(true);
       if (!(await maybeFinalize())) {
+        if (active !== a || job) return;
         const s = nextUncovered(a.cov, 0);
         // Reaching EOF and wrapping back to fill every earlier gap is the
         // whole-book backfill — power-gated.
@@ -838,6 +890,10 @@
     lastPosMs = pos;
     if (a.done) return;
     refreshPower();
+    if (job?.stopping) {
+      if (pendingRestartMs != null) pendingRestartMs = pos;
+      return;
+    }
     if (maybeParkForPower(pos)) return;
     if (job) {
       const now = Date.now();
@@ -1293,6 +1349,7 @@
     pendingRestartMs = null;
     active = null;
     lastPosMs = -1;   // a stale cross-title playhead must not seed the next job
+    _powerAnchorMs = 0;
   }
 
   // Is position `ms` transcribed yet, and if not, how close is the job to
