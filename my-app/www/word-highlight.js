@@ -298,8 +298,24 @@
       return out;
     } catch (_) { return w; }
   }
+  // Token stamps past the cue's (energy-trimmed) END: whisper's DTW stamps the
+  // last tokens later than the speech, so the fill lagged toward the end of
+  // every line on Android. Stamps beyond the cue duration are rescaled into it.
+  function fitToCue(w, cue) {
+    try {
+      const dur = (cue.endMs || 0) - (cue.startMs || 0);
+      const n = w.length >> 2;
+      if (!(dur > 0) || n < 1) return w;
+      let last = 0; for (let i = 0; i < n; i++) if (w[i * 4 + 3] > last) last = w[i * 4 + 3];
+      if (last <= dur * 1.03) return w;
+      const k = dur / last;
+      const out = w.slice();
+      for (let i = 0; i < n; i++) { out[i * 4 + 2] = Math.round(w[i * 4 + 2] * k); out[i * 4 + 3] = Math.round(w[i * 4 + 3] * k); }
+      return out;
+    } catch (_) { return w; }
+  }
   function smoothedW(cue) {
-    if (cue._wsmSrc !== cue.w) { cue._wsmSrc = cue.w; cue._wsm = smoothQuads(cue.w); }
+    if (cue._wsmSrc !== cue.w) { cue._wsmSrc = cue.w; cue._wsm = fitToCue(smoothQuads(cue.w), cue); }
     return cue._wsm;
   }
 
@@ -894,10 +910,51 @@
   // G — margin beam: a slim light-bar spanning the whole line in the margin,
   // with a bright node sliding along it at the spoken word — the line context
   // of the ruler and the word precision of the dot, in four pixels of ink.
+  // Track + node (2026-09-11 heat fix): the beam/band used to rebuild a CSS
+  // gradient string EVERY FRAME on up to three full-column layers, which
+  // re-rasterized them at 60 fps for the whole session. Now the track is a
+  // static layer (flat colour, sized once per line) and the bright node is a
+  // small child layer with a fixed gradient that only TRANSLATES — compositor
+  // work only, no per-frame raster. Same look.
+  function _mkTrack(id, z, radius) {
+    const t = _mkOv(id, z, 'border-radius:' + radius + ';overflow:hidden;');
+    const n = document.createElement('div');
+    n.style.cssText = 'position:absolute;left:0;top:0;width:0;height:0;will-change:transform;pointer-events:none;';
+    t.appendChild(n);
+    t._node = n;
+    return t;
+  }
+  function _setTrackGeom(el, x, y, w, h) {
+    if (el._kwW !== w) { el._kwW = w; el.style.width = w.toFixed(1) + 'px'; }
+    if (el._kwH !== h) { el._kwH = h; el.style.height = h.toFixed(1) + 'px'; }
+    const tx = x.toFixed(1), ty = y.toFixed(1);
+    if (el._kwTx !== tx || el._kwTy !== ty) { el._kwTx = tx; el._kwTy = ty; el.style.transform = 'translate3d(' + tx + 'px,' + ty + 'px,0)'; }
+    if (el.style.display !== 'block') el.style.display = 'block';
+  }
+  // Node: `len` px along the reading axis, full track thickness across it,
+  // centred at `frac` of the track length.
+  function _setNode(node, vert, w, h, len, frac) {
+    const thick = vert ? w : h;
+    if (node._kwL !== len || node._kwT !== thick || node._kwV !== vert) {
+      node._kwL = len; node._kwT = thick; node._kwV = vert;
+      node.style.width = (vert ? thick : len).toFixed(1) + 'px';
+      node.style.height = (vert ? len : thick).toFixed(1) + 'px';
+    }
+    const off = (frac * (vert ? h : w) - len / 2).toFixed(1);
+    if (node._kwOff !== off) {
+      node._kwOff = off;
+      node.style.transform = vert ? ('translate3d(0,' + off + 'px,0)') : ('translate3d(' + off + 'px,0,0)');
+    }
+  }
+  // Bright node over a 0.14 base: 0.42 at ±14 px, 0.95 at the centre, back to
+  // the base at ±36 px (identical stops to the old per-frame gradient).
+  function _nodeGrad(axis, A) {
+    return 'linear-gradient(' + axis + ', rgba(' + A + ',0.14), rgba(' + A + ',0.42) 22px, rgba(' + A + ',0.95) 36px, rgba(' + A + ',0.42) 50px, rgba(' + A + ',0.14) 72px)';
+  }
   let beamEl = null;
   function ensureBeam() {
     if (beamEl && beamEl.isConnected) return beamEl;
-    beamEl = _mkOv('kwBeam', 2540, 'border-radius:2px;');
+    beamEl = _mkTrack('kwBeam', 2540, '2px');
     return beamEl;
   }
   function hideBeam() { if (beamEl) beamEl.style.display = 'none'; }
@@ -936,18 +993,15 @@
       frac = rd._bf + (frac - rd._bf) * k;
     }
     rd._bf = frac; rd._bft = performance.now();
-    const f = (frac * 100).toFixed(2);
     const axis = g.vert ? 'to bottom' : 'to right';
-    // Softer, wider node (bell-shaped falloff) — sub-pixel motion reads as a
-    // drifting light rather than a sliding edge.
-    el.style.background = 'linear-gradient(' + axis + ', rgba(' + A + ',0.14), rgba(' + A + ',0.14) ' +
-      'calc(' + f + '% - 36px), rgba(' + A + ',0.42) calc(' + f + '% - 14px), rgba(' + A + ',0.95) ' + f + '%, ' +
-      'rgba(' + A + ',0.42) calc(' + f + '% + 14px), rgba(' + A + ',0.14) calc(' + f + '% + 36px), rgba(' + A + ',0.14))';
-    if (el._kwA !== A) { el._kwA = A; el.style.boxShadow = '0 0 8px rgba(' + A + ',0.18)'; }
-    el.style.width = w.toFixed(1) + 'px';
-    el.style.height = h.toFixed(1) + 'px';
-    el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
-    if (el.style.display !== 'block') el.style.display = 'block';
+    if (el._kwA !== A || el._kwAxis !== axis) {
+      el._kwA = A; el._kwAxis = axis;
+      el.style.background = 'rgba(' + A + ',0.14)';
+      el.style.boxShadow = '0 0 8px rgba(' + A + ',0.18)';
+      el._node.style.background = _nodeGrad(axis, A);
+    }
+    _setTrackGeom(el, x, y, w, h);
+    _setNode(el._node, g.vert, w, h, 72, frac);
   }
 
   // J — twin beams: the margin beam on BOTH sides of the line (bright node
@@ -960,9 +1014,9 @@
     if (twinEls && twinEls.band.isConnected) return twinEls;
     ensureAnimCss();
     twinEls = {
-      band: _mkOv('kwTwinBand', 2537, 'border-radius:8px;'),
-      a: _mkOv('', 2540, 'border-radius:2px;'),
-      b: _mkOv('', 2540, 'border-radius:2px;'),
+      band: _mkTrack('kwTwinBand', 2537, '8px'),
+      a: _mkTrack('', 2540, '2px'),
+      b: _mkTrack('', 2540, '2px'),
     };
     return twinEls;
   }
@@ -1028,29 +1082,23 @@
       frac = rd._bf + (frac - rd._bf) * k;
     }
     rd._bf = frac; rd._bft = performance.now();
-    const f = (frac * 100).toFixed(2);
     const axis = g.vert ? 'to bottom' : 'to right';
-    const beamBg = 'linear-gradient(' + axis + ', rgba(' + A + ',0.14), rgba(' + A + ',0.14) ' +
-      'calc(' + f + '% - 36px), rgba(' + A + ',0.42) calc(' + f + '% - 14px), rgba(' + A + ',0.95) ' + f + '%, ' +
-      'rgba(' + A + ',0.42) calc(' + f + '% + 14px), rgba(' + A + ',0.14) calc(' + f + '% + 36px), rgba(' + A + ',0.14))';
     const paused = !playing && scrubMs < 0;
-    // Band: soft wash with a slightly brighter pool around the node.
+    // Band: soft wash (static layer) with a brighter pool node sliding on it.
     const band = els.band;
-    if (band._kwA !== A) {
-      band._kwA = A;
+    if (band._kwA !== A || band._kwAxis !== axis) {
+      band._kwA = A; band._kwAxis = axis;
       band.style.setProperty('--kw-a', A);
+      band.style.background = 'rgba(' + A + ',0.13)';
       band.style.boxShadow = 'inset 0 0 0 1px rgba(' + A + ',0.22), 0 0 14px rgba(' + A + ',0.16)';
+      band._node.style.background = 'linear-gradient(' + axis + ', rgba(' + A + ',0), rgba(' + A + ',0.17) 70px, rgba(' + A + ',0) 140px)';
     }
-    band.style.background = 'linear-gradient(' + axis + ', rgba(' + A + ',0.13), rgba(' + A + ',0.13) ' +
-      'calc(' + f + '% - 70px), rgba(' + A + ',0.30) ' + f + '%, rgba(' + A + ',0.13) calc(' + f + '% + 70px), rgba(' + A + ',0.13))';
     if (band._kwP !== paused) {
       band._kwP = paused;
       band.classList.toggle('kw-paused', paused);
     }
-    band.style.width = bw.toFixed(1) + 'px';
-    band.style.height = bh.toFixed(1) + 'px';
-    band.style.transform = 'translate3d(' + bx.toFixed(1) + 'px,' + by.toFixed(1) + 'px,0)';
-    if (band.style.display !== 'block') band.style.display = 'block';
+    _setTrackGeom(band, bx, by, bw, bh);
+    _setNode(band._node, g.vert, bw, bh, 140, frac);
     // Beams on both sides, mirrored about the line at the gap-centre distance.
     for (const [k, side] of [['a', -1], ['b', 1]]) {
       const el = els[k];
@@ -1062,12 +1110,14 @@
         x = bx; w = bw; h = 4;
         y = (side < 0) ? (by + 2 - gapHalf - 2) : (by + 2 + rect.height + gapHalf - 2);
       }
-      el.style.background = beamBg;
-      if (el._kwA !== A) { el._kwA = A; el.style.boxShadow = '0 0 8px rgba(' + A + ',0.18)'; }
-      el.style.width = w.toFixed(1) + 'px';
-      el.style.height = h.toFixed(1) + 'px';
-      el.style.transform = 'translate3d(' + x.toFixed(1) + 'px,' + y.toFixed(1) + 'px,0)';
-      if (el.style.display !== 'block') el.style.display = 'block';
+      if (el._kwA !== A || el._kwAxis !== axis) {
+        el._kwA = A; el._kwAxis = axis;
+        el.style.background = 'rgba(' + A + ',0.14)';
+        el.style.boxShadow = '0 0 8px rgba(' + A + ',0.18)';
+        el._node.style.background = _nodeGrad(axis, A);
+      }
+      _setTrackGeom(el, x, y, w, h);
+      _setNode(el._node, g.vert, w, h, 72, frac);
     }
   }
 
@@ -1316,16 +1366,39 @@
     return true;
   }
 
+  // W-less cue → a shallow copy with uniform per-character timing, so the
+  // karaoke indicator (not the block highlight) is what the reader shows
+  // while real word times are still on their way. The ORIGINAL cue object is
+  // never mutated: the timing enrichers skip cues that already carry `w`.
+  function withSynthW(cue) {
+    if (!cue || (Array.isArray(cue.w) && cue.w.length)) return cue;
+    const text = String(cue.text || '');
+    const dur = Math.max(300, (cue.endMs || 0) - (cue.startMs || 0));
+    const idxs = [];
+    for (let i = 0; i < text.length; i++) if (!/[\s　「」『』、。・…！？!?,.;:()（）]/.test(text[i])) idxs.push(i);
+    if (!idxs.length) return cue;
+    const lead = Math.min(120, dur * 0.06), tail = Math.min(200, dur * 0.1);
+    const per = (dur - lead - tail) / idxs.length;
+    const w = [];
+    for (let k = 0; k < idxs.length; k++) w.push(idxs[k], 1, Math.round(lead + k * per), Math.round(lead + (k + 1) * per));
+    return Object.assign({}, cue, { w, _wSynth: true });
+  }
+
   let _bindDiagAt = 0;
   function readerCuePainted(range, cue) {
     ensureStyles();
     attachOnce();
+    cue = withSynthW(cue);
     try {   // diag: how far into the cue the clock already is when the reader binds
       if (window._diag && cue && Number.isFinite(cue.startMs)) {
         const c = clockMs();
         const lag = (c >= 0) ? Math.round(c - cue.startMs) : null;
         const nowD = performance.now();
-        if (nowD - _bindDiagAt > 900) { _bindDiagAt = nowD; window._diag('[paged-diag] kw bind lag=' + lag + 'ms rate=' + rate.toFixed(2) + ' evAge=' + Math.round(nowD - lastTs) + 'ms'); }
+        if (nowD - _bindDiagAt > 900) {
+          _bindDiagAt = nowD;
+          let wEnd = 0; try { const w0 = cue.w; for (let i = 3; i < w0.length; i += 4) if (w0[i] > wEnd) wEnd = w0[i]; } catch (_) {}
+          window._diag('[paged-diag] kw bind lag=' + lag + 'ms rate=' + rate.toFixed(2) + ' evAge=' + Math.round(nowD - lastTs) + 'ms wEnd=' + wEnd + ' dur=' + ((cue.endMs || 0) - cue.startMs) + (cue._wSynth ? ' synth' : ''));
+        }
       }
     } catch (_) {}
     if (!range || !cue || !Array.isArray(cue.w) || !cue.w.length || !cue.text) { clearReader(); return false; }

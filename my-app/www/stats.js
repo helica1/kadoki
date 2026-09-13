@@ -328,6 +328,11 @@
   function startMode(mode) {
     const t = timers[mode];
     if (t.runningSince) return;
+    // Card-tab panes (Vocabulary list / entry view): the dict popup's bumpRead,
+    // the reconcile backstop and the bg 'state' listener all tried to restart
+    // the mode timer under the pane. No card/read/audio/video time accrues
+    // while one is open (the pane sets window._statsPaneOpen).
+    if (window._statsPaneOpen && (mode === 'card' || mode === 'read' || mode === 'audio' || mode === 'video')) return;
     for (const other of ['card', 'read', 'audio', 'video']) {
       if (other !== mode && timers[other].runningSince) stopMode(other);
     }
@@ -556,7 +561,9 @@
     if (!newMode) newMode = currentMode();
     if (lastMode === null) lastMode = newMode;
     handleModeChange(newMode);
-    const audBucket = (newMode === 'audio' || newMode === 'video') ? newMode : null;
+    // Hidden read-mode listening (pocketed, no mode switch) counts as audio.
+    const hiddenListen = document.visibilityState === 'hidden' && !!window._bgPlaying && newMode === 'read' && !_ankiRoundtripActive;
+    const audBucket = (newMode === 'audio' || newMode === 'video') ? newMode : (hiddenListen ? audFamilyBucket() : null);
     const inAudio = !!audBucket;
     if (window._bgPlaying && inAudio && !timers[audBucket].runningSince) startMode(audBucket);
     // Stop whichever audio-family timer is running when we leave that state —
@@ -712,21 +719,14 @@
         // resume) when the user has since paused. Only a LIVE resume counts.
         const _sts = Number(d?.ts);
         const _liveEvent = !Number.isFinite(_sts) || _sts <= 0 || (Date.now() - _sts <= 5000);
-        if (d.playing && _liveEvent && document.visibilityState === 'hidden' &&
-            !_ankiRoundtripActive && !window._autoAudioPrevMode &&
-            typeof window.setShellMode === 'function') {
-          const b = document.body.classList;
-          const interactive = b.contains('mode-read') ? 'read' : (b.contains('mode-card') ? 'card' : null);
-          if (interactive) {
-            window._autoAudioPrevMode = interactive;
-            try {
-              window.setShellMode('audio', { force: true, resumeOnly: true, autoSwitch: true });
-            } catch (_) { window._autoAudioPrevMode = null; }
-          }
-        }
+        // (2026-09-10) NO automatic mode switch any more — the user rule is
+        // that the app never changes mode on its own (earbud pause/resume
+        // while pocketed used to flip read → audio). A hidden read-mode
+        // listen simply accrues AUDIO time in place.
         const inAudioMode = document.body.classList.contains('mode-audio');
         const inReadMode  = document.body.classList.contains('mode-read');
-        if (d.playing && inAudioMode) startMode(audFamilyBucket());
+        const hiddenListen = d.playing && _liveEvent && inReadMode && document.visibilityState === 'hidden' && !_ankiRoundtripActive;
+        if (d.playing && (inAudioMode || hiddenListen)) startMode(audFamilyBucket());
         else { if (timers.audio.runningSince) stopMode('audio'); if (timers.video.runningSince) stopMode('video'); }
         // Read-mode: audio start kicks the read timer alive (bumpRead).
         // Audio STOP intentionally does NOT stop the read timer —
@@ -839,16 +839,12 @@
     try { _mirrorLastTs = Date.now(); mirrorWrite(); } catch (e) {}
     const b = document.body.classList;
     const interactive = b.contains('mode-read') ? 'read' : (b.contains('mode-card') ? 'card' : null);
-    if (!_ankiRoundtripActive && interactive && window._bgPlaying &&
-        typeof window.setShellMode === 'function' && !window._autoAudioPrevMode) {
-      window._autoAudioPrevMode = interactive;
-      try {
-        // autoSwitch: skip the per-title lastMode persist — TITLES_V1 keeps
-        // saying read/card, so a process death in background cold-boots into
-        // the user's real mode at the position flushed by the leave-read hook.
-        window.setShellMode('audio', { force: true, resumeOnly: true, autoSwitch: true });
-      } catch (e) { window._autoAudioPrevMode = null; }
-      scheduleBackgroundStop();   // backstop only — timers already reconciled
+    if (!_ankiRoundtripActive && interactive === 'read' && window._bgPlaying) {
+      // (2026-09-10) Read-mode listening keeps playing in the background
+      // WITHOUT switching to audio mode (the app never changes mode on its
+      // own). The audio timer takes over through the hidden-listen rule in
+      // reconcileMode / the state listener; the read timer stops below.
+      scheduleBackgroundStop();
       return;
     }
     pauseAudioForBackgroundIfInteractive();

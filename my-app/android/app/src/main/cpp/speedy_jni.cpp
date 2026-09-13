@@ -33,6 +33,32 @@ Java_com_example_app_SpeedyNative_setNonlinear(JNIEnv*, jclass, jlong h, jboolea
     if (h) sonicEnableNonlinearSpeedup((sonicStream)(intptr_t)h, on ? 1.0f : 0.0f);
 }
 
+JNIEXPORT void JNICALL
+Java_com_example_app_SpeedyNative_setPitch(JNIEnv*, jclass, jlong h, jfloat pitch) {
+    if (h) { sonicSetPitch((sonicStream)(intptr_t)h, pitch); sonicIntSetQuality((sonicStream)(intptr_t)h, 1); }   // full pitch-period search for the shifter
+}
+
+// frames = samples per channel; buffer is interleaved float PCM.
+JNIEXPORT jint JNICALL
+Java_com_example_app_SpeedyNative_writeFloat(JNIEnv* env, jclass, jlong h, jfloatArray arr, jint frames) {
+    if (!h || !arr || frames <= 0) return 0;
+    jfloat* p = (jfloat*)env->GetPrimitiveArrayCritical(arr, nullptr);
+    if (!p) return 0;
+    int r = sonicWriteFloatToStream((sonicStream)(intptr_t)h, p, frames);
+    env->ReleasePrimitiveArrayCritical(arr, p, JNI_ABORT);
+    return r;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_example_app_SpeedyNative_readFloat(JNIEnv* env, jclass, jlong h, jfloatArray arr, jint maxFrames) {
+    if (!h || !arr || maxFrames <= 0) return 0;
+    jfloat* p = (jfloat*)env->GetPrimitiveArrayCritical(arr, nullptr);
+    if (!p) return 0;
+    int got = sonicReadFloatFromStream((sonicStream)(intptr_t)h, p, maxFrames);
+    env->ReleasePrimitiveArrayCritical(arr, p, 0);
+    return got;
+}
+
 // frames = samples per channel; buffer is interleaved 16-bit PCM.
 JNIEXPORT jint JNICALL
 Java_com_example_app_SpeedyNative_writeShort(JNIEnv* env, jclass, jlong h, jshortArray arr, jint frames) {

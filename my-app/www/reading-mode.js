@@ -3054,6 +3054,13 @@
       const tid = window._activeTitleId;
       try { await at.enrichSrtWordTimes(tid, cues); } catch (_) {}
       if (window._activeTitleId !== tid) return;
+      // Auto-generated SRT: its word times come from the transcription cache
+      // (enrichWordTimes) — re-timing it live only re-did the work and painted
+      // the cues w-less meanwhile.
+      try {
+        const tt = (await window.titleStore?.list?.())?.find?.((x) => x.id === tid);
+        if (tt?.attachments?.srt?.auto) return;
+      } catch (_) {}
       at.activate({ audioPath: audio.path, audioName: audio.name, timingOnly: true });
     } catch (_) {}
   };
@@ -3137,6 +3144,7 @@
         const r = await bg.deviceModel();
         // Debug builds: device diagnostics on without the localStorage flag.
         try { if (r && r.debugBuild && !window._diag) window._diag = function () { console.warn.apply(console, arguments); }; } catch (_) {}
+        try { if (r && r.simFold) window.__kadokiSimFold = true; } catch (_) {}
         // Compat mode fakes utsname ("iPad13,4" observed on device) — match on
         // the deeper signals instead; ANY hit means visionOS. A REAL machine
         // string means the NATIVE visionOS build: the transport is a system

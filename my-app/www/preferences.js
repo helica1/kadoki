@@ -486,6 +486,43 @@
           sel.addEventListener('change', () => { try { localStorage.setItem('KADOKI_SRT_WORDTIME', sel.value); } catch (_) {} });
           return sel;
         })()));
+        // Subtitle generation effort. On-device speech recognition is the
+        // heaviest thing the app runs; by default it keeps ~10 minutes ahead
+        // of the playhead and finishes the rest of the book while charging.
+        block.appendChild(row(window.i18n.t('pj.at_power', 'Generate subtitles'), (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['0', window.i18n.t('pj.at_power_balanced', 'Keep ahead · finish on charge')],
+           ['1', window.i18n.t('pj.at_power_unlimited', 'Always, full speed')]].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          let cur = '0'; try { cur = localStorage.getItem('AT_POWER_UNLIMITED') === '1' ? '1' : '0'; } catch (_) {}
+          sel.value = cur;
+          sel.addEventListener('change', () => {
+            try { localStorage.setItem('AT_POWER_UNLIMITED', sel.value); } catch (_) {}
+            try { window.autoTranscribe?.refreshPower?.(true); } catch (_) {}
+          });
+          return sel;
+        })()));
+        // Slow acceleration while reading undisturbed (speed-drift.js).
+        block.appendChild(row(window.i18n.t('pj.speed_drift', 'Speed drift while reading'), (() => {
+          const sel = document.createElement('select');
+          sel.style.cssText = 'background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:.85rem;';
+          [['0', window.i18n.t('pj.off', 'Off')],
+           ['0.01', window.i18n.fmt('pj.speed_drift_per_min', { n: '0.01' }, '+0.01× per minute')],
+           ['0.02', window.i18n.fmt('pj.speed_drift_per_min', { n: '0.02' }, '+0.02× per minute')],
+           ['0.05', window.i18n.fmt('pj.speed_drift_per_min', { n: '0.05' }, '+0.05× per minute')],
+           ['0.1',  window.i18n.fmt('pj.speed_drift_per_min', { n: '0.1' },  '+0.1× per minute')]].forEach(([v, t]) => {
+            const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o);
+          });
+          let cur = '0'; try { cur = localStorage.getItem('READ_SPEED_DRIFT') || '0'; } catch (_) {}
+          sel.value = ['0', '0.01', '0.02', '0.05', '0.1'].includes(cur) ? cur : '0';
+          sel.addEventListener('change', () => {
+            try { localStorage.setItem('READ_SPEED_DRIFT', sel.value); } catch (_) {}
+            try { window.speedDrift?.reset('pref'); } catch (_) {}
+          });
+          return sel;
+        })()));
         // Follow resolver engine — the revert switch for the sequential cursor.
         block.appendChild(row(window.i18n.t('pj.follow_engine', 'Follow engine'), (() => {
           const sel = document.createElement('select');
@@ -1573,6 +1610,17 @@
         <div id="dictImportBar" style="width:0%;height:100%;background:#4caf50;transition:width .2s ease;"></div>
       </div>
     `;
+    // Frequency list (JPDB v2.2 etc.): its own row — it feeds the library's
+    // difficulty profile, not the lookup popup.
+    try {
+      const fi = window.wordFreq?.info?.();
+      html += '<div id="dictFreqRow" style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:#bbb;padding:6px 0 10px;border-bottom:1px solid #222;margin-bottom:8px;">' +
+        '<span style="flex:1;min-width:0;">' + (fi
+          ? (window.i18n.t('pj.freq_list', 'Frequency list') + ': <b style="color:#ddd;">' + String(fi.name || '').replace(/[&<>]/g, '') + '</b> · ' + Number(fi.count || 0).toLocaleString() + ' ' + window.i18n.t('pj.freq_words', 'words'))
+          : window.i18n.t('pj.freq_hint', 'No frequency list yet — import a Yomitan frequency zip (e.g. JPDB v2.2) with the button above; it powers the library\'s difficulty rating.')) + '</span>' +
+        (fi ? '<button id="dictFreqRemove" class="btn" style="font-size:.74rem;">' + window.i18n.t('common.remove', 'Remove') + '</button>' : '') +
+      '</div>';
+    } catch (_) {}
     if (!ordered.length) {
       html += '<div style="color:#666;font-size:.8rem;padding:8px 0;">' + window.i18n.t('pj.no_dicts_loaded', 'No dictionaries loaded yet. Open Preferences again once startup loading completes.') + '</div>';
     } else {
@@ -1600,6 +1648,10 @@
       }).join('');
     }
     host.innerHTML = html;
+    try {
+      const rm = host.querySelector('#dictFreqRemove');
+      if (rm) rm.addEventListener('click', async () => { if (!confirm(window.i18n.t('pj.freq_remove_confirm', 'Remove the frequency list?'))) return; try { await window.wordFreq.remove(); } catch (_) {} buildDictionarySection(); });
+    } catch (_) {}
 
     document.getElementById('dictImportBtn')?.addEventListener('click', () => triggerDictImport());
 

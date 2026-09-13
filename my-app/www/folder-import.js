@@ -1,6 +1,11 @@
 // folder-import.js — bulk-import a folder tree of epub / audio / srt as Titles.
 //
 // Rule (matches the user's mental model):
+//   • Files loose in one big folder, one folder per book, or one folder per
+//     book holding several volumes (上/下, 1/2/3) all work: pairing happens
+//     within each folder first (import-pairing.js: tags + fuzzy names +
+//     volume guards), then a stricter cross-folder pass catches an EPUB and
+//     its audiobook that live in different folders.
 //   • A folder that directly contains media → one or more Titles.
 //   • A folder of subfolders → recurse (the native scan already flattens the
 //     tree; we just group the returned files by their containing folder).
@@ -72,6 +77,7 @@
   }
   function baseName(p) { const s = (p || '').split('/'); return s[s.length - 1] || ''; }
   function toast(msg, ms) { try { window.showToast?.(msg, ms || 3000); } catch (_) {} }
+  const T = (k, fb) => (window.i18n && window.i18n.t) ? window.i18n.t(k, fb) : fb;
 
   // ---------- progress modal (self-contained overlay) ----------
 
@@ -159,6 +165,22 @@
 
     if (epubs.length) {
       const single = epubs.length === 1;
+      const P = window.importPairing;
+      if (P && typeof P.pairGroup === 'function') {
+        // Metadata + fuzzy-name pairing with volume guards (import-pairing.js).
+        // Unpaired audiobooks in a mixed folder become audiobook Titles of
+        // their own (a giant flat folder is the normal case now).
+        const plainAudios = audios.filter(a => !videoExtOk(a.ext));
+        const r = P.pairGroup(epubs, plainAudios, srts, { allowSingle: single && plainAudios.length === 1 });
+        for (const b of r.books) {
+          b.name = nameFor(b, single, folderName);
+          b._cands = { audios: r.audios, srts: r.srts };
+          b._review = r.review;
+          b._dir = dir || '';
+          books.push(b);
+        }
+        return books;
+      }
       for (const epub of epubs) {
         books.push({
           name: (single ? (folderName || stripExt(epub.name)) : stripExt(epub.name)) || 'Untitled',
@@ -192,11 +214,13 @@
         // mode when an SRT is present.
         const single = audios.length === 1;
         for (const audio of audios) {
+          const mt = (audio.metaTitle && audio.metaTitle.length <= 80) ? audio.metaTitle.trim() : '';
           books.push({
-            name: (single ? (folderName || stripExt(audio.name)) : stripExt(audio.name)) || 'Untitled',
+            name: (single ? (folderName || mt || stripExt(audio.name)) : (mt || stripExt(audio.name))) || 'Untitled',
             epub: null,
             audio,
-            srt: matchByStem(audio, srts, single)
+            srt: matchByStem(audio, srts, single),
+            _dir: dir || ''
           });
         }
       }
@@ -205,9 +229,20 @@
     return books;
   }
 
+  // Title name: the EPUB's own title tag when it has one (a folder of rips
+  // named "[B0…]-cbr" gets the real book title), else the old folder/stem rule.
+  function nameFor(b, single, folderName) {
+    const mt = (b.epub && b.epub.metaTitle) || (!b.epub && b.audio && b.audio.metaTitle) || '';
+    const clean = mt && mt.length <= 80 ? mt.trim() : '';
+    if (single && b.epub) return (folderName || clean || stripExt(b.epub.name)) || 'Untitled';
+    const stem = b.epub ? stripExt(b.epub.name) : (b.audio ? stripExt(b.audio.name) : '');
+    return (clean || stem) || 'Untitled';
+  }
+
   function attachmentsFor(book) {
     const att = {};
     if (book.epub)  att.epub      = { uri: book.epub.uri,  name: book.epub.name };
+    if (book.epub && book.epub.cachePath) att.epub.cachePath = book.epub.cachePath;   // materialized for the metadata read
     if (book.audio) {
       att.audiobook = { uri: book.audio.uri, name: book.audio.name };
       if (VIDEO_EXTS.has(book.audio.ext)) att.audiobook.isVideo = true;
@@ -225,6 +260,167 @@
   function titleKey(t) {
     const a = t.attachments || {};
     return [t.name || '', a.epub?.name || '', a.audiobook?.name || '', a.srt?.name || ''].join('|');
+  }
+
+  // ---------- pairing review sheet ----------
+  // Shown only when the matcher was unsure about a pair or left both an EPUB
+  // and an audiobook unmatched. Tap an audiobook cell to swap it for another
+  // candidate (or none); an audiobook taken from another row goes back to
+  // "unpaired". Resolves with the (edited) book list, or null on cancel.
+  function reviewPairs(books, rootName, skipped) {
+    return new Promise((resolve) => {
+      const P = window.importPairing;
+      const T = (k, fb) => (window.i18n && window.i18n.t) ? window.i18n.t(k, fb) : fb;
+      const esc = (s) => String(s || '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+      let list = books.slice();
+      const ov = document.createElement('div');
+      ov.id = 'importReviewOverlay'; ov.className = 'kai-modal';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:9650;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:12px;direction:ltr;';
+      const card = document.createElement('div');
+      card.style.cssText = 'background:#141419;border:1px solid #2a2a33;border-radius:16px;width:100%;max-width:520px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 14px 40px rgba(0,0,0,.6);';
+      card.innerHTML =
+        '<div style="padding:14px 16px 8px;border-bottom:1px solid #22222a;">' +
+          '<div style="font:700 15px/1.3 var(--font-sans,system-ui);color:#f0f0f4;"></div>' +
+          '<div style="font:12px/1.4 var(--font-sans,system-ui);color:#8a8a96;margin-top:3px;"></div>' +
+        '</div>' +
+        '<div class="ir-list" style="flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:6px 10px;"></div>' +
+        '<div style="display:flex;gap:10px;padding:10px 12px calc(env(safe-area-inset-bottom,0px) + 12px);border-top:1px solid #22222a;">' +
+          '<button class="ir-cancel" style="flex:1;background:#22222b;border:1px solid #33333e;color:#ccccd6;border-radius:10px;padding:11px 0;font-size:.9rem;"></button>' +
+          '<button class="ir-ok" style="flex:2;background:var(--accent-read,#4caf50);border:none;color:#0b0b0e;font-weight:700;border-radius:10px;padding:11px 0;font-size:.95rem;"></button>' +
+        '</div>';
+      const head = card.firstElementChild;
+      head.children[0].textContent = T('ir.title', 'Import from') + ' ' + rootName;
+      head.children[1].textContent = T('ir.sub', 'Uncheck anything you don\'t want. Tap an audiobook to change it.') + (skipped ? ' ' + skipped + ' ' + T('ir.skipped', 'already in your library.') : '');
+      const listEl = card.querySelector('.ir-list');
+      const okBtn = card.querySelector('.ir-ok'), cancelBtn = card.querySelector('.ir-cancel');
+      cancelBtn.textContent = T('common.cancel', 'Cancel');
+      const badge = (score) => {
+        if (score == null) return '';
+        const pct = Math.round(score * 100);
+        const col = score >= P.REVIEW_MIN ? 'var(--accent-read,#4caf50)' : (score >= P.ACCEPT_MIN ? '#ffd54a' : '#888');
+        return '<span style="flex:none;font-size:.7rem;font-weight:700;color:' + col + ';border:1px solid ' + col + ';border-radius:999px;padding:1px 7px;margin-left:8px;">' + pct + '%</span>';
+      };
+      const rowCss = 'padding:10px 8px 10px 4px;border-bottom:1px solid #1e1e26;display:flex;gap:8px;align-items:flex-start;';
+      const cellCss = 'display:flex;align-items:center;gap:8px;font-size:.84rem;line-height:1.35;';
+      // Include toggle (round check) at the left of every row.
+      const tick = (b) => {
+        const t = document.createElement('button');
+        t.className = 'ir-tick';
+        const on = !b._skip;
+        t.style.cssText = 'flex:none;width:26px;height:26px;border-radius:50%;margin-top:2px;cursor:pointer;font-size:.9rem;line-height:1;' +
+          (on ? 'background:var(--accent-read,#4caf50);border:1px solid var(--accent-read,#4caf50);color:#0b0b0e;' : 'background:transparent;border:1px solid #3a3a44;color:transparent;');
+        t.textContent = '✓';
+        t.setAttribute('aria-label', on ? 'Included' : 'Excluded');
+        t.addEventListener('click', (e) => { e.stopPropagation(); b._skip = !b._skip; try { window.kHaptic?.(); } catch (_) {} render(); });
+        return t;
+      };
+      const body = (b) => { const d = document.createElement('div'); d.style.cssText = 'flex:1;min-width:0;' + (b._skip ? 'opacity:.45;' : ''); return d; };
+      const render = () => {
+        listEl.innerHTML = '';
+        const withEpub = list.filter(b => b.epub);
+        const audioOnly = list.filter(b => !b.epub && b.audio && !(Array.isArray(b.series) && b.series.length));
+        const others = list.filter(b => !b.epub && !audioOnly.includes(b));
+        for (const b of withEpub) {
+          const row = document.createElement('div');
+          row.style.cssText = rowCss;
+          row.appendChild(tick(b));
+          const bd = body(b); row.appendChild(bd);
+          bd.innerHTML =
+            '<div style="' + cellCss + 'color:#e8f1ff;font-weight:700;"><span style="flex:none;font-size:.62rem;letter-spacing:.08em;color:#8a93c4;border:1px solid #2f3a5e;border-radius:999px;padding:1px 6px;">EPUB</span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(b.epub.name) + '</span></div>' +
+            '<button class="ir-audio" style="' + cellCss + 'width:100%;text-align:left;margin-top:6px;background:#1a1a22;border:1px solid #2a2a33;border-radius:10px;padding:8px 10px;color:' + (b.audio ? '#e8e8f0' : '#8a8a96') + ';cursor:pointer;">' +
+              '<span style="flex:none;font-size:.62rem;letter-spacing:.08em;color:#b794f6;border:1px solid #4a3c72;border-radius:999px;padding:1px 6px;">AUDIO</span>' +
+              '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (b.audio ? esc(b.audio.name) : esc(T('ir.no_audio', 'No audiobook — tap to choose'))) + '</span>' + (b.audio ? badge(b.score) : '') +
+            '</button>' +
+            (b.srt ? '<div style="' + cellCss + 'margin-top:5px;color:#9a9aa6;font-size:.74rem;"><span style="flex:none;font-size:.6rem;letter-spacing:.08em;color:#ffd54a;border:1px solid #5a4d1a;border-radius:999px;padding:1px 6px;">SRT</span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(b.srt.name) + '</span></div>' : '');
+          bd.querySelector('.ir-audio').addEventListener('click', () => { if (!b._skip) chooseAudio(b); });
+          listEl.appendChild(row);
+        }
+        if (audioOnly.length) {
+          const h = document.createElement('div');
+          h.style.cssText = 'padding:14px 8px 4px;font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:#8a8a96;';
+          h.textContent = T('ir.audio_only', 'Audiobooks without a book (imported as audiobook titles)');
+          listEl.appendChild(h);
+          for (const b of audioOnly) {
+            const row = document.createElement('div');
+            row.style.cssText = rowCss + 'color:#b9b9c4;';
+            row.appendChild(tick(b));
+            const bd = body(b); row.appendChild(bd);
+            bd.innerHTML = '<div style="' + cellCss + '"><span style="flex:none;font-size:.62rem;letter-spacing:.08em;color:#b794f6;border:1px solid #4a3c72;border-radius:999px;padding:1px 6px;">AUDIO</span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(b.audio.name) + '</span></div>';
+            listEl.appendChild(row);
+          }
+        }
+        if (others.length) {
+          const h = document.createElement('div');
+          h.style.cssText = 'padding:14px 8px 4px;font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:#8a8a96;';
+          h.textContent = T('ir.others', 'Also importing');
+          listEl.appendChild(h);
+          for (const b of others) {
+            const row = document.createElement('div');
+            row.style.cssText = rowCss + 'color:#b9b9c4;font-size:.84rem;';
+            row.appendChild(tick(b));
+            const bd = body(b); row.appendChild(bd);
+            bd.textContent = b.name || '';
+            listEl.appendChild(row);
+          }
+        }
+        const chosen = list.filter(b => !b._skip);
+        okBtn.textContent = chosen.length ? (T('ir.import', 'Import') + ' ' + describeBatch(chosen)) : T('ir.import_none', 'Nothing selected');
+        okBtn.disabled = !chosen.length; okBtn.style.opacity = chosen.length ? '1' : '.5';
+      };
+      const chooseAudio = (b) => {
+        const cands = (b._cands && b._cands.audios) || [];
+        const ranked = P.rankCandidates(b.epub, cands).slice(0, 10);
+        const sh = document.createElement('div');
+        sh.style.cssText = 'position:fixed;inset:0;z-index:9660;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center;';
+        const sheet = document.createElement('div');
+        sheet.style.cssText = 'width:min(100%,520px);max-height:70vh;overflow-y:auto;background:#141419;border:1px solid #2a2a33;border-bottom:0;border-radius:16px 16px 0 0;padding:12px 10px calc(env(safe-area-inset-bottom,0px) + 12px);';
+        const mk = (label, sub, onPick, hi) => {
+          const bt = document.createElement('button');
+          bt.style.cssText = 'display:block;width:100%;text-align:left;margin:4px 0;background:' + (hi ? '#1d1830' : '#1a1a22') + ';border:1px solid ' + (hi ? '#5a4a8a' : '#2a2a33') + ';border-radius:10px;padding:10px 12px;color:#eee;font-size:.84rem;line-height:1.35;';
+          bt.innerHTML = '<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>' + (sub ? '<div style="color:#8a8a96;font-size:.72rem;margin-top:2px;"></div>' : '');
+          bt.firstChild.textContent = label;
+          if (sub) bt.lastChild.textContent = sub;
+          bt.addEventListener('click', (e) => { e.stopPropagation(); sh.remove(); onPick(); });
+          return bt;
+        };
+        sheet.appendChild(mk(T('ir.none', 'No audiobook'), '', () => setAudio(b, null), !b.audio));
+        for (const c of ranked) {
+          const owner = list.find(x => x !== b && x.audio === c.file);
+          const sub = Math.round(c.score * 100) + '%' + (owner ? ' · ' + T('ir.used_by', 'currently paired with') + ' ' + (owner.epub ? owner.epub.name : owner.name) : '');
+          sheet.appendChild(mk(c.file.name, sub, () => setAudio(b, c.file), b.audio === c.file));
+        }
+        sh.addEventListener('click', (e) => { if (e.target === sh) sh.remove(); });
+        sh.appendChild(sheet); document.body.appendChild(sh);
+      };
+      const setAudio = (b, audio) => {
+        const prev = b.audio;
+        if (audio) {
+          // Take it away from whoever had it (an epub row, or a leftover audiobook row).
+          for (const x of list.slice()) {
+            if (x === b || x.audio !== audio) continue;
+            if (x.epub) { x.audio = null; x.score = null; x.srt = null; }
+            else list.splice(list.indexOf(x), 1);
+          }
+        }
+        b.audio = audio;
+        b.score = audio ? P.scorePair(b.epub, audio) : null;
+        // A displaced audiobook becomes its own title again.
+        if (prev && prev !== audio && !list.some(x => x.audio === prev)) {
+          list.push({ name: (prev.metaTitle && prev.metaTitle.length <= 80) ? prev.metaTitle : stripExt(prev.name), epub: null, audio: prev, srt: null, score: null, _cands: b._cands });
+        }
+        // Re-match SRTs for this row against the srts nobody else holds.
+        const used = new Set(list.filter(x => x !== b && x.srt).map(x => x.srt));
+        const m = P.matchSrt(b, (b._cands && b._cands.srts) || [], used);
+        b.srt = m ? m.srt : null;
+        b.name = nameFor(b, false, '');
+        render();
+      };
+      okBtn.addEventListener('click', () => { ov.remove(); resolve(list.filter(b => !b._skip)); });
+      cancelBtn.addEventListener('click', () => { ov.remove(); resolve(null); });
+      render();
+      ov.appendChild(card);
+      document.body.appendChild(ov);
+    });
   }
 
   // ---------- orchestration ----------
@@ -273,10 +469,50 @@
       // Unplayable video containers: explain instead of a bare "no books".
       const unplayable = files.filter(f => extUnplayable(f.ext));
       const playable = unplayable.length ? files.filter(f => !UNPLAYABLE_VIDEO_EXTS.has(f.ext)) : files;
+      for (const f of playable) {
+        f.kind = EPUB_EXTS.has(f.ext) ? 'epub' : (AUDIO_EXTS.has(f.ext) ? 'audio' : (videoExtOk(f.ext) ? 'video' : (SRT_EXTS.has(f.ext) ? 'srt' : '')));
+      }
+      // Metadata pass (EPUB title/author from the package file; audio title/
+      // artist/duration from the tags) — the strongest pairing signal, and it
+      // becomes the Title's author + length in the library.
+      if (window.importPairing?.readMeta) {
+        const metaFiles = playable.filter(f => f.kind === 'epub' || f.kind === 'audio');
+        if (metaFiles.length) {
+          setProgress(42, `Reading file details… 0/${metaFiles.length}`);
+          await window.importPairing.readMeta(metaFiles, (d, t) => setProgress(42 + 23 * (d / Math.max(1, t)), `Reading file details… ${d}/${t}`));
+        }
+      }
 
       const groups = groupByDir(playable);
       let books = [];
       for (const [dir, gf] of groups) books = books.concat(classifyFolder(dir, gf, res.rootName));
+      // Cross-folder pass: an EPUB left alone in one folder and an audiobook
+      // left alone in another (e.g. "epubs/" + "audio/" subfolders) pair up
+      // here — with a STRICTER bar than within a folder, since a shared folder
+      // is itself evidence. Pairs under the review bar go to the sheet.
+      try {
+        const P = window.importPairing;
+        if (P) {
+          const loneEpubs = books.filter(b => b.epub && !b.audio);
+          const loneAudios = books.filter(b => !b.epub && b.audio && !(Array.isArray(b.series) && b.series.length) && !videoExtOk(b.audio.ext));
+          const CROSS_MIN = 0.7;
+          const cand = [];
+          for (const e of loneEpubs) for (const a of loneAudios) { if (e._dir === a._dir) continue; const s = P.scorePair(e.epub, a.audio); if (s >= CROSS_MIN) cand.push({ e, a, s }); }
+          cand.sort((x, y) => y.s - x.s);
+          const usedE = new Set(), usedA = new Set();
+          for (const c of cand) {
+            if (usedE.has(c.e) || usedA.has(c.a)) continue;
+            usedE.add(c.e); usedA.add(c.a);
+            c.e.audio = c.a.audio; c.e.score = c.s;
+            if (!c.e.srt && c.a.srt) c.e.srt = c.a.srt;
+            if (c.s < P.REVIEW_MIN) c.e._review = true;
+            books.splice(books.indexOf(c.a), 1);
+          }
+          // Every EPUB row can pick from the WHOLE import in the review sheet.
+          const allAudios = playable.filter(f => f.kind === 'audio'), allSrts = playable.filter(f => f.kind === 'srt');
+          for (const b of books) if (b.epub) b._cands = { audios: allAudios, srts: allSrts };
+        }
+      } catch (_) {}
 
       if (!books.length) {
         hideModal();
@@ -311,17 +547,30 @@
         return;
       }
 
-      // Confirm before mutating the library. (hide the progress overlay so the
-      // native confirm() isn't visually stacked under it.)
+      // Confirm before mutating the library. Uncertain pairings (or leftovers
+      // of both kinds) go through the review sheet, which has its own Import
+      // button; a clean batch just gets the plain confirm.
       hideModal();
-      const ok = confirm(
-        `Import ${describeBatch(fresh)} from "${res.rootName || 'folder'}"?` +
-        (skipped ? `\n(${skipped} already in your library — skipped)` : '')
-      );
-      if (!ok) return;
+      // The review sheet IS the confirmation: every title has an include
+      // toggle (user: "seems we have to import everything it finds"), and
+      // uncertain pairings can be corrected in place.
+      const toImport = await reviewPairs(fresh, res.rootName || 'folder', skipped);
+      if (!toImport) return;
+      if (!toImport.length) { toast(T('ir.nothing', 'Nothing selected — nothing imported.')); return; }
+      fresh.length = 0; for (const b of toImport) fresh.push(b);
 
       setProgress(75, `Adding ${fresh.length} title${fresh.length === 1 ? '' : 's'}…`);
-      const partials = fresh.map(b => ({ name: b.name || 'Untitled', attachments: attachmentsFor(b) }));
+      const partials = fresh.map(b => ({
+        name: b.name || 'Untitled',
+        author: (b.epub && b.epub.metaAuthor) || (b.audio && b.audio.metaAuthor) || '',
+        meta: {
+          durationMs: (b.audio && b.audio.durationMs) || 0,
+          epubTitle: (b.epub && b.epub.metaTitle) || '',
+          audioTitle: (b.audio && b.audio.metaTitle) || '',
+          pairScore: Number.isFinite(b.score) ? Math.round(b.score * 100) / 100 : null,
+        },
+        attachments: attachmentsFor(b),
+      }));
       const created = await window.titleStore.createMany(partials);
 
       setProgress(100, `Imported ${describeBatch(fresh)}`);
@@ -340,6 +589,9 @@
       // The library shows letter avatars immediately; embedded covers fill in
       // as each book's epub/audio is read.
       extractCoversForImport(created);
+      try { window.libraryMeta?.sweepInPlace?.(); } catch (_) {}
+      // Library metadata (length, difficulty) then summaries — background.
+      try { Promise.resolve(window.libraryBlurb?.runQueue?.()).catch(() => {}).finally(() => { try { window.libraryMeta?.ensureAll?.(); } catch (_) {} }); } catch (_) {}
     } catch (e) {
       hideModal();
       alert('Folder import failed: ' + (e?.message || e));

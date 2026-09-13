@@ -212,6 +212,12 @@
         opacity: 0;
         pointer-events: none;
       }
+      /* Vertical speed drag: show the readout even with the chrome hidden. */
+      body.kadoki-speed-adjust.mode-read #pagedSpeedCtl {
+        opacity: 1 !important;
+        transform: scale(1.25);
+        transition: transform .12s ease, opacity .18s ease;
+      }
       /* On-device transcription progress (auto-subtitled titles): shown while
          the playhead waits on the transcriber, e.g. right after opening a new
          title or after a set-playhead into untranscribed audio. */
@@ -242,7 +248,17 @@
       #pagedSyncPill .psy-fill { height: 100%; width: 0; border-radius: 2px; background: var(--accent-audio, #b794f6); transition: width .3s linear; }
       #pagedSyncPill .psy-fill.idle { width: 38%; animation: pagedSyncSlide 1.2s ease-in-out infinite alternate; }
       @keyframes pagedSyncSlide { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
-      @media (orientation: landscape), (min-width: 600px) {
+      /* LANDSCAPE only: the status-bar strip the pill lives in doesn't exist,
+         so it moves into the header band, just left of the play button.
+         Portrait is untouched. */
+      @media (orientation: landscape) {
+        #pagedSpeedCtl {
+          top: calc(env(safe-area-inset-top, 0px) + 9px);
+          right: calc(env(safe-area-inset-right, 0px) + 100px);
+          height: 30px;
+        }
+      }
+      @media (min-width: 1100px) {
         #pagedSpeedCtl { display: none !important; }
       }
       /* Wide layouts — landscape, OR a wide foldable/tablet (≥600px) in any
@@ -691,6 +707,28 @@
     // is a per-gesture latch so a single down-swipe doesn't fire
     // togglePlayPause N times across consecutive touchmove events.
     let swipeFired = false;
+    // SLOW vertical drag = playback speed (up faster, down slower). A QUICK
+    // down-flick stays the play/pause toggle; the two are told apart by how
+    // long the finger took to cross the threshold.
+    // Told apart by SPEED, not duration: a flick covers ground fast, a speed
+    // drag crawls. (An elapsed-time gate didn't work — iOS stops delivering
+    // touchmove on this horizontally-scrollable container once a vertical
+    // gesture is a few hundred ms old, so the slow drag never reached it.)
+    // Three outcomes for a vertical gesture, in order of certainty:
+    //   • fast flick (>= SPEED_FLICK_V)      → play/pause, fires mid-gesture
+    //   • slow AND sustained                 → speed drag
+    //   • anything else                      → play/pause, resolved on release
+    // The middle case needs both a distance and a DWELL: an ordinary swipe is
+    // over in ~150 ms, so requiring the finger to still be travelling slowly
+    // after SPEED_DWELL_MS keeps normal swipes out of the speed drag.
+    const SPEED_FLICK_V = 0.55;   // px/ms — at or above this it's unmistakably a flick
+    const SPEED_DWELL_MS = 200;   // finger must still be down and slow after this
+    const SPEED_MIN_PX = 24;      // committed vertical travel before the drag is ours
+    const SPEED_PX_PER_X = 320;   // px of travel for 1.00× of change
+    const SPEED_MIN = 1.0, SPEED_MAX = 2.0;
+    let speedMode = false, speedBase = 1, speedAnchorY = 0, speedLastApply = 0, speedTarget = 1;
+    let speedIdleTimer = null, moveN = 0;
+    function _speedShow(on) { try { document.body.classList.toggle('kadoki-speed-adjust', !!on); } catch (_) {} }
     scrollEl.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
       sx = e.touches[0].clientX; sy = e.touches[0].clientY;
@@ -698,6 +736,7 @@
       dismissedPopupOnStart = false;
       dismissedSelectionOnStart = false;
       swipeFired = false;
+      moveN = 0;
       const popup = document.getElementById('dictPopup');
       if (popup && popup.style.display !== 'none' && !popup.contains(e.target)) {
         // Route through enhanced-dictionary's hidePopup so its
@@ -741,19 +780,94 @@
     // detection in place for Android + future iOS WebKit
     // improvements; iOS users use the header PLAY button.
     scrollEl.addEventListener('touchmove', (e) => {
-      if (swipeFired || physDragging) return;
+      // `swipeFired` latches a one-shot gesture (the play/pause flick) so it
+      // can't repeat — but a speed drag is CONTINUOUS and sets the same latch
+      // to suppress the tap path, so it has to be let through here or the
+      // drag never sees another move event.
+      if ((swipeFired && !speedMode) || physDragging) return;
       const t = e.touches?.[0];
       if (!t) return;
       const dxRaw = t.clientX - sx, dyRaw = t.clientY - sy;
       const adx = Math.abs(dxRaw), ady = Math.abs(dyRaw);
-      // Ignore down-swipes that BEGAN in the OS notification-shade zone (top
-      // edge) so pulling down the shade doesn't also toggle playback.
-      if (dyRaw > 30 && ady > adx * 1.5 && adx < 50 && !window._inSystemGestureZone?.(sy)) {
+      const elapsed = Date.now() - tStart;
+      const vertical = ady > adx * 1.5 && adx < 50;
+      const inShade = !!window._inSystemGestureZone?.(sy);
+      const vel = ady / Math.max(1, elapsed);        // px/ms since finger-down
+      // CLAIM the gesture. Without this iOS hands a sustained vertical drag on
+      // this (horizontally scrolling) container to the native scroll engine
+      // and simply stops delivering touchmove — measured on device: events die
+      // after ~20 px, which is why the speed drag latched (haptic fired) and
+      // then never moved. preventDefault needs the listener to be non-passive.
+      if (vertical && ady > 8 && !inShade && (window._pagedAudioPath || window._bgPlaying)) {
+        try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+      }
+      if (moveN < 8) {
+        moveN++;
+        try { window._diag?.('[paged-diag] gesture move#' + moveN + ' dx=' + Math.round(dxRaw) + ' dy=' + Math.round(dyRaw) + ' t=' + elapsed + 'ms v=' + vel.toFixed(2) + ' vert=' + vertical + ' audio=' + !!(window._pagedAudioPath || window._bgPlaying)); } catch (_) {}
+      }
+      // --- speed drag ---
+      if (speedMode) {
+        const want = Math.max(SPEED_MIN, Math.min(SPEED_MAX,
+          Math.round((speedBase + (speedAnchorY - t.clientY) / SPEED_PX_PER_X) * 100) / 100));
+        if (want !== speedTarget) {
+          speedTarget = want;
+          const now = Date.now();
+          if (now - speedLastApply > 90) {   // live feedback, throttled off the bridge
+            speedLastApply = now;
+            try { window.setActivePlaybackRate?.(want, true); } catch (_) {}
+          }
+        }
+        // Backstop: iOS can stop delivering events for a gesture it claimed,
+        // and then touchend never arrives — commit on a lull instead.
+        // Backstop: if the gesture is ever claimed anyway, touchend may never
+        // arrive — persist after a lull, but STAY in the drag so a finger held
+        // still and then moved again doesn't re-anchor and jump.
+        if (speedIdleTimer) clearTimeout(speedIdleTimer);
+        speedIdleTimer = setTimeout(() => { speedIdleTimer = null; _commitSpeed(); }, 900);
+        return;
+      }
+      if (!speedMode && vertical && ady > SPEED_MIN_PX && elapsed > SPEED_DWELL_MS && vel < SPEED_FLICK_V && !inShade &&
+          (window._pagedAudioPath || window._bgPlaying)) {
+        speedMode = true;
+        swipeFired = true;              // this gesture is ours; no toggle, no tap
+        speedBase = (typeof window.effectivePlaybackRate === 'function')
+          ? window.effectivePlaybackRate() : (window.audioPlaybackRate || 1);
+        speedBase = Math.max(SPEED_MIN, Math.min(SPEED_MAX, speedBase));
+        speedTarget = speedBase;
+        speedAnchorY = t.clientY;       // anchor HERE so the rate doesn't jump
+        _speedShow(true);
+        try { window.kHaptic?.(); } catch (_) {}
+        log('[speed] drag begin at ' + speedBase.toFixed(2) + '×');
+        try { window._diag?.('[paged-diag] speed drag begin ' + speedBase.toFixed(2) + '×'); } catch (_) {}
+        return;
+      }
+      // Only an unmistakable FLICK fires mid-gesture; a slower swipe is still
+      // undecided here (it may yet become a speed drag) and is resolved on
+      // release instead. Down-swipes that began in the OS shade zone are
+      // ignored so pulling the shade down doesn't toggle playback.
+      if (dyRaw > 30 && vertical && vel >= SPEED_FLICK_V && !inShade) {
         swipeFired = true;
-        log('[swipe] down dy=' + Math.round(dyRaw) + ' dx=' + Math.round(dxRaw));
+        log('[swipe] down dy=' + Math.round(dyRaw) + ' dx=' + Math.round(dxRaw) + ' v=' + vel.toFixed(2));
         try { handleSwipeDown(); } catch (err) { log('[swipe] handler error:', err?.message); }
       }
-    }, { passive: true });
+    }, { passive: false });
+    // Commit the speed drag (and keep the readout up briefly so the user sees
+    // where it landed).
+    const _commitSpeed = () => {
+      try { window.setActivePlaybackRate?.(speedTarget, false); } catch (_) {}
+    };
+    const _endSpeedDrag = () => {
+      if (speedIdleTimer) { clearTimeout(speedIdleTimer); speedIdleTimer = null; }
+      if (!speedMode) return;
+      speedMode = false;
+      log('[speed] drag end at ' + speedTarget.toFixed(2) + '×');
+      try { window._diag?.('[paged-diag] speed drag end ' + speedTarget.toFixed(2) + '×'); } catch (_) {}
+      _commitSpeed();
+      try { window.kHaptic?.(); } catch (_) {}
+      setTimeout(() => _speedShow(false), 900);
+    };
+    scrollEl.addEventListener('touchend', _endSpeedDrag, { passive: true });
+    scrollEl.addEventListener('touchcancel', _endSpeedDrag, { passive: true });
 
     scrollEl.addEventListener('touchend', (e) => {
       if (swipeFired || physDragging) return; // swipe / physics drag owns the gesture
@@ -762,6 +876,14 @@
       const dxRaw = t.clientX - sx, dyRaw = t.clientY - sy;
       const adx = Math.abs(dxRaw), ady = Math.abs(dyRaw);
       const elapsed = Date.now() - tStart;
+      // A down-swipe that wasn't fast enough to fire mid-gesture, and never
+      // became a speed drag, resolves here on release.
+      if (dyRaw > 30 && ady > adx * 1.5 && adx < 50 && !window._inSystemGestureZone?.(sy)) {
+        swipeFired = true;
+        log('[swipe] down (on release) dy=' + Math.round(dyRaw) + ' t=' + elapsed + 'ms');
+        try { handleSwipeDown(); } catch (err) { log('[swipe] handler error:', err?.message); }
+        return;
+      }
       // Treat any motion as scroll/abort the tap path below.
       if (ady > 14 || adx > 14) return;
       if (elapsed > 400) return;
@@ -2158,7 +2280,11 @@
       // the static block green (the user's "old static highlighting" on mode
       // re-entry). setCueRangeHighlight still resolves the range for the
       // scroll; the glow is the cursor.
-      const _kw = (c) => !!(c && Array.isArray(c.w) && c.w.length && window.wordHighlight);
+      // (2026-09-10) Karaoke for EVERY cue: w-less cues get synthetic per-char
+      // timing inside readerCuePainted, so the static green block never shows
+      // (it used to flash before the word times arrived, e.g. SRT titles
+      // being word-timed live).
+      const _kw = (c) => !!(c && window.wordHighlight);
       let paintCue = (matchCue >= 0) ? cues[matchCue] : (cues[want] || null);
       let r = setCueRangeHighlight(chunk, paintText, _kw(paintCue));
       if (!r) {
@@ -2173,7 +2299,7 @@
         let ok = false;
         try { ok = !!window.wordHighlight.readerCuePainted(r, paintCue); } catch (_) {}
         // Glow didn't bind → repaint the block highlight (never NO indicator).
-        if (!ok) { try { setCueRangeHighlight(chunk, (paintCue && paintCue.text) || paintText); } catch (_) {} }
+        if (!ok) log('ensureGreenOnEnter: karaoke bind failed (no block fallback)');
       }
       lastHighlightedCue = -1;             // let the next live audio-follow paint fire
       window._lastAudioCueIdx = want; window._lastAudioCueTitleId = window._activeTitleId;      // keep the shared cursor at the intended cue (title-stamped)
@@ -2338,12 +2464,12 @@
         // highlight (same entry treatment as ensureGreenOnEnter).
         const _cCue = (pagedCues[_aCueIdx] && highlightText === pagedCues[_aCueIdx].text)
           ? pagedCues[_aCueIdx] : null;
-        const _cKw = !!(_cCue && Array.isArray(_cCue.w) && _cCue.w.length && window.wordHighlight);
+        const _cKw = !!(_cCue && window.wordHighlight);
         const _r = setCueRangeHighlight(chunk, highlightText, _cKw);
         if (_cKw && _r) {
           let _ok = false;
           try { _ok = !!window.wordHighlight.readerCuePainted(_r, _cCue); } catch (_) {}
-          if (!_ok) { try { setCueRangeHighlight(chunk, highlightText); } catch (_) {} }
+          if (!_ok) log('scroll-follow paint: karaoke bind failed (no block fallback)');
         }
       }
       // Then scroll if any part of the highlight overflows the viewport,
@@ -2696,8 +2822,8 @@
     // at the left edge near images. Anchor each mask to the phase of the
     // chunk actually AT its edge, and take the median only within that phase.
     let lAnchor = null, lBest = Infinity, rAnchor = null, rBest = Infinity;
-    for (const ch of list) {
-      let cb; try { cb = ch.getBoundingClientRect(); } catch (_) { continue; }
+    for (const _v of (list === chunks ? _chunkRectsNearX(sr, W).list : list.map((ch) => { let r = null; try { r = ch.getBoundingClientRect(); } catch (_) {} return r ? { ch, r } : null; }).filter(Boolean))) {
+      const ch = _v.ch, cb = _v.r;
       if (cb.width < 1 || cb.height < 1) continue;
       if (cb.right < sr.left - W || cb.left > sr.right + W) continue;
       if (cb.right > sr.right - W * 1.6) edgeChunks.push(ch);
@@ -2734,7 +2860,10 @@
       c.sort((x, y) => x - y);
       return c[Math.floor(c.length / 2)];
     };
-    const effW = (raw) => (raw > 1.5 ? Math.min(raw, W) : 0);
+    // A leftover under the old 1.5px floor was treated as nothing — but a
+    // 1px sliver of a vertical line IS a visible fragment. Cover anything
+    // real, and round up by a pixel so sub-pixel layout can't leak one back.
+    const effW = (raw) => (raw > 0.4 ? Math.min(Math.ceil(raw) + 1, W) : 0);
     _maskLW = effW(med(lefts, lAnchor));
     _maskRW = effW(med(rights, rAnchor));
     // Furigana allowance (right/reading edge only), applied CONDITIONALLY and
@@ -2840,12 +2969,11 @@
       const sr = scrollEl.getBoundingClientRect();
       if (sr.width < 40) return;
       const W = _columnWidth();
-      const list = (chunks && chunks.length) ? chunks : [];
       const near = [];
-      for (const ch of list) {
-        let cb; try { cb = ch.getBoundingClientRect(); } catch (_) { continue; }
+      for (const v of _chunkRectsNearX(sr, W).list) {
+        const cb = v.r;
         if (cb.width < 1 || cb.right < sr.right - W * 1.6 || cb.left > sr.right + W) continue;
-        near.push(ch);
+        near.push(v.ch);
       }
       const over = _rtOverhangPast(sr.right, near);
       let fs = 24;
@@ -2954,7 +3082,7 @@
   // CURVE: gentle acceleration — the rate per point grows linearly with the
   // distance already travelled, so a short rub is fine-grained and a long
   // drag reaches (1 + CURVE)× the base rate at a full screen width.
-  const SCRUB = { START_PX: 14, SPAN_MS: 2250, CURVE: 1.5, FLICK_MS: 220, AUDIO_MIN_GAP_MS: 8, AUDIO_MIN_DELTA_MS: 4 };
+  const SCRUB = { START_PX: 14, SPAN_MS: 4500, CURVE: 1.5, FLICK_MS: 220, AUDIO_MIN_GAP_MS: 8, AUDIO_MIN_DELTA_MS: 4 };   // 4500: doubled 2026-09-10 (user); the scrub audio is pitched down 2 octaves natively so the faster travel doesn't squeal
   let _scrubS = null;
   let _scrubPainting = false;   // true only while the scrub itself calls __onPagedCueUpdate
   function _scrubMode() {
@@ -3005,6 +3133,7 @@
   //   hooks.land(idx, t)        — finger released at t (cue idx)
   //   hooks.cancel()            — flick turned into a one-cue step
   function scrubBegin(touchState, dim, commitT, hooks) {
+    try { window.speedDrift?.reset('scrub'); } catch (_) {}
     const cues = _scrubCues();
     if (!cues.length) return null;
     const anchor = _scrubAnchorMs(touchState);
@@ -3411,6 +3540,125 @@
   // every scrollLeft write is tagged programmatic (lastProgrammaticScrollTime),
   // so the gated scroll-listener path below NEVER runs while paging — which is
   // why the read char counter sat at 0 and lastReadCueIdx never advanced.
+  // ---- visible-chunk geometry cache (heat fix, 2026-09-12) ----
+  //
+  // Every "which chunks are on screen" scan used to call
+  // getBoundingClientRect() on EVERY chunk: 4,625 layout probes per scan on a
+  // full novel, and the scans run on each scroll frame (progress strip, read
+  // cursor, frontier, PLAY resolver). Measured on device at 1,400-1,700
+  // layout calls/second with JS itself under 1% CPU — the cost was all inside
+  // WebKit's layout engine, which is exactly the kind of work that heats a
+  // phone without showing up as script time.
+  //
+  // offsetLeft/Top/Width/Height are layout-relative and constant until the
+  // next re-layout, so they're read ONCE per layout generation into plain
+  // arrays. A single anchor measurement then maps them into viewport space
+  // (the page-turn transform is a pure translate — the scale check below
+  // falls back to real measurement if that ever stops being true).
+  let _geoL = null, _geoT = null, _geoW = null, _geoH = null;
+  let _geoGen = -1, _geoN = 0, _layoutGen = 0, _geoVerifyAt = 0;
+  function _invalidateChunkGeo() { _layoutGen++; }
+  window._pagedInvalidateGeo = _invalidateChunkGeo;
+  function _buildChunkGeo() {
+    const n = chunks ? chunks.length : 0;
+    if (!n) { _geoL = null; _geoN = 0; return false; }
+    const L = new Float64Array(n), T = new Float64Array(n), W = new Float64Array(n), H = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const c = chunks[i];
+      L[i] = c.offsetLeft; T[i] = c.offsetTop; W[i] = c.offsetWidth; H[i] = c.offsetHeight;
+    }
+    _geoL = L; _geoT = T; _geoW = W; _geoH = H; _geoN = n; _geoGen = _layoutGen;
+    return true;
+  }
+  // {dx, dy} mapping offset-space → viewport, or null when the cache can't be
+  // trusted (nothing measurable, or a scaled transform in flight).
+  function _geoMap(sr) {
+    if (!chunks || !chunks.length) return null;
+    if (_geoGen !== _layoutGen || _geoN !== chunks.length || !_geoL) { if (!_buildChunkGeo()) return null; }
+    let anchor = -1;
+    for (let i = 0; i < _geoN; i++) { if (_geoW[i] > 0 && _geoH[i] > 0) { anchor = i; break; } }
+    if (anchor < 0) return null;
+    const ar = chunks[anchor].getBoundingClientRect();
+    if (!ar.width || !ar.height) return null;
+    if (Math.abs(ar.width - _geoW[anchor]) > Math.max(1, _geoW[anchor] * 0.02)) return null;   // scaled → measure for real
+    const dx = ar.left - _geoL[anchor], dy = ar.top - _geoT[anchor];
+    // Self-heal a missed invalidation: once a second, check a FAR chunk's
+    // predicted box against its real one and rebuild if the layout moved.
+    const now = performance.now();
+    if (now - _geoVerifyAt > 1000) {
+      _geoVerifyAt = now;
+      let far = -1;
+      for (let i = _geoN - 1; i > anchor; i--) { if (_geoW[i] > 0 && _geoH[i] > 0) { far = i; break; } }
+      if (far > 0) {
+        const fr = chunks[far].getBoundingClientRect();
+        if (Math.abs((_geoL[far] + dx) - fr.left) > 1.5 || Math.abs((_geoT[far] + dy) - fr.top) > 1.5) {
+          _invalidateChunkGeo();
+          if (!_buildChunkGeo()) return null;
+          const ar2 = chunks[anchor].getBoundingClientRect();
+          if (!ar2.width) return null;
+          return { dx: ar2.left - _geoL[anchor], dy: ar2.top - _geoT[anchor] };
+        }
+      }
+    }
+    return { dx, dy };
+  }
+  // Chunks within `margin` px of the scrollport HORIZONTALLY (no vertical
+  // test) — what the edge-mask grid needs. Same cached path, same fallback.
+  function _chunkRectsNearX(srIn, margin) {
+    const sr = srIn || (scrollEl ? scrollEl.getBoundingClientRect() : null);
+    if (!sr || !chunks || !chunks.length) return { sr, list: [], cached: false };
+    const list = [];
+    const g = _geoMap(sr);
+    if (g) {
+      const dx = g.dx, dy = g.dy;
+      for (let i = 0; i < _geoN; i++) {
+        const w = _geoW[i], h = _geoH[i];
+        if (!(w >= 1) || !(h >= 1)) continue;
+        const left = _geoL[i] + dx, right = left + w;
+        if (right < sr.left - margin || left > sr.right + margin) continue;
+        const top = _geoT[i] + dy;
+        list.push({ ch: chunks[i], i, r: { left, top, right, bottom: top + h, width: w, height: h } });
+      }
+      return { sr, list, cached: true };
+    }
+    for (let i = 0; i < chunks.length; i++) {
+      const ch = chunks[i];
+      let r; try { r = ch.getBoundingClientRect(); } catch (_) { continue; }
+      if (r.width < 1 || r.height < 1) continue;
+      if (r.right < sr.left - margin || r.left > sr.right + margin) continue;
+      list.push({ ch, i, r });
+    }
+    return { sr, list, cached: false };
+  }
+  // The chunks intersecting the scrollport, with their viewport boxes.
+  // Cached path does ZERO per-chunk layout work; falls back to measuring.
+  function _visibleChunkRects(srIn) {
+    const sr = srIn || (scrollEl ? scrollEl.getBoundingClientRect() : null);
+    if (!sr || !chunks || !chunks.length) return { sr, list: [], cached: false };
+    const list = [];
+    const g = _geoMap(sr);
+    if (g) {
+      const dx = g.dx, dy = g.dy;
+      for (let i = 0; i < _geoN; i++) {
+        const w = _geoW[i], h = _geoH[i];
+        if (!(w > 0) || !(h > 0)) continue;
+        const left = _geoL[i] + dx, top = _geoT[i] + dy;
+        const right = left + w, bottom = top + h;
+        if (right < sr.left + 1 || left > sr.right - 1) continue;
+        if (bottom < sr.top + 1 || top > sr.bottom - 1) continue;
+        list.push({ ch: chunks[i], i, r: { left, top, right, bottom, width: w, height: h } });
+      }
+      return { sr, list, cached: true };
+    }
+    for (let i = 0; i < chunks.length; i++) {
+      const ch = chunks[i], r = ch.getBoundingClientRect();
+      if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
+      if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
+      list.push({ ch, i, r });
+    }
+    return { sr, list, cached: false };
+  }
+
   function _creditReadCharsFromVisible() {
     try {
       if (!document.body.classList.contains('mode-read')) return;
@@ -3428,18 +3676,17 @@
       //    peek-ahead column was what reopened the book 1-2 subtitles AHEAD.
       let leftChunk = null, leftMin = Infinity;
       let edgeChunk = null, edgeDist = Infinity;
-      for (const ch of chunks) {
-        const r = ch.getBoundingClientRect();
-        if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
-        if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
-        if (r.left < leftMin) { leftChunk = ch; leftMin = r.left; }
+      for (const v of _visibleChunkRects(sr).list) {
+        const r = v.r;
+        if (r.left < leftMin) { leftChunk = v.ch; leftMin = r.left; }
         const d = Math.abs(r.right - sr.right); // closest to the right reading edge
-        if (d < edgeDist) { edgeChunk = ch; edgeDist = d; }
+        if (d < edgeDist) { edgeChunk = v.ch; edgeDist = d; }
       }
       // (Char crediting removed from this scroll path — it counted auto-scroll.
       // Chars are credited only at the 5 s bookmark; `leftChunk` is unused here
       // now but kept so the scan stays a single source for both anchors.)
       void leftChunk;
+      if (edgeChunk) _placeAnchorChunk = edgeChunk;
       // Read cursor: the current reading line is the chunk at the RIGHT edge, so
       // "stay at read position" + restore-on-open land where the user actually is.
       if (edgeChunk && pagedChunkToCue) {
@@ -3499,10 +3746,8 @@
     let edgeChunk = null, edgeDist = Infinity;
     let readingChunk = null, readingDist = Infinity;
     let maxFrontier = 0;   // deepest END char-offset among on-screen chunks
-    for (const ch of chunks) {
-      const r = ch.getBoundingClientRect();
-      if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
-      if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
+    for (const v of _visibleChunkRects(sr).list) {
+      const ch = v.ch, r = v.r;
       // Frontier = the DEEPEST visible text, from char METADATA (engine-agnostic).
       // dataset.jpOff/jpLen are identical on both engines and the max END offset
       // on screen climbs monotonically as you read forward.
@@ -3815,10 +4060,197 @@
     }
   }
 
+  // Is the highlighted line actually inside the READABLE area (between the
+  // edge masks)? If not, scroll it back to the reading edge. Cheap and
+  // idempotent — safe to run several times while a fresh open settles.
+  function _ensureHighlightOnScreen() {
+    try {
+      if (_readerHidden() || !scrollEl) return;
+      if (window._bgPlaying) return;            // live follow owns the position
+      if (Date.now() - lastUserScrollTime < 1500) return;   // the user is moving it themselves
+      const chunk = (_placeAnchorChunk && _placeAnchorChunk.isConnected) ? _placeAnchorChunk : null;
+      if (!chunk) return;
+      const cr = chunk.getBoundingClientRect();
+      const sr = scrollEl.getBoundingClientRect();
+      if (!cr.width || !sr.width) return;
+      const visL = sr.left + (_maskLW || 0);
+      const visR = sr.right - (_maskRW || 0);
+      // In vertical-rl the line STARTS at its right edge, so that edge is what
+      // must be comfortably inside the unmasked area.
+      const ok = cr.right <= visR - 2 && cr.right >= visL + 24;
+      if (ok) return;
+      try { window._diag?.('[paged-diag] highlight off-screen (right=' + Math.round(cr.right - sr.left) + ' vis=[' + Math.round(visL - sr.left) + ',' + Math.round(visR - sr.left) + ']) → pulling it back'); } catch (_) {}
+      const saved = lastUserScrollTime;
+      lastUserScrollTime = 0;
+      scrollChunkNearRightWithContext(chunk, 3, { allowFarJump: true, instant: true });
+      lastUserScrollTime = saved;
+    } catch (_) {}
+  }
+  window._pagedEnsureHighlightOnScreen = _ensureHighlightOnScreen;
+
+  function _orientAngle() {
+    try { const a = screen.orientation && screen.orientation.angle; if (Number.isFinite(a)) return a; } catch (_) {}
+    try { const b = Number(window.orientation); return Number.isFinite(b) ? b : 0; } catch (_) { return 0; }
+  }
+  // FOLD / UNFOLD relayout. A foldable changes the viewport WIDTH without
+  // changing orientation, which no ordinary iPhone does — so this path can't
+  // fire on a regular device and the rotation path below is untouched.
+  //
+  // The goal is that opening the phone shows no hunt for the place: the line
+  // the reader was on is re-anchored at the RIGHT reading edge (where
+  // vertical-rl reading starts) with a direct scroll assignment, never an
+  // animated one, and the content is held invisible for the single frame the
+  // new column layout settles in — so it reads as a cross-fade, not a scroll.
+  let _foldBusy = false, _armedAnchor = null, _armTimer = null, _armedAt = 0;
+  function _fadeReaderIn() {
+    if (!innerEl) return;
+    if (_armTimer) { clearTimeout(_armTimer); _armTimer = null; }
+    requestAnimationFrame(() => {
+      if (!innerEl) return;
+      innerEl.style.transition = 'opacity .14s ease';
+      innerEl.style.opacity = '1';
+      setTimeout(() => { if (innerEl) innerEl.style.transition = ''; }, 220);
+    });
+  }
+  // Called the INSTANT a rotation starts — before the viewport changes, while
+  // the old layout is still valid. Captures the line being read and blanks the
+  // text, so the reflow and the re-anchor happen unseen.
+  function _armRelayout(why) {
+    if (!innerEl || _readerHidden()) return;
+    if (Date.now() - _armedAt < 400) return;   // already armed for this event
+    _armedAt = Date.now();
+    _armedAnchor = (_placeAnchorChunk && _placeAnchorChunk.isConnected)
+      ? _placeAnchorChunk : _visibleEdgeChunk();
+    // DIM, not blank. The FIRST rotation to a given width has to re-run the
+    // browser's multi-column layout over the whole book, which can take the
+    // better part of a second (later rotations reuse it and are instant) — and
+    // a fully transparent reader for that long reads as the screen blacking
+    // out. A heavy veil keeps the page present while the reflow happens.
+    innerEl.style.transition = 'opacity .08s ease';
+    innerEl.style.opacity = '0.12';
+    try { window._diag?.('[paged-diag] relayout armed (' + why + ') anchor=#' + (_armedAnchor ? chunks.indexOf(_armedAnchor) : -1)); } catch (_) {}
+    // Safety: never leave the reader blank if the expected resize never lands.
+    if (_armTimer) clearTimeout(_armTimer);
+    _armTimer = setTimeout(() => { _armTimer = null; _armedAnchor = null; _fadeReaderIn(); }, 900);
+  }
+  function _relayoutKeepingPlace(why) {
+    if (!scrollEl || !innerEl || _readerHidden() || _foldBusy) return;
+    _foldBusy = true;
+    const anchor = (_armedAnchor && _armedAnchor.isConnected) ? _armedAnchor
+      : ((_placeAnchorChunk && _placeAnchorChunk.isConnected) ? _placeAnchorChunk : _visibleEdgeChunk());
+    _armedAnchor = null;
+    if (_armTimer) { clearTimeout(_armTimer); _armTimer = null; }
+    const anchorIdx = anchor ? chunks.indexOf(anchor) : -1;
+    const prevTrans = innerEl.style.transition;
+    if (innerEl.style.opacity !== '0.12') { innerEl.style.transition = 'opacity .08s ease'; innerEl.style.opacity = '0.12'; }
+    recompute();
+    requestAnimationFrame(() => {
+      try {
+        const savedUserScroll = lastUserScrollTime;
+        lastUserScrollTime = 0;
+        const a2 = (anchorIdx >= 0 && chunks[anchorIdx]) ? chunks[anchorIdx] : (anchor && anchor.isConnected ? anchor : null);
+        if (a2) scrollChunkNearRightWithContext(a2, 3, { allowFarJump: true, instant: true });
+        else centerOnActiveCard();
+        lastUserScrollTime = savedUserScroll;
+      } catch (_) {}
+      // Land on a real column boundary so no half-rendered line is left at the
+      // reading edge, then keep re-painting the leftover mask as the layout
+      // settles (fonts and images can still shift the grid for a second).
+      try { _snapToColumn(); } catch (_) {}
+      _scheduleEdgeMask();
+      for (const d of [160, 480, 1100]) setTimeout(() => { try { if (!_readerHidden()) { _snapToColumn(); _scheduleEdgeMask(); } } catch (_) {} }, d);
+      try { window._diag?.('[paged-diag] relayout (' + why + ') anchor=#' + anchorIdx + ' w=' + scrollEl.clientWidth + ' cols=' + Math.round(scrollEl.clientWidth / Math.max(1, _columnWidth()))); } catch (_) {}
+      void prevTrans;
+      _fadeReaderIn();
+      setTimeout(() => { _foldBusy = false; }, 240);
+    });
+  }
+  // Test hook: emulate a fold/unfold on any device by forcing the reader's
+  // width. `__kadokiSimulateFold()` with no argument restores the real width.
+  window.__kadokiSimulateFold = function (px) {
+    const view = document.getElementById('readingPagedView');
+    if (!view) return 'reader not open';
+    if (px) view.style.width = Math.round(px) + 'px';
+    else view.style.removeProperty('width');
+    try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+    return 'reader width → ' + (px ? Math.round(px) + 'px' : 'auto');
+  };
+
+  // Automated fold check (launch with KADOKI_SIM_FOLD=1): once the reader has
+  // settled, log where the place is, force an unfold-sized width, log it again,
+  // then fold back — so the place-keeping can be verified on a device that
+  // can't actually fold.
+  (function foldSelfTest() {
+    let tries = 0;
+    const where = (tag) => {
+      const a = (_placeAnchorChunk && _placeAnchorChunk.isConnected) ? _placeAnchorChunk : _visibleEdgeChunk();
+      const edge = _visibleEdgeChunk();
+      const off = a ? (parseInt(a.dataset.jpOff) || 0) : -1;
+      try {
+        console.warn('[fold-test] ' + tag + ' w=' + (scrollEl ? scrollEl.clientWidth : -1) +
+          ' anchor=#' + (a ? chunks.indexOf(a) : -1) + '@' + off +
+          ' edge=#' + (edge ? chunks.indexOf(edge) : -1) +
+          ' scrollLeft=' + Math.round(scrollEl ? scrollEl.scrollLeft : 0));
+      } catch (_) {}
+      return off;
+    };
+    const step = () => {
+      if (!window.__kadokiSimFold) return;
+      if (_readerHidden() || !chunks.length) {
+        if (++tries < 40) setTimeout(step, 2000);
+        else try { console.warn('[fold-test] reader never opened — nothing to check'); } catch (_) {}
+        return;
+      }
+      const a = where('folded ');
+      setTimeout(() => {
+        window.__kadokiSimulateFold(1000);            // open the phone
+        setTimeout(() => {
+          const b = where('unfolded');
+          setTimeout(() => {
+            window.__kadokiSimulateFold();            // close it again
+            setTimeout(() => {
+              const c = where('refolded');
+              const ok = (a >= 0 && Math.abs(b - a) < 2500 && Math.abs(c - a) < 2500);
+              try { console.warn('[fold-test] RESULT ' + (ok ? 'PASS' : 'FAIL') + ' folded=' + a + ' unfolded=' + b + ' refolded=' + c); } catch (_) {}
+            }, 900);
+          }, 900);
+        }, 900);
+      }, 600);
+    };
+    setTimeout(step, 9000);
+  })();
+
   function setupResize() {
     let t;
     let lastWidth = 0;
+    let lastSeenW = 0, lastAngle = _orientAngle();
+    // Blank + capture the moment a rotation BEGINS (this fires before the
+    // viewport has finished changing), so the reflow is never seen.
+    const onOrient = () => _armRelayout('rotate');
+    window.addEventListener('orientationchange', onOrient);
+    try { if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', onOrient); } catch (_) {}
     window.addEventListener('resize', () => {
+      _invalidateChunkGeo();
+      // A ROTATION (angle changed) and a FOLD (big width change at the same
+      // angle) both get the instant, place-preserving relayout — no animated
+      // scroll, no hunt for the line. Everything else (the URL bar, iPad
+      // split-view nudges) keeps the old debounced path below.
+      try {
+        const w = scrollEl ? scrollEl.clientWidth : 0;
+        const ang = _orientAngle();
+        const rotated = ang !== lastAngle;
+        const folded = !rotated && w > 0 && lastSeenW > 0 &&
+                       Math.abs(w - lastSeenW) / Math.max(w, lastSeenW) > 0.25;
+        lastSeenW = w; lastAngle = ang;
+        if ((rotated || folded) && w > 0 && !_readerHidden()) {
+          lastWidth = w; cw = w;
+          if (t) { clearTimeout(t); t = null; }
+          if (rotated) _armRelayout('rotate');   // no-op if orientationchange already armed
+          // One beat for the viewport metrics to settle, then relayout unseen.
+          setTimeout(() => _relayoutKeepingPlace(rotated ? 'rotate' : 'unfold'), 70);
+          return;
+        }
+      } catch (_) {}
       if (t) clearTimeout(t);
       t = setTimeout(() => {
         if (_readerHidden()) return;
@@ -3858,6 +4290,7 @@
     cw = scrollEl.clientWidth;
     sw = innerEl.scrollWidth;
     chunks = Array.from(innerEl.querySelectorAll('.reading-chunk'));
+    _invalidateChunkGeo();   // fresh DOM → the geometry cache must be rebuilt
     _fcReset();   // sequential follow lock is meaningless across a re-chunk
     log(`recompute: clientW=${cw}, scrollW=${sw}, chunks=${chunks.length}`);
     updateProgress();
@@ -3956,8 +4389,11 @@
       return t + '×';
     };
     const paint = () => {
-      const r = (typeof window.getActivePlaybackRate === 'function')
-        ? window.getActivePlaybackRate() : (window.audioPlaybackRate || 1);
+      // Effective, not base: with speed drift on, the number has to climb with
+      // the audio it describes.
+      const r = (typeof window.effectivePlaybackRate === 'function')
+        ? window.effectivePlaybackRate()
+        : ((typeof window.getActivePlaybackRate === 'function') ? window.getActivePlaybackRate() : (window.audioPlaybackRate || 1));
       val.textContent = fmt(r);
     };
     // Same double-fire guard the strip uses (touchend + synthetic click).
@@ -4002,7 +4438,11 @@
           document.body.appendChild(el);
         }
         const band = el.offsetHeight || 0;
-        ctl.dataset.noBand = band >= 34 ? '0' : '1';
+        // The pill normally lives in the status-bar strip and hides when there
+        // isn't one. LANDSCAPE has no such strip by definition, and there it
+        // sits in the header band instead — so it must stay visible.
+        const landscape = (window.innerWidth || 0) > (window.innerHeight || 0);
+        ctl.dataset.noBand = (landscape || band >= 34) ? '0' : '1';
       } catch (_) {}
     };
     probe();
@@ -4241,12 +4681,8 @@
         let chosen = null;
         let chosenLeft = Infinity;
         if (chunks?.length) {
-          const sr = scrollEl.getBoundingClientRect();
-          for (const ch of chunks) {
-            const r = ch.getBoundingClientRect();
-            if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
-            if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
-            if (r.left < chosenLeft) { chosen = ch; chosenLeft = r.left; }
+          for (const v of _visibleChunkRects().list) {
+            if (v.r.left < chosenLeft) { chosen = v.ch; chosenLeft = v.r.left; }
           }
         }
         if (chosen) {
@@ -5801,7 +6237,9 @@
       log(`Loaded ${pagedCues.length} SRT cues for paged reader`);
       try { window._diag?.('[paged-diag] SRT loaded cues=' + pagedCues.length + ' last=' + (pagedCues.length ? Math.round(pagedCues[pagedCues.length - 1].endMs / 1000) + 's' : '-') + ' chunks=' + chunks.length); } catch (_) {}
       // Auto-generated SRT: copy cached word timings back on (karaoke).
-      try { window.autoTranscribe?.enrichWordTimes?.(window._activeTitleId, pagedCues); } catch (_) {}
+      // AWAITED: the copy is async and the first cue paint used to race it —
+      // cues painted w-less (static green) until the word times landed.
+      try { await window.autoTranscribe?.enrichWordTimes?.(window._activeTitleId, pagedCues); } catch (_) {}
       try { window.abStartSrtWordTiming?.(audio, pagedCues); } catch (_) {}
     } catch (e) {
       log('SRT load failed:', e.message);
@@ -6014,15 +6452,14 @@
       return;
     }
     // Word-timed cue → karaoke glow only, no block highlight (kwOnly).
-    const kwOnly = !!(Array.isArray(cue.w) && cue.w.length && window.wordHighlight);
+    const kwOnly = !!(cue && window.wordHighlight);
     const range = setCueRangeHighlight(chunk, cue.text, kwOnly);
     _lastFollowPaintAt = Date.now();   // follow-freeze watchdog heartbeat
-    // Karaoke: word-level glow inside the located cue (no-op without cue.w).
+    // Karaoke: word-level glow inside the located cue (synthetic timing when
+    // the cue has no word times yet). No block-highlight fallback: the static
+    // green must never flash through (user, 2026-09-10).
     let glowed = false;
     try { glowed = !!window.wordHighlight?.readerCuePainted(range, cue); } catch (_) {}
-    // Glow failed to bind (walker mismatch, dead range) → repaint the block
-    // highlight so the reader is never left with NO indicator at all.
-    if (kwOnly && !glowed && range) { try { setCueRangeHighlight(chunk, cue.text); } catch (_) {} }
     if (Date.now() - lastUserScrollTime < 5000) return;
     autoScrollForRange(range, kwOnly);
   }
@@ -6038,7 +6475,12 @@
   // removes both the leftover activation flash and the "green ≠ what Anki
   // gets" mismatch. Any lingering green from an explicit action (set-playhead,
   // reader-entry centering — those still paint) is cleared.
+  // The chunk the reader is ON — the anchor a fold/unfold restores to. Kept
+  // current by every cue paint (follow, jump, entry) and by the scroll scan
+  // below, so it is already correct at the instant the screen changes size.
+  let _placeAnchorChunk = null;
   function setCueRangeHighlight(chunk, cueText, suppressPaint) {
+    if (chunk) _placeAnchorChunk = chunk;
     if (!window.CSS?.highlights || typeof Highlight === 'undefined') return;
     const normCue = normalizeJP(cueText);
     if (!normCue) { clearCueHighlight(); return; }
@@ -6220,6 +6662,7 @@
     if (Math.abs(delta) < 4) return;
     lastProgrammaticScrollTime = Date.now();
     log('[scroll-trace] scrollBy delta=' + Math.round(delta));
+    try { window._diag?.('[paged-diag] follow scroll delta=' + Math.round(delta) + ' cueL=' + Math.round(rangeRect.left - sr.left) + ' cueR=' + Math.round(rangeRect.right - sr.left) + ' vis=[' + Math.round(visLeft - sr.left) + ',' + Math.round(visRight - sr.left) + '] defer=' + !!deferWordTurn + ' text=' + String(range.toString() || '').slice(0, 14)); } catch (_) {}
     scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
   }
 
@@ -6578,6 +7021,11 @@
         if (!ok && _tries < 45 && !window._bgPlaying) setTimeout(tryPaint, 120);
       };
       tryPaint();
+      // The paint can succeed with the line just OFF the reading area — under
+      // an edge mask, or a column past the edge — because "painted" only means
+      // the range resolved. Re-check once the layout has settled and pull it
+      // back in. Three passes: late images and font loading can move it again.
+      for (const d of [320, 900, 1800]) setTimeout(_ensureHighlightOnScreen, d);
       _revealReaderSettled();
     };
     // First attempt on the next FRAME (the old flat 80ms was pure added
@@ -6721,14 +7169,11 @@
       try { window.showToast?.('No content loaded', 1800); } catch (_) {}
       return;
     }
-    const sr = scrollEl.getBoundingClientRect();
-    let chosen = null, chosenRight = -Infinity, visibleCount = 0;
-    for (const ch of chunks) {
-      const r = ch.getBoundingClientRect();
-      if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
-      if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
-      visibleCount++;
-      if (r.right > chosenRight) { chosen = ch; chosenRight = r.right; }
+    const _vis = _visibleChunkRects();
+    let chosen = null, chosenRight = -Infinity;
+    const visibleCount = _vis.list.length;
+    for (const v of _vis.list) {
+      if (v.r.right > chosenRight) { chosen = v.ch; chosenRight = v.r.right; }
     }
     note('setPlayhead: ' + visibleCount + ' visible chunks');
     if (!chosen) {
@@ -6794,13 +7239,9 @@
   // shared by the read-mode PLAY resolvers below. null when hidden/empty.
   function _visibleEdgeChunk() {
     if (_readerHidden() || !scrollEl || !chunks?.length) return null;
-    const sr = scrollEl.getBoundingClientRect();
     let chosen = null, chosenRight = -Infinity;
-    for (const ch of chunks) {
-      const r = ch.getBoundingClientRect();
-      if (r.right < sr.left + 1 || r.left > sr.right - 1) continue;
-      if (r.bottom < sr.top + 1 || r.top > sr.bottom - 1) continue;
-      if (r.right > chosenRight) { chosen = ch; chosenRight = r.right; }
+    for (const v of _visibleChunkRects().list) {
+      if (v.r.right > chosenRight) { chosen = v.ch; chosenRight = v.r.right; }
     }
     return chosen;
   }
@@ -6867,13 +7308,9 @@
     // Paint the marker exactly at the new playhead. Word-timed cue → park the
     // karaoke glow (the follow look); w-less → the block cue-active highlight.
     try {
-      const _jKw = !!(Array.isArray(cue.w) && cue.w.length && window.wordHighlight);
+      const _jKw = !!(cue && window.wordHighlight);
       const _jr = setCueRangeHighlight(chunk, cue.text, _jKw);
-      if (_jKw && _jr) {
-        let _jok = false;
-        try { _jok = !!window.wordHighlight.readerCuePainted(_jr, cue); } catch (_) {}
-        if (!_jok) { try { setCueRangeHighlight(chunk, cue.text); } catch (_) {} }
-      }
+      if (_jKw && _jr) { try { window.wordHighlight.readerCuePainted(_jr, cue); } catch (_) {} }
     } catch (_) {}
     // Reset the highlight-cue gate so the next position event (when
     // user resumes audio from here) actually paints — without this,
@@ -6970,8 +7407,17 @@
     }
     if (Math.abs(delta) < 4) return; // already there
     lastProgrammaticScrollTime = Date.now();
-    log('[scroll-trace] scrollChunkNearRightWithContext delta=' + Math.round(delta));
-    scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
+    log('[scroll-trace] scrollChunkNearRightWithContext delta=' + Math.round(delta) + (opts && opts.instant ? ' (instant)' : ''));
+    if (opts && opts.instant) {
+      // Rotation / fold: the layout just changed under the reader, so an
+      // ANIMATED scroll is the "rush" the user sees — half a second of the
+      // page racing to find the line. A direct scrollLeft set lands in the
+      // same frame. (Direct set, never scrollBy({behavior:'instant'}), which
+      // blanks the viewport — see the verification note below.)
+      scrollEl.scrollLeft += delta;
+    } else {
+      scrollEl.scrollBy({ left: delta, behavior: 'smooth' });
+    }
     // Verification pass: if the chunk still isn't visible 600 ms
     // later (smooth scroll should complete in ~400 ms), re-issue
     // a one-shot direct scrollLeft set to force the position. This
@@ -7029,7 +7475,7 @@
       // Set-playhead flash the whole passage green for a second until the
       // follow's kwOnly repaint cleared it.
       try {
-        const kwOnly = !!(Array.isArray(cue.w) && cue.w.length && window.wordHighlight);
+        const kwOnly = !!(cue && window.wordHighlight);
         const range = setCueRangeHighlight(chunk, cue.text || '', kwOnly);
         if (kwOnly && range) { try { window.wordHighlight?.readerCuePainted(range, cue); } catch (_) {} }
       } catch (e) {}
@@ -7389,15 +7835,14 @@
       lastReadCueIdx = idx;
     }
     // Word-timed cue → karaoke glow only, no block highlight (kwOnly).
-    const kwOnly = !!(Array.isArray(cue.w) && cue.w.length && window.wordHighlight);
+    const kwOnly = !!(cue && window.wordHighlight);
     const range = setCueRangeHighlight(chunk, cue.text, kwOnly);
     _lastFollowPaintAt = Date.now();   // follow-freeze watchdog heartbeat
-    // Karaoke: word-level glow inside the located cue (no-op without cue.w).
+    // Karaoke: word-level glow inside the located cue (synthetic timing when
+    // the cue has no word times yet). No block-highlight fallback: the static
+    // green must never flash through (user, 2026-09-10).
     let glowed = false;
     try { glowed = !!window.wordHighlight?.readerCuePainted(range, cue); } catch (_) {}
-    // Glow failed to bind (walker mismatch, dead range) → repaint the block
-    // highlight so the reader is never left with NO indicator at all.
-    if (kwOnly && !glowed && range) { try { setCueRangeHighlight(chunk, cue.text); } catch (_) {} }
     // Range resolution failed entirely (setCueRangeHighlight bailed): nothing
     // was painted AND readerCuePainted(undefined) just tore the glow down.
     // Un-claim the cue so the next position event retries instead of leaving

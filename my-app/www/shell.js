@@ -243,7 +243,7 @@
 
     // Source of truth: the Title object's attachments. Falls back to the
     // legacy per-deck pref read only when no Title is active.
-    let hasAudio = false, hasEpub = false, hasDeck = false, hasSrt = false;
+    let hasAudio = false, hasEpub = false, hasDeck = false, hasSrt = false, hasVideo = false;
     let source = 'none';
     const idsToCheck = [window._activeTitleId, window._editingTitleId].filter(Boolean);
     try {
@@ -255,6 +255,7 @@
           if (t.attachments?.epub) hasEpub = true;
           if (t.attachments?.deck) hasDeck = true;
           if (t.attachments?.srt) hasSrt = true;
+          try { const ab = t.attachments?.audiobook; if (ab && (ab.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(ab.name || ''))) hasVideo = true; } catch (_) {}
           source = 'title:' + id;
           if (hasAudio && hasEpub && hasDeck) break;
         }
@@ -295,6 +296,10 @@
 
     console.log('[shell] refreshTabAvailability source=' + source +
       ' hasAudio=' + hasAudio + ' hasEpub=' + hasEpub + ' hasCards=' + hasCards);
+    // Title kind for the Card-tab chooser: a BOOK (epub/audio, not an Anki deck,
+    // not a video) may route its Card tab to Vocabulary / Timeline / Library.
+    window._activeTitleKind = hasDeck ? 'deck' : hasVideo ? 'video' : (hasEpub || hasAudio) ? 'book' : 'none';
+    setTimeout(updateCardTabLabel, 0);   // after the data-empty marks below
     const setEmpty = (tab, empty) => {
       if (!tab) return;
       if (empty) tab.dataset.empty = '1';
@@ -364,6 +369,153 @@
     }
     return false;
   }
+
+  // ---------- Card tab for BOOK titles: press-and-hold chooser ----------
+  // The user rarely uses card mode for books, so the tab can instead open
+  // Vocabulary (Anki words → lookups → AI picks), Timeline & Scenes, or the
+  // Library. Long-press the tab to choose; the choice persists (one setting
+  // for all books). Decks and video keep card mode.
+  const CARD_TAB_KEY = 'CARD_TAB_VIEW_V1';
+  let _cardTabLongPressed = false;
+  function cardTabView() {
+    try { const v = localStorage.getItem(CARD_TAB_KEY); return (v === 'vocab' || v === 'timeline' || v === 'library') ? v : 'cards'; } catch (_) { return 'cards'; }
+  }
+  function cardTabIsBook() { return window._activeTitleKind === 'book'; }
+  // Panes live BELOW the app header (z < 9000) so the mode tabs stay live:
+  // tapping READ / AUDIO closes whatever pane is open and switches as usual.
+  function closeCardTabPanes() {
+    try { window.vocabView?.close?.(); } catch (_) {}
+    try { if (document.getElementById('lookupNavBar')?.dataset.pane) window.lookupLog?.closeViewer?.(); } catch (_) {}
+    try { document.querySelectorAll('#kchapterView').forEach((ov) => { if (typeof ov._kaiClose === 'function') ov._kaiClose(); else ov.remove(); }); } catch (_) {}
+    // Library opened as a pane from the Card tab.
+    try { const lp = document.getElementById('libraryPage'); if (lp && lp.classList.contains('library-pane') && lp.classList.contains('visible') && typeof closeLibrary === 'function') closeLibrary(); } catch (_) {}
+    // Timeline & Scenes panel (ai-timeline openPanel; id reused from the bookmarks overlay).
+    try { const tl = document.getElementById('bookmarksOverlay'); if (tl && tl.classList.contains('kai-ai-page')) { if (typeof tl._kaiDestroy === 'function') tl._kaiDestroy(); else tl.remove(); } } catch (_) {}
+  }
+  function markCardTabActive() {
+    document.querySelectorAll('#shellModeTabs .mode-tab').forEach((t) => { if (t.dataset.mode === 'card') t.dataset.active = '1'; else delete t.dataset.active; });
+  }
+  function openCardTabView(v) {
+    if (v === 'vocab') {
+      closeCardTabPanes();
+      try { window.vocabView?.open?.(); } catch (_) {}
+      markCardTabActive();
+      return;
+    }
+    if (v === 'timeline') {
+      closeCardTabPanes();
+      try {
+        Promise.resolve(window.aiTimeline?.openPanel?.()).then(() => {
+          // Dock the panel BELOW the header (z < 9000) so the mode tabs stay live.
+          const ov = document.getElementById('bookmarksOverlay');
+          if (ov && ov.classList.contains('kai-ai-page')) { ov.style.top = 'calc(env(safe-area-inset-top, 0px) + 48px)'; ov.style.zIndex = '8900'; ov.style.background = '#0b0b10'; ov.style.paddingTop = '6px'; }
+          markCardTabActive();
+        }).catch(() => {});
+      } catch (_) {}
+      return;
+    }
+    if (v === 'library')  { closeCardTabPanes(); try { if (typeof openLibrary === 'function') openLibrary({ pane: true }); } catch (_) {} markCardTabActive(); return; }
+    if (typeof window.setShellMode === 'function') window.setShellMode('card');
+  }
+  (function installPaneCloseOnTabs() {
+    const tabs = document.getElementById('shellModeTabs');
+    if (!tabs) return;
+    tabs.addEventListener('click', (e) => {
+      const tab = e.target && e.target.closest ? e.target.closest('.mode-tab') : null;
+      if (!tab || tab.dataset.mode === 'card') return;
+      const tlOv = document.getElementById('bookmarksOverlay');
+      const lp = document.getElementById('libraryPage');
+      const hadPane = !!(document.getElementById('vocabPane') || document.getElementById('lookupNavBar')?.dataset.pane || document.getElementById('kchapterView') || (tlOv && tlOv.classList.contains('kai-ai-page')) || (lp && lp.classList.contains('library-pane') && lp.classList.contains('visible')));
+      if (!hadPane) return;
+      closeCardTabPanes();
+      // Same-mode tap (the underlying mode already IS this tab): setShellMode
+      // no-ops, so restore the tab highlight here.
+      try { updateTabsUI(inferActiveMode()); } catch (_) {}
+    }, true);
+  })();
+  window.onCardTabTap = function () {
+    if (_cardTabLongPressed) { _cardTabLongPressed = false; return; }
+    openCardTabView(cardTabIsBook() ? cardTabView() : 'cards');
+  };
+  function updateCardTabLabel() {
+    const tab = document.querySelector('#shellModeTabs .mode-tab[data-mode="card"]');
+    if (!tab) return;
+    const v = cardTabIsBook() ? cardTabView() : 'cards';
+    const T = (k, fb) => (window.i18n && window.i18n.t) ? window.i18n.t(k, fb) : fb;
+    const labels = { cards: T('nav.mode_card', 'CARD'), vocab: T('ct.tab_vocab', 'VOCAB'), timeline: T('ct.tab_timeline', 'TIMELINE'), library: T('ct.tab_library', 'LIBRARY') };
+    tab.textContent = labels[v] || labels.cards;
+    if (v !== 'cards') delete tab.dataset.empty;   // the chosen view is always available
+  }
+  function openCardTabChooser() {
+    const T = (k, fb) => (window.i18n && window.i18n.t) ? window.i18n.t(k, fb) : fb;
+    const prev = document.getElementById('cardTabChooser'); if (prev) prev.remove();
+    const cur = cardTabView();
+    const ov = document.createElement('div');
+    ov.id = 'cardTabChooser'; ov.className = 'kai-modal';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99990;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center;';
+    const sheet = document.createElement('div');
+    sheet.style.cssText = 'width:min(100%,520px);background:#141419;border:1px solid #2a2a33;border-bottom:0;border-radius:16px 16px 0 0;padding:14px 12px calc(env(safe-area-inset-bottom,0px) + 14px);display:flex;flex-direction:column;gap:8px;';
+    const head = document.createElement('div');
+    head.style.cssText = 'color:#9a9aa6;font-size:.76rem;letter-spacing:.06em;text-transform:uppercase;padding:0 6px 6px;';
+    head.textContent = T('ct.title', 'This tab opens');
+    sheet.appendChild(head);
+    const opts = [
+      ['cards',    T('ct.cards', 'Cards'),               T('ct.cards_sub', 'One card per subtitle line')],
+      ['vocab',    T('ct.vocab', 'Vocabulary'),          T('ct.vocab_sub', 'Anki words, lookups and AI picks for this title')],
+      ['timeline', T('ct.timeline', 'Timeline & Scenes'), T('ct.timeline_sub', 'Chapter summaries, characters, scenes')],
+      ['library',  T('ct.library', 'Library'),           T('ct.library_sub', 'Switch titles')],
+    ];
+    for (const [v, label, sub] of opts) {
+      const b = document.createElement('button');
+      const on = v === cur;
+      b.style.cssText = 'text-align:left;background:' + (on ? '#1d1830' : '#1a1a22') + ';border:1px solid ' + (on ? '#5a4a8a' : '#2a2a33') + ';border-radius:12px;padding:12px 14px;color:#eee;cursor:pointer;display:flex;align-items:center;gap:12px;';
+      b.innerHTML = '<span style="flex:1;min-width:0;"><span style="display:block;font-weight:700;font-size:.98rem;"></span><span style="display:block;color:#8a8a96;font-size:.78rem;margin-top:2px;"></span></span><span style="flex:none;color:#cbbfee;font-size:1rem;">' + (on ? '✓' : '') + '</span>';
+      b.querySelector('span > span').textContent = label;
+      b.querySelectorAll('span > span')[1].textContent = sub;
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        try { localStorage.setItem(CARD_TAB_KEY, v); } catch (_) {}
+        try { window.kHaptic?.(); } catch (_) {}
+        ov.remove();
+        updateCardTabLabel();
+        openCardTabView(v);
+      });
+      sheet.appendChild(b);
+    }
+    const hint = document.createElement('div');
+    hint.style.cssText = 'color:#6a6a76;font-size:.72rem;text-align:center;padding-top:4px;';
+    hint.textContent = T('ct.hint', 'Press and hold the tab to change this');
+    sheet.appendChild(hint);
+    ov.addEventListener('click', (e) => { if (e.target === ov) ov.remove(); });
+    ov.appendChild(sheet);
+    document.body.appendChild(ov);
+  }
+  (function installCardTabLongPress() {
+    const tab = document.querySelector('#shellModeTabs .mode-tab[data-mode="card"]');
+    if (!tab) return;
+    let timer = null, x0 = 0, y0 = 0;
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    tab.addEventListener('touchstart', (e) => {
+      const t = e.touches[0]; if (!t) return;
+      x0 = t.clientX; y0 = t.clientY;
+      cancel();
+      timer = setTimeout(() => {
+        timer = null;
+        if (!cardTabIsBook()) return;
+        _cardTabLongPressed = true;
+        try { window.kHaptic?.('MEDIUM'); } catch (_) {}
+        openCardTabChooser();
+      }, 500);
+    }, { passive: true });
+    tab.addEventListener('touchmove', (e) => {
+      const t = e.touches[0];
+      if (t && (Math.abs(t.clientX - x0) > 10 || Math.abs(t.clientY - y0) > 10)) cancel();
+    }, { passive: true });
+    tab.addEventListener('touchend', cancel, { passive: true });
+    tab.addEventListener('touchcancel', cancel, { passive: true });
+    tab.addEventListener('contextmenu', (e) => e.preventDefault());
+    tab.style.webkitTouchCallout = 'none'; tab.style.webkitUserSelect = 'none'; tab.style.userSelect = 'none';
+  })();
 
   window.setShellMode = function (mode, opts) {
     // Block USER switches into modes whose backing content isn't loaded.

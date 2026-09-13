@@ -251,8 +251,11 @@ final class KadokiReadEngine: NSObject, KadokiPlayback {
         if playingFlag { gain = 0; gainStep = Float(1.0 / (0.010 * sampleRate)) }
         ringLock.unlock()
         lastTimeWhenIdle = Double(f) / sampleRate
+        seekAt = Date().timeIntervalSince1970; firstAfterSeekLogged = false
         sem.signal()
     }
+    private var seekAt: Double = 0
+    private var firstAfterSeekLogged = true
 
     // MARK: producer
 
@@ -376,6 +379,7 @@ final class KadokiReadEngine: NSObject, KadokiPlayback {
             return
         }
         let take = min(count, avail)
+        if !firstAfterSeekLogged { firstAfterSeekLogged = true; NSLog("[ReadEngine] first audio %.0f ms after seek", (Date().timeIntervalSince1970 - seekAt) * 1000) }
         var h = ringHead
         var g = gain
         let gT = gainTarget, gS = gainStep

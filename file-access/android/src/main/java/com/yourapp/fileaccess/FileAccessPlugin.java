@@ -214,6 +214,28 @@ public class FileAccessPlugin extends Plugin {
         startActivityForResult(call, intent, "filePickerResult");
     }
 
+    /** Audio/video tags without copying the file (folder-import pairing). */
+    @PluginMethod
+    public void mediaTags(PluginCall call) {
+        String uriString = call.getString("uri");
+        JSObject out = new JSObject();
+        if (uriString == null) { call.resolve(out); return; }
+        android.media.MediaMetadataRetriever r = new android.media.MediaMetadataRetriever();
+        try {
+            r.setDataSource(getContext(), Uri.parse(uriString));
+            String t = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE);
+            String a = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST);
+            String al = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ALBUM);
+            String d = r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION);
+            if (t != null && !t.isEmpty()) out.put("title", t);
+            if (a != null && !a.isEmpty()) out.put("artist", a);
+            if (al != null && !al.isEmpty()) out.put("album", al);
+            if (d != null) { try { out.put("durationMs", Long.parseLong(d)); } catch (Exception ignored) {} }
+        } catch (Throwable ignored) {
+        } finally { try { r.release(); } catch (Throwable ignored) {} }
+        call.resolve(out);
+    }
+
     @PluginMethod
     public void materializeToCache(PluginCall call) {
         String uriString = call.getString("uri");

@@ -40,6 +40,67 @@
   const GAP_OK_MS = 2000;                // residual uncovered gap still counting as "complete"
   const SKIP_AHEAD_MIN_MS = 60 * 1000;   // re-entering covered audio ≥ this long → jump the job past it
   const MAX_JOB_RETRIES = 2;
+  // ---- power policy (2026-09-12) ----
+  //
+  // On-device speech recognition is by far the heaviest thing the app runs.
+  // Unbounded it transcribed the WHOLE book at full speed for an entire
+  // session (LOOKAHEAD_MS is an hour, and reaching EOF wrapped around to
+  // backfill every remaining gap from 0) — device profiling put it at the top
+  // of the "why is the phone hot" list, well above anything on the JS side.
+  //
+  // Now the transcriber keeps a bounded BUFFER ahead of the playhead and
+  // parks once it's full, so its duty cycle tracks playback instead of racing
+  // it; the whole-book backfill runs only while charging; and serious thermal
+  // pressure or Low Power Mode stops it outright. The user can opt back into
+  // unlimited work (Preferences → Read).
+  const AHEAD_HIGH_MS = 10 * 60 * 1000;   // park once this much ahead is covered
+  const AHEAD_LOW_MS  =  4 * 60 * 1000;   // un-park once the buffer drains below this
+  const POWER_TTL_MS  = 20000;
+  let _power = { charging: false, thermal: 'nominal', lowPower: false, level: -1, at: 0 };
+  let _powerBusy = false, _parked = false;
+  function unlimited() { try { return localStorage.getItem('AT_POWER_UNLIMITED') === '1'; } catch (_) { return false; } }
+  function refreshPower(force) {
+    const now = Date.now();
+    if (_powerBusy || (!force && now - _power.at < POWER_TTL_MS)) return;
+    _powerBusy = true;
+    Promise.resolve(window.Capacitor?.Plugins?.BackgroundAudio?.powerState?.())
+      .then((r) => { if (r) _power = { charging: !!r.charging, thermal: String(r.thermal || 'nominal'), lowPower: !!r.lowPower, level: Number(r.level), at: Date.now() }; else _power.at = Date.now(); })
+      .catch(() => { _power.at = Date.now(); })
+      .finally(() => { _powerBusy = false; });
+  }
+  // kind: 'ahead' (keep up with the playhead) | 'backfill' (the rest of the book)
+  function powerAllows(kind) {
+    if (unlimited()) return true;
+    if (_power.thermal === 'serious' || _power.thermal === 'critical') return false;
+    if (_power.lowPower && !_power.charging) return false;
+    return kind === 'backfill' ? !!_power.charging : true;
+  }
+  function aheadCoveredMs(pos) {
+    const a = active;
+    if (!a || !(pos >= 0)) return 0;
+    const r = coveringRange(a.cov || [], pos);
+    return r ? Math.max(0, r[1] - pos) : 0;
+  }
+  // Parked work is re-evaluated on a slow tick: plugging in (or the phone
+  // cooling off) must resume the backfill even with nothing playing, which
+  // the position-event path alone would never notice.
+  setInterval(() => {
+    try {
+      const a = active;
+      if (!a || a.done || job || a.timingOnly) return;
+      if (document.hidden && !window._bgPlaying) return;
+      refreshPower();
+      if (!_parked) return;
+      if (!powerAllows('backfill') && !(aheadCoveredMs(lastPosMs >= 0 ? lastPosMs : 0) < AHEAD_LOW_MS && powerAllows('ahead'))) return;
+      lastEnsureAt = 0;   // bypass the 2 s throttle for this deliberate retry
+      ensureJob(lastPosMs >= 0 ? lastPosMs : 0);
+    } catch (_) {}
+  }, 30000);
+
+  function powerInfo() {
+    return { charging: _power.charging, thermal: _power.thermal, lowPower: _power.lowPower, parked: _parked, unlimited: unlimited(),
+             aheadMs: aheadCoveredMs(lastPosMs >= 0 ? lastPosMs : 0) };
+  }
 
   const plugin = () => window.Capacitor?.Plugins?.AutoTranscribe;
   // Native transcription exists on BOTH platforms now: iOS = SpeechAnalyzer,
@@ -630,7 +691,32 @@
     const now = Date.now();
     if (now - lastEnsureAt < 2000) return;
     lastEnsureAt = now;
-    startJob(nextUncovered(a.cov, Math.max(0, posMs)));
+    refreshPower();   // fire-and-forget; the snapshot below is at most POWER_TTL_MS old
+    const at = Math.max(0, posMs);
+    const start = nextUncovered(a.cov, at);
+    // Work that isn't keeping the playhead supplied — a gap far ahead, or the
+    // fill-the-rest pass — is backfill, and backfill needs power.
+    const kind = (aheadCoveredMs(at) >= AHEAD_HIGH_MS || start > at + AHEAD_HIGH_MS) ? 'backfill' : 'ahead';
+    if (!powerAllows(kind)) {
+      _parked = true;
+      diag('ensureJob: held (' + kind + ') thermal=' + _power.thermal + ' charging=' + _power.charging + ' lowPower=' + _power.lowPower);
+      return;
+    }
+    _parked = false;
+    startJob(start);
+  }
+  // Park a RUNNING job once the buffer ahead of the playhead is full (battery
+  // only). The native job is stopped, not queued for restart — onPosition
+  // brings it back when the buffer drains past AHEAD_LOW_MS.
+  function maybeParkForPower(pos) {
+    if (!job || unlimited()) return false;
+    const ahead = aheadCoveredMs(pos);
+    const thermal = _power.thermal === 'serious' || _power.thermal === 'critical' || (_power.lowPower && !_power.charging);
+    if (!thermal && (_power.charging || ahead < AHEAD_HIGH_MS)) return false;
+    diag('parking transcriber: ' + Math.round(ahead / 1000) + 's buffered, thermal=' + _power.thermal + ' charging=' + _power.charging);
+    const j = job; job = null; pendingRestartMs = null; _parked = true;
+    try { plugin()?.stop({ jobId: j.id }); } catch (_) {}
+    return true;
   }
 
   // Reader-page hint (paged reader, after its layout/bookmark settle): before
@@ -710,7 +796,12 @@
       schedulePersist(true);
       if (!(await maybeFinalize())) {
         const s = nextUncovered(a.cov, 0);
-        if (!isFullyCovered(a.cov, a.durationMs)) startJob(s);
+        // Reaching EOF and wrapping back to fill every earlier gap is the
+        // whole-book backfill — power-gated.
+        if (!isFullyCovered(a.cov, a.durationMs)) {
+          if (powerAllows('backfill')) { _parked = false; startJob(s); }
+          else { _parked = true; diag('backfill held for power (charging=' + _power.charging + ' thermal=' + _power.thermal + ')'); }
+        }
       }
     } else if (ev.reason === 'stopped') {
       if (pendingRestartMs != null) {
@@ -746,6 +837,8 @@
     if (!Number.isFinite(pos)) return;
     lastPosMs = pos;
     if (a.done) return;
+    refreshPower();
+    if (maybeParkForPower(pos)) return;
     if (job) {
       const now = Date.now();
       if (now - lastTargetSentAt > 5000) {
@@ -758,6 +851,8 @@
       if ((outsideAhead || outsideBehind) && !coveringRange(a.cov, pos)) {
         restartAt(Math.max(0, pos - 2000));
       }
+    } else if (_parked && aheadCoveredMs(pos) >= AHEAD_LOW_MS && !unlimited() && !_power.charging) {
+      // Still well buffered — stay parked (hysteresis; no restart churn).
     } else {
       ensureJob(pos);
     }
@@ -1381,6 +1476,8 @@
 
   window.autoTranscribe = {
     progressState,      // () → null when nothing to wait on, else {progress, coveragePct, jobRunning}
+    powerInfo,          // () → {charging, thermal, lowPower, parked, unlimited, aheadMs}
+    refreshPower,
     hintPosition,       // (ms) → before playback: move the job to the reader's page if untranscribed
     enrichSrtWordTimes, // (titleId, cues) → align cached transcription word times onto SRT cues
     srtWordTimingWanted,// () → pref: harvest word timings for SRT titles via transcription

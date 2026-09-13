@@ -398,6 +398,41 @@ public class BackgroundAudioPlugin extends Plugin {
         }, "kadoki-audio-cover").start();
     }
 
+    /** Charging / thermal / battery-saver state for the transcriber's power policy. */
+    @PluginMethod
+    public void powerState(PluginCall call) {
+        JSObject r = new JSObject();
+        boolean charging = false; double level = -1;
+        try {
+            android.content.Intent b = getContext().registerReceiver(null,
+                new android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED));
+            if (b != null) {
+                int status = b.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1);
+                charging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING
+                        || status == android.os.BatteryManager.BATTERY_STATUS_FULL;
+                int lvl = b.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1);
+                int scale = b.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, -1);
+                if (lvl >= 0 && scale > 0) level = (double) lvl / (double) scale;
+            }
+        } catch (Throwable ignored) {}
+        String thermal = "nominal";
+        boolean lowPower = false;
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE);
+            if (pm != null) {
+                lowPower = pm.isPowerSaveMode();
+                if (android.os.Build.VERSION.SDK_INT >= 29) {
+                    int s = pm.getCurrentThermalStatus();
+                    if (s >= android.os.PowerManager.THERMAL_STATUS_SEVERE) thermal = "critical";
+                    else if (s >= android.os.PowerManager.THERMAL_STATUS_MODERATE) thermal = "serious";
+                    else if (s >= android.os.PowerManager.THERMAL_STATUS_LIGHT) thermal = "fair";
+                }
+            }
+        } catch (Throwable ignored) {}
+        r.put("charging", charging); r.put("level", level); r.put("thermal", thermal); r.put("lowPower", lowPower);
+        call.resolve(r);
+    }
+
     @PluginMethod
     public void deviceModel(PluginCall call) {
         JSObject r = new JSObject();

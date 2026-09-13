@@ -227,6 +227,10 @@
     .subtitle-text::-webkit-scrollbar { display: none; }
 
     /* Library Page Styles */
+    /* Card-tab pane: below the header, tabs stay live (shell.js closes it on a tab tap). */
+    #libraryPage.library-pane { top: calc(env(safe-area-inset-top, 0px) + 48px); height: auto; bottom: 0; z-index: 8900; padding-top: 10px; }
+    #libraryPage.library-pane .library-header { margin-top: 0; padding-top: 0; }
+    #libraryPage.library-pane .close-library { display: none; }
     #libraryPage {
       position: fixed;
       top: 0;
@@ -292,7 +296,90 @@
       gap: 12px;
     }
 
+    /* Library browser: toolbar, meta line, expandable details, swipe gallery. */
+    .lib-toolbar { display:flex; gap:8px; align-items:center; justify-content:space-between; margin:0 0 10px; }
+    .lib-more { display:inline-flex; align-items:center; gap:8px; background:transparent; color:#bbb; border:1px solid var(--border,#2a2a2a); border-radius:999px; padding:6px 12px; font-size:.78rem; font-weight:600; cursor:pointer; font-family:inherit; max-width:60%; }
+    .lib-more > span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .lib-more[data-on="1"] { color:#fff; border-color:#555; }
+    .lib-more-chev { color:#777; font-size:.7rem; }
+    .lib-tools { display:flex; flex-direction:column; gap:8px; margin:-2px 0 12px; padding:10px 12px; background:var(--panel,#161616); border:1px solid var(--border,#2a2a2a); border-radius:12px; }
+    .lib-tools-row { display:flex; align-items:center; gap:10px; }
+    .lib-tools-row > span { flex:none; width:44px; color:#8a8a96; font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; }
+    .lib-tools-row .lib-seg { flex:1; display:flex; }
+    .lib-tools-row .lib-seg button { flex:1; padding:6px 4px; }
+    .lib-seg { display:inline-flex; border:1px solid var(--border,#2a2a2a); border-radius:999px; overflow:hidden; }
+    .lib-seg button { background:transparent; color:#aaa; border:0; padding:6px 12px; font-size:.78rem; font-weight:600; cursor:pointer; font-family:inherit; }
+    .lib-seg button[data-on="1"] { background:var(--panel-elev,#1c1c1c); color:#fff; }
+    .lib-chip { background:transparent; color:#aaa; border:1px solid var(--border,#2a2a2a); border-radius:999px; padding:5px 11px; font-size:.76rem; cursor:pointer; font-family:inherit; }
+    .lib-chip[data-on="1"] { color:#fff; border-color:var(--accent-read,#4caf50); }
+    .lib-status { font-size:.72rem; color:#8a8a96; margin:-4px 0 10px; text-align:center; }
+    .lib-meta { display:flex; gap:10px; flex-wrap:wrap; color:#9a9aa6; font-size:.78rem; margin-top:5px; align-items:center; }
+    .lib-diff { display:inline-flex; gap:2px; align-items:center; }
+    .lib-diff i { width:7px; height:7px; border-radius:50%; background:#2e2e3a; display:inline-block; }
+    .lib-diff i.on { background:var(--accent-card,#ff9550); }
+    .lib-tag { display:inline-block; font-size:.68rem; color:#b9b9c4; border:1px solid #2a2a33; border-radius:999px; padding:1px 8px; margin:2px 4px 0 0; }
+    .lib-details { margin-top:10px; padding-top:10px; border-top:1px solid #22222a; }
+    .lib-toprow { display:flex; gap:8px; margin:0 0 12px; }
+    .lib-mini { flex:1; background:transparent; color:#ccc; border:1px solid var(--border,#2a2a2a); border-radius:9px; padding:8px 0; font-size:.8rem; font-weight:600; cursor:pointer; font-family:inherit; }
+    .lib-mini.danger { color:#e08a8a; border-color:#4a2a2a; }
+    .lib-details .lib-cover { width:min(52%,220px); border-radius:10px; display:block; margin:0 auto 10px; box-shadow:0 10px 26px rgba(0,0,0,.5); }
+    .lib-para { color:#d4d4de; font-size:1.06rem; line-height:1.8; margin:0 0 14px; }
+    .lib-note { color:#9a9aa6; font-size:.78rem; line-height:1.5; margin:4px 0 8px; }
+    .deck-toggle { flex:none; background:transparent; border:1px solid var(--border,#2a2a2a); border-radius:8px; color:#bbb; width:34px; height:34px; font-size:1rem; cursor:pointer; margin-left:8px; font-family:inherit; }
+    .lib-gallery { display:flex; overflow-x:auto; scroll-snap-type:x mandatory; gap:14px; padding:2px 0 16px; -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+    .lib-gallery::-webkit-scrollbar { display:none; }
+    /* One block per card: the whole page scrolls (cover scrolls away as you read); nothing nested scrolls. */
+    .lib-card { flex:0 0 100%; scroll-snap-align:center; align-self:flex-start; background:linear-gradient(180deg,#1a1a22,#111116); border:1px solid rgba(255,255,255,.1); border-radius:18px; padding:16px 16px 18px; box-sizing:border-box; box-shadow:inset 0 1px 0 rgba(255,255,255,.08), 0 10px 30px rgba(0,0,0,.45); display:flex; flex-direction:column; }
+    .lib-gallery { align-items:flex-start; }
+    .lib-card .lib-cover-big { width:min(58%,240px); aspect-ratio:2/3; object-fit:cover; border-radius:12px; margin:0 auto 12px; display:block; box-shadow:0 12px 30px rgba(0,0,0,.55); flex:none; }
+    .lib-card .lib-avatar-big { width:min(58%,240px); aspect-ratio:2/3; border-radius:12px; margin:0 auto 12px; display:flex; align-items:center; justify-content:center; font-size:3rem; font-weight:700; background:#1c1c24; color:#777; flex:none; }
+    .lib-card h3 { margin:0; font-size:1.12rem; line-height:1.3; color:#f0f0f4; }
+    .lib-card .lib-author { color:#9a9aa6; font-size:.82rem; margin-top:2px; }
+    .lib-card .lib-body { flex:none; margin-top:8px; }
+    .lib-card .lib-actions { display:flex; gap:8px; margin-top:10px; flex:none; }
+    .lib-btn { display:block; flex:none; width:100%; box-sizing:border-box; min-height:50px; background:var(--accent-read,#4caf50); color:#0b0b0e; border:0; border-radius:12px; padding:14px 12px; font-weight:800; font-size:1.05rem; line-height:1.2; letter-spacing:.02em; cursor:pointer; font-family:inherit; -webkit-appearance:none; appearance:none; }
+    .lib-btn:active { filter:brightness(1.1); }
+    .lib-btn.sec { display:inline-block; flex:1 1 0; width:auto; min-width:0; min-height:42px; background:transparent; color:#ccc; border:1px solid var(--border,#2a2a2a); padding:10px 6px; font-size:.82rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; letter-spacing:0; }
+    .lib-btn.sec.on { color:#fff; border-color:#555; background:rgba(255,255,255,.05); }
+    .lib-actions-sec { margin-top:8px; }
+    .lib-cover, .lib-cover-big { cursor:pointer; }
+    .lib-count { color:#7a7a86; font-size:.74rem; margin-left:auto; }
+    /* Series (上/下, numbered volumes) grouped under one header. */
+    .lib-series { border:1px solid var(--border,#2a2a2a); border-radius:12px; background:var(--panel,#161616); overflow:hidden; }
+    .lib-series-head { display:flex; align-items:center; gap:12px; padding:12px 14px; cursor:pointer; -webkit-user-select:none; user-select:none; }
+    .lib-series-stack { position:relative; width:64px; height:60px; flex:none; }
+    .lib-series-stack img, .lib-series-stack .title-avatar { position:absolute; width:44px; height:44px; border-radius:6px; object-fit:cover; border:1px solid #2a2a33; box-shadow:0 4px 12px rgba(0,0,0,.5); }
+    .lib-series-name { font-weight:700; font-size:1rem; line-height:1.3; }
+    .lib-series-sub { color:#9a9aa6; font-size:.78rem; margin-top:2px; }
+    .lib-series-vols { display:flex; flex-direction:column; gap:8px; padding:0 10px 10px 18px; }
+    .lib-series-vols .deck-item { border-color:#22222a; }
+    .lib-series-vols .deck-item-content { padding:10px 12px; }
+    .lib-vol-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+    .lib-vol-chip { display:inline-flex; align-items:center; gap:6px; background:#1a1a22; border:1px solid #2a2a33; border-radius:999px; padding:6px 12px; color:#e8e8f0; font-size:.8rem; cursor:pointer; font-family:inherit; }
+    .lib-vol-chip[data-on="1"] { border-color:var(--accent-read,#4caf50); }
+    .lib-vol-chip b { color:#8a8a96; font-weight:600; font-size:.72rem; }
+    /* Pinned titles (long-press a library card, up to 3): a large row on top. */
+    .pinned-row { display: flex; gap: 12px; margin: 0 0 14px; }
+    .pinned-card {
+      flex: 1 1 0; min-width: 0; max-width: 50%;
+      background: var(--panel-elev, #1c1c1c); border: 1px solid var(--border, #2a2a2a);
+      border-radius: 12px; padding: 12px; cursor: pointer;
+      -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    }
+    .pinned-card:active { filter: brightness(1.12); }
+    .pinned-cover img, .pinned-avatar { width: 100%; aspect-ratio: 1 / 1; border-radius: 8px; object-fit: cover; display: block; }
+    .pinned-avatar {
+      background: var(--panel, #161616); color: var(--text-faint, #777); display: flex; align-items: center;
+      justify-content: center; font-size: 2.2rem; font-weight: 700; font-family: var(--font-sans); border: 1px solid var(--border, #2a2a2a);
+    }
+    .pinned-name { margin-top: 10px; font-weight: 700; font-size: .95rem; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .pinned-meta { margin-top: 6px; color: #888; font-size: .78rem; }
+    .pinned-meta:empty { display: none; }
+    .pin-mark { color: var(--accent-read, #4caf50); font-size: .8em; margin-right: 3px; }
+    .want-mark { color: #e57373; font-size: .8em; margin-right: 3px; }
+    .deck-item.expanded { border-color: #3a3a48; }
     .deck-item {
+      -webkit-touch-callout: none; -webkit-user-select: none; user-select: none;
       background: var(--panel, #161616);
       border: 1px solid var(--border, #2a2a2a);
       border-radius: 10px;
@@ -781,7 +868,7 @@ body.dimmed .card-image {
        content area to hide (chrome-hidden on body). No bottom row. -->
   <div id="appHeader">
     <div class="mode-tabs" id="shellModeTabs">
-      <button class="mode-tab" data-mode="card"  data-active="1" data-i18n="nav.mode_card" onclick="window.setShellMode && window.setShellMode('card')">CARD</button>
+      <button class="mode-tab" data-mode="card"  data-active="1" data-i18n="nav.mode_card" onclick="window.onCardTabTap ? window.onCardTabTap() : (window.setShellMode && window.setShellMode('card'))">CARD</button>
       <button class="mode-tab" data-mode="read"  data-i18n="nav.mode_read" onclick="window.setShellMode && window.setShellMode('read')">READ</button>
       <button class="mode-tab" data-mode="audio" data-i18n="nav.mode_audio" onclick="window.setShellMode && window.setShellMode('audio')">AUDIO</button>
     </div>
@@ -811,7 +898,7 @@ body.dimmed .card-image {
         <button class="close-library" onclick="closeLibrary()" style="font-size:1.3rem;letter-spacing:0;padding:4px 14px;color:#ccc;">✕</button>
       </div>
     </div>
-    <div class="library-swipe-hint" data-i18n="lib.swipe_hint" style="font-size:.72rem;color:var(--text-muted,#888);margin:0 0 12px;text-align:center;">Swipe left on a title to edit or delete it</div>
+    <div class="library-swipe-hint" data-i18n="lib.swipe_hint" style="font-size:.72rem;color:var(--text-muted,#888);margin:0 0 12px;text-align:center;">Tap a title for details · swipe left for stats, edit, delete</div>
     <div id="deckList" class="deck-list">
       <!-- Title items will be populated here -->
     </div>
@@ -1916,8 +2003,14 @@ body.dimmed .card-image {
   <script src="drive-sync.js"></script>
   <script src="drive-sync-media.js"></script>
   <script src="drive-sync-ui.js"></script>
+  <script src="import-pairing.js"></script><!-- epub↔audiobook pairing (metadata + fuzzy names + volume guards) for folder import -->
   <script src="folder-import.js"></script>
   <script src="cover-extract.js"></script>
+  <script src="speed-drift.js"></script><!-- optional slow speed acceleration while reading undisturbed -->
+  <script src="power-probe.js"></script><!-- CPU attribution probe (debug builds / KADOKI_POWER) -->
+  <script src="word-freq.js"></script><!-- imported Yomitan frequency list (FREQ_V1) → rare-word share -->
+  <script src="library-meta.js"></script><!-- author / hours / chars / local difficulty / excerpt (background) -->
+  <script src="library-blurb.js"></script><!-- spoiler-free JA+EN summaries + difficulty via the AI backend -->
   <script src="stats.js"></script>
   <script src="title-stats.js"></script>
   <script src="lookup-log.js"></script>
@@ -1940,6 +2033,7 @@ body.dimmed .card-image {
   <script src="ai-summary.js"></script>
   <script src="ai-timeline.js"></script>
   <script src="vocab-srs.js"></script><!-- in-app vocab review (SRS over the 語彙 picks) -->
+  <script src="vocab-view.js"></script><!-- Card-tab "Vocabulary" view for books: Anki words → lookups → AI picks -->
   <script src="handoff-sync.js"></script><!-- iPhone ⇄ Vision Pro direct LAN state handoff -->
 
   <script src="ai-characters.js"></script>
@@ -2102,19 +2196,23 @@ body.dimmed .card-image {
     };
 
     // Library functionality
-    async function openLibrary() {
+    async function openLibrary(opts) {
       debugLog('Opening library');
+      // Card-tab pane: dock the library BELOW the app header (tabs stay live).
+      try { document.getElementById('libraryPage').classList.toggle('library-pane', !!(opts && opts.pane)); } catch (_) {}
       // Pause the running timer for the duration of the modal — see
       // [[modal-pause]] in stats.js: opening Library shouldn't credit
       // session time. Resume on dismiss if it was running.
       if (window.stats?.pauseForModal) window.stats.pauseForModal();
       await populateLibrary();
+      try { Promise.resolve(window.libraryBlurb?.runQueue?.()).catch(() => {}).finally(() => { try { window.libraryMeta?.ensureAll?.(); } catch (_) {} }); } catch (_) {}
       document.getElementById('libraryPage').classList.add('visible');
     }
 
     function closeLibrary() {
       debugLog('Closing library');
       document.getElementById('libraryPage').classList.remove('visible');
+      document.getElementById('libraryPage').classList.remove('library-pane');
       if (window.stats?.resumeFromModal) window.stats.resumeFromModal();
     }
 
@@ -2152,7 +2250,26 @@ body.dimmed .card-image {
       return '';
     }
 
+    // Re-renders happen whenever a summary or metadata lands. They must not
+    // disturb what the user is looking at: expanded rows stay expanded, the
+    // page and gallery keep their scroll positions.
+    const _libExpanded = new Set();
     async function populateLibrary() {
+      const page = document.getElementById('libraryPage');
+      const deckListEl = document.getElementById('deckList');
+      const pageTop = page ? page.scrollTop : 0;
+      const gal0 = deckListEl ? deckListEl.querySelector('.lib-gallery') : null;
+      const galLeft = gal0 ? gal0.scrollLeft : 0;
+      try { await _populateLibraryInner(); }
+      finally {
+        try {
+          if (page) page.scrollTop = pageTop;
+          const gal1 = deckListEl ? deckListEl.querySelector('.lib-gallery') : null;
+          if (gal1 && galLeft) gal1.scrollLeft = galLeft;
+        } catch (_) {}
+      }
+    }
+    async function _populateLibraryInner() {
       debugLog('Populating library');
       const deckList = document.getElementById('deckList');
 
@@ -2168,10 +2285,42 @@ body.dimmed .card-image {
       titles.sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
 
       deckList.innerHTML = '';
+      // ---- Browser toolbar: view (list / gallery), filter, sort ----
+      const blurbs = {};
+      try { if (window.libraryBlurb) for (const t of titles) blurbs[t.id] = await window.libraryBlurb.get(t.id); } catch (_) {}
+      deckList.appendChild(buildLibToolbar(titles.length));
+      let shown = titles.filter(t => libFilterPass(t, blurbs[t.id]));
+      shown = libSortTitles(shown, blurbs);
+      const groups = groupSeries(shown);
+      if (libPref('LIB_VIEW_V1', 'list') === 'gallery') {
+        const gal = document.createElement('div');
+        gal.className = 'lib-gallery';
+        for (const g of groups) gal.appendChild(g.type === 'series' ? buildSeriesCard(g, blurbs) : buildGalleryCard(g.t, blurbs[g.t.id]));
+        if (!shown.length) { const e = document.createElement('div'); e.className = 'no-decks'; e.textContent = 'No titles match this filter.'; gal.appendChild(e); }
+        deckList.appendChild(gal);
+        return;
+      }
+      // List: series volumes render as normal rows nested under a series header.
+      const seriesOf = new Map(), seriesBox = new Map();
+      titles.length = 0;
+      for (const g of groups) {
+        if (g.type === 'series') { for (const v of g.titles) { seriesOf.set(v.id, g); titles.push(v); } }
+        else titles.push(g.t);
+      }
+      // Pinned titles (long-press any card to pin, up to PIN_MAX): a large row
+      // on top, most recently opened first — a title switch is one tap.
+      const pinned = titles.filter(t => t.pinnedAt && !t.cloudOnly).slice(0, PIN_MAX);
+      if (pinned.length) {
+        const row = document.createElement('div');
+        row.className = 'pinned-row';
+        for (const pt of pinned) row.appendChild(buildPinnedCard(pt));
+        deckList.appendChild(row);
+      }
       for (const title of titles) {
         const a = title.attachments || {};
         const item = document.createElement('div');
         item.className = 'deck-item' + (title.cloudOnly ? ' deck-item-cloud' : '');
+        attachPinLongPress(item, title);
         if (title.cloudOnly) item.style.opacity = '0.82';
         const enabled = window.titleStore.enabledModes(title);
         // Cover preview: prefer the user-set cover dataUri; else letter
@@ -2195,7 +2344,10 @@ body.dimmed .card-image {
             <div style="display:flex;gap:12px;align-items:flex-start;">
               ${thumb}
               <div style="flex:1;min-width:0;">
-                <div class="deck-name" style="margin:0;">${escapeHtml(title.name || 'Untitled')}</div>
+                <div style="display:flex;align-items:flex-start;gap:4px;">
+                  <div class="deck-name" style="margin:0;flex:1;min-width:0;">${title.pinnedAt ? '<span class="pin-mark" title="Pinned">✦</span>' : ''}${title.wantToRead ? '<span class="want-mark" title="Want to read">♥</span>' : ''}${escapeHtml(title.name || 'Untitled')}</div>
+                </div>
+                ${title.author ? `<div style="color:#9a9aa6;font-size:.8rem;margin-top:2px;">${escapeHtml(title.author)}</div>` : ''}
                 <div class="title-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">
                   ${chipHtml('card',  'DECK',  !!a.deck)}
                   ${chipHtml('read',  'EPUB',  !!a.epub)}
@@ -2208,10 +2360,32 @@ body.dimmed .card-image {
                   ${!title.cloudOnly && a.epub ? bookProgressHtml(title) : ''}
                   <span>${new Date(title.lastOpenedAt || title.createdAt).toLocaleDateString()}</span>
                 </div>
+                ${libMetaLineHtml(title, blurbs[title.id])}
               </div>
             </div>
           </div>
         `;
+        // List rows EXPAND on tap (summary, stats, Open / Pin); only the pinned
+        // cards up top open a title directly. Anki decks have nothing to show,
+        // so they still open on tap.
+        if ((a.epub || a.audiobook) && !a.deck && !title.cloudOnly) {
+          const expand = (scroll) => {
+            const content = item.querySelector('.deck-item-content');
+            if (content.querySelector('.lib-details')) return;
+            closeOtherSwipes(null);
+            content.appendChild(buildDetails(title, blurbs[title.id]));
+            item.classList.add('expanded');
+            _libExpanded.add(title.id);
+            if (scroll) { try { item.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (_) {} }
+          };
+          item._expandOnTap = () => {
+            const content = item.querySelector('.deck-item-content');
+            const open = content.querySelector('.lib-details');
+            if (open) { open.remove(); item.classList.remove('expanded'); _libExpanded.delete(title.id); return; }
+            expand(true);
+          };
+          if (_libExpanded.has(title.id)) expand(false);   // survived a re-render
+        }
         // Action buttons (revealed by left-swipe).
         item.querySelector('.deck-action-stats').addEventListener('click', (e) => {
           e.stopPropagation(); window.kHaptic?.(); openTitleStats(title.id);
@@ -2229,8 +2403,466 @@ body.dimmed .card-image {
           }
         });
         setupLibrarySwipe(item, title);
-        deckList.appendChild(item);
+        const grp = seriesOf.get(title.id);
+        if (grp) {
+          let box = seriesBox.get(grp.key);
+          if (!box) { box = buildSeriesHeader(grp); seriesBox.set(grp.key, box); deckList.appendChild(box); }
+          box._vols.appendChild(item);
+        } else deckList.appendChild(item);
       }
+    }
+
+    // ----- Library browser helpers -----
+    const libPref = (k, d) => { try { return localStorage.getItem(k) || d; } catch (_) { return d; } };
+    const libSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+    const LT = (k, fb) => (window.i18n && window.i18n.t) ? window.i18n.t(k, fb) : fb;
+    function titleProgressPct(title) {
+      const deck = title.attachments?.deck?.name || title.name;
+      const epubName = title.attachments?.epub?.name;
+      if (!deck || !epubName) return -1;
+      try {
+        const pos = parseInt(localStorage.getItem('READING_POS_' + deck + '_' + epubName)) || 0;
+        const total = parseInt(localStorage.getItem('READING_TOTAL_CHARS_' + deck + '_' + epubName)) || 0;
+        if (pos > 0 && total > 0) return Math.min(100, Math.max(0, Math.round((pos / total) * 100)));
+      } catch (e) {}
+      return -1;
+    }
+    function libDifficulty(title, blurb) {
+      if (blurb && blurb.difficulty) return { n: blurb.difficulty, score: (Number(blurb.difficulty_score) > 0 ? Number(blurb.difficulty_score) : null), approx: false };
+      const d = title.meta && title.meta.localDifficulty;
+      if (d > 0) return { n: Math.round(d), approx: true };
+      return null;
+    }
+    function diffPipsHtml(d) {
+      if (!d) return '';
+      let s = '<span class="lib-diff" title="' + LT('lib.difficulty', 'Difficulty') + '">';
+      for (let i = 1; i <= 5; i++) s += '<i class="' + (i <= d.n ? 'on' : '') + '"></i>';
+      return s + '</span><span style="color:#7a7a86;">' + (d.approx ? '≈' : '') + (d.score ? d.score.toFixed(1) : d.n) + '/5</span>';
+    }
+    function libMetaLineHtml(title, blurb) {
+      const m = title.meta || {};
+      const bits = [];
+      const h = window.libraryMeta ? window.libraryMeta.fmtHours(m.durationMs) : '';
+      const c = window.libraryMeta ? window.libraryMeta.fmtChars(m.chars) : '';
+      if (h) bits.push('<span>' + h + '</span>');
+      if (c) bits.push('<span>' + c + ' ' + LT('lib.chars_unit', 'chars') + '</span>');
+      const d = diffPipsHtml(libDifficulty(title, blurb));
+      if (d) bits.push(d);
+      if (blurb && blurb.tags_en && blurb.tags_en.length) {
+        const lang = libPref('LIB_BLURB_LANG', 'ja');
+        const tags = (lang === 'ja' ? blurb.tags_ja : blurb.tags_en) || [];
+        bits.push('<span>' + tags.slice(0, 3).map(t => '<span class="lib-tag">' + escapeHtml(t) + '</span>').join('') + '</span>');
+      }
+      return bits.length ? '<div class="lib-meta">' + bits.join('') + '</div>' : '';
+    }
+    function libFilterPass(title, blurb) {
+      const f = libPref('LIB_FILTER_V1', 'all');
+      if (f === 'all') return true;
+      const p = titleProgressPct(title);
+      const opened = (title.lastOpenedAt || 0) > (title.createdAt || 0) + 60000;
+      if (f === 'want') return !!title.wantToRead;
+      if (f === 'reading') return p > 0 && p < 97;
+      if (f === 'new') return p <= 0 && !opened;
+      if (f === 'done') return p >= 97;
+      return true;
+    }
+    function libSortTitles(list, blurbs) {
+      const s = libPref('LIB_SORT_V1', 'recent');
+      const arr = list.slice();
+      const len = (t) => (t.meta && (t.meta.durationMs || 0)) || ((t.meta && t.meta.chars) || 0) * 300;
+      const dif = (t) => { const d = libDifficulty(t, blurbs[t.id]); return d ? d.n : 99; };
+      if (s === 'want') arr.sort((a, b) => ((b.wantToRead || 0) - (a.wantToRead || 0)));   // wanted first, newest wish on top
+      else if (s === 'length') arr.sort((a, b) => len(a) - len(b));
+      else if (s === 'difficulty') arr.sort((a, b) => dif(a) - dif(b));
+      else if (s === 'title') arr.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ja'));
+      return arr;   // 'recent' = incoming order (lastOpenedAt desc)
+    }
+    // One compact row: [List | Gallery] on the left, a "filter · sort ⌄"
+    // button on the right that folds out the two option rows underneath.
+    const FILTERS = () => [['all', LT('lib.f_all', 'All')], ['want', '♥ ' + LT('lib.f_want', 'Want')], ['reading', LT('lib.f_reading', 'Reading')], ['new', LT('lib.f_new', 'New')], ['done', LT('lib.f_done', 'Done')]];
+    const SORTS = () => [['recent', LT('lib.s_recent', 'Recent')], ['want', '♥ ' + LT('lib.s_want', 'Want')], ['length', LT('lib.s_length', 'Length')], ['difficulty', LT('lib.s_difficulty', 'Difficulty')], ['title', LT('lib.s_title', 'A–Z')]];
+    function buildLibToolbar(total) {
+      const wrap = document.createElement('div');
+      const row = document.createElement('div');
+      row.className = 'lib-toolbar';
+      const seg = (key, def, opts) => {
+        const s = document.createElement('div'); s.className = 'lib-seg';
+        const cur = libPref(key, def);
+        for (const [v, label] of opts) {
+          const b = document.createElement('button'); b.textContent = label; if (v === cur) b.dataset.on = '1';
+          b.addEventListener('click', () => { libSet(key, v); try { window.kHaptic?.(); } catch (_) {} populateLibrary(); });
+          s.appendChild(b);
+        }
+        return s;
+      };
+      row.appendChild(seg('LIB_VIEW_V1', 'list', [['list', LT('lib.view_list', 'List')], ['gallery', LT('lib.view_gallery', 'Gallery')]]));
+      const open = libPref('LIB_TOOLS_OPEN', '0') === '1';
+      const f = libPref('LIB_FILTER_V1', 'all'), s = libPref('LIB_SORT_V1', 'recent');
+      const fl = (FILTERS().find(x => x[0] === f) || FILTERS()[0])[1], sl = (SORTS().find(x => x[0] === s) || SORTS()[0])[1];
+      const more = document.createElement('button');
+      more.className = 'lib-more'; more.dataset.on = open ? '1' : '0';
+      more.innerHTML = '<span></span><span class="lib-more-chev">' + (open ? '▴' : '▾') + '</span>';
+      more.firstChild.textContent = fl + ' · ' + sl;
+      more.addEventListener('click', () => { libSet('LIB_TOOLS_OPEN', open ? '0' : '1'); try { window.kHaptic?.(); } catch (_) {} populateLibrary(); });
+      row.appendChild(more);
+      wrap.appendChild(row);
+      if (open) {
+        const panel = document.createElement('div');
+        panel.className = 'lib-tools';
+        const line = (label, seg) => { const l = document.createElement('div'); l.className = 'lib-tools-row'; const t = document.createElement('span'); t.textContent = label; l.appendChild(t); l.appendChild(seg); return l; };
+        panel.appendChild(line(LT('lib.show', 'Show'), seg('LIB_FILTER_V1', 'all', FILTERS())));
+        panel.appendChild(line(LT('lib.sort', 'Sort'), seg('LIB_SORT_V1', 'recent', SORTS())));
+        wrap.appendChild(panel);
+      }
+      const st = document.createElement('div'); st.id = 'libBlurbStatus'; st.className = 'lib-status'; st.hidden = true;
+      wrap.appendChild(st);
+      try { const q = window.libraryBlurb?.status?.(); if (q) { st.hidden = false; st.textContent = LT('lib.summarizing', 'Summarizing') + ' ' + (q.done + 1) + '/' + q.total + (q.current ? ' · ' + q.current : ''); } } catch (_) {}
+      // The swipe hint only applies to the list.
+      try { const hint = document.querySelector('#libraryPage .library-swipe-hint'); if (hint) hint.style.display = libPref('LIB_VIEW_V1', 'list') === 'gallery' ? 'none' : ''; } catch (_) {}
+      return wrap;
+    }
+    function langSeg(onChange) {
+      const s = document.createElement('div'); s.className = 'lib-seg'; s.style.margin = '6px 0 8px';
+      const cur = libPref('LIB_BLURB_LANG', 'ja');
+      for (const [v, label] of [['ja', '日本語'], ['en', 'English']]) {
+        const b = document.createElement('button'); b.textContent = label; if (v === cur) b.dataset.on = '1';
+        b.addEventListener('click', (e) => { e.stopPropagation(); libSet('LIB_BLURB_LANG', v); onChange(); });
+        s.appendChild(b);
+      }
+      return s;
+    }
+    function blurbBody(title, blurb, host) {
+      host.innerHTML = '';
+      if (!blurb) {
+        try {
+          const pl = window.libraryMeta?.profileLine?.(title.meta);
+          if (pl) { const q = document.createElement('div'); q.className = 'lib-note'; const ld = title.meta && title.meta.localDifficulty; q.innerHTML = (ld ? diffPipsHtml({ n: Math.round(ld), approx: true }) + ' · ' : ''); q.appendChild(document.createTextNode(pl)); host.appendChild(q); }
+        } catch (_) {}
+        const p = document.createElement('div'); p.className = 'lib-note';
+        const st = window.libraryBlurb?.status?.();
+        p.textContent = (window.ai?.isEnabled?.() ? (st ? LT('lib.summary_pending', 'Summary coming — in the queue.') : LT('lib.summary_none', 'No summary yet.')) : LT('lib.summary_ai_off', 'Enable the AI assistant in Preferences to get summaries.'));
+        host.appendChild(p);
+        // Why not? The last failure for this title, if any.
+        Promise.resolve(window.libraryBlurb?.lastError?.(title.id)).then((le) => {
+          if (!le || !host.isConnected) return;
+          const q = document.createElement('div'); q.className = 'lib-note'; q.style.color = '#e08a8a';
+          q.textContent = LT('lib.summary_failed', 'Summary failed: ') + le.msg + ' · ' + new Date(le.ts).toLocaleString();
+          host.appendChild(q);
+        }).catch(() => {});
+        return;
+      }
+      const lang = libPref('LIB_BLURB_LANG', 'ja');
+      const paras = (lang === 'ja' ? blurb.ja : blurb.en) || [];
+      const note = lang === 'ja' ? blurb.difficulty_ja : blurb.difficulty_en;
+      const tags = (lang === 'ja' ? blurb.tags_ja : blurb.tags_en) || [];
+      if (tags.length) { const tg = document.createElement('div'); tg.style.margin = '0 0 8px'; tg.innerHTML = tags.map(t => '<span class="lib-tag">' + escapeHtml(t) + '</span>').join(''); host.appendChild(tg); }
+      if (note) { const n = document.createElement('div'); n.className = 'lib-note'; n.innerHTML = diffPipsHtml(libDifficulty(title, blurb)) + ' · '; n.appendChild(document.createTextNode(note)); host.appendChild(n); }
+      try {   // measured profile (kanji density, distinct kanji, sentence length, rare words) next to the model's judgement
+        const pl = window.libraryMeta?.profileLine?.(title.meta);
+        if (pl) { const p = document.createElement('div'); p.className = 'lib-note'; const ld = title.meta && title.meta.localDifficulty; p.innerHTML = (ld ? diffPipsHtml({ n: Math.round(ld), approx: true }) + ' · ' : ''); p.appendChild(document.createTextNode(pl)); host.appendChild(p); }
+      } catch (_) {}
+      for (const t of paras) { const p = document.createElement('p'); p.className = 'lib-para'; p.textContent = t; host.appendChild(p); }
+      if (typeof window.dictEnableLookupIn === 'function' && lang === 'ja') { try { window.dictEnableLookupIn(host); } catch (_) {} }
+    }
+    async function toggleWantToRead(title) {
+      try {
+        const cur = await window.titleStore.get(title.id);
+        const on = !(cur && cur.wantToRead);
+        await window.titleStore.update(title.id, { wantToRead: on ? Date.now() : null });
+        window.showToast?.(on ? LT('lib.want_added', 'Added to Want to read') : LT('lib.want_removed', 'Removed from Want to read'), 1400);
+        await populateLibrary();
+      } catch (_) {}
+    }
+    function actionsRow(title, blurb, refresh) {
+      const wrap = document.createElement('div');
+      const row1 = document.createElement('div'); row1.className = 'lib-actions';
+      const open = document.createElement('button'); open.className = 'lib-btn'; open.textContent = LT('lib.open', 'Open');
+      open.addEventListener('click', (e) => { e.stopPropagation(); try { window.kHaptic?.(); } catch (_) {} loadTitleFromLibrary(title); });
+      row1.appendChild(open);
+      wrap.appendChild(row1);
+      const row2 = document.createElement('div'); row2.className = 'lib-actions lib-actions-sec';
+      const mk = (label, fn, on) => {
+        const b = document.createElement('button'); b.className = 'lib-btn sec' + (on ? ' on' : ''); b.textContent = label;
+        b.addEventListener('click', async (e) => { e.stopPropagation(); try { window.kHaptic?.(); } catch (_) {} await fn(b); });
+        return b;
+      };
+      row2.appendChild(mk(title.pinnedAt ? ('✦ ' + LT('lib.unpin', 'Unpin')) : ('✦ ' + LT('lib.pin', 'Pin')), () => togglePinTitle(title), !!title.pinnedAt));
+      row2.appendChild(mk((title.wantToRead ? '♥ ' : '♡ ') + LT('lib.want', 'Want to read'), () => toggleWantToRead(title), !!title.wantToRead));
+      if (title.attachments?.epub && window.libraryBlurb && window.ai?.isEnabled?.()) {
+        row2.appendChild(mk(blurb ? LT('lib.new_summary', 'New summary') : LT('lib.summarize', 'Summarize'), async (b) => {
+          b.disabled = true; b.textContent = LT('lib.summarizing', 'Summarizing') + '…';
+          try { await window.libraryBlurb.regenerate(title.id); } catch (_) {}
+          refresh();
+        }));
+      }
+      wrap.appendChild(row2);
+      return wrap;
+    }
+    function buildDetails(title, blurb) {
+      const d = document.createElement('div'); d.className = 'lib-details';
+      d.addEventListener('click', (e) => e.stopPropagation());
+      d.addEventListener('touchend', (e) => e.stopPropagation(), { passive: true });
+      // Stats / Edit / Delete as discrete buttons (the swipe actions are off
+      // while a row is expanded — the tall panel made them unwieldy).
+      const top = document.createElement('div'); top.className = 'lib-toprow';
+      const mk = (label, fn, danger) => {
+        const b = document.createElement('button'); b.className = 'lib-mini' + (danger ? ' danger' : ''); b.textContent = label;
+        b.addEventListener('click', async (e) => { e.stopPropagation(); try { window.kHaptic?.(danger ? 'MEDIUM' : undefined); } catch (_) {} await fn(); });
+        return b;
+      };
+      top.appendChild(mk(LT('lib.stats', 'Stats'), () => openTitleStats(title.id)));
+      top.appendChild(mk(LT('lib.edit', 'Edit'), () => openTitleEdit(title.id)));
+      top.appendChild(mk(LT('lib.delete', 'Delete'), async () => {
+        if (!(window.titleStore && confirm('Remove this title from your library?'))) return;
+        try { if (title.syncId && window.driveIndex) await window.driveIndex.dismiss(title.syncId); } catch (_) {}
+        try { await window.titleStore.remove(title.id); } catch (_) {}
+        populateLibrary();
+      }, true));
+      d.appendChild(top);
+      const cover = title.attachments?.cover?.dataUri;
+      if (cover) { const img = document.createElement('img'); img.className = 'lib-cover'; img.src = cover; img.alt = ''; img.addEventListener('click', (e) => { e.stopPropagation(); try { window.kHaptic?.(); } catch (_) {} loadTitleFromLibrary(title); }); d.appendChild(img); }
+      const body = document.createElement('div');
+      const render = async () => { const b = await window.libraryBlurb?.get?.(title.id); blurbBody(title, b, body); };
+      d.appendChild(langSeg(render));
+      d.appendChild(body);
+      blurbBody(title, blurb, body);
+      d.appendChild(actionsRow(title, blurb, () => populateLibrary()));
+      return d;
+    }
+    // ----- Series grouping (上/下, 第N巻, numbered volumes) -----
+    function volumeLabel(title) {
+      try {
+        const keys = window.importPairing?.volumeKeys?.(title.name || '') || new Set();
+        const kan = [...keys].find(k => !k.startsWith('v')), num = [...keys].find(k => k.startsWith('v'));
+        if (kan) return kan;
+        if (num) return num.slice(1);
+      } catch (_) {}
+      return '';
+    }
+    function volumeOrder(title) {
+      const l = volumeLabel(title);
+      if (l === '上') return 1; if (l === '中') return 2; if (l === '下') return 3;
+      const n = parseInt(l, 10); return Number.isFinite(n) ? n : 99;
+    }
+    const ID_BRACKET_RE = /[\[（(【][^\]）)】]*[A-Za-z0-9]{8,}[^\]）)】]*[\]）)】]/g;   // [B0…] ASIN / ISBN tags
+    // Everything BEFORE the first volume marker is the series name: "神の守り人 上
+    // 来訪編" and "神の守り人 下 帰還編" share "神の守り人"; "鹿の王1" → "鹿の王";
+    // "64（ロクヨン）上" keeps its 64. Leading "５．" / "[01] " numbering is dropped.
+    function seriesBase(name) {
+      let s = String(name || '').replace(/\.[^.]+$/, '').replace(ID_BRACKET_RE, ' ').replace(/\s+/g, ' ').trim();
+      s = s.replace(/^[_\s]+/, '').replace(/^\s*[\[（(]?\s*[0-9０-９]{1,2}\s*[\]）)．.、]\s*/, '');
+      const VOL = '(?:[上中下]巻?|第\\s*[0-9０-９一二三四五六七八九十]+\\s*[巻部集話]|vol(?:ume)?\\.?\\s*[0-9０-９]{1,3})';
+      let m = s.match(new RegExp('^(.*?[^\\s_\\-–—・:：（(\\[）)\\]])[\\s_\\-–—・:：（(\\[）)\\]]+' + VOL + '(?:[）)\\]]|(?=[\\s_\\-–—・:：])|$)'));
+      const fixParen = (b) => { const o = (b.match(/[（(]/g) || []).length, c = (b.match(/[）)]/g) || []).length; return o > c ? b + (b.includes('（') ? '）' : ')') : b; };
+      if (m && m[1].length >= 2) return fixParen(m[1].trim());
+      m = s.match(/^(.*?[^0-9０-９\s])[\s_\-–—・:：（(\[]*[0-9０-９]{1,2}\s*[）)\]]?\s*$/);   // trailing number: "鹿の王1", "鹿の王 3"
+      if (m && m[1].length >= 2) return fixParen(m[1].replace(/[\s_\-–—・:：（(\[]+$/, '').trim());
+      m = s.match(/^(.*?[^0-9０-９\s])[0-9０-９]{1,2}(?=[\s_\-–—・:：]+\S)/);   // number glued to the base, then a subtitle: "裏世界ピクニック３ ヤマノケハイ"
+      if (m && m[1].length >= 2) return fixParen(m[1].trim());
+      return s;
+    }
+    function seriesKeyOf(title) {
+      try {
+        const P = window.importPairing; if (!P) return '';
+        const s = P.norm(seriesBase(title.name || ''));
+        return s.length >= 2 ? s : '';
+      } catch (_) { return ''; }
+    }
+    function seriesDisplayName(name) { return seriesBase(name) || String(name || ''); }
+    function _seriesDisplayNameOld(name) {
+      let s = String(name || '').replace(/\.[^.]+$/, '').replace(ID_BRACKET_RE, ' ').replace(/\s+/g, ' ').trim();
+      s = s.replace(/^\s*[\[（(]\s*[0-9０-９]{1,2}\s*[\]）)]\s*/, '');                 // "[01] "
+      s = s.replace(/[\s_\-–—・:：]*第\s*[0-9０-９一二三四五六七八九十]+\s*[巻部集話]\s*$/, '');
+      s = s.replace(/[\s_\-–—・:：（(\[]*[上中下]\s*巻?\s*[）)\]]?\s*$/, '');
+      s = s.replace(/[\s_\-–—・:：（(\[]*(?:vol(?:ume)?\.?\s*)?[0-9０-９]{1,2}\s*[）)\]]?\s*$/i, '');
+      s = s.replace(/[\s_\-–—・:：]+$/, '').trim();
+      return s || String(name || '');
+    }
+    // Returns [{type:'title', t} | {type:'series', key, name, titles}] in the incoming order.
+    function groupSeries(list) {
+      const byKey = new Map();
+      for (const t of list) { const k = seriesKeyOf(t); if (!k) continue; if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(t); }
+      const isSeries = new Set();
+      for (const [k, arr] of byKey) {
+        if (arr.length < 2) continue;
+        const labels = new Set(arr.map(volumeLabel));
+        if (labels.size < 2) continue;   // same name twice = duplicates, not volumes
+        isSeries.add(k);
+      }
+      const out = [], done = new Set();
+      for (const t of list) {
+        const k = seriesKeyOf(t);
+        if (k && isSeries.has(k)) {
+          if (done.has(k)) continue;
+          done.add(k);
+          const vols = byKey.get(k).slice().sort((a, b) => volumeOrder(a) - volumeOrder(b) || (a.name || '').localeCompare(b.name || '', 'ja'));
+          out.push({ type: 'series', key: k, name: seriesDisplayName(vols[0].name), titles: vols });
+        } else out.push({ type: 'title', t });
+      }
+      return out;
+    }
+    function seriesTotals(vols) {
+      let ms = 0, ch = 0;
+      for (const v of vols) { ms += (v.meta && v.meta.durationMs) || 0; ch += (v.meta && v.meta.chars) || 0; }
+      const bits = [];
+      if (window.libraryMeta) { const h = window.libraryMeta.fmtHours(ms), c = window.libraryMeta.fmtChars(ch); if (h) bits.push(h); if (c) bits.push(c + ' ' + LT('lib.chars_unit', 'chars')); }
+      return bits;
+    }
+    function buildSeriesHeader(group) {
+      const box = document.createElement('div'); box.className = 'lib-series';
+      const head = document.createElement('div'); head.className = 'lib-series-head';
+      const stack = document.createElement('div'); stack.className = 'lib-series-stack';
+      group.titles.slice(0, 3).forEach((v, i) => {
+        const c = v.attachments?.cover?.dataUri;
+        const el = c ? document.createElement('img') : document.createElement('div');
+        if (c) { el.src = c; el.alt = ''; } else { el.className = 'title-avatar'; el.style.cssText += 'background:var(--panel-elev);color:#888;display:flex;align-items:center;justify-content:center;font-weight:700;'; el.textContent = (v.name || '?').charAt(0); }
+        el.style.left = (i * 9) + 'px'; el.style.top = (i * 7) + 'px'; el.style.zIndex = String(3 - i);
+        stack.appendChild(el);
+      });
+      head.appendChild(stack);
+      const txt = document.createElement('div'); txt.style.cssText = 'flex:1;min-width:0;';
+      const nm = document.createElement('div'); nm.className = 'lib-series-name'; nm.textContent = group.name;
+      const sub = document.createElement('div'); sub.className = 'lib-series-sub';
+      const bits = [group.titles.length + ' ' + LT('lib.volumes', 'volumes')].concat(seriesTotals(group.titles));
+      if (group.titles[0].author) bits.unshift(group.titles[0].author);
+      sub.textContent = bits.join(' · ');
+      txt.appendChild(nm); txt.appendChild(sub); head.appendChild(txt);
+      const chev = document.createElement('span'); chev.style.cssText = 'color:#8a8a96;font-size:1rem;flex:none;';
+      const openKey = 'LIB_SERIES_OPEN_' + group.key;
+      let open = libPref(openKey, '1') === '1';
+      chev.textContent = open ? '▾' : '▸';
+      head.appendChild(chev);
+      const vols = document.createElement('div'); vols.className = 'lib-series-vols'; vols.hidden = !open;
+      head.addEventListener('click', () => { open = !open; libSet(openKey, open ? '1' : '0'); vols.hidden = !open; chev.textContent = open ? '▾' : '▸'; try { window.kHaptic?.(); } catch (_) {} });
+      box.appendChild(head); box.appendChild(vols);
+      box._vols = vols;
+      return box;
+    }
+    function buildSeriesCard(group, blurbs) {
+      const vols = group.titles;
+      // Current volume: the most recently opened one that is not finished, else the first.
+      let cur = vols.slice().sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0)).find(v => titleProgressPct(v) < 97) || vols[0];
+      const card = document.createElement('div'); card.className = 'lib-card';
+      const cover = cur.attachments?.cover?.dataUri || vols[0].attachments?.cover?.dataUri;
+      if (cover) { const img = document.createElement('img'); img.className = 'lib-cover-big'; img.src = cover; img.alt = ''; img.addEventListener('click', (e) => { e.stopPropagation(); try { window.kHaptic?.(); } catch (_) {} loadTitleFromLibrary(cur); }); card.appendChild(img); }
+      else { const av = document.createElement('div'); av.className = 'lib-avatar-big'; av.textContent = (group.name || '?').trim().charAt(0) || '?'; card.appendChild(av); }
+      const h = document.createElement('h3'); h.textContent = group.name; card.appendChild(h);
+      if (vols[0].author) { const au = document.createElement('div'); au.className = 'lib-author'; au.textContent = vols[0].author; card.appendChild(au); }
+      const meta = document.createElement('div'); meta.className = 'lib-meta';
+      const tb = [vols.length + ' ' + LT('lib.volumes', 'volumes')].concat(seriesTotals(vols));
+      meta.innerHTML = tb.map(b => '<span>' + escapeHtml(b) + '</span>').join('') + (diffPipsHtml(libDifficulty(cur, blurbs[cur.id])) || '');
+      card.appendChild(meta);
+      const chips = document.createElement('div'); chips.className = 'lib-vol-chips';
+      const body = document.createElement('div'); body.className = 'lib-body';
+      const renderVol = () => { blurbBody(cur, blurbs[cur.id], body); Array.from(chips.children).forEach(c => { c.dataset.on = c._vol === cur ? '1' : '0'; }); };
+      for (const v of vols) {
+        const c = document.createElement('button'); c.className = 'lib-vol-chip'; c._vol = v;
+        const p = titleProgressPct(v);
+        c.innerHTML = '<span></span><b></b>';
+        c.firstChild.textContent = volumeLabel(v) ? (volumeLabel(v).length <= 2 ? volumeLabel(v) + (/[上中下]/.test(volumeLabel(v)) ? '巻' : '') : volumeLabel(v)) : v.name;
+        c.lastChild.textContent = [window.libraryMeta ? window.libraryMeta.fmtHours(v.meta && v.meta.durationMs) : '', p > 0 ? p + '%' : ''].filter(Boolean).join(' · ');
+        c.addEventListener('click', (e) => { e.stopPropagation(); cur = v; renderVol(); });
+        chips.appendChild(c);
+      }
+      card.appendChild(chips);
+      card.appendChild(langSeg(() => renderVol()));
+      card.appendChild(body);
+      renderVol();
+      const act = document.createElement('div'); act.className = 'lib-actions';
+      const open = document.createElement('button'); open.className = 'lib-btn';
+      open.textContent = LT('lib.open', 'Open');
+      open.addEventListener('click', (e) => { e.stopPropagation(); try { window.kHaptic?.(); } catch (_) {} loadTitleFromLibrary(cur); });
+      act.appendChild(open);
+      card.appendChild(act);
+      return card;
+    }
+
+    function buildGalleryCard(title, blurb) {
+      const a = title.attachments || {};
+      const card = document.createElement('div'); card.className = 'lib-card';
+      const cover = a.cover?.dataUri;
+      const openIt = (e) => { e.stopPropagation(); try { window.kHaptic?.(); } catch (_) {} loadTitleFromLibrary(title); };
+      if (cover) { const img = document.createElement('img'); img.className = 'lib-cover-big'; img.src = cover; img.alt = ''; img.addEventListener('click', openIt); card.appendChild(img); }
+      else { const av = document.createElement('div'); av.className = 'lib-avatar-big'; av.textContent = (title.name || '?').trim().charAt(0) || '?'; av.addEventListener('click', openIt); card.appendChild(av); }
+      const h = document.createElement('h3'); h.textContent = (title.pinnedAt ? '✦ ' : '') + (title.wantToRead ? '♥ ' : '') + (title.name || 'Untitled'); card.appendChild(h);
+      if (title.author) { const au = document.createElement('div'); au.className = 'lib-author'; au.textContent = title.author; card.appendChild(au); }
+      const meta = document.createElement('div'); meta.innerHTML = libMetaLineHtml(title, blurb); card.appendChild(meta);
+      const p = titleProgressPct(title);
+      if (p > 0) { const pr = document.createElement('div'); pr.style.cssText = 'height:4px;border-radius:2px;background:#22222a;margin-top:8px;overflow:hidden;'; pr.innerHTML = '<div style="height:100%;width:' + p + '%;background:var(--accent-read,#4caf50);"></div>'; card.appendChild(pr); }
+      const body = document.createElement('div'); body.className = 'lib-body';
+      const render = async () => { const b = await window.libraryBlurb?.get?.(title.id); blurbBody(title, b, body); };
+      card.appendChild(langSeg(render));
+      card.appendChild(body);
+      blurbBody(title, blurb, body);
+      card.appendChild(actionsRow(title, blurb, () => populateLibrary()));
+      attachPinLongPress(card, title);
+      return card;
+    }
+    window.addEventListener('kai:blurb', () => { try { if (document.getElementById('libraryPage')?.classList.contains('visible')) populateLibrary(); } catch (_) {} });
+
+    // ----- Pinned titles -----
+    const PIN_MAX = 3;
+    function buildPinnedCard(title) {
+      const a = title.attachments || {};
+      const el = document.createElement('div');
+      el.className = 'pinned-card';
+      const coverUri = a.cover?.dataUri;
+      const firstLetter = (title.name || '?').trim().charAt(0) || '?';
+      el.innerHTML = `
+        <div class="pinned-cover">${coverUri
+          ? `<img src="${coverUri}" alt="" decoding="async">`
+          : `<div class="pinned-avatar">${escapeHtml(firstLetter)}</div>`}</div>
+        <div class="pinned-name">${escapeHtml(title.name || 'Untitled')}</div>
+        <div class="pinned-meta">${a.epub ? bookProgressHtml(title) : ''}</div>`;
+      el.addEventListener('click', () => {
+        if (el._lp) { el._lp = false; return; }   // the tap that ended a long-press
+        try { window.kHaptic?.(); } catch (_) {}
+        loadTitleFromLibrary(title);
+      });
+      attachPinLongPress(el, title);
+      return el;
+    }
+    // Long-press (550 ms, finger still) on a library card or a pinned card → pin / unpin.
+    function attachPinLongPress(el, title) {
+      let timer = null, x0 = 0, y0 = 0;
+      const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+      el.addEventListener('touchstart', (e) => {
+        const t = e.touches[0]; if (!t) return;
+        x0 = t.clientX; y0 = t.clientY;
+        cancel();
+        timer = setTimeout(async () => {
+          timer = null; el._lp = true;
+          try { window.kHaptic?.('MEDIUM'); } catch (_) {}
+          await togglePinTitle(title);
+        }, 550);
+      }, { passive: true });
+      el.addEventListener('touchmove', (e) => {
+        const t = e.touches[0];
+        if (t && (Math.abs(t.clientX - x0) > 10 || Math.abs(t.clientY - y0) > 10)) cancel();
+      }, { passive: true });
+      el.addEventListener('touchend', cancel, { passive: true });
+      el.addEventListener('touchcancel', cancel, { passive: true });
+      el.addEventListener('contextmenu', (e) => { e.preventDefault(); });
+    }
+    async function togglePinTitle(title) {
+      try {
+        const all = await window.titleStore.list();
+        const cur = all.find(t => t.id === title.id);
+        if (!cur) return;
+        if (cur.pinnedAt) {
+          await window.titleStore.update(title.id, { pinnedAt: null });
+          window.showToast?.(window.i18n.t('lib.unpinned', 'Unpinned'), 1400);
+        } else {
+          const n = all.filter(t => t.pinnedAt).length;
+          if (n >= PIN_MAX) {
+            window.showToast?.(window.i18n.fmt('lib.pin_limit', { n: PIN_MAX }, 'Up to ' + PIN_MAX + ' pinned titles'), 2200);
+            return;
+          }
+          await window.titleStore.update(title.id, { pinnedAt: Date.now() });
+          window.showToast?.(window.i18n.t('lib.pinned_toast', 'Pinned to the top'), 1400);
+        }
+        await populateLibrary();
+      } catch (_) {}
     }
 
     // Left-swipe a library item to reveal its Edit / Delete actions; tap to
@@ -2264,6 +2896,7 @@ body.dimmed .card-image {
       }, { passive: true });
       content.addEventListener('touchmove', (e) => {
         if (!dragging) return;
+        if (item.classList.contains('expanded')) { dragging = false; return; }   // expanded: actions are buttons in the panel
         const t = e.touches[0], dx = t.clientX - x0, dy = t.clientY - y0;
         if (!decided && (Math.abs(dx) > 10 || Math.abs(dy) > 10)) {
           decided = true; horiz = Math.abs(dx) > Math.abs(dy); moved = true;
@@ -2287,12 +2920,16 @@ body.dimmed .card-image {
       // Tap (synthetic click — suppressed by the browser after a real drag):
       // open the title, or close the actions if they're showing.
       content.addEventListener('click', () => {
+        if (item._lp) { item._lp = false; return; }   // the tap that ended a pin long-press
         if (moved) { moved = false; return; }
         if (opened) { close(); return; }
         // Cloud-only entries (synced from another device, no local files yet)
         // download on tap instead of opening.
         if (title.cloudOnly && window.driveSyncUI && window.driveSyncUI.downloadCloudTitle) {
           window.driveSyncUI.downloadCloudTitle(title);
+        } else if (typeof item._expandOnTap === 'function') {
+          try { window.kHaptic?.(); } catch (_) {}
+          item._expandOnTap();
         } else {
           loadTitleFromLibrary(title);
         }

@@ -308,6 +308,8 @@
       // book); otherwise mint a fresh one.
       syncId: partial?.syncId || genSyncId(),
       name: partial?.name || 'Untitled',
+      author: partial?.author || '',
+      meta: partial?.meta || undefined,
       createdAt: Date.now(),
       lastOpenedAt: Date.now(),
       attachments: partial?.attachments || {}
@@ -333,6 +335,8 @@
         id: genId() + (i ? '_' + i : ''),
         syncId: partial?.syncId || genSyncId(),
         name: partial?.name || 'Untitled',
+        author: partial?.author || '',
+        meta: partial?.meta || undefined,
         createdAt: Date.now(),
         lastOpenedAt: Date.now(),
         attachments: partial?.attachments || {}

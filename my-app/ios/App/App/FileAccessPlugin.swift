@@ -1,6 +1,7 @@
 import Foundation
 import Capacitor
 import UIKit
+import AVFoundation
 import UniformTypeIdentifiers
 
 /**
@@ -36,6 +37,8 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "materializeToCache",        returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getPersistedUriPermissions", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "readChunk",                 returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "mediaTags",                 returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "localPath",                 returnType: CAPPluginReturnPromise),
     ]
 
     private static let bookmarksKey = "FileAccess.bookmarks.v1"
@@ -221,9 +224,140 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
         return false
     }
 
+    /// Resolve a picked-file or folder-child:// URI to its source file and the
+    /// security-scoped URL to hold open while reading it.
+    private func resolveSource(_ uri: String) -> (source: URL, scope: URL)? {
+        if let parsed = Self.parseFolderChildUri(uri) {
+            guard let entry = findBookmark(forUri: parsed.folderUri), let folderURL = resolveBookmark(entry.bookmark) else { return nil }
+            let relComps = (parsed.relPath as NSString).pathComponents
+            if parsed.relPath.hasPrefix("/") || relComps.contains("..") { return nil }
+            return (folderURL.appendingPathComponent(parsed.relPath), folderURL)
+        }
+        guard let entry = findBookmark(forUri: uri), let url = resolveBookmark(entry.bookmark) else { return nil }
+        return (url, url)
+    }
+
+    /// Audio/video tags without copying the file: title, artist, album,
+    /// duration (ms). Used by folder import to pair audiobooks with EPUBs.
+    @objc func mediaTags(_ call: CAPPluginCall) {
+        guard let uri = call.getString("uri"), let r = resolveSource(uri) else { call.resolve([:]); return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let didStart = r.scope.startAccessingSecurityScopedResource()
+            defer { if didStart { r.scope.stopAccessingSecurityScopedResource() } }
+            let asset = AVURLAsset(url: r.source)
+            let sem = DispatchSemaphore(value: 0)
+            asset.loadValuesAsynchronously(forKeys: ["commonMetadata", "duration"]) { sem.signal() }
+            _ = sem.wait(timeout: .now() + 10)
+            var out: [String: Any] = [:]
+            for item in asset.commonMetadata {
+                guard let key = item.commonKey?.rawValue, let v = item.stringValue, !v.isEmpty else { continue }
+                if key == "title" { out["title"] = v }
+                else if key == "artist" { out["artist"] = v }
+                else if key == "albumName" { out["album"] = v }
+            }
+            let d = asset.duration
+            if d.isNumeric && d.seconds.isFinite { out["durationMs"] = Int(d.seconds * 1000) }
+            call.resolve(out)
+        }
+    }
+
+    // MARK: - In-place library (On My iPhone ▸ Kadoki)
+    //
+    // Files inside the app's OWN Documents folder are used where they are:
+    // no copy into the purgeable cache, no duplicate bytes, and a library the
+    // user manages in the Files app. The picked-folder URI may carry an OLD
+    // container UUID (dev reinstalls) — the path is rebased onto the live
+    // Documents directory by its "/Documents/…" suffix, no bookmark needed.
+    private static func documentsURL() -> URL {
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].standardizedFileURL
+    }
+    /// The live path of a file that lives under Documents, from a picked-file
+    /// or folder-child:// URI; nil when the URI points outside the container.
+    private static func containerLocalSource(uri: String) -> URL? {
+        var base: String
+        var rel = ""
+        if let parsed = parseFolderChildUri(uri) {
+            base = parsed.folderUri; rel = parsed.relPath
+            let relComps = (rel as NSString).pathComponents
+            if rel.hasPrefix("/") || relComps.contains("..") { return nil }
+        } else {
+            base = uri
+        }
+        let basePath = URL(string: base)?.path ?? base.removingPercentEncoding ?? base
+        guard let r = basePath.range(of: "/Containers/Data/Application/") else { return nil }
+        let afterApp = basePath[r.upperBound...]                       // "<UUID>/Documents/Library/…"
+        guard let slash = afterApp.firstIndex(of: "/") else { return nil }
+        let inside = String(afterApp[afterApp.index(after: slash)...])  // "Documents/Library/…"
+        guard inside == "Documents" || inside.hasPrefix("Documents/") else { return nil }
+        let suffix = inside == "Documents" ? "" : String(inside.dropFirst("Documents/".count))
+        var url = documentsURL()
+        if !suffix.isEmpty { url.appendPathComponent(suffix) }
+        if !rel.isEmpty { url.appendPathComponent(rel) }
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        // The original was an .mkv that has since been remuxed in place → its
+        // .mp4 sibling is the file now.
+        if url.pathExtension.lowercased() == "mkv" {
+            let mp4 = url.deletingPathExtension().appendingPathExtension("mp4")
+            if FileManager.default.fileExists(atPath: mp4.path) { return mp4 }
+        }
+        return nil
+    }
+    private func resolveInPlace(_ call: CAPPluginCall, source: URL, uri: String) {
+        var out = source
+        let ext = source.pathExtension.lowercased()
+        #if (os(visionOS) || os(iOS)) && !targetEnvironment(simulator)
+        if ext == "mkv" {
+            // Remux next to the original, then DROP the .mkv (user's call: the
+            // library must never hold two copies of a video).
+            let mp4 = source.deletingPathExtension().appendingPathExtension("mp4")
+            let ok = (try? FileManager.default.attributesOfItem(atPath: mp4.path))?[.size] as? Int ?? 0
+            if ok <= 65536 {
+                NSLog("[FileAccess] remuxing in place: \(source.lastPathComponent)")
+                var err = [CChar](repeating: 0, count: 256)
+                let rc = kadoki_remux(source.path, mp4.path, &err, 256, nil, nil)
+                if rc != 0 {
+                    let msg = String(cString: err)
+                    try? FileManager.default.removeItem(at: mp4)
+                    call.reject("mkv remux failed: \(msg.isEmpty ? "code \(rc)" : msg)")
+                    return
+                }
+            }
+            try? FileManager.default.removeItem(at: source)
+            out = mp4
+        }
+        #endif
+        // Reclaim a stale cache copy made before in-place use existed.
+        let cacheDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("decks", isDirectory: true)
+        for cand in ["deck_\(stableHash(uri)).\(ext)", "deck_\(stableHash(uri)).mp4"] {
+            let c = cacheDir.appendingPathComponent(cand)
+            if FileManager.default.fileExists(atPath: c.path) { try? FileManager.default.removeItem(at: c); NSLog("[FileAccess] dropped cache copy \(cand) (file lives in Kadoki)") }
+        }
+        let size = (try? FileManager.default.attributesOfItem(atPath: out.path))?[.size] as? Int ?? 0
+        call.resolve(["path": out.path, "size": size, "cached": true, "inPlace": true])
+    }
+
+    /// {path} when the URI's file lives inside the app's Documents folder
+    /// (used in place — and any stale cache copy is dropped), else {}.
+    /// Never copies anything: safe to call for every attachment at boot.
+    @objc func localPath(_ call: CAPPluginCall) {
+        guard let uri = call.getString("uri"), let local = Self.containerLocalSource(uri: uri) else { call.resolve([:]); return }
+        if local.pathExtension.lowercased() == "mkv" { call.resolve([:]); return }   // needs the remux: leave it to materialize on open
+        let ext = local.pathExtension.lowercased()
+        let cacheDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("decks", isDirectory: true)
+        for cand in ["deck_\(stableHash(uri)).\(ext)", "deck_\(stableHash(uri)).mp4"] {
+            let c = cacheDir.appendingPathComponent(cand)
+            if FileManager.default.fileExists(atPath: c.path) { try? FileManager.default.removeItem(at: c); NSLog("[FileAccess] dropped cache copy \(cand) (file lives in Kadoki)") }
+        }
+        call.resolve(["path": local.path])
+    }
+
     @objc func materializeToCache(_ call: CAPPluginCall) {
         guard let uri = call.getString("uri") else {
             call.reject("uri required")
+            return
+        }
+        if let local = Self.containerLocalSource(uri: uri) {
+            resolveInPlace(call, source: local, uri: uri)
             return
         }
 

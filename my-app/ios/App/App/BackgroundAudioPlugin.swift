@@ -77,6 +77,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "skipToNextChapter", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deviceModel",       returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "probeDuration",     returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "powerState",        returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "safeAreaInsets",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "tpState",           returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "dictPanel",         returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "panelWindow",       returnType: CAPPluginReturnPromise),
@@ -425,6 +427,65 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    /// Charging / thermal / Low-Power state — the on-device transcriber uses
+    /// it to decide whether it may keep working (it is by far the heaviest
+    /// thing the app runs).
+    @objc func powerState(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            UIDevice.current.isBatteryMonitoringEnabled = true
+            let st = UIDevice.current.batteryState
+            let thermal: String
+            switch ProcessInfo.processInfo.thermalState {
+            case .nominal:  thermal = "nominal"
+            case .fair:     thermal = "fair"
+            case .serious:  thermal = "serious"
+            case .critical: thermal = "critical"
+            @unknown default: thermal = "nominal"
+            }
+            call.resolve([
+                "charging": st == .charging || st == .full,
+                "level":    Double(UIDevice.current.batteryLevel),
+                "thermal":  thermal,
+                "lowPower": ProcessInfo.processInfo.isLowPowerModeEnabled,
+            ])
+        }
+    }
+
+    /// The window's REAL safe-area insets plus the device idiom. CSS
+    /// env(safe-area-inset-*) proved unreliable here (the reader's blackout
+    /// stayed on the left in both landscape orientations), and the reader has
+    /// to know which side the Dynamic Island is actually on.
+    @objc func safeAreaInsets(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            var win: UIWindow? = nil
+            var oName = "unknown"
+            for scene in UIApplication.shared.connectedScenes {
+                guard let ws = scene as? UIWindowScene else { continue }
+                switch ws.interfaceOrientation {
+                case .portrait:           oName = "portrait"
+                case .portraitUpsideDown: oName = "portraitUpsideDown"
+                case .landscapeLeft:      oName = "landscapeLeft"
+                case .landscapeRight:     oName = "landscapeRight"
+                default:                  oName = "unknown"
+                }
+                if let k = ws.windows.first(where: { $0.isKeyWindow }) { win = k; break }
+                if win == nil { win = ws.windows.first }
+            }
+            let i = win?.safeAreaInsets ?? .zero
+            let idiom: String
+            switch UIDevice.current.userInterfaceIdiom {
+            case .phone: idiom = "phone"
+            case .pad:   idiom = "pad"
+            default:     idiom = "other"
+            }
+            call.resolve([
+                "top": Double(i.top), "left": Double(i.left),
+                "bottom": Double(i.bottom), "right": Double(i.right),
+                "idiom": idiom, "orientation": oName,
+            ])
+        }
+    }
+
     @objc func deviceModel(_ call: CAPPluginCall) {
         var systemInfo = utsname()
         uname(&systemInfo)
@@ -485,6 +546,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "simAdv": ProcessInfo.processInfo.environment["KADOKI_SIM_ADV"] == "1",
             "simBrowse": ProcessInfo.processInfo.environment["KADOKI_SIM_BROWSE"] == "1",
             "simAnki": ProcessInfo.processInfo.environment["KADOKI_SIM_ANKI"] == "1",
+            "simFold": ProcessInfo.processInfo.environment["KADOKI_SIM_FOLD"] == "1",
             "simCard": ProcessInfo.processInfo.environment["KADOKI_SIM_CARD"] == "1",
             "simMenu": ProcessInfo.processInfo.environment["KADOKI_SIM_MENU"] == "1",
             "simBrowsePreview": ProcessInfo.processInfo.environment["KADOKI_SIM_BROWSE_PREVIEW"] == "1",
@@ -1295,11 +1357,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             // position; starting the player at the LANDING position underneath
             // it was a two-voice blip. Let the engine go silent first.
             let gen = scrubGen
+            let tEnd = Date().timeIntervalSince1970
+            NSLog("[scrub] end: resume requested at %d ms", posMs)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { [weak self] in
                 guard let self = self, self.scrubGen == gen, !self.scrubActive, let p = self.player else { return }
                 self.ensureSessionActive()
                 p.volume = 0.0
                 p.play()
+                NSLog("[scrub] player.play() %.0f ms after end", (Date().timeIntervalSince1970 - tEnd) * 1000)
                 p.setVolume(1.0, fadeDuration: 0.05)
                 if rampFrom > 0 && self.currentRate > rampFrom + 0.03 {
                     // Re-hear the scrubbed-over span at 1×, then ease back up.
@@ -1905,6 +1970,10 @@ final class KadokiScrubEngine {
     private var lastEnsureAt: TimeInterval = 0
     private static let PRIME_SEC = 3.0            // synchronous: ready in a few ms
     private static let INITIAL_SEC = 12.0
+    // A NEW area mid-drag: seed a SMALL window first (±1.5 s ≈ a few ms of
+    // decode) and grow behind it — reloading ±INITIAL_SEC (24 s of audio) at
+    // every jump was the 100-300 ms of silence before the scrub sound came back.
+    private static let RELOAD_SEC = 1.5
     private static let GROW_SEC: [Double] = [12, 40, 80]
     private static let TAU_SEC = 0.032
     // Speed cap: beyond this the sound is a squeal, not scrubbing. A gap the
@@ -1912,6 +1981,27 @@ final class KadokiScrubEngine {
     // dip, so a fast throw never leaves the head chasing at full squeal for
     // seconds after the finger has stopped.
     private static let MAX_SPEED = 8.0
+    // Scrub audio is pitched DOWN two octaves (Sonic pitch shift, speed 1×)
+    // so the doubled travel per swipe keeps the turntable "effect" without
+    // the squeal (user, 2026-09-10).
+    private static let SCRUB_PITCH: Float = 0.5   // one octave (user, 2026-09-10; two was too dark)
+    private var pitchStream: sonicStream? = nil
+    private var pitchTmp: [Float] = []
+    private var pitchOut: [Float] = []
+    // Output queue after the pitch stage: Sonic emits in pitch-period bursts,
+    // so a per-call read came back short or empty at random — zero-filling
+    // those was the "clicks when scrubbing". Prime ~1 buffer, then steady.
+    private static let FIFO_CAP = 16384
+    private var pitchFifo: [Float] = []
+    private var fifoHead = 0, fifoCount = 0
+    private var fifoPrimed = false
+    private var fifoUnderruns = 0
+    private var fifoFade = 0, fifoFadeTotal = 1     // short fade-in after (re)priming — no step from silence
+    private var pitchSpeed: Float = 1.0             // ±3 % steering keeps the queue at its setpoint (Sonic's in/out drift)
+    // Session gain applied AFTER the pitch stage: end() silences the actual
+    // output at once instead of leaving a Sonic-latency tail under the
+    // resumed player (the "short latency when starting").
+    private var masterGain: Float = 0
     private static let SNAP_SEC = 0.7
     // Fast passes are where the squeal lives: duck the level as |speed| rises
     // (full ≤1.5×, ~0.2 by ~6×) and roll off the top end with a one-pole
@@ -1936,7 +2026,14 @@ final class KadokiScrubEngine {
         engine.attach(source)
         engine.connect(source, to: engine.mainMixerNode, format: fmt)
         engine.mainMixerNode.outputVolume = 1.0
+        if let ps = sonicCreateStream(Int32(sampleRate), 2) {
+            sonicIntSetQuality(ps, 1)   // full pitch-period search: the fast search glitched on resampled (unnatural-pitch) input
+            sonicSetSpeed(ps, 1.0)
+            sonicIntSetPitch(ps, Self.SCRUB_PITCH)
+            pitchStream = ps
+        }
     }
+    deinit { if let ps = pitchStream { sonicDestroyStream(ps) } }
 
     var currentMs: Double { lock.lock(); defer { lock.unlock() }; return pos / sampleRate * 1000 }
 
@@ -1964,8 +2061,10 @@ final class KadokiScrubEngine {
         return start(anchor: anchor, grow: false)
     }
 
+    private var everBegan = false   // a real drag happened this session (vs prime-only touch)
     @discardableResult
     func begin(atMs ms: Double) -> Bool {
+        everBegan = true
         let anchor = Int64(max(0, min(Double(totalFrames), ms / 1000 * sampleRate)))
         if isWarm(at: anchor) {
             // Primed: just re-aim. No decode, no engine start.
@@ -2020,14 +2119,14 @@ final class KadokiScrubEngine {
         // Re-centre when the finger nears an edge of the decoded window.
         let margin = 2.0 * sampleRate
         let now = Date().timeIntervalSince1970
-        if (f < Double(ws) + margin || f > Double(ws + Int64(len)) - margin) && !decodeBusy && now - lastEnsureAt > 0.15 {
+        if (f < Double(ws) + margin || f > Double(ws + Int64(len)) - margin) && !decodeBusy && now - lastEnsureAt > 0.06 {
             lastEnsureAt = now
             let inside = f >= Double(ws) && f < Double(ws + Int64(len))
             decodeQ.async { [weak self] in
                 guard let self = self else { return }
                 if inside { _ = self.grow(toHalfSec: Self.GROW_SEC.last ?? 60, gen: gen) }
-                else { self.loadWindow(center: Int64(f), halfSec: Self.INITIAL_SEC, gen: gen)
-                       for h in Self.GROW_SEC { if !self.grow(toHalfSec: h, gen: gen) { break } } }
+                else { self.loadWindow(center: Int64(f), halfSec: Self.RELOAD_SEC, gen: gen)
+                       for h in [Self.PRIME_SEC] + Self.GROW_SEC { if !self.grow(toHalfSec: h, gen: gen) { break } } }
             }
         }
     }
@@ -2035,14 +2134,17 @@ final class KadokiScrubEngine {
     func end() {
         lock.lock(); gainTarget = 0; decodeGen += 1; let endGen = decodeGen; lock.unlock()
         // Stay running (silent) for a while: consecutive swipes reuse the live
-        // engine and never pay an audio-unit stop/start, which can pop.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+        // engine and never pay an audio-unit stop/start, which can pop. A
+        // prime-only touch (page turn, tap) never made a sound — stop it soon.
+        let keep: Double = everBegan ? 6.0 : 1.2
+        DispatchQueue.main.asyncAfter(deadline: .now() + keep) { [weak self] in
             guard let self = self else { return }
             self.lock.lock()
             let stillEnded = (self.decodeGen == endGen)
             self.lock.unlock()
             guard stillEnded else { return }     // a new prime()/begin() raced in
             self.engine.stop()
+            self.everBegan = false
             // Release on THIS (main) thread, after the render callback is gone.
             self.lock.lock()
             let dropL = self.bufL, dropR = self.bufR, dropRL = self.retiredL, dropRR = self.retiredR
@@ -2142,7 +2244,9 @@ final class KadokiScrubEngine {
         let vgTarget: Float = sp <= 1.5 ? 1.0 : Float(max(0.2, 1.0 - (sp - 1.5) / 5.5))
         let vg0 = vGain
         let dvg = (vgTarget - vg0) / Float(count)
-        let fc = min(18000.0, max(1400.0, 12000.0 / max(1.0, sp)))
+        // Lighter low-pass than before: the two-octave pitch drop below already
+        // tames the fast-scrub harshness.
+        let fc = min(18000.0, max(3000.0, 12000.0 / max(1.0, sp * 0.5)))
         let a = Float(1.0 - exp(-2.0 * Double.pi * fc / sampleRate))
         var yl = lpL, yr = lpR
         l.withUnsafeBufferPointer { lp in
@@ -2164,7 +2268,7 @@ final class KadokiScrubEngine {
                     // Ramp toward silence while a jump is armed or the head has run
                     // off the decoded window (was an abrupt cut = click), else
                     // toward the session gain.
-                    let wantG: Float = (snapArmed || !avail) ? 0 : gT
+                    let wantG: Float = (snapArmed || !avail) ? 0 : 1   // session gain is applied post-pitch (masterGain)
                     if g < wantG { g = min(wantG, g + gStep) } else if g > wantG { g = max(wantG, g - gStep) }
                     let vg = vg0 + dvg * Float(i + 1)
                     outL[i] = yl * g * vg
@@ -2178,6 +2282,73 @@ final class KadokiScrubEngine {
         // Keep the read head inside the file.
         if pos < 0 { pos = 0; vel = 0 }
         if pos > Double(totalFrames) { pos = Double(totalFrames); vel = 0 }
+        // Idle (primed but never dragged, or faded out after end): nothing is
+        // audible, so skip the pitch stage — Sonic's pitch search on silence
+        // was steady CPU for every keep-alive window (every page-turn touch).
+        if gT <= 0 && masterGain <= 0.0005 {
+            if fifoPrimed || fifoCount > 0 { fifoPrimed = false; fifoCount = 0; fifoHead = 0 }
+            for i in 0..<count { outL[i] = 0; outR[i] = 0 }
+            return
+        }
+        // Pitch stage: interleave → Sonic (pitch 0.5, speed 1) → de-interleave.
+        // Sonic buffers a few pitch periods, so the first buffers after start
+        // come back short — the remainder is zero-filled (tens of ms once).
+        if let ps = pitchStream {
+            if pitchTmp.count < count * 2 { pitchTmp = [Float](repeating: 0, count: count * 2) }
+            if pitchOut.isEmpty { pitchOut = [Float](repeating: 0, count: 4096 * 2) }
+            if pitchFifo.isEmpty { pitchFifo = [Float](repeating: 0, count: Self.FIFO_CAP * 2) }
+            for i in 0..<count { pitchTmp[2 * i] = outL[i]; pitchTmp[2 * i + 1] = outR[i] }
+            pitchTmp.withUnsafeBufferPointer { p in _ = sonicWriteFloatToStream(ps, p.baseAddress, Int32(count)) }
+            // Drain everything Sonic has into the queue.
+            var guardIters = 0
+            while guardIters < 8 {
+                guardIters += 1
+                let avail = Int(sonicIntSamplesAvailable(ps))
+                let room = Self.FIFO_CAP - fifoCount
+                if avail <= 0 || room <= 0 { break }
+                let want = min(avail, min(room, pitchOut.count / 2))
+                var got: Int32 = 0
+                pitchOut.withUnsafeMutableBufferPointer { p in got = sonicReadFloatFromStream(ps, p.baseAddress, Int32(want)) }
+                let gi = max(0, Int(got))
+                if gi == 0 { break }
+                var w = (fifoHead + fifoCount) % Self.FIFO_CAP
+                for i in 0..<gi { pitchFifo[2 * w] = pitchOut[2 * i]; pitchFifo[2 * w + 1] = pitchOut[2 * i + 1]; w += 1; if w == Self.FIFO_CAP { w = 0 } }
+                fifoCount += gi
+            }
+            // Steer Sonic's speed by a few percent to hold the queue near its
+            // setpoint: pitch shifting's in/out ratio isn't exactly 1, so a
+            // fixed queue drifted into underruns (gaps) or ever-growing latency.
+            let setpoint = count + 2048
+            let dev = fifoCount - setpoint
+            let wantSpd: Float = dev > 1024 ? 1.03 : (dev < -1024 ? 0.97 : 1.0)
+            if wantSpd != pitchSpeed { pitchSpeed = wantSpd; sonicSetSpeed(ps, wantSpd) }
+            if fifoCount > Self.FIFO_CAP - 2048 {   // safety: drop the excess (silence-only in practice)
+                let drop = fifoCount - setpoint
+                fifoHead = (fifoHead + drop) % Self.FIFO_CAP; fifoCount -= drop
+            }
+            if !fifoPrimed && fifoCount >= setpoint { fifoPrimed = true; fifoFadeTotal = max(1, Int(0.008 * sampleRate)); fifoFade = fifoFadeTotal }
+            if fifoPrimed && fifoCount >= count {
+                var h = fifoHead
+                for i in 0..<count {
+                    var k: Float = 1
+                    if fifoFade > 0 { k = 1 - Float(fifoFade) / Float(fifoFadeTotal); fifoFade -= 1 }
+                    outL[i] = pitchFifo[2 * h] * k; outR[i] = pitchFifo[2 * h + 1] * k
+                    h += 1; if h == Self.FIFO_CAP { h = 0 }
+                }
+                fifoHead = h; fifoCount -= count
+            } else {
+                if fifoPrimed { fifoUnderruns += 1; if fifoUnderruns % 4 == 1 { NSLog("[scrub] pitch queue underrun #%d (have %d, need %d)", fifoUnderruns, fifoCount, count) } }
+                fifoPrimed = false
+                for i in 0..<count { outL[i] = 0; outR[i] = 0 }
+            }
+        }
+        // Session gain (begin → 1, end/prime → 0) on the ACTUAL output.
+        var mg = masterGain
+        for i in 0..<count {
+            if mg < gT { mg = min(gT, mg + gStep) } else if mg > gT { mg = max(gT, mg - gStep) }
+            outL[i] *= mg; outR[i] *= mg
+        }
+        masterGain = mg
     }
 
     @inline(__always)

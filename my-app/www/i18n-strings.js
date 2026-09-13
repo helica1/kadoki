@@ -28,7 +28,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'lib.library': { en: 'Library', ja: 'ライブラリ' },
   'lib.import_folder': { en: 'Import folder', ja: 'フォルダを取り込む' },
   'lib.new_title': { en: '+ New title', ja: '＋ 新規タイトル' },
-  'lib.swipe_hint': { en: 'Swipe left on a title for stats, edit, or delete', ja: 'タイトルを左にスワイプで統計・編集・削除できます' },
+  'lib.swipe_hint': { en: 'Tap a title for details · swipe left for stats, edit, delete', ja: 'タイトルをタップで詳細 · 左スワイプで統計・編集・削除' },
   'lib.stats': { en: 'Stats', ja: '統計' },
   // ---- per-title stats card (library swipe → Stats) ----
   'ts.title': { en: 'Title stats', ja: 'タイトル統計' },

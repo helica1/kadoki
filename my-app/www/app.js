@@ -33,8 +33,14 @@ window.SYS_GESTURE_BOTTOM = 72;
 window._inSystemGestureZone = function (clientY) {
   if (!Number.isFinite(clientY)) return false;
   const vh = window.innerHeight || 0;
-  return clientY <= window.SYS_GESTURE_TOP ||
-         (vh > 0 && clientY >= vh - window.SYS_GESTURE_BOTTOM);
+  // These margins were chosen for PORTRAIT. In landscape the viewport is less
+  // than half as tall, so the same 64 + 72 px swallowed a third of the screen
+  // and swipes there quietly did nothing — and the notification shade / home
+  // indicator targets are smaller in landscape anyway.
+  const landscape = (window.innerWidth || 0) > vh;
+  const top = landscape ? 24 : window.SYS_GESTURE_TOP;
+  const bottom = landscape ? 34 : window.SYS_GESTURE_BOTTOM;
+  return clientY <= top || (vh > 0 && clientY >= vh - bottom);
 };
 // "Reverse horizontal swipe direction" pref. Swipe handlers (card / audio /
 // read transport) read it synchronously from localStorage; preferences.js
@@ -1566,8 +1572,31 @@ window.getActivePlaybackRate = function () {
 // Apply the active rate to live playback engines AND mirror to
 // window.audioPlaybackRate so existing call sites that read that
 // variable see the right value.
+// Transient speed DRIFT (Preferences → Read → "Speed drift"): added on top of
+// the saved rate while playback runs untouched, and dropped back to 0 on a
+// lookup / scrub / manual change. Never persisted — the saved rate stays the
+// speed the user chose.
+window._rateDrift = 0;
+window.effectivePlaybackRate = function () {
+  const base = window.getActivePlaybackRate();
+  const d = Number(window._rateDrift) || 0;
+  return Math.round(Math.max(0.5, Math.min(3.0, base + d)) * 100) / 100;
+};
+// Set the ACTIVE mode's rate outright (the vertical speed drag). `live` skips
+// the write-back to storage so a drag doesn't hammer Preferences.
+window.setActivePlaybackRate = async function (r, live) {
+  const MIN = 0.5, MAX = 3.0;
+  r = Math.max(MIN, Math.min(MAX, Math.round((parseFloat(r) || 1) * 100) / 100));
+  window._rateDrift = 0;
+  if (window._playbackPerMode) window._playbackRates[_currentModeForSpeed()] = r;
+  else { window._playbackRates.global = r; window._playbackRates.card = r; window._playbackRates.read = r; window._playbackRates.audio = r; }
+  await window.applyActivePlaybackRate();
+  if (!live) { try { await _persistPlaybackRates(); } catch (_) {} }
+  return r;
+};
+
 window.applyActivePlaybackRate = async function () {
-  const r = window.getActivePlaybackRate();
+  const r = window.effectivePlaybackRate();
   window.audioPlaybackRate = r;
   try {
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
@@ -1676,6 +1705,7 @@ window.setGlobalPlaybackRate = async function (rate) {
 // 0.5–3.0 range. Returns the new effective rate.
 window.nudgeActivePlaybackRate = async function (delta) {
   const STEP = 0.05, MIN = 0.5, MAX = 3.0;
+  window._rateDrift = 0;   // a manual change is the new baseline
   const cur = window.getActivePlaybackRate();
   let r = cur + (parseFloat(delta) || 0);
   r = Math.max(MIN, Math.min(MAX, Math.round(r / STEP) * STEP));
@@ -4465,7 +4495,27 @@ function _ensureBgListenersForSrtCards() {
   if (!bg) return;
   _srtEndListenerAttached = true;
   bg.addListener('state', (d) => {
+    const _wasPlaying = !!window._bgPlaying;
     window._bgPlaying = !!d.playing;
+    // DELIBERATE-PAUSE MARK (never-lose-place). Read-mode PLAY re-resolves a
+    // start position and distrusts a playhead more than VIS_TOL_MS from the
+    // top of the page on screen — but a full page of vertical text is often
+    // MORE than that much audio, so pausing mid-page and pressing play
+    // restarted at the top of the page. Remember where playback actually
+    // stopped (and which page was showing); the resume path trusts that.
+    if (_wasPlaying && !d.playing) {
+      // Speed drift is a reward for uninterrupted listening — stopping ends
+      // it, so the next start is at the speed the user actually chose.
+      try { window.speedDrift?.reset('pause'); } catch (_) {}
+      try {
+        bg.getState().then((s) => {
+          if (!s || !Number.isFinite(s.positionMs) || s.positionMs <= 0) return;
+          let vis = null;
+          try { const v = window._pagedVisibleCueStartMs?.(); if (Number.isFinite(v)) vis = v; } catch (_) {}
+          window._readPauseMark = { ms: s.positionMs, visMs: vis, ts: Date.now() };
+        }).catch(() => {});
+      } catch (_) {}
+    }
     // Card waveform: the draggable bounds show only when STOPPED. Re-render the
     // editor on every play/pause from THIS persistent listener (set _bgPlaying
     // first, above, so render() reads the correct state). The editor's own
@@ -5294,6 +5344,25 @@ window.isReadingPlaying = function () {
   return !!(currentAudio && !currentAudio.paused && !currentAudio.ended);
 };
 
+// Is a loaded-but-paused playhead trustworthy enough to just resume?
+//   • It agrees with the page on screen → yes (the common case).
+//   • It is exactly where the user paused AND the page hasn't moved since →
+//     yes, even if that's deep into the visible page (a page of vertical text
+//     can be minutes of audio; see the pause mark in the state listener).
+//   • Otherwise it's a stale restore / EOF clamp → the caller restarts from
+//     the visible line.
+function _readResumeTrusted(s, visMs, tolMs) {
+  if (!Number.isFinite(visMs) || !Number.isFinite(s.positionMs)) return true;
+  if (Math.abs(s.positionMs - visMs) <= tolMs) return true;
+  const m = window._readPauseMark;
+  if (m && Number.isFinite(m.ms) && Math.abs(s.positionMs - m.ms) < 2500 &&
+      (!Number.isFinite(m.visMs) || Math.abs(visMs - m.visMs) <= tolMs)) {
+    try { window.debugLog?.('[reader-play] resuming at the deliberate pause mark ' + Math.round(s.positionMs)); } catch (_) {}
+    return true;
+  }
+  return false;
+}
+
 window.toggleReadingPlayback = function () {
   const inReader = document.body.classList.contains('mode-read');
 
@@ -5363,8 +5432,14 @@ window.toggleReadingPlayback = function () {
         console.log('[reader-play] state.playing=' + s.playing + ' state.ready=' + s.ready);
         try { window._diag?.('[paged-diag] reader-play state playing=' + s.playing + ' ready=' + s.ready + ' pos=' + s.positionMs + ' engine=' + s.engine); } catch (_) {}
         if (s.playing) {
+          // Record the mark here too: this is the path the reader's
+          // down-swipe and the transport button take.
+          try {
+            let _v = null; try { const q = window._pagedVisibleCueStartMs?.(); if (Number.isFinite(q)) _v = q; } catch (_) {}
+            if (Number.isFinite(s.positionMs) && s.positionMs > 0) window._readPauseMark = { ms: s.positionMs, visMs: _v, ts: Date.now() };
+          } catch (_) {}
           bg.pause();
-        } else if (s.ready && !(Number.isFinite(visMs) && Number.isFinite(s.positionMs) && Math.abs(s.positionMs - visMs) > VIS_TOL_MS)) {
+        } else if (s.ready && _readResumeTrusted(s, visMs, VIS_TOL_MS)) {
           bg.resume();
         } else if (s.ready) {
           // A loaded-but-paused player parked FAR from the page on screen

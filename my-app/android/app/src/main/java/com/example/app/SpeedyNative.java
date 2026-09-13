@@ -13,6 +13,9 @@ final class SpeedyNative {
     static native void destroy(long h);
     static native void setSpeed(long h, float speed);
     static native void setNonlinear(long h, boolean on);
+    static native void setPitch(long h, float pitch);            // Sonic pitch shift (1 = unchanged)
+    static native int writeFloat(long h, float[] interleaved, int frames);
+    static native int readFloat(long h, float[] out, int maxFrames);
     static native int writeShort(long h, short[] interleaved, int frames);
     static native int readShort(long h, short[] out, int maxFrames);
     static native int available(long h);

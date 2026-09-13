@@ -468,5 +468,6 @@
     } catch (_) {}
   }
 
-  window.vocabSrs = { add, remove, has, counts, openReview, openHub };
+  async function listForTitle(titleId) { const s = await load(); return s.cards.filter(c => c && c.titleId === titleId); }
+  window.vocabSrs = { add, remove, has, counts, openReview, openHub, listForTitle };
 })();

@@ -38,6 +38,20 @@ final class KadokiScrubEngine {
     private static final double SNAP_SEC = 0.7;
     private static final double GAIN_RAMP_SEC = 0.012;
     private static final int FRAMES_PER_WRITE = 256;
+    // Scrub audio pitched DOWN two octaves (Sonic pitch shift at speed 1×) so
+    // the doubled travel per swipe keeps the effect without the squeal.
+    private static final float SCRUB_PITCH = 0.5f;   // one octave
+    private long pitchH = 0;
+    private float[] pitchOut = null;
+    // Output queue after the pitch stage (Sonic emits in bursts) + session gain
+    // applied on the ACTUAL output so end() silences it at once (see iOS).
+    private static final int FIFO_CAP = 16384;
+    private float[] pitchFifo = null;
+    private int fifoHead = 0, fifoCount = 0;
+    private boolean fifoPrimed = false;
+    private float masterGain = 0f;
+    private int fifoFade = 0, fifoFadeTotal = 1;
+    private float pitchSpeed = 1f;
 
     final String path;
     private final Context ctx;
@@ -163,7 +177,9 @@ final class KadokiScrubEngine {
         return start(anchor, false);
     }
 
+    private boolean everBegan = false;
     boolean begin(double ms) {
+        everBegan = true;
         long anchor = clampFrame(ms);
         if (isWarm(anchor)) {
             final int gen;
@@ -213,7 +229,7 @@ final class KadokiScrubEngine {
         }
         double margin = 2.0 * sampleRate;
         long now = System.currentTimeMillis();
-        if ((f < ws + margin || f > ws + len - margin) && !decodeBusy && now - lastEnsureAt > 150) {
+        if ((f < ws + margin || f > ws + len - margin) && !decodeBusy && now - lastEnsureAt > 60) {
             lastEnsureAt = now;
             final boolean inside = f >= ws && f < ws + len;
             final long ff = (long) f;
@@ -231,8 +247,9 @@ final class KadokiScrubEngine {
         new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
             synchronized (lock) { if (decodeGen != endGen) return; }
             stopTrack();
+            everBegan = false;
             synchronized (lock) { bufL = new float[0]; bufR = new float[0]; }
-        }, 6000);
+        }, everBegan ? 6000 : 1200);
     }
 
     void release() {
@@ -291,6 +308,13 @@ final class KadokiScrubEngine {
             track.play();
         } catch (Exception e) { Log.e(TAG, "AudioTrack failed", e); track = null; return false; }
         outBuf = new float[FRAMES_PER_WRITE * 2];
+        pitchOut = new float[4096 * 2];
+        if (pitchH == 0 && SpeedyNative.load()) {
+            try {
+                pitchH = SpeedyNative.create((int) sampleRate, 2);
+                if (pitchH != 0) { SpeedyNative.setSpeed(pitchH, 1f); SpeedyNative.setPitch(pitchH, SCRUB_PITCH); }
+            } catch (Throwable t) { pitchH = 0; }
+        }
         running = true;
         renderThread = new Thread(this::renderLoop, "kadoki-scrub-render");
         renderThread.setPriority(Thread.MAX_PRIORITY);
@@ -304,6 +328,7 @@ final class KadokiScrubEngine {
         if (t != null) { try { t.join(300); } catch (InterruptedException ignored) {} }
         AudioTrack tr = track; track = null;
         if (tr != null) { try { tr.pause(); tr.flush(); tr.release(); } catch (Exception ignored) {} }
+        if (pitchH != 0) { try { SpeedyNative.destroy(pitchH); } catch (Throwable ignored) {} pitchH = 0; }
     }
 
     private void renderLoop() {
@@ -311,7 +336,58 @@ final class KadokiScrubEngine {
             AudioTrack tr = track;
             if (tr == null) break;
             render(outBuf, FRAMES_PER_WRITE);
-            try { tr.write(outBuf, 0, FRAMES_PER_WRITE * 2, AudioTrack.WRITE_BLOCKING); }
+            float[] w = outBuf;
+            float gTi; synchronized (lock) { gTi = gainTarget; }
+            if (gTi <= 0f && masterGain <= 0.0005f) {   // idle: nothing audible → skip the pitch stage
+                if (fifoPrimed || fifoCount > 0) { fifoPrimed = false; fifoCount = 0; fifoHead = 0; }
+                java.util.Arrays.fill(outBuf, 0f);
+                try { tr.write(outBuf, 0, FRAMES_PER_WRITE * 2, AudioTrack.WRITE_BLOCKING); } catch (Exception e) { break; }
+                continue;
+            }
+            if (pitchH != 0) {
+                try {
+                    if (pitchFifo == null) pitchFifo = new float[FIFO_CAP * 2];
+                    SpeedyNative.writeFloat(pitchH, outBuf, FRAMES_PER_WRITE);
+                    for (int it = 0; it < 8; it++) {
+                        int avail = SpeedyNative.available(pitchH), room = FIFO_CAP - fifoCount;
+                        if (avail <= 0 || room <= 0) break;
+                        int want = Math.min(avail, Math.min(room, pitchOut.length / 2));
+                        int got = SpeedyNative.readFloat(pitchH, pitchOut, want);
+                        if (got <= 0) break;
+                        int wi = (fifoHead + fifoCount) % FIFO_CAP;
+                        for (int i = 0; i < got; i++) { pitchFifo[2 * wi] = pitchOut[2 * i]; pitchFifo[2 * wi + 1] = pitchOut[2 * i + 1]; if (++wi == FIFO_CAP) wi = 0; }
+                        fifoCount += got;
+                    }
+                    int setpoint = FRAMES_PER_WRITE + 2048, dev = fifoCount - setpoint;
+                    float wantSpd = dev > 1024 ? 1.03f : (dev < -1024 ? 0.97f : 1f);
+                    if (wantSpd != pitchSpeed) { pitchSpeed = wantSpd; SpeedyNative.setSpeed(pitchH, wantSpd); }
+                    if (fifoCount > FIFO_CAP - 2048) { int drop = fifoCount - setpoint; fifoHead = (fifoHead + drop) % FIFO_CAP; fifoCount -= drop; }
+                    if (!fifoPrimed && fifoCount >= setpoint) { fifoPrimed = true; fifoFadeTotal = Math.max(1, (int) (0.008 * sampleRate)); fifoFade = fifoFadeTotal; }
+                    if (fifoPrimed && fifoCount >= FRAMES_PER_WRITE) {
+                        int h = fifoHead;
+                        for (int i = 0; i < FRAMES_PER_WRITE; i++) {
+                            float k = 1f;
+                            if (fifoFade > 0) { k = 1f - (float) fifoFade / (float) fifoFadeTotal; fifoFade--; }
+                            pitchOut[2 * i] = pitchFifo[2 * h] * k; pitchOut[2 * i + 1] = pitchFifo[2 * h + 1] * k;
+                            if (++h == FIFO_CAP) h = 0;
+                        }
+                        fifoHead = h; fifoCount -= FRAMES_PER_WRITE;
+                    } else {
+                        fifoPrimed = false;
+                        java.util.Arrays.fill(pitchOut, 0, FRAMES_PER_WRITE * 2, 0f);
+                    }
+                    w = pitchOut;
+                } catch (Throwable ignored) { w = outBuf; }
+            }
+            // Session gain on the actual output (begin → 1, end/prime → 0).
+            float gT; synchronized (lock) { gT = gainTarget; }
+            float gStep = (float) (1.0 / (GAIN_RAMP_SEC * sampleRate)), mg = masterGain;
+            for (int i = 0; i < FRAMES_PER_WRITE; i++) {
+                if (mg < gT) mg = Math.min(gT, mg + gStep); else if (mg > gT) mg = Math.max(gT, mg - gStep);
+                w[2 * i] *= mg; w[2 * i + 1] *= mg;
+            }
+            masterGain = mg;
+            try { tr.write(w, 0, FRAMES_PER_WRITE * 2, AudioTrack.WRITE_BLOCKING); }
             catch (Exception e) { break; }
         }
     }
@@ -333,7 +409,7 @@ final class KadokiScrubEngine {
         double sp = Math.abs(desired);
         float vgTarget = sp <= 1.5 ? 1f : (float) Math.max(0.2, 1.0 - (sp - 1.5) / 5.5);
         float vg0 = vGain, dvg = (vgTarget - vg0) / count;
-        double fc = Math.min(18000.0, Math.max(1400.0, 12000.0 / Math.max(1.0, sp)));
+        double fc = Math.min(18000.0, Math.max(3000.0, 12000.0 / Math.max(1.0, sp * 0.5)));   // lighter: the pitch drop tames the harshness
         float a = (float) (1.0 - Math.exp(-2.0 * Math.PI * fc / sampleRate));
         float yl = lpL, yr = lpR;
         double wsD = ws;
@@ -351,7 +427,7 @@ final class KadokiScrubEngine {
             }
             yl += a * (sl - yl);
             yr += a * (sr - yr);
-            float wantG = (snapArmed || !avail) ? 0f : gT;
+            float wantG = (snapArmed || !avail) ? 0f : 1f;   // session gain is applied post-pitch (masterGain)
             if (g < wantG) g = Math.min(wantG, g + gStep); else if (g > wantG) g = Math.max(wantG, g - gStep);
             float vg = vg0 + dvg * (i + 1);
             out[2 * i] = yl * g * vg;

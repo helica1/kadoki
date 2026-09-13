@@ -2226,6 +2226,7 @@
         try { overlay.remove(); } catch (_) {}
       }
       async function close() { await teardown(); reopenSafe(); }
+      overlay._kaiClose = close;   // shell.js closes the pane when a mode tab is tapped
       async function navigateScene(dir) {
         if (switching || closed || overlay._dead || curSceneIdx < 0) return;
         const ni = curSceneIdx + dir;

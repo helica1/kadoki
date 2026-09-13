@@ -423,6 +423,41 @@
         // Count banks first so we can drive a real progress bar.
         let bankCount = 0;
         while (zip.file(`${prefix}term_bank_${bankCount + 1}.json`)) bankCount++;
+        // A FREQUENCY dictionary (term_meta_bank_N.json only, e.g. JPDB v2.2):
+        // one rank per word, kept in its own store (blobStore FREQ_V1) for the
+        // library's difficulty profile — it never enters the lookup pipeline.
+        let metaBankCount = 0;
+        while (zip.file(`${prefix}term_meta_bank_${metaBankCount + 1}.json`)) metaBankCount++;
+        if (bankCount === 0 && metaBankCount > 0) {
+            const ranks = Object.create(null);
+            let rows = 0;
+            for (let b = 1; b <= metaBankCount; b++) {
+                const bank = JSON.parse(await zip.file(`${prefix}term_meta_bank_${b}.json`).async('text'));
+                for (const row of bank) {
+                    if (!Array.isArray(row) || row[1] !== 'freq') continue;
+                    const term = row[0]; let d = row[2];
+                    if (d && typeof d === 'object' && d.frequency != null) d = d.frequency;   // {reading, frequency}
+                    let v = (typeof d === 'number') ? d : (d && typeof d === 'object' && typeof d.value === 'number') ? d.value : NaN;
+                    if (!Number.isFinite(v) || !term) continue;
+                    const cur = ranks[term];
+                    if (cur == null || v < cur) ranks[term] = v;
+                    rows++;
+                }
+                onProgress({ phase: 'parse', pct: b / metaBankCount, banks: b, totalBanks: metaBankCount });
+                await new Promise(r => setTimeout(r, 0));
+            }
+            const count = Object.keys(ranks).length;
+            if (!count) throw new Error('Frequency dictionary has no usable ranks');
+            onProgress({ phase: 'index', pct: 0.5 });
+            const payload = { v: 1, name: dictName, count, ts: Date.now(), ranks };
+            if (window.blobStore?.set) await window.blobStore.set('FREQ_V1', JSON.stringify(payload));
+            try { localStorage.setItem('FREQ_NAME_V1', JSON.stringify({ name: dictName, count, ts: payload.ts })); } catch (_) {}
+            try { window.wordFreq?.release?.(); } catch (_) {}
+            try { window.dispatchEvent(new CustomEvent('kai:freq-imported', { detail: { name: dictName, count } })); } catch (_) {}
+            onProgress({ phase: 'done', pct: 1 });
+            console.log(`✅ Imported frequency list "${dictName}" (${count} words from ${rows} rows)`);
+            return dictName;
+        }
 
         // Bundled image assets (Jitendex forms-table marks, badges) — store
         // them so structured-content <img> nodes can render. Capped so a
@@ -1608,6 +1643,9 @@
             popup.style.maxHeight = 'none';
             popup.style.borderRadius = '0 0 14px 14px';
             popup.style.borderTop = 'none';
+            // Pane viewer (Card-tab Vocabulary): stay BELOW the app header so
+            // the mode tabs remain tappable; closeViewer resets zIndex.
+            try { popup.style.zIndex = document.getElementById('lookupNavBar').dataset.pane ? '8960' : ''; } catch (_) {}
             return;
         }
         const vw = window.innerWidth, vh = window.innerHeight;
@@ -2098,7 +2136,7 @@
     // can resume audio underneath (racing e.g. key-passage playback). Gestures
     // inside a VISIBLE overlay belong to it; taps on dict text still dismiss
     // via the dict-frag handlers. New modals need the same exclusion.
-    const AI_OVERLAY_IDS = ['kchapterView', 'kcharsScreen', 'kcharPopup', 'kplacePopup', 'aiSummaryOverlay', 'bookmarksOverlay', 'kaiLightbox', 'kvocabReview', 'shellSubMenu'];
+    const AI_OVERLAY_IDS = ['vocabViewOverlay', 'cardTabChooser', 'kchapterView', 'kcharsScreen', 'kcharPopup', 'kplacePopup', 'aiSummaryOverlay', 'bookmarksOverlay', 'kaiLightbox', 'kvocabReview', 'shellSubMenu'];
     function _aiOverlayVisible(el) {
         if (!el || !el.getClientRects().length) return false;
         try {
@@ -2432,6 +2470,9 @@
         }
     }
     async function _performLookupInner(spans, index, lazy) {
+        // A lookup means the reader stopped to think — drop any accumulated
+        // speed drift so playback resumes at the speed they actually chose.
+        try { window.speedDrift?.reset('lookup'); } catch (_) {}
         const _t0 = performance.now();
         const lap = (label) => console.log(`⏱ ${label}: +${Math.round(performance.now() - _t0)}ms`);
         console.log(`🚀 Performing multi-dictionary lookup for span ${index}...`);
