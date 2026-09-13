@@ -4610,6 +4610,10 @@
         // for every tap and definitions from earlier taps would pop up
         // seconds later in random order.
         const token = ++currentLookupToken;
+        // Speed drift is a reward for uninterrupted reading — looking a word up
+        // ends the run, so the speed (and the readout) drop back to the one the
+        // user actually chose.
+        try { window.speedDrift?.reset('lookup'); } catch (_) {}
         const loadPromise = startGlobalDictionaryLoading();
         if (document.body.classList.contains('mode-read') && window.stats?.bumpRead) {
             window.stats.bumpRead();

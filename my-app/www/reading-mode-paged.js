@@ -4424,6 +4424,10 @@
     });
     window.addEventListener('playback:rate', paint);
     window.addEventListener('shell:mode-change', () => setTimeout(paint, 0));
+    // Direct repaint hook. applyActivePlaybackRate only reaches this readout
+    // after an await on the native setRate call, so a caller that needs the
+    // number corrected NOW (a drift reset) calls this as well.
+    window._pagedPaintSpeed = paint;
     paint();
     document.body.appendChild(ctl);
     // No status-bar band to live in (Android without edge-to-edge, older
