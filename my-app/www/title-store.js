@@ -357,6 +357,20 @@
     return titles[i];
   }
 
+  // Same patch on several titles, one persist (library folder moves).
+  async function updateMany(ids, patch) {
+    await load();
+    const want = new Set(ids || []);
+    let n = 0;
+    titles = titles.map(t => {
+      if (!want.has(t.id)) return t;
+      n++;
+      return { ...t, ...patch, attachments: t.attachments };
+    });
+    if (n) await persist();
+    return n;
+  }
+
   async function attach(id, kind, attachment) {
     await load();
     const i = titles.findIndex(t => t.id === id);
@@ -498,6 +512,7 @@
     create,
     createMany,
     update,
+    updateMany,
     attach,
     detach,
     remove,

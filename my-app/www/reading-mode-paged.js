@@ -272,6 +272,138 @@
         #readingPagedProgress { display: none !important; }
         #readingPagedProgressInline { display: inline-block !important; }
       }
+      /* iPhone Duo cover screen: no status-bar band (iOS reports its corner
+         camera as a right inset, top 0), so the strip label would sit half
+         off the top edge, and the header is too narrow for the inline copy.
+         It moves to the home-indicator band at the bottom-left instead —
+         the same kind of unused strip, so it costs no space. Inset clear of
+         the rounded corner. Class set by _duoBandCheck, Duo only. */
+      html.kadoki-duo-noband #readingPagedProgress {
+        top: auto !important;
+        bottom: calc(env(safe-area-inset-bottom, 0px) / 2);
+        transform: translateY(50%);
+        left: calc(env(safe-area-inset-left, 0px) + 26px);
+      }
+      /* ---- iPhone Duo read mode, both screens: full-height text under glass bars ----
+         The page runs edge to edge, top to bottom. The shell header and a
+         bottom bar float over it as frosted glass, so the text shows through
+         them blurred, and they slide away with the rest of the chrome on a tap.
+         Nothing reflows when they show or hide. The bottom bar holds the position
+         marker (tap = enter a position) and the speed control, which keeps
+         the speed control off the header's play button. */
+      html.kadoki-duo body.mode-read #readingPagedView { top: 0 !important; }
+      /* The glass is a ::before layer, not the bar itself, so it can reach a
+         little past the bar and FADE out (mask) toward the text: no hard line
+         where the tint and blur begin. Top-lit gradient + a faint highlight
+         along the outer edge give it a slight 3D sheen. */
+      html.kadoki-duo body.mode-read #appHeader,
+      html.kadoki-duo #kadokiDuoBottomBar {
+        background: transparent !important;
+        border: 0 !important;
+        box-shadow: none !important;
+        -webkit-backdrop-filter: none;
+        backdrop-filter: none;
+      }
+      html.kadoki-duo body.mode-read #appHeader::before,
+      html.kadoki-duo #kadokiDuoBottomBar::before {
+        content: '';
+        position: absolute;
+        left: 0; right: 0;
+        z-index: -1;
+        pointer-events: none;
+        -webkit-backdrop-filter: blur(1px) saturate(140%);
+        backdrop-filter: blur(1px) saturate(140%);
+      }
+      html.kadoki-duo body.mode-read #appHeader::before {
+        top: 0; bottom: -26px;
+        background: linear-gradient(180deg,
+          rgba(46, 46, 56, 0.74) 0%,
+          rgba(22, 22, 28, 0.66) 45%,
+          rgba(10, 10, 12, 0.58) calc(100% - 26px),
+          rgba(16, 16, 20, 0.0) 100%);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09);
+        -webkit-mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 34px), transparent 100%);
+        mask-image: linear-gradient(to bottom, #000 0, #000 calc(100% - 34px), transparent 100%);
+      }
+      html.kadoki-duo #kadokiDuoBottomBar::before {
+        top: -26px; bottom: 0;
+        background: linear-gradient(180deg,
+          rgba(16, 16, 20, 0.0) 0%,
+          rgba(26, 26, 32, 0.64) 26px,
+          rgba(15, 15, 19, 0.70) 60%,
+          rgba(8, 8, 10, 0.76) 100%);
+        -webkit-mask-image: linear-gradient(to top, #000 0, #000 calc(100% - 34px), transparent 100%);
+        mask-image: linear-gradient(to top, #000 0, #000 calc(100% - 34px), transparent 100%);
+      }
+      /* The text runs all the way under both bars (no top/bottom page
+         margin) so the glass has something to show through. */
+      html.kadoki-duo body.mode-read #readingPagedContent { padding-top: 0 !important; padding-bottom: 0 !important; }
+      html.kadoki-duo body.mode-read #readingPagedInner { padding-top: 6px !important; padding-bottom: 6px !important; }
+      /* Bottom bar: narrow screens only (the cover screen). Thin — the marker
+         and speed control sit just above the home indicator, inside the band
+         iOS reserves anyway. Unfolded, everything fits in the top bar. */
+      #kadokiDuoBottomBar {
+        display: none;
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        height: max(calc(env(safe-area-inset-bottom, 0px) + 10px), 30px);
+        z-index: 8990;
+        border-top: 0.5px solid rgba(255, 255, 255, 0.10);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+        transition: transform .22s ease, opacity .18s ease;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      body.chrome-hidden #kadokiDuoBottomBar {
+        transform: translateY(110%);
+        opacity: 0;
+        pointer-events: none;
+      }
+      @media (max-width: 799px) {
+        html.kadoki-duo body.mode-read #kadokiDuoBottomBar { display: block; }
+        html.kadoki-duo body.mode-read #readingPagedProgress {
+          display: block !important;
+          top: auto !important;
+          bottom: max(calc(env(safe-area-inset-bottom, 0px) * 0.5 + 7px), 15px) !important;
+          transform: translateY(50%) !important;
+          left: calc(env(safe-area-inset-left, 0px) + 16px) !important;
+          padding: 6px 10px !important;
+          font-size: 13px !important;
+          color: #d6d6de;
+        }
+        html.kadoki-duo body.mode-read #readingPagedProgressInline { display: none !important; }
+        html.kadoki-duo body.mode-read #pagedSpeedCtl {
+          top: auto !important;
+          bottom: max(calc(env(safe-area-inset-bottom, 0px) * 0.5 - 5px), 3px) !important;
+          right: 16px !important;
+          height: 24px !important;
+        }
+        html.kadoki-duo body.mode-read #pagedSpeedCtl button { font-size: 18px; min-width: 34px; }
+        html.kadoki-duo body.mode-read:not(.chrome-hidden) #pagedSpeedCtl[data-no-band="1"] {
+          opacity: 1;
+          pointer-events: auto;
+        }
+      }
+      /* Unfolded: the speed control lives INSIDE the header row, just left
+         of the play button (moved there by _duoPlaceSpeedCtl). */
+      /* Duo corners are big (~55-59pt radius) and the header sits right at
+         the top edge (no top inset), so the curve clipped the mode tabs at
+         the default 12px. Every mode, both screens. */
+      html.kadoki-duo #appHeader { padding-left: 30px !important; }
+      html.kadoki-duo body.mode-read #readingPagedProgressInline { font-size: 13px !important; }
+      html.kadoki-duo body.mode-read #pagedSpeedCtl .ps-val { font-size: 13px; min-width: 42px; }
+      html.kadoki-duo #appHeader #pagedSpeedCtl {
+        position: static !important;
+        top: auto !important; right: auto !important; bottom: auto !important;
+        height: 30px !important;
+        align-self: center;
+        flex: none;
+      }
+      html.kadoki-duo body:not(.mode-read) #appHeader #pagedSpeedCtl { display: none !important; }
+      html.kadoki-duo body.mode-read #appHeader #pagedSpeedCtl[data-no-band="1"] {
+        opacity: 1;
+        pointer-events: auto;
+      }
       body.chrome-hidden #readingPagedProgressInline {
         opacity: 0;
         pointer-events: none;
@@ -3907,6 +4039,9 @@
   function _canSaveReadScroll() {
     try {
       if (!currentName || !scrollEl || !viewEl) return false;
+      // Restore in flight (the same signal the chunk-bookmark save trusts): the
+      // offset is transient and would overwrite this book's raw fallback.
+      if (suppressScrollSave) return false;
       if (_readerHidden()) return false;
       if (!(scrollEl.scrollWidth > scrollEl.clientWidth + 1)) return false;  // not laid out
       const hasCards = Array.isArray(window.allNotes) && window.allNotes.length > 0;
@@ -3977,6 +4112,7 @@
     let pendingSave = null;
     scrollEl.addEventListener('scroll', () => {
       _scheduleEdgeMask(); // keep the far-edge partial-column mask in sync (rAF-throttled, never scrolls)
+      _duoScheduleCapture();   // Duo only: re-take the fold anchor once the page rests
       // Distinguish user-initiated scroll from programmatic (audio-follow)
       // scroll. Anything not within 800ms of our last programmatic call
       // counts as the user actively reading.
@@ -4011,7 +4147,13 @@
       }
       if (suppressScrollSave) return;
       if (pendingSave) clearTimeout(pendingSave);
+      const armedName = currentName;
       pendingSave = setTimeout(() => {
+        pendingSave = null;
+        // Armed for THIS book, outside a restore. A load that began since (another
+        // book, or a restore of this one) owns the position — never write the
+        // transient offset it is part-way through.
+        if (suppressScrollSave || currentName !== armedName) return;
         if (_canSaveReadScroll()) {
           setPref(KEY_LAST_SCROLL_PREFIX + currentName, scrollEl.scrollLeft);
         }
@@ -4176,6 +4318,198 @@
     return 'reader width → ' + (px ? Math.round(px) + 'px' : 'auto');
   };
 
+  // ---- iPhone Duo: exact-line place keeping across fold / unfold ----
+  // Only when the native layer has seen a hinge (window.KADOKI_DUO, set by
+  // MainViewController's hinge observer): a phone without one runs none of
+  // this. The paragraph-level path above lands the right paragraph a few
+  // columns in; here the COLUMN being read stays flush at the right reading
+  // edge, fold or unfold, with nothing painted in between.
+  //
+  // The anchor is a live Range on the first glyph of the column at the
+  // reading edge, re-captured whenever the page comes to rest. It has to be
+  // captured BEFORE the resize (by the time the resize event fires the layout
+  // is already the new one), so it is kept current rather than taken on
+  // demand; hinge movement, which starts before the display switch, refreshes
+  // it once more. A Range survives the relayout — only its rects change.
+  const _isDuo = () => !!window.KADOKI_DUO;
+  let _duoAnchor = null;           // { range, col } — col: columns left of the reading edge
+  let _duoW = 0, _duoH = 0;        // reader size the anchor was captured at
+  let _duoCapTimer = null;
+  let _duoRestoring = false;
+  function _duoTextAt(x, y) {
+    const r = document.caretRangeFromPoint && document.caretRangeFromPoint(x, y);
+    if (!r) return null;
+    const node = r.startContainer;
+    if (!node || node.nodeType !== 3 || !innerEl.contains(node)) return null;
+    const el = node.parentElement;
+    if (!el || el.closest('rt, rp')) return null;          // furigana: not the base column
+    const len = node.length || 0;
+    if (!len) return null;
+    const s = Math.min(r.startOffset, len - 1);
+    if (!/\S/.test(node.data.charAt(s))) return null;       // whitespace between glyphs
+    const g = document.createRange();
+    g.setStart(node, s); g.setEnd(node, s + 1);
+    return g;
+  }
+  function _duoCapture() {
+    if (!_isDuo() || !scrollEl || !innerEl || _readerHidden()) return;
+    if (_duoRestoring || _foldBusy || suppressScrollSave || physDragging || _physAnim) return;
+    // Size moved since the last resize we handled: the layout is already the
+    // new one and the resize handler has yet to run — the old anchor stands.
+    if (_duoW && (scrollEl.clientWidth !== _duoW || Math.abs(scrollEl.clientHeight - _duoH) > 1)) return;
+    try {
+      const sr = scrollEl.getBoundingClientRect();
+      if (sr.width < 40 || sr.height < 40) return;
+      const W = _columnWidth();
+      const edge = sr.right - _furiGutter(sr.width);
+      const step = Math.max(6, W * 0.45);
+      // Top glyph of the edge column; a blank column (paragraph gap) falls
+      // through to the next one in, remembered as `col`.
+      for (let col = 0; col < 4; col++) {
+        const x = edge - W * (col + 0.5);
+        for (let y = sr.top + 6; y < sr.bottom - 6; y += step) {
+          const g = _duoTextAt(x, y);
+          if (g) {
+            _duoAnchor = { range: g, col };
+            _duoW = scrollEl.clientWidth; _duoH = scrollEl.clientHeight;
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+  function _duoScheduleCapture() {
+    if (!_isDuo()) return;
+    if (_duoCapTimer) clearTimeout(_duoCapTimer);
+    _duoCapTimer = setTimeout(() => { _duoCapTimer = null; _duoCapture(); }, 180);
+  }
+  // Put the anchored column back at the reading edge. Direct scrollLeft
+  // assignment in the same task as the layout change: no animation, and no
+  // frame is painted at the wrong place. Returns false when there is no
+  // usable anchor (the caller then falls back to the paragraph path).
+  function _duoRestore() {
+    const a = _duoAnchor;
+    if (!a || !scrollEl) return false;
+    try {
+      const node = a.range.startContainer;
+      if (!node || !node.isConnected || !innerEl.contains(node)) return false;
+      const gr = a.range.getBoundingClientRect();
+      if (!gr || (!gr.width && !gr.height)) return false;
+      const sr = scrollEl.getBoundingClientRect();
+      const W = _columnWidth();
+      const edge = sr.right - _furiGutter(sr.width);
+      const cx = (gr.left + gr.right) / 2;
+      // The glyph box is narrower than its column. The chunk's right edge is a
+      // true column boundary (see _snapToColumn), so snap to that grid.
+      let colRight = cx + W / 2;
+      const chunk = node.parentElement && node.parentElement.closest('.reading-chunk');
+      if (chunk) {
+        const cb = chunk.getBoundingClientRect();
+        const k = Math.max(0, Math.round((cb.right - W / 2 - cx) / W));
+        colRight = cb.right - k * W;
+      }
+      const delta = colRight - (edge - a.col * W);
+      _duoRestoring = true;
+      ++_scrollSeq;                          // retire any pending verifier from older scrolls
+      lastProgrammaticScrollTime = Date.now();
+      if (Math.abs(delta) >= 1) scrollEl.scrollLeft += delta;
+      setTimeout(() => { _duoRestoring = false; }, 0);
+      return true;
+    } catch (_) { _duoRestoring = false; return false; }
+  }
+  // Resize on a Duo. Returns true when handled (the caller skips its own
+  // paths). Runs synchronously inside the resize event: the layout is already
+  // at the new size, and nothing has been painted there yet.
+  function _duoOnResize() {
+    if (!_isDuo() || !scrollEl || !innerEl) return false;
+    // Resized while another mode is up: the anchor belongs to a layout that
+    // is gone. Reader entry re-anchors itself; capture starts over after it.
+    if (_readerHidden()) { _duoAnchor = null; _duoW = _duoH = 0; return false; }
+    const w = scrollEl.clientWidth, h = scrollEl.clientHeight;
+    if (!w) return false;
+    if (w === _duoW && Math.abs(h - _duoH) <= 1) return false;
+    const hadAnchor = !!_duoAnchor && !!_duoW;
+    if (!hadAnchor) { _duoW = w; _duoH = h; return false; }
+    recompute();
+    if (!_duoRestore()) { _duoW = w; _duoH = h; return false; }
+    _duoW = w; _duoH = h;
+    _scheduleEdgeMask();
+    // Late layout (web fonts, images decoding at the new width) can still
+    // shift the grid: re-seat the same glyph — a no-op when nothing moved.
+    // No column snap and no paragraph re-anchor after this; they would move
+    // the line the reader is on.
+    const t0 = Date.now();
+    requestAnimationFrame(() => { if (!_readerHidden()) { _duoRestore(); _scheduleEdgeMask(); } });
+    for (const d of [160, 480, 1100]) setTimeout(() => {
+      if (_readerHidden() || scrollEl.clientWidth !== w) return;
+      if (lastUserScrollTime > t0) return;   // the reader has moved on — the page is theirs now
+      _duoRestore(); _scheduleEdgeMask();
+    }, d);
+    try { window._diag?.('[paged-diag] duo relayout w=' + w + ' col=' + _duoAnchor.col); } catch (_) {}
+    return true;
+  }
+  // Duo only: is there a status-bar band above the header for the strip
+  // label? The insets land after first paint without a resize event and the
+  // hinge flag can arrive at any point of the load, so the probe is observed
+  // and re-checked on hinge / mode changes rather than read once.
+  let _duoBandProbe = null;
+  function _duoBandCheck() {
+    const root = document.documentElement;
+    if (!_isDuo()) { root.classList.remove('kadoki-duo-noband'); return; }
+    try { localStorage.setItem('KADOKI_IS_DUO', '1'); } catch (_) {}
+    try {
+      if (!_duoBandProbe) {
+        if (!document.body) return;
+        _duoBandProbe = document.createElement('div');
+        _duoBandProbe.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:env(safe-area-inset-top, 0px);visibility:hidden;pointer-events:none;';
+        document.body.appendChild(_duoBandProbe);
+        try { new ResizeObserver(() => _duoBandCheck()).observe(_duoBandProbe); } catch (_) {}
+      }
+      root.classList.toggle('kadoki-duo-noband', (_duoBandProbe.offsetHeight || 0) < 20);
+    } catch (_) {}
+  }
+  // Unfolded (wide) Duo: the speed control joins the header row, just left
+  // of the play button, instead of floating in the (absent) bottom bar.
+  // Folded, it goes back to <body> where the bottom-bar CSS positions it.
+  function _duoPlaceSpeedCtl() {
+    const ctl = document.getElementById('pagedSpeedCtl');
+    if (!ctl) return;
+    const header = document.getElementById('appHeader');
+    const play = document.getElementById('shellPlayBtn');
+    const wide = _isDuo() && !!header && !!play && window.matchMedia('(min-width: 800px)').matches;
+    if (wide) {
+      if (ctl.parentNode !== header || ctl.nextSibling !== play) header.insertBefore(ctl, play);
+    } else if (ctl.parentNode !== document.body) {
+      document.body.appendChild(ctl);
+    }
+  }
+  window.addEventListener('resize', () => { _duoBandCheck(); _duoPlaceSpeedCtl(); }, true);
+  window.addEventListener('shell:mode-change', () => { _duoBandCheck(); _duoPlaceSpeedCtl(); });
+  setTimeout(() => { _duoBandCheck(); _duoPlaceSpeedCtl(); }, 0);
+  setTimeout(() => { _duoBandCheck(); _duoPlaceSpeedCtl(); }, 2000);
+
+  // Hinge movement from native (see MainViewController.installHingeObserver).
+  // The hinge starts to move before the display switches, so this refreshes
+  // the anchor while the old layout is still on screen.
+  window.__kadokiHinge = function (status) {
+    if (status >= 1) {
+      window.KADOKI_DUO = true;
+      try { localStorage.setItem('KADOKI_IS_DUO', '1'); } catch (_) {}
+    }
+    _duoBandCheck();
+    _duoPlaceSpeedCtl();
+    _duoCapture();
+  };
+  // Reader entry: take a first anchor once it has settled (entry scrolls
+  // re-capture on their own; this covers an entry that lands without one).
+  window.addEventListener('shell:mode-change', () => { if (_isDuo()) setTimeout(_duoCapture, 1500); });
+  window.__kadokiDuoState = function () {
+    const a = _duoAnchor;
+    let txt = '';
+    try { txt = a ? a.range.startContainer.data.substr(a.range.startOffset, 12) : ''; } catch (_) {}
+    return { duo: _isDuo(), w: _duoW, h: _duoH, col: a ? a.col : -1, text: txt };
+  };
+
   // Automated fold check (launch with KADOKI_SIM_FOLD=1): once the reader has
   // settled, log where the place is, force an unfold-sized width, log it again,
   // then fold back — so the place-keeping can be verified on a device that
@@ -4226,11 +4560,17 @@
     let lastSeenW = 0, lastAngle = _orientAngle();
     // Blank + capture the moment a rotation BEGINS (this fires before the
     // viewport has finished changing), so the reflow is never seen.
-    const onOrient = () => _armRelayout('rotate');
+    // (Duo: no dimming — its resize path re-seats the line before any paint.)
+    const onOrient = () => { if (_isDuo()) _duoCapture(); else _armRelayout('rotate'); };
     window.addEventListener('orientationchange', onOrient);
     try { if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', onOrient); } catch (_) {}
     window.addEventListener('resize', () => {
       _invalidateChunkGeo();
+      if (_isDuo() && _duoOnResize()) {
+        if (t) { clearTimeout(t); t = null; }
+        lastSeenW = lastWidth = cw = scrollEl.clientWidth; lastAngle = _orientAngle();
+        return;
+      }
       // A ROTATION (angle changed) and a FOLD (big width change at the same
       // angle) both get the instant, place-preserving relayout — no animated
       // scroll, no hunt for the line. Everything else (the URL bar, iPad
@@ -4283,6 +4623,15 @@
         });
       }, 220);
     });
+    // Duo: the reader's box can also change with no window resize (the Duo
+    // layout switching on, chrome geometry). Same exact-line re-seat; a no-op
+    // when the size already matches what the resize path handled.
+    try {
+      new ResizeObserver(() => {
+        if (!_isDuo() || !scrollEl) return;
+        if (_duoOnResize()) { lastSeenW = lastWidth = cw = scrollEl.clientWidth; lastAngle = _orientAngle(); }
+      }).observe(scrollEl);
+    } catch (_) {}
   }
 
   function recompute() {
@@ -4359,6 +4708,15 @@
     progressEl.addEventListener('click', fire);
     progressEl.addEventListener('touchend', fire, { passive: false });
     document.body.appendChild(progressEl);
+    // iPhone Duo glass bottom bar (CSS shows it only on a Duo in read mode).
+    // The whole bar takes the tap, like the marker it frames.
+    if (!document.getElementById('kadokiDuoBottomBar')) {
+      const bar = document.createElement('div');
+      bar.id = 'kadokiDuoBottomBar';
+      bar.addEventListener('click', fire);
+      bar.addEventListener('touchend', fire, { passive: false });
+      document.body.appendChild(bar);
+    }
     ensureSpeedCtl();
   }
 
@@ -4430,6 +4788,7 @@
     window._pagedPaintSpeed = paint;
     paint();
     document.body.appendChild(ctl);
+    _duoPlaceSpeedCtl();   // Duo unfolded: into the header row
     // No status-bar band to live in (Android without edge-to-edge, older
     // iPhones with a short inset): hide rather than overlap the header.
     const probe = () => {
@@ -5693,6 +6052,9 @@
       // the uri is dead. This is the lone read-loader that wasn't cachePath-aware,
       // which is why synced txt/epub titles rendered stale or stuck on "Loading…".
       let path = null;
+      if (cachePath && window.rebaseContainerPath) {
+        try { cachePath = (await window.rebaseContainerPath(cachePath)) || cachePath; } catch (_) {}
+      }
       if (uri) {
         try { path = (await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri })).path; }
         catch (e) { if (cachePath) path = cachePath; else throw e; }
@@ -6807,17 +7169,18 @@
         currentTitleId = titleId;
         // DURABILITY: a synced read source is a CACHE file (no uri); the OS can evict
         // CACHE. If it's gone but we know its Drive id, re-download it before loading.
-        if (!ep.uri && ep.cachePath && ep.driveFileId && ep.size &&
-            window.driveSyncMedia?.downloadMedia && await _fileMissing(ep.cachePath)) {
+        // The stored cachePath carries the container UUID of whichever install
+        // synced it, so it is usually STALE: judging it "missing" and re-downloading
+        // over the live container's good copy is what emptied the file (2026-10-01).
+        // ensureLocalPath maps to the CURRENT container by the deterministic
+        // filename and re-downloads only when that file is absent/incomplete.
+        if (!ep.uri && ep.driveFileId && ep.size && window.driveSyncMedia?.ensureLocalPath) {
           try {
-            log('synced epub cache missing → re-downloading from Drive');
-            // Distinct paint so the (rare) re-download doesn't look like the old
-            // indefinite "Loading…" stuck-bug. loadEpubFromUri repaints right after.
-            try { ensureView(); innerEl.innerHTML = '<p style="color:#888;text-align:center;margin-top:30vh;">本を再ダウンロード中…</p>'; } catch (_) {}
-            await window.driveSyncMedia.downloadMedia(titleId, { kind: 'epub', name: ep.name, size: ep.size, driveFileId: ep.driveFileId });
-            const t2 = (await window.titleStore.list()).find(x => x.id === titleId);
-            const ep2 = t2?.attachments?.epub; if (ep2 && ep2.cachePath) ep.cachePath = ep2.cachePath;
-          } catch (e) { log('epub re-download failed: ' + (e?.message || e)); }
+            const cur = await window.driveSyncMedia.ensureLocalPath(titleId, 'epub', ep, { background: false });
+            if (cur) ep.cachePath = cur;
+          } catch (e) { log('epub ensureLocalPath failed: ' + (e?.message || e)); }
+        } else if (!ep.uri && ep.cachePath && window.rebaseContainerPath) {
+          try { ep.cachePath = (await window.rebaseContainerPath(ep.cachePath)) || ep.cachePath; } catch (_) {}
         }
         log(`Auto-load from active title: ${ep.name}`);
         await loadEpubFromUri(ep.uri || null, ep.name, ep.cachePath || null);

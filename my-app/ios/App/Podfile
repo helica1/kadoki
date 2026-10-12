@@ -1,6 +1,6 @@
 require_relative '../../node_modules/@capacitor/ios/scripts/pods_helpers'
 
-platform :ios, '14.0'
+platform :ios, '15.0'
 use_frameworks!
 
 # workaround to avoid Xcode caching of Pods that requires
@@ -39,6 +39,10 @@ post_install do |installer|
       c.build_settings['SUPPORTED_PLATFORMS'] = 'iphoneos iphonesimulator xros xrsimulator'
       c.build_settings['TARGETED_DEVICE_FAMILY'] = '1,2,7'
       c.build_settings['XROS_DEPLOYMENT_TARGET'] = '26.0'
+      # Xcode 27.1 (the first SDK with the iPhone Duo hinge API) rejects
+      # iOS deployment targets below 15.0; the podspecs still declare 14.0.
+      dt = c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'].to_f
+      c.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0' if dt > 0 && dt < 15.0
     end
   end
   # ---- visionOS: IONFilesystemLib is an iOS-only BINARY xcframework (no xros

@@ -66,6 +66,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'ph.field_expression': { en: 'Expression → field', ja: '表現 → フィールド' },
   'ph.field_image': { en: 'Image → field', ja: '画像 → フィールド' },
   'ph.field_sentence_audio': { en: 'Sentence audio → field', ja: '文の音声 → フィールド' },
+  'ph.field_translation': { en: 'Translation → field', ja: '翻訳 → フィールド' },
   'ph.field_term': { en: 'Term → field', ja: '単語 → フィールド' },
   'ph.field_reading': { en: 'Reading → field', ja: '読み → フィールド' },
   'ph.field_sentence': { en: 'Sentence → field', ja: '文 → フィールド' },

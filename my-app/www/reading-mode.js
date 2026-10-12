@@ -3827,9 +3827,25 @@
   // whole titles blob each call. The cover cannot change mid-title, so one
   // lookup per title is enough.
   let _abCoverCacheTitleId = null, _abCoverCacheSrc = '';
+  // Title switch STARTED: swap to the incoming title's cover right away. The
+  // lazy path below only runs on the new title's first cue render, so the
+  // outgoing cover stayed up through the whole open (file rehydrate included).
+  window._abPrimeCover = function (titleId, src) {
+    const imgEl = document.getElementById('audiobookCardImage');
+    if (src) { _abCoverCacheTitleId = titleId; _abCoverCacheSrc = src; }
+    else { _abCoverCacheTitleId = null; _abCoverCacheSrc = ''; }
+    if (!imgEl) return;
+    try {
+      if (src) { if (imgEl.src !== src) imgEl.src = src; imgEl.style.display = ''; }
+      else { imgEl.removeAttribute('src'); imgEl.style.display = 'none'; }
+    } catch (_) {}
+  };
   async function updateAudiobookCardImage(idx) {
     const imgEl = document.getElementById('audiobookCardImage');
     if (!imgEl) return;
+    // Mid-switch the OUTGOING title is still active (and may still be ticking
+    // cues) — don't let it repaint its cover over the primed one.
+    if (window._titleSwitchInFlight && _abCoverCacheTitleId !== window._activeTitleId) return;
     let src = '';
     // Title changed: drop the PREVIOUS title's cover right now — the lookup
     // below is async, and the old image sat on screen until it resolved
@@ -5915,7 +5931,7 @@
                          border:1px solid var(--accent-read,#4caf50);
                          padding:10px 18px;border-radius:8px;font-weight:700;
                          font-family:var(--font-sans);font-size:.95rem;">
-            📂 Pick EPUB
+            Pick EPUB
           </button>
         </div>`;
     }
@@ -6170,7 +6186,7 @@
     const srtBtn = document.getElementById('readerPickSrtBtn');
     if (srtBtn) {
       const sr = deckNow ? await getSrtPairing(deckNow) : null;
-      srtBtn.textContent = sr ? `📄 ${sr.name}` : '📄 Pick SRT';
+      srtBtn.textContent = sr ? sr.name : 'Pick SRT';
     }
     if (hiInput) {
       const saved = (await getPref(KEYS.HIGHLIGHT)) || DEFAULT_HIGHLIGHT;

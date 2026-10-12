@@ -625,7 +625,7 @@ async function loadDeckState() {
           openFilePicker();
         };
         
-        showToast('💾 ' + window.i18n.fmt('ap.last_deck_toast', { name: savedFileName, n: parseInt(savedCardIndex) + 1 }, 'Last deck: {name}. Tap filename to reopen and continue from card {n}.'), 5000);
+        showToast(window.i18n.fmt('ap.last_deck_toast', { name: savedFileName, n: parseInt(savedCardIndex) + 1 }, 'Last deck: {name}. Tap filename to reopen and continue from card {n}.'), 5000);
       }
       
       return restored;
@@ -2695,7 +2695,7 @@ const namesFor = (mid) => {
       // Sync the paged reader / shared cue cursor to the restored index
       // (displayCard below doesn't notify; only manual nav did).
       try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
-      showToast('🎯 ' + window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
+      showToast(window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
     } else {
       // Target card not loaded yet, will restore after background processing
       debugLog(`⏳ Target card ${window.pendingCardIndex + 1} not loaded yet, will restore after background processing`);
@@ -2746,7 +2746,7 @@ const namesFor = (mid) => {
               // reader stayed anchored at card 0 (the book start) and could
               // persist THAT over the real bookmark.
               try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
-              showToast('🎯 ' + window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
+              showToast(window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
               window.pendingCardIndex = undefined;
             }
           }
@@ -2777,7 +2777,7 @@ const namesFor = (mid) => {
           displayCard();
           updateProgressBar();
           try { window.notifyCardIndexChanged?.(currentCardIndex); } catch (_) {}
-          showToast('🎯 ' + window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
+          showToast(window.i18n.fmt('ap.resumed_at_card', { n: currentCardIndex + 1 }, 'Resumed at card {n}'), 2000);
           window.pendingCardIndex = undefined;
         }
       }
@@ -3814,6 +3814,7 @@ function setupSwipe() {
                 // For SRT cards, open the waveform editor so the user can
                 // fine-tune bounds before we slice + send. Cancel aborts.
                 let finalExpression = expression;
+                let finalTranslation = '';
                 if (card.isSrtCard && card.audiobookPath && window.Capacitor?.Plugins?.AudioSlicer) {
                   let finalStart = Math.round(_comboAC && Number.isFinite(_comboAC.cueStartMs) ? _comboAC.cueStartMs : card.audiobookStartMs);
                   let finalEnd   = Math.round(_comboAC && Number.isFinite(_comboAC.cueEndMs) ? _comboAC.cueEndMs : card.audiobookEndMs);
@@ -3848,6 +3849,7 @@ function setupSwipe() {
                     finalStart = Math.round(result.startMs);
                     finalEnd   = Math.round(result.endMs);
                     if (result.text) finalExpression = result.text;
+                    if (result.translation) finalTranslation = result.translation;
                     // Persist the adjusted bounds back into the in-memory card so
                     // the next replay/next-card transition uses them too — but NOT
                     // for a combined card, where shrinking to the Anki sub-clip
@@ -3876,7 +3878,7 @@ function setupSwipe() {
                     }
                   } catch (e) { debugLog('SRT slice for Anki: ' + e.message); }
                 }
-                sendToAnki({ expression: finalExpression, imageData, audioData });
+                sendToAnki({ expression: finalExpression, imageData, audioData, translation: finalTranslation });
               }
         };
 
@@ -4547,9 +4549,9 @@ function _ensureBgListenersForSrtCards() {
   } catch (_) {}
   // Lock screen / Control Center remote commands. The audiobook is the ONLY
   // content the lock screen ever controls (card SRT clips are just segments of
-  // the same audiobook file), so a remote "play" should always land us in
-  // AUDIO mode — which is what starts the audio timer + shows the cover, and
-  // guarantees we never mis-attribute the time to card/read.
+  // the same audiobook file). A remote "play" resumes IN PLACE — the app never
+  // changes mode on its own; stats.js attributes hidden read/card listening to
+  // audio without a mode switch.
   bg.addListener('remoteCommand', (d) => {
     const action = d?.action;
     // Staleness guard: on iOS, lock-screen commands fired while the WebView is
@@ -4566,18 +4568,11 @@ function _ensureBgListenersForSrtCards() {
     if (action === 'play') {
       // Disarm the SRT-card end-boundary auto-pause IMMEDIATELY (synchronously)
       // so the ~150ms position events can't pause the audio the lock screen
-      // just resumed before the async mode switch flips us out of card mode.
+      // just resumed at the current card's end.
       _srtCardEndMs = 0;
-      // A remote play LANDS AND STAYS in audio mode. The native state(true)
-      // event precedes this command and stats.js's hidden auto-switch may have
-      // already recorded the card/read mode for a foreground restore — clear
-      // it, or the restore would bounce the user straight back out of audio.
-      window._autoAudioPrevMode = null;
-      // Native already resumed playback; switch to audio mode in RESUME mode
-      // so we attach to it without reseeking/restarting.
-      if (!document.body.classList.contains('mode-audio') && typeof window.setShellMode === 'function') {
-        try { window.setShellMode('audio', { force: true, resumeOnly: true }); } catch (_) {}
-      }
+      // (2026-09-13) No mode switch. Switching to audio here also persisted Audio
+      // as the title's mode, so a lock-screen / Bluetooth play from Read made the
+      // next launch reopen in Audio. Native already resumed playback in place.
     } else if (action === 'nextCue' || action === 'prevCue') {
       try { window.lockScreenCueJump?.(action === 'nextCue' ? 1 : -1); } catch (_) {}
     }

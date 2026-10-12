@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <!-- iPhone Duo: remembered from the native hinge report on an earlier launch,
+       so the Duo layout is in place from the first paint (the native report
+       lands ~1 s into each launch; applying it late would reflow the reader). -->
+  <script>try { if (localStorage.getItem('KADOKI_IS_DUO') === '1') { window.KADOKI_DUO = true; document.documentElement.classList.add('kadoki-duo'); } } catch (_) {}</script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Anki Deck Previewer</title>
   <style>
@@ -228,8 +232,8 @@
 
     /* Library Page Styles */
     /* Card-tab pane: below the header, tabs stay live (shell.js closes it on a tab tap). */
-    #libraryPage.library-pane { top: calc(env(safe-area-inset-top, 0px) + 48px); height: auto; bottom: 0; z-index: 8900; padding-top: 10px; }
-    #libraryPage.library-pane .library-header { margin: -10px -20px 20px; padding: 10px 20px 12px; }
+    #libraryPage.library-pane { top: calc(env(safe-area-inset-top, 0px) + 48px); height: auto; bottom: 0; z-index: 8900; padding-top: 0; }
+    #libraryPage.library-pane .library-header { margin: 0 -20px 20px; padding: 10px 20px 12px; }
     #libraryPage.library-pane .close-library { display: none; }
     #libraryPage {
       position: fixed;
@@ -244,9 +248,11 @@
       display: none;
       overflow-y: auto;
       padding: 20px;
-      /* iOS Dynamic Island clearance — pushes "LIBRARY | Title | Close"
-         below the cutout so the "Title" button isn't half-hidden. */
-      padding-top: calc(20px + env(safe-area-inset-top, 0px));
+      /* NO top padding on the scroll container: WebKit pins a sticky child
+         below the container's padding, not at its edge, so rows showed
+         through the strip above the pinned header. The Dynamic Island
+         clearance lives in .library-header's own padding instead. */
+      padding-top: 0;
       box-sizing: border-box;
     }
 
@@ -260,16 +266,16 @@
       align-items: center;
       border-bottom: 1px solid var(--border, #2a2a2a);
       /* PINNED. #libraryPage is the scroll container, so sticky works here.
-         The negative margins pull the bar out over the container's own
-         padding and the re-added padding puts the buttons back where they
-         were — without that, rows would scroll through the gap above and to
-         the sides of the bar. Otherwise closing the library from deep in a
-         long list meant scrolling all the way back to the top. */
+         It sits flush at the container's top edge (the container has no top
+         padding — see #libraryPage) and carries the safe-area clearance in
+         its own padding, so nothing can scroll through above it. The negative
+         side margins span the container's side padding so rows don't show
+         at the bar's edges. */
       position: sticky;
       top: 0;
       z-index: 6;
       background: black;
-      margin: calc(-1 * (20px + env(safe-area-inset-top, 0px))) -20px 20px;
+      margin: 0 -20px 20px;
       padding: calc(20px + env(safe-area-inset-top, 0px)) 20px 12px;
     }
 
@@ -368,6 +374,43 @@
     .lib-vol-chip { display:inline-flex; align-items:center; gap:6px; background:#1a1a22; border:1px solid #2a2a33; border-radius:999px; padding:6px 12px; color:#e8e8f0; font-size:.8rem; cursor:pointer; font-family:inherit; }
     .lib-vol-chip[data-on="1"] { border-color:var(--accent-read,#4caf50); }
     .lib-vol-chip b { color:#8a8a96; font-weight:600; font-size:.72rem; }
+    /* Folders: rows at the library root, a header bar inside one. */
+    .lib-folders { display:flex; flex-direction:column; gap:8px; margin:0 0 12px; }
+    .lib-folder { display:flex; align-items:center; gap:12px; padding:10px 14px; border:1px solid var(--border,#2a2a2a); border-radius:12px; background:var(--panel,#161616); cursor:pointer; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; }
+    .lib-folder-icon { position:relative; width:52px; height:40px; flex:none; }
+    .lib-folder-icon::before { content:''; position:absolute; left:0; top:0; width:22px; height:8px; border-radius:4px 4px 0 0; background:#3a3a48; }
+    .lib-folder-icon::after { content:''; position:absolute; left:0; right:0; top:5px; bottom:0; border-radius:3px 6px 6px 6px; background:#2a2a36; border:1px solid #3a3a48; }
+    .lib-folder-icon img, .lib-folder-icon .fav { position:absolute; z-index:1; width:24px; height:30px; bottom:3px; border-radius:3px; object-fit:cover; box-shadow:0 2px 6px rgba(0,0,0,.5); }
+    .lib-folder-icon .fav { background:#1c1c24; color:#888; font-size:.7rem; font-weight:700; display:flex; align-items:center; justify-content:center; }
+    .lib-folder-name { font-weight:700; font-size:.98rem; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .lib-folder-sub { color:#8a8a96; font-size:.76rem; margin-top:2px; }
+    .lib-folder-new { color:#9a9aa6; border-style:dashed; background:transparent; justify-content:center; font-size:.85rem; font-weight:600; padding:9px 14px; }
+    .lib-crumb { display:flex; align-items:center; gap:8px; margin:0 0 12px; }
+    .lib-crumb-back { flex:none; background:transparent; color:#ccc; border:1px solid var(--border,#2a2a2a); border-radius:999px; padding:6px 12px; font-size:.8rem; font-weight:600; cursor:pointer; font-family:inherit; }
+    .lib-crumb-name { flex:1; min-width:0; font-weight:700; font-size:1.02rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .lib-crumb-more { flex:none; background:transparent; color:#aaa; border:1px solid var(--border,#2a2a2a); border-radius:8px; width:34px; height:30px; font-size:1rem; cursor:pointer; font-family:inherit; }
+    /* Select mode: checkboxes on rows, a sticky action bar at the bottom. */
+    .lib-check { flex:none; width:22px; height:22px; border-radius:50%; border:2px solid #555; box-sizing:border-box; display:flex; align-items:center; justify-content:center; font-size:.8rem; color:#0b0b0e; align-self:center; }
+    .lib-check[data-on="1"] { background:var(--accent-read,#4caf50); border-color:var(--accent-read,#4caf50); }
+    .deck-item[data-sel="1"] { border-color:var(--accent-read,#4caf50); }
+    .lib-selbar { position:sticky; bottom:0; z-index:6; margin:14px -20px 0; padding:10px 20px calc(10px + env(safe-area-inset-bottom, 0px)); background:rgba(0,0,0,.92); border-top:1px solid var(--border,#2a2a2a); display:flex; gap:8px; align-items:center; }
+    .lib-selbar .n { flex:1; min-width:0; color:#ccc; font-size:.84rem; font-weight:600; }
+    .lib-selbar button { background:transparent; color:#ddd; border:1px solid var(--border,#2a2a2a); border-radius:9px; padding:8px 12px; font-size:.82rem; font-weight:700; cursor:pointer; font-family:inherit; }
+    .lib-selbar button.go { background:var(--accent-read,#4caf50); color:#0b0b0e; border-color:transparent; }
+    .lib-selbar button:disabled { opacity:.4; }
+    /* Move-to-folder sheet. */
+    .lib-sheet { position:fixed; inset:0; z-index:100000; background:rgba(0,0,0,.6); display:flex; align-items:flex-end; justify-content:center; }
+    .lib-sheet-box { background:#141419; border:1px solid #2a2a33; border-radius:16px 16px 0 0; width:100%; max-width:520px; max-height:78vh; overflow-y:auto; padding:16px 16px calc(16px + env(safe-area-inset-bottom, 0px)); box-sizing:border-box; }
+    .lib-sheet-h { font-size:.72rem; font-weight:700; letter-spacing:.08em; color:#8a8a96; margin:0 0 10px; text-transform:uppercase; }
+    .lib-sheet-opt { display:flex; align-items:center; gap:10px; width:100%; text-align:left; background:#1a1a22; color:#e8e8f0; border:1px solid #2a2a33; border-radius:10px; padding:12px 14px; margin:0 0 8px; font-size:.92rem; cursor:pointer; font-family:inherit; }
+    .lib-sheet-opt:disabled { opacity:.4; }
+    .lib-sheet-opt span:first-child { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .lib-sheet-opt b { color:#8a8a96; font-weight:600; font-size:.76rem; }
+    .lib-sheet-opt.danger { color:#e08a8a; border-color:#4a2a2a; }
+    .lib-sheet-new { display:flex; gap:8px; margin:4px 0 8px; }
+    .lib-sheet-new input { flex:1; min-width:0; background:#0e0e12; color:#eee; border:1px solid #33333e; border-radius:10px; padding:11px 12px; font-size:16px; font-family:inherit; }
+    .lib-sheet-new button { flex:none; background:var(--accent-read,#4caf50); color:#0b0b0e; border:0; border-radius:10px; padding:0 16px; font-weight:800; font-size:.9rem; cursor:pointer; font-family:inherit; }
+    .lib-sheet-cancel { display:block; width:100%; margin-top:6px; background:transparent; border:1px solid #33333e; color:#bbb; border-radius:10px; padding:11px 0; font-size:.9rem; cursor:pointer; font-family:inherit; }
     /* Pinned titles (long-press a library card, up to 3): a large row on top. */
     .pinned-row { display: flex; gap: 12px; margin: 0 0 14px; }
     .pinned-card {
@@ -919,7 +962,7 @@ body.dimmed .card-image {
   <div id="fieldMappingModal">
     <div class="field-mapping-content">
       <div class="field-mapping-header">
-        <h3>🔧 Field Mapping</h3>
+        <h3>Field Mapping</h3>
         <button class="field-mapping-close" onclick="closeFieldMapping()">✕</button>
       </div>
       
@@ -1443,6 +1486,10 @@ body.dimmed .card-image {
             <label data-i18n="ph.field_sentence_audio">Sentence audio → field</label>
             <select id="ankiSwipeFieldAudio"></select>
           </div>
+          <div class="prefs-row">
+            <label data-i18n="ph.field_translation">Translation → field</label>
+            <select id="ankiSwipeFieldTranslation"></select>
+          </div>
         </details>
 
         <!-- ===== ANKI: DICTIONARY ===== -->
@@ -1465,6 +1512,7 @@ body.dimmed .card-image {
           <div class="prefs-row"><label data-i18n="ph.field_term_audio">Term audio → field</label><select id="ankiDictFieldTermAudio"></select></div>
           <div class="prefs-row"><label data-i18n="ph.field_glossary">Glossary (rich, optional) → field</label><select id="ankiDictFieldGlossary"></select></div>
           <div class="prefs-row"><label data-i18n="ph.field_furigana">Furigana ruby (optional) → field</label><select id="ankiDictFieldFurigana"></select></div>
+          <div class="prefs-row"><label data-i18n="ph.field_translation">Translation → field</label><select id="ankiDictFieldTranslation"></select></div>
           <div style="font-size:.72rem;color:#777;margin:6px 2px 0;line-height:1.5;">
             Optional: map these to extra note-type fields for a richer card.
             <b>Glossary</b> saves the full multi-sense definition HTML (same as the
@@ -1537,15 +1585,15 @@ body.dimmed .card-image {
       <label for="apkgFile" onclick="event.preventDefault(); openFilePicker();">Choose File</label>
       <input type="file" id="apkgFile" accept=".apkg" />
       <span class="file-name" id="deckName">No file chosen</span>
-      <button class="field-mapping-button" onclick="openFieldMapping()" id="fieldMappingBtn" style="display: none; margin-left: 8px;">🔧 Fields</button>
+      <button class="field-mapping-button" onclick="openFieldMapping()" id="fieldMappingBtn" style="display: none; margin-left: 8px;">Fields</button>
     </div>
     <div>
       <button onclick="openLibrary()">Library</button>
-      <button onclick="openReadingMode()">📖 Reading</button>
+      <button onclick="openReadingMode()">Reading</button>
       <!-- Developer audio-engine test controls. Hidden in release; revealed only
            when localStorage KADOKI_DEBUG is set (reveal script just below). -->
       <span id="debugAudioControls" style="display:none">
-        <button onclick="window.testBgAudio && window.testBgAudio()">🎧 BG Pick&Play</button>
+        <button onclick="window.testBgAudio && window.testBgAudio()">BG Pick&Play</button>
         <button onclick="window.bgPauseToggle && window.bgPauseToggle()">⏯ BG</button>
         <button onclick="window.bgSeek && window.bgSeek(-10000)">−10s</button>
         <button onclick="window.bgSeek && window.bgSeek(10000)">+10s</button>
@@ -1553,13 +1601,13 @@ body.dimmed .card-image {
         <button onclick="window.bgSetRate && window.bgSetRate(1.0)">1×</button>
         <button onclick="window.bgSetRate && window.bgSetRate(1.5)">1.5×</button>
         <button onclick="window.stopBgAudio && window.stopBgAudio()">⏹ Stop BG</button>
-        <button onclick="window.bgCycleTestMetadata && window.bgCycleTestMetadata()">📝 Test Lockscreen</button>
+        <button onclick="window.bgCycleTestMetadata && window.bgCycleTestMetadata()">Test Lockscreen</button>
         <span id="bgAudioPosLabel" style="color:#00ffcc;font-variant-numeric:tabular-nums;font-size:14px;min-width:90px;">–:–– / –:––</span>
       </span>
       <script>try{if(localStorage.getItem('KADOKI_DEBUG')){var _dac=document.getElementById('debugAudioControls');if(_dac)_dac.style.display='';}}catch(e){}</script>
     </div>
     <div>
-      <button onclick="openPreferences()">⚙️</button>
+      <button onclick="openPreferences()">Settings</button>
     </div>
     <div>
       <span id="stopwatch">0s</span>
@@ -1581,9 +1629,9 @@ body.dimmed .card-image {
          hidden, text scrolling up never appears behind the notch cutout. -->
     <div id="readingModeNotchMask" style="position:absolute;top:0;left:0;right:0;height:env(safe-area-inset-top, 0px);background:#000000;z-index:3;pointer-events:none;"></div>
     <div id="readingModeToolbar" style="position:absolute;top:0;left:0;right:0;display:flex;align-items:center;gap:10px;padding:14px 14px;padding-top:calc(14px + env(safe-area-inset-top, 0px));background:rgba(17,17,17,0.95);border-bottom:1px solid #333;z-index:2;flex-wrap:wrap;transform:translateY(0);transition:transform 0.22s ease;">
-      <button onclick="pickReadingEpub()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;">📂</button>
+      <button onclick="pickReadingEpub()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;">Open</button>
       <button id="readingPlayPauseBtn" onclick="window.toggleReadingPlaybackUI && window.toggleReadingPlaybackUI()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;min-width:56px;">▶</button>
-      <button onclick="openReadingSettings()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;">⚙️</button>
+      <button onclick="openReadingSettings()" style="background:#444;color:#fff;border:none;padding:12px 16px;border-radius:6px;font-size:20px;min-height:48px;">Settings</button>
       <span id="readingModeTitle" style="color:#ccc;font-size:16px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">No EPUB loaded</span>
       <span id="readingTimerLabel" onclick="window.openReadingStats && window.openReadingStats()" style="color:#00ffcc;font-size:18px;font-variant-numeric:tabular-nums;cursor:pointer;user-select:none;padding:8px 6px;">0:00</span>
     </div>
@@ -1956,7 +2004,7 @@ body.dimmed .card-image {
         <button type="button" id="readerPickAudiobookBtn" onclick="window.pickAudiobookFile && window.pickAudiobookFile()"
                 style="padding:10px;background:#333;color:#fff;border:1px solid #555;border-radius:6px;font-size:14px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Pick Audiobook</button>
         <button type="button" id="readerPickSrtBtn" onclick="window.pickSrtFile && window.pickSrtFile()"
-                style="padding:10px;background:#333;color:#fff;border:1px solid #555;border-radius:6px;font-size:14px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">📄 Pick SRT</button>
+                style="padding:10px;background:#333;color:#fff;border:1px solid #555;border-radius:6px;font-size:14px;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Pick SRT</button>
         <button type="button" onclick="window.openAudiobookMode && window.openAudiobookMode()"
                 style="padding:10px;background:#2196f3;color:#fff;border:none;border-radius:6px;font-size:14px;">▶ Audiobook Mode</button>
       </div>
@@ -2071,6 +2119,7 @@ body.dimmed .card-image {
   <script src="cue-grouper.js"></script>
   <script src="combo-card.js"></script>
   <script src="cue-alignment.js"></script>
+  <script src="anki-translate.js"></script>
   <script src="waveform.js"></script>
   <script src="livewaveform.js"></script>
   <script src="reading-mode.js"></script>
@@ -2222,6 +2271,7 @@ body.dimmed .card-image {
 
     function closeLibrary() {
       debugLog('Closing library');
+      _libSel = null;
       document.getElementById('libraryPage').classList.remove('visible');
       document.getElementById('libraryPage').classList.remove('library-pane');
       if (window.stats?.resumeFromModal) window.stats.resumeFromModal();
@@ -2255,7 +2305,7 @@ body.dimmed .card-image {
         const total    = parseInt(totalRaw) || 0;
         if (pos > 0 && total > 0) {
           const pct = Math.min(100, Math.max(0, Math.round((pos / total) * 100)));
-          return `<span style="color:var(--accent-read);">📖 ${pct}%</span>`;
+          return `<span style="color:var(--accent-read);">${pct}%</span>`;
         }
       } catch (e) {}
       return '';
@@ -2285,52 +2335,74 @@ body.dimmed .card-image {
       const deckList = document.getElementById('deckList');
 
       // Use the new Title store. Migration auto-runs the first time.
-      const titles = window.titleStore ? await window.titleStore.list() : [];
+      const all = window.titleStore ? await window.titleStore.list() : [];
 
-      if (!titles.length) {
+      if (!all.length) {
         deckList.innerHTML = '<div class="no-decks">Library is empty.<br>Load a deck or pick files to get started.</div>';
         return;
       }
 
       // Sort by lastOpenedAt desc.
-      titles.sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
+      all.sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
+
+      // Folder scope: the root shows folder rows plus unfiled titles; inside a
+      // folder only its titles. A folder that vanished (renamed on another
+      // path, deleted) drops back to the root.
+      const folders = libFolderList(all);
+      let cur = libCurFolder();
+      if (cur && !folders.some(f => f.name === cur)) { cur = ''; libSetCurFolder(''); }
+      if (_libSel) { const ids = new Set(all.map(t => t.id)); for (const id of [..._libSel]) if (!ids.has(id)) _libSel.delete(id); }
+      const here = all.filter(t => (t.folder || '') === cur);
 
       deckList.innerHTML = '';
       // ---- Browser toolbar: view (list / gallery), filter, sort ----
       const blurbs = {};
-      try { if (window.libraryBlurb) for (const t of titles) blurbs[t.id] = await window.libraryBlurb.get(t.id); } catch (_) {}
-      deckList.appendChild(buildLibToolbar(titles.length));
-      let shown = titles.filter(t => libFilterPass(t, blurbs[t.id]));
+      try { if (window.libraryBlurb) for (const t of here) blurbs[t.id] = await window.libraryBlurb.get(t.id); } catch (_) {}
+      deckList.appendChild(buildLibToolbar(all.length));
+      if (cur) deckList.appendChild(buildFolderCrumb(cur, here.length));
+      else deckList.appendChild(buildFolderRows(folders));
+      let shown = here.filter(t => libFilterPass(t, blurbs[t.id]));
       shown = libSortTitles(shown, blurbs);
       const groups = groupSeries(shown);
-      if (libPref('LIB_VIEW_V1', 'list') === 'gallery') {
+      const emptyMsg = () => {
+        const e = document.createElement('div'); e.className = 'no-decks';
+        e.textContent = !here.length
+          ? (cur ? LT('lib.folder_empty', 'This folder is empty. Tap Select, pick titles, then Move.') : LT('lib.all_in_folders', 'Every title is in a folder.'))
+          : 'No titles match this filter.';
+        return e;
+      };
+      // Select mode always shows the list: checkboxes need rows.
+      if (!_libSel && libPref('LIB_VIEW_V1', 'list') === 'gallery') {
         const gal = document.createElement('div');
         gal.className = 'lib-gallery';
         for (const g of groups) gal.appendChild(g.type === 'series' ? buildSeriesCard(g, blurbs) : buildGalleryCard(g.t, blurbs[g.t.id]));
-        if (!shown.length) { const e = document.createElement('div'); e.className = 'no-decks'; e.textContent = 'No titles match this filter.'; gal.appendChild(e); }
+        if (!shown.length) gal.appendChild(emptyMsg());
         deckList.appendChild(gal);
         return;
       }
       // List: series volumes render as normal rows nested under a series header.
       const seriesOf = new Map(), seriesBox = new Map();
-      titles.length = 0;
+      const titles = [];
       for (const g of groups) {
         if (g.type === 'series') { for (const v of g.titles) { seriesOf.set(v.id, g); titles.push(v); } }
         else titles.push(g.t);
       }
       // Pinned titles (long-press any card to pin, up to PIN_MAX): a large row
-      // on top, most recently opened first — a title switch is one tap.
-      const pinned = titles.filter(t => t.pinnedAt && !t.cloudOnly).slice(0, PIN_MAX);
+      // on top, most recently opened first — a title switch is one tap. Root
+      // only, and from every folder: pins are the shortcut past the folders.
+      const pinned = (cur || _libSel) ? [] : all.filter(t => t.pinnedAt && !t.cloudOnly).slice(0, PIN_MAX);
       if (pinned.length) {
         const row = document.createElement('div');
         row.className = 'pinned-row';
         for (const pt of pinned) row.appendChild(buildPinnedCard(pt));
         deckList.appendChild(row);
       }
+      if (!shown.length) deckList.appendChild(emptyMsg());
       for (const title of titles) {
         const a = title.attachments || {};
         const item = document.createElement('div');
         item.className = 'deck-item' + (title.cloudOnly ? ' deck-item-cloud' : '');
+        item.dataset.tid = title.id;
         attachPinLongPress(item, title);
         if (title.cloudOnly) item.style.opacity = '0.82';
         const enabled = window.titleStore.enabledModes(title);
@@ -2353,6 +2425,7 @@ body.dimmed .card-image {
           </div>
           <div class="deck-item-content">
             <div style="display:flex;gap:12px;align-items:flex-start;">
+              ${_libSel ? '<span class="lib-check"></span>' : ''}
               ${thumb}
               <div style="flex:1;min-width:0;">
                 <div style="display:flex;align-items:flex-start;gap:4px;">
@@ -2362,7 +2435,7 @@ body.dimmed .card-image {
                 <div class="title-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">
                   ${chipHtml('card',  'DECK',  !!a.deck)}
                   ${chipHtml('read',  'EPUB',  !!a.epub)}
-                  ${(a.audiobook && (a.audiobook.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(a.audiobook.name || ''))) ? chipHtml('audio', Array.isArray(a.series) && a.series.length > 1 ? ('VIDEO \u00d7' + a.series.length) : 'VIDEO', true) : chipHtml('audio', 'AUDIO', !!a.audiobook)}
+                  ${(a.audiobook && (a.audiobook.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(a.audiobook.name || ''))) ? chipHtml('audio', Array.isArray(a.series) && a.series.length > 1 ? ('VIDEO ×' + a.series.length) : 'VIDEO', true) : chipHtml('audio', 'AUDIO', !!a.audiobook)}
                   ${chipHtml('srt',   'SRT',   !!a.srt)}
                 </div>
                 <div class="deck-info" style="color:#888;font-size:0.85em;display:flex;gap:10px;flex-wrap:wrap;">
@@ -2379,7 +2452,7 @@ body.dimmed .card-image {
         // List rows EXPAND on tap (summary, stats, Open / Pin); only the pinned
         // cards up top open a title directly. Anki decks have nothing to show,
         // so they still open on tap.
-        if ((a.epub || a.audiobook) && !a.deck && !title.cloudOnly) {
+        if ((a.epub || a.audiobook) && !a.deck && !title.cloudOnly && !_libSel) {
           const expand = (scroll) => {
             const content = item.querySelector('.deck-item-content');
             if (content.querySelector('.lib-details')) return;
@@ -2421,6 +2494,240 @@ body.dimmed .card-image {
           box._vols.appendChild(item);
         } else deckList.appendChild(item);
       }
+      if (_libSel) { deckList.appendChild(buildSelBar(titles)); libRefreshSel(); }
+    }
+
+    // ----- Library folders -----
+    // A title's folder is its `folder` field (a name; absent = library root).
+    // LIB_FOLDERS_V1 keeps the folder order and remembers empty folders.
+    let _libSel = null;   // Set of selected title ids while in select mode, else null
+    function libStoredFolders() {
+      try { const a = JSON.parse(localStorage.getItem('LIB_FOLDERS_V1') || '[]'); return Array.isArray(a) ? a.filter(s => typeof s === 'string' && s) : []; } catch (_) { return []; }
+    }
+    function libSaveFolders(arr) { libSet('LIB_FOLDERS_V1', JSON.stringify([...new Set(arr)])); }
+    function libFolderList(all) {
+      const names = libStoredFolders();
+      const extra = [...new Set(all.map(t => t.folder).filter(f => f && !names.includes(f)))].sort((a, b) => a.localeCompare(b, 'ja'));
+      if (extra.length) libSaveFolders(names.concat(extra));
+      return names.concat(extra).map(name => ({ name, titles: all.filter(t => t.folder === name) }));
+    }
+    function libCurFolder() { return libPref('LIB_FOLDER_CUR_V1', ''); }
+    function libSetCurFolder(name) { libSet('LIB_FOLDER_CUR_V1', name || ''); }
+    function libOpenFolder(name) {
+      libSetCurFolder(name);
+      _libExpanded.clear();
+      try { window.kHaptic?.(); } catch (_) {}
+      populateLibrary().then(() => { try { document.getElementById('libraryPage').scrollTop = 0; } catch (_) {} });
+    }
+    function libCleanName(s) { return String(s || '').replace(/\s+/g, ' ').trim().slice(0, 60); }
+
+    function folderIcon(f) {
+      const ic = document.createElement('div'); ic.className = 'lib-folder-icon';
+      f.titles.slice(0, 2).forEach((t, i) => {
+        const c = t.attachments?.cover?.dataUri;
+        const el = c ? document.createElement('img') : document.createElement('div');
+        if (c) { el.src = c; el.alt = ''; el.decoding = 'async'; } else { el.className = 'fav'; el.textContent = (t.name || '?').trim().charAt(0) || '?'; }
+        el.style.left = (8 + i * 16) + 'px';
+        ic.appendChild(el);
+      });
+      return ic;
+    }
+    function buildFolderRows(folders) {
+      const box = document.createElement('div'); box.className = 'lib-folders';
+      for (const f of folders) {
+        const row = document.createElement('div'); row.className = 'lib-folder';
+        row.appendChild(folderIcon(f));
+        const txt = document.createElement('div'); txt.style.cssText = 'flex:1;min-width:0;';
+        const nm = document.createElement('div'); nm.className = 'lib-folder-name'; nm.textContent = f.name;
+        const sub = document.createElement('div'); sub.className = 'lib-folder-sub';
+        sub.textContent = [f.titles.length + ' ' + LT('lib.titles_unit', 'titles')].concat(seriesTotals(f.titles)).join(' · ');
+        txt.appendChild(nm); txt.appendChild(sub); row.appendChild(txt);
+        const chev = document.createElement('span'); chev.style.cssText = 'color:#8a8a96;flex:none;'; chev.textContent = '›';
+        row.appendChild(chev);
+        // Tap opens; long-press (or ⋯ inside) renames / deletes.
+        let lp = false, timer = null, x0 = 0, y0 = 0;
+        const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+        row.addEventListener('touchstart', (e) => {
+          const t = e.touches[0]; if (!t) return; x0 = t.clientX; y0 = t.clientY; cancel(); lp = false;
+          timer = setTimeout(() => { timer = null; lp = true; try { window.kHaptic?.('MEDIUM'); } catch (_) {} openFolderSheet(f.name); }, 550);
+        }, { passive: true });
+        row.addEventListener('touchmove', (e) => { const t = e.touches[0]; if (t && (Math.abs(t.clientX - x0) > 10 || Math.abs(t.clientY - y0) > 10)) cancel(); }, { passive: true });
+        row.addEventListener('touchend', cancel, { passive: true });
+        row.addEventListener('touchcancel', cancel, { passive: true });
+        row.addEventListener('contextmenu', (e) => { e.preventDefault(); });
+        row.addEventListener('click', () => { if (lp) { lp = false; return; } libOpenFolder(f.name); });
+        box.appendChild(row);
+      }
+      const add = document.createElement('div'); add.className = 'lib-folder lib-folder-new';
+      add.textContent = '+ ' + LT('lib.new_folder', 'New folder');
+      add.addEventListener('click', () => { try { window.kHaptic?.(); } catch (_) {} openNewFolderSheet(); });
+      box.appendChild(add);
+      return box;
+    }
+    function buildFolderCrumb(name, n) {
+      const row = document.createElement('div'); row.className = 'lib-crumb';
+      const back = document.createElement('button'); back.className = 'lib-crumb-back'; back.textContent = '‹ ' + LT('lib.library', 'Library');
+      back.addEventListener('click', () => libOpenFolder(''));
+      const nm = document.createElement('div'); nm.className = 'lib-crumb-name'; nm.textContent = name;
+      const cnt = document.createElement('span'); cnt.className = 'lib-count'; cnt.style.marginLeft = '0'; cnt.textContent = String(n);
+      const more = document.createElement('button'); more.className = 'lib-crumb-more'; more.textContent = '⋯'; more.setAttribute('aria-label', 'Folder options');
+      more.addEventListener('click', () => { try { window.kHaptic?.(); } catch (_) {} openFolderSheet(name); });
+      row.appendChild(back); row.appendChild(nm); row.appendChild(cnt); row.appendChild(more);
+      return row;
+    }
+
+    // ----- Select mode -----
+    function libEnterSelect(firstId) {
+      _libSel = new Set(firstId ? [firstId] : []);
+      _libExpanded.clear();
+      closeOtherSwipes(null);
+      populateLibrary();
+    }
+    function libExitSelect() { _libSel = null; populateLibrary(); }
+    function libToggleSel(id) {
+      if (!_libSel) return;
+      if (_libSel.has(id)) _libSel.delete(id); else _libSel.add(id);
+      try { window.kHaptic?.(); } catch (_) {}
+      libRefreshSel();
+    }
+    // Checkbox / count state updated in place — no re-render per tap.
+    function libRefreshSel() {
+      const list = document.getElementById('deckList'); if (!list || !_libSel) return;
+      list.querySelectorAll('.deck-item[data-tid]').forEach(el => {
+        const on = _libSel.has(el.dataset.tid);
+        el.dataset.sel = on ? '1' : '0';
+        const c = el.querySelector('.lib-check'); if (c) { c.dataset.on = on ? '1' : '0'; c.textContent = on ? '✓' : ''; }
+      });
+      list.querySelectorAll('.lib-series').forEach(box => {
+        const c = box.querySelector('.lib-series-head .lib-check'); if (!c) return;
+        const ids = Array.from(box.querySelectorAll('.deck-item[data-tid]')).map(el => el.dataset.tid);
+        const on = ids.length && ids.every(id => _libSel.has(id));
+        c.dataset.on = on ? '1' : '0'; c.textContent = on ? '✓' : '';
+      });
+      const bar = list.querySelector('.lib-selbar');
+      if (bar) {
+        bar.querySelector('.n').textContent = window.i18n?.fmt ? window.i18n.fmt('lib.n_selected', { n: _libSel.size }, _libSel.size + ' selected') : (_libSel.size + ' selected');
+        bar.querySelector('.go').disabled = !_libSel.size;
+      }
+    }
+    function buildSelBar(visible) {
+      const bar = document.createElement('div'); bar.className = 'lib-selbar';
+      const n = document.createElement('span'); n.className = 'n';
+      const allBtn = document.createElement('button'); allBtn.textContent = LT('lib.select_all', 'All');
+      allBtn.addEventListener('click', () => {
+        const ids = visible.map(t => t.id);
+        const every = ids.length && ids.every(id => _libSel.has(id));
+        for (const id of ids) { if (every) _libSel.delete(id); else _libSel.add(id); }
+        try { window.kHaptic?.(); } catch (_) {}
+        libRefreshSel();
+      });
+      const go = document.createElement('button'); go.className = 'go'; go.textContent = LT('lib.move_to', 'Move to…');
+      go.addEventListener('click', () => { if (_libSel && _libSel.size) { try { window.kHaptic?.(); } catch (_) {} openMoveSheet([..._libSel]); } });
+      bar.appendChild(n); bar.appendChild(allBtn); bar.appendChild(go);
+      return bar;
+    }
+
+    // ----- Sheets (move / new folder / folder options) -----
+    function libSheet(heading) {
+      const ov = document.createElement('div'); ov.className = 'lib-sheet kai-modal';
+      const box = document.createElement('div'); box.className = 'lib-sheet-box';
+      const h = document.createElement('div'); h.className = 'lib-sheet-h'; h.textContent = heading; box.appendChild(h);
+      ov.appendChild(box);
+      const close = () => ov.remove();
+      ov.addEventListener('click', (e) => { if (e.target === ov) close(); });
+      // Keep touches from reaching the document-level card-swipe handlers.
+      for (const ev of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) ov.addEventListener(ev, (e) => e.stopPropagation(), { passive: true });
+      const cancel = document.createElement('button'); cancel.className = 'lib-sheet-cancel'; cancel.textContent = LT('common.cancel', 'Cancel');
+      cancel.addEventListener('click', close);
+      document.body.appendChild(ov);
+      return { ov, box, close, finish: () => box.appendChild(cancel) };
+    }
+    function libOpt(label, sub, fn, cls) {
+      const b = document.createElement('button'); b.className = 'lib-sheet-opt' + (cls ? ' ' + cls : '');
+      const s = document.createElement('span'); s.textContent = label; b.appendChild(s);
+      if (sub) { const x = document.createElement('b'); x.textContent = sub; b.appendChild(x); }
+      b.addEventListener('click', (e) => { e.stopPropagation(); try { window.kHaptic?.(); } catch (_) {} fn(b); });
+      return b;
+    }
+    function libNameInput(placeholder, value, btnLabel, onSubmit) {
+      const row = document.createElement('form'); row.className = 'lib-sheet-new';
+      const inp = document.createElement('input'); inp.type = 'text'; inp.placeholder = placeholder; inp.value = value || ''; inp.maxLength = 60;
+      inp.setAttribute('autocomplete', 'off'); inp.setAttribute('autocorrect', 'off');
+      const b = document.createElement('button'); b.type = 'submit'; b.textContent = btnLabel;
+      row.addEventListener('submit', (e) => { e.preventDefault(); const v = libCleanName(inp.value); if (v) onSubmit(v); else inp.focus(); });
+      row.appendChild(inp); row.appendChild(b);
+      return { row, inp };
+    }
+    async function libMoveTitles(ids, folder) {
+      await window.titleStore.updateMany(ids, { folder: folder || null });
+      if (folder && !libStoredFolders().includes(folder)) libSaveFolders(libStoredFolders().concat([folder]));
+      const n = ids.length;
+      const where = folder || LT('lib.library', 'Library');
+      window.showToast?.(window.i18n?.fmt ? window.i18n.fmt('lib.moved_n', { n, where }, 'Moved ' + n + ' to ' + where) : ('Moved ' + n + ' to ' + where), 1600);
+      _libSel = null;
+      await populateLibrary();
+    }
+    async function openMoveSheet(ids) {
+      const all = window.titleStore ? await window.titleStore.list() : [];
+      const picked = all.filter(t => ids.includes(t.id));
+      if (!picked.length) return;
+      const allIn = (name) => picked.every(t => (t.folder || '') === name);
+      const heading = picked.length === 1 ? (picked[0].name || 'Untitled') : (window.i18n?.fmt ? window.i18n.fmt('lib.move_n', { n: picked.length }, 'Move ' + picked.length + ' titles') : ('Move ' + picked.length + ' titles'));
+      const sh = libSheet(heading);
+      const go = async (folder) => { sh.close(); try { await libMoveTitles(picked.map(t => t.id), folder); } catch (e) { console.warn('move:', e); } };
+      const root = libOpt(LT('lib.library', 'Library') + ' — ' + LT('lib.no_folder', 'no folder'), '', () => go(''));
+      root.disabled = allIn('');
+      sh.box.appendChild(root);
+      for (const f of libFolderList(all)) {
+        const b = libOpt(f.name, String(f.titles.length), () => go(f.name));
+        b.disabled = allIn(f.name);
+        sh.box.appendChild(b);
+      }
+      const nf = libNameInput(LT('lib.new_folder_ph', 'New folder name'), '', LT('lib.create', 'Create'), (name) => go(name));
+      sh.box.appendChild(nf.row);
+      sh.finish();
+    }
+    function openNewFolderSheet() {
+      const sh = libSheet(LT('lib.new_folder', 'New folder'));
+      const nf = libNameInput(LT('lib.new_folder_ph', 'New folder name'), '', LT('lib.create', 'Create'), (name) => {
+        if (!libStoredFolders().includes(name)) libSaveFolders(libStoredFolders().concat([name]));
+        sh.close(); populateLibrary();
+      });
+      sh.box.appendChild(nf.row);
+      sh.finish();
+      setTimeout(() => { try { nf.inp.focus(); } catch (_) {} }, 60);
+    }
+    async function openFolderSheet(name) {
+      const sh = libSheet(name);
+      const ren = libNameInput(LT('lib.rename_folder', 'Rename folder'), name, LT('lib.save', 'Save'), async (nn) => {
+        sh.close();
+        if (nn === name) return;
+        const all = await window.titleStore.list();
+        await window.titleStore.updateMany(all.filter(t => t.folder === name).map(t => t.id), { folder: nn });
+        const stored = libStoredFolders();
+        const i = stored.indexOf(name);
+        if (i >= 0 && !stored.includes(nn)) stored[i] = nn; else if (i >= 0) stored.splice(i, 1);   // renaming onto an existing folder merges into it
+        libSaveFolders(stored);
+        if (libCurFolder() === name) libSetCurFolder(nn);
+        populateLibrary();
+      });
+      sh.box.appendChild(ren.row);
+      if (libCurFolder() === name) {
+        sh.box.appendChild(libOpt(LT('lib.select_titles', 'Select titles…'), '', () => { sh.close(); libEnterSelect(); }));
+      }
+      // Two taps to delete; the titles go back to the library root, never away.
+      let armed = false;
+      const del = libOpt(LT('lib.delete_folder', 'Delete folder'), LT('lib.delete_folder_sub', 'titles move to Library'), async (b) => {
+        if (!armed) { armed = true; b.firstChild.textContent = LT('lib.delete_folder_confirm', 'Tap again to delete'); return; }
+        sh.close();
+        const all = await window.titleStore.list();
+        await window.titleStore.updateMany(all.filter(t => t.folder === name).map(t => t.id), { folder: null });
+        libSaveFolders(libStoredFolders().filter(f => f !== name));
+        if (libCurFolder() === name) libSetCurFolder('');
+        populateLibrary();
+      }, 'danger');
+      sh.box.appendChild(del);
+      sh.finish();
     }
 
     // ----- Library browser helpers -----
@@ -2507,6 +2814,11 @@ body.dimmed .card-image {
         return s;
       };
       row.appendChild(seg('LIB_VIEW_V1', 'list', [['list', LT('lib.view_list', 'List')], ['gallery', LT('lib.view_gallery', 'Gallery')]]));
+      const selBtn = document.createElement('button');
+      selBtn.className = 'lib-more'; selBtn.dataset.on = _libSel ? '1' : '0'; selBtn.style.marginLeft = 'auto';
+      selBtn.textContent = _libSel ? LT('lib.done', 'Done') : LT('lib.select', 'Select');
+      selBtn.addEventListener('click', () => { try { window.kHaptic?.(); } catch (_) {} if (_libSel) libExitSelect(); else libEnterSelect(); });
+      row.appendChild(selBtn);
       const open = libPref('LIB_TOOLS_OPEN', '0') === '1';
       const f = libPref('LIB_FILTER_V1', 'all'), s = libPref('LIB_SORT_V1', 'recent');
       const fl = (FILTERS().find(x => x[0] === f) || FILTERS()[0])[1], sl = (SORTS().find(x => x[0] === s) || SORTS()[0])[1];
@@ -2584,7 +2896,7 @@ body.dimmed .card-image {
         await populateLibrary();
       } catch (_) {}
     }
-    function actionsRow(title, blurb, refresh) {
+    function actionsRow(title, blurb, refresh, withMove) {
       const wrap = document.createElement('div');
       const row1 = document.createElement('div'); row1.className = 'lib-actions';
       const open = document.createElement('button'); open.className = 'lib-btn'; open.textContent = LT('lib.open', 'Open');
@@ -2599,6 +2911,7 @@ body.dimmed .card-image {
       };
       row2.appendChild(mk(title.pinnedAt ? ('✦ ' + LT('lib.unpin', 'Unpin')) : ('✦ ' + LT('lib.pin', 'Pin')), () => togglePinTitle(title), !!title.pinnedAt));
       row2.appendChild(mk((title.wantToRead ? '♥ ' : '♡ ') + LT('lib.want', 'Want to read'), () => toggleWantToRead(title), !!title.wantToRead));
+      if (withMove) row2.appendChild(mk(LT('lib.move', 'Move'), () => openMoveSheet([title.id])));
       if (title.attachments?.epub && window.libraryBlurb && window.ai?.isEnabled?.()) {
         row2.appendChild(mk(blurb ? LT('lib.new_summary', 'New summary') : LT('lib.summarize', 'Summarize'), async (b) => {
           b.disabled = true; b.textContent = LT('lib.summarizing', 'Summarizing') + '…';
@@ -2623,6 +2936,7 @@ body.dimmed .card-image {
       };
       top.appendChild(mk(LT('lib.stats', 'Stats'), () => openTitleStats(title.id)));
       top.appendChild(mk(LT('lib.edit', 'Edit'), () => openTitleEdit(title.id)));
+      top.appendChild(mk(LT('lib.move', 'Move'), () => openMoveSheet([title.id])));
       top.appendChild(mk(LT('lib.delete', 'Delete'), async () => {
         if (!(window.titleStore && confirm('Remove this title from your library?'))) return;
         try { if (title.syncId && window.driveIndex) await window.driveIndex.dismiss(title.syncId); } catch (_) {}
@@ -2730,6 +3044,17 @@ body.dimmed .card-image {
         el.style.left = (i * 9) + 'px'; el.style.top = (i * 7) + 'px'; el.style.zIndex = String(3 - i);
         stack.appendChild(el);
       });
+      if (_libSel) {
+        const ck = document.createElement('span'); ck.className = 'lib-check';
+        ck.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const ids = group.titles.map(v => v.id), every = ids.every(id => _libSel.has(id));
+          for (const id of ids) { if (every) _libSel.delete(id); else _libSel.add(id); }
+          try { window.kHaptic?.(); } catch (_) {}
+          libRefreshSel();
+        });
+        head.appendChild(ck);
+      }
       head.appendChild(stack);
       const txt = document.createElement('div'); txt.style.cssText = 'flex:1;min-width:0;';
       const nm = document.createElement('div'); nm.className = 'lib-series-name'; nm.textContent = group.name;
@@ -2805,7 +3130,7 @@ body.dimmed .card-image {
       card.appendChild(langSeg(render));
       card.appendChild(body);
       blurbBody(title, blurb, body);
-      card.appendChild(actionsRow(title, blurb, () => populateLibrary()));
+      card.appendChild(actionsRow(title, blurb, () => populateLibrary(), true));
       attachPinLongPress(card, title);
       return card;
     }
@@ -2838,7 +3163,7 @@ body.dimmed .card-image {
       let timer = null, x0 = 0, y0 = 0;
       const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
       el.addEventListener('touchstart', (e) => {
-        const t = e.touches[0]; if (!t) return;
+        const t = e.touches[0]; if (!t || _libSel) return;
         x0 = t.clientX; y0 = t.clientY;
         cancel();
         timer = setTimeout(async () => {
@@ -2902,6 +3227,7 @@ body.dimmed .card-image {
       item._closeSwipe = close;
 
       content.addEventListener('touchstart', (e) => {
+        if (_libSel) { dragging = false; return; }   // select mode: taps only
         const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY;
         dragging = true; decided = false; horiz = false; moved = false;
       }, { passive: true });
@@ -2932,6 +3258,7 @@ body.dimmed .card-image {
       // open the title, or close the actions if they're showing.
       content.addEventListener('click', () => {
         if (item._lp) { item._lp = false; return; }   // the tap that ended a pin long-press
+        if (_libSel) { libToggleSel(title.id); return; }
         if (moved) { moved = false; return; }
         if (opened) { close(); return; }
         // Cloud-only entries (synced from another device, no local files yet)
@@ -3680,6 +4007,13 @@ body.dimmed .card-image {
       // already the incoming title, so a background/mode-switch capture would mint
       // a record whose titleId disagrees with its location (History corruption).
       window._titleSwitchInFlight = true;
+      // Swap every in-app cover to the INCOMING title's before anything slow
+      // runs — otherwise the outgoing cover shows until the open finishes.
+      if (title && title.id !== window._activeTitleId) {
+        const _cov = title.attachments?.cover?.dataUri || '';
+        try { window._abPrimeCover?.(title.id, _cov); } catch (_) {}
+        try { window._shellPrimeCardBg?.(title.id, _cov); } catch (_) {}
+      }
       // Stop the Phase B live stream for the OUTGOING title immediately —
       // shell:title-change (fired once the new title's cues finish loading)
       // re-arms it for the incoming one.

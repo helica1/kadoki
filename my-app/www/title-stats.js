@@ -86,8 +86,8 @@
     } catch (_) {}
   }
 
-  // Time spent, per mode, ADDITIVE (fed 1s at a time by stats.js's tick while
-  // that mode's timer runs — 1 tick = 1 real second, so no idempotency needed).
+  // Time spent, per mode, ADDITIVE (fed whole seconds by stats.js: card/read from
+  // the same elapsed intervals as the daily totals, audio from playhead samples).
   // Stored per day as t: { c, r, a, v, w } seconds (card/read/audio/video/watch).
   function noteTime(tid, mode, sec) {
     if (!tid || !Number.isFinite(sec) || sec <= 0) return;

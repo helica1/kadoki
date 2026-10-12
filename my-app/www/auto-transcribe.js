@@ -1193,15 +1193,7 @@
       timingOnly: !!timingOnly
     };
     const me = active;
-    if (!timingOnly) setStatus(t('at.generating', 'Generating subtitles on device…'));
     const isAndroid = window.Capacitor?.getPlatform?.() === 'android';
-    if (!timingOnly) try {
-      window.showToast?.(hasEpub
-        ? t('at.toast_book', 'No native subtitles — generating on device and matching to the book text')
-        : (isAndroid
-            ? t('at.toast_android', 'No native subtitles — generating with on-device speech recognition')
-            : t('at.toast', 'No native subtitles — generating with Apple on-device speech recognition')), 3500);
-    } catch (_) {}
     // Book-text index builds in parallel with asset download / job start;
     // the ready-sweep upgrades any cues that merged as plain ASR meanwhile.
     if (hasEpub && window.autoAlign) {
@@ -1252,7 +1244,7 @@
       }
       if (active !== me) return false;   // title switched during download
       me.assetsDownloading = false;
-      setStatus(t('at.generating', 'Generating subtitles on device…'));
+      setStatus('');
     }
 
     // Cache signature = audio file name|size (survives cache renames across

@@ -3,6 +3,7 @@ import Network
 import Capacitor
 import UIKit
 import AVFoundation
+import AVKit
 import MediaPlayer
 
 // Native position tap for the Apple Watch live-subtitle stream (Phase B):
@@ -77,6 +78,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "skipToNextChapter", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "deviceModel",       returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "probeDuration",     returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "showRoutePicker",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "powerState",        returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "safeAreaInsets",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "tpState",           returnType: CAPPluginReturnPromise),
@@ -609,6 +611,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     /// right after open (pause) would be undone by the still-pending
     /// asyncAfter pause. (Android's cancelFade already handles this.)
     private var fadeGeneration = 0
+    /// Bumped by EVERY seek (JS seek, lock-screen scrub, scrub end, chapter skip /
+    /// repeat, a new play). A faded seek lands its target only if nothing newer
+    /// superseded it, so an older delayed callback never overwrites a newer spot.
+    private var seekGeneration = 0
+    /// Bumped by every explicit user transport command (play / resume / pause /
+    /// toggle / stop). Deferred automatic work captured before it — a chapter-
+    /// repeat announcement's completion — yields to the newer user intent.
+    private var transportGen = 0
     // Scrub session (reader drag-scrub): grains are short audible slices at
     // the finger position. scrubGen cancels a grain's scheduled fade-out/
     // pause when a newer grain (or scrubEnd) supersedes it.
@@ -674,11 +684,45 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     /// (an always-active .playback session kept the process resident).
     private func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
+        // `.longFormAudio` marks Kadoki as a long-form player (the policy Music /
+        // Podcasts / Books use): starting playback then routes to the user's
+        // long-form output and lets AirPods auto-switch over from a Mac/iPad,
+        // instead of staying on whatever the default route happens to be.
         do {
-            try session.setCategory(.playback, mode: .spokenAudio, options: [])
+            try session.setCategory(.playback, mode: .spokenAudio, policy: .longFormAudio, options: [])
         } catch {
-            NSLog("[BackgroundAudio] AudioSession category failed: \(error.localizedDescription)")
+            NSLog("[BackgroundAudio] longFormAudio category failed: \(error.localizedDescription)")
+            do { try session.setCategory(.playback, mode: .spokenAudio, options: []) }
+            catch { NSLog("[BackgroundAudio] AudioSession category failed: \(error.localizedDescription)") }
         }
+    }
+
+    #if !os(visionOS)
+    private var routePicker: AVRoutePickerView?
+    #endif
+    /// Present the system audio-output sheet (AirPods / speaker / AirPlay) —
+    /// the manual grab for when the AirPods stayed on another device. iOS has
+    /// no public API to pick a Bluetooth output directly; this sheet is it.
+    @objc func showRoutePicker(_ call: CAPPluginCall) {
+        #if os(visionOS)
+        call.resolve(["shown": false])
+        #else
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let host = self.bridge?.viewController?.view else {
+                call.resolve(["shown": false]); return
+            }
+            let picker = self.routePicker ?? {
+                let p = AVRoutePickerView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+                p.alpha = 0.011; p.isUserInteractionEnabled = false
+                host.addSubview(p)
+                self.routePicker = p
+                return p
+            }()
+            let button = picker.subviews.compactMap { $0 as? UIButton }.first
+            button?.sendActions(for: .touchUpInside)
+            call.resolve(["shown": button != nil])
+        }
+        #endif
     }
 
     /// Activate the audio session right before playback (lazy). Safe to call
@@ -753,6 +797,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
         cmd.playCommand.addTarget { [weak self] _ in
             guard let p = self?.player else { return .commandFailed }
+            self?.noteUserTransport()
             self?.ensureSessionActive()
             p.play()
             self?.startPositionTimer()
@@ -760,14 +805,15 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             self?.postLiveTick(ms: Int(p.currentTime * 1000), playing: true)
             self?.updateNowPlaying()
             // Tell JS this play came from the lock screen / Control Center, so
-            // it can force AUDIO mode (audiobook + audio timer) regardless of
-            // whatever mode the app was in.
+            // it can disarm a card clip's end boundary. JS never changes mode
+            // for it — playback simply resumes in place.
             // ts: lets JS drop this command if it thaws out of a suspended
             // WebView minutes later (stale-replay guard).
             self?.notifyListeners("remoteCommand", data: ["action": "play", "ts": Int(Date().timeIntervalSince1970 * 1000)])
             return .success
         }
         cmd.pauseCommand.addTarget { [weak self] _ in
+            self?.noteUserTransport()
             let ms = Int((self?.player?.currentTime ?? 0) * 1000)
             self?.player?.pause()
             self?.stopPositionTimer()
@@ -823,6 +869,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             guard let event = event as? MPChangePlaybackPositionCommandEvent,
                   let p = self?.player else { return .commandFailed }
             p.currentTime = event.positionTime
+            self?.seekGeneration += 1
             // External seek: keep the chapter-repeat detector from reading this
             // lock-screen scrub as a natural boundary crossing.
             self?.repeatGuardUntil = Date().timeIntervalSince1970 + 0.6
@@ -844,10 +891,22 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    /// Record an explicit user transport command. Also cuts a chapter-repeat
+    /// announcement short, so its completion runs now and honours this intent
+    /// instead of seeking/resuming over it seconds later.
+    private func noteUserTransport() {
+        transportGen += 1
+        DispatchQueue.main.async { [weak self] in   // the synth lives on main
+            guard let self = self, self.repeatBusy, self.speechSynth.isSpeaking else { return }
+            self.speechSynth.stopSpeaking(at: .immediate)
+        }
+    }
+
     // Shared by the lock-screen toggle button and the watch's tap-to-toggle
     // (Phase B) — both are "remote, no context on current state" triggers.
     private func performTogglePlayPause() {
         guard let p = player else { NSLog("[BackgroundAudio] performTogglePlayPause: no active player"); return }
+        noteUserTransport()
         if p.isPlaying {
             p.pause()
             stopPositionTimer()
@@ -873,6 +932,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         currentUrlStr = urlStr   // remember what JS asked us to play (for getState "same audio" check)
+        noteUserTransport()      // a new start supersedes any deferred automatic resume
+        seekGeneration += 1      // …and any seek still waiting out its fade
         stopRateRamp()
         ensureSessionActive()    // lazy activation (session is deactivated on stop)
         // call.getInt/getDouble — getDouble is reliable for fractional JSON Numbers.
@@ -1002,6 +1063,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // boundary). The fadeGeneration token lets a resume/play that races in
         // during the fade window — e.g. a quick dictionary close — cancel this
         // pending pause instead of stopping the freshly-resumed audio.
+        noteUserTransport()
         let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
         fadeGeneration += 1
         let gen = fadeGeneration
@@ -1040,6 +1102,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func resume(_ call: CAPPluginCall) {
         guard let p = player else { call.resolve(); return }
+        noteUserTransport()
         ensureSessionActive()   // re-activate if a prior stop() deactivated it
         fadeGeneration += 1 // supersede any pending faded-pause so it doesn't stop us
         let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
@@ -1059,6 +1122,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     @objc func stop(_ call: CAPPluginCall) {
+        noteUserTransport()
         stopPositionTimer()
         saveLastPositionNow()   // before the player/url are cleared (parity with Android ACTION_STOP)
         let msAtStop = Int((player?.currentTime ?? 0) * 1000)
@@ -1094,22 +1158,33 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // No `fadeMs` (or while paused → nothing audible) seeks immediately, so
         // continuous scrub-bar dragging stays instant. Mirrors the play/pause
         // ramp; the same fadeGeneration token defers the fade-in to a pause/play
-        // that races in, but the seek itself always lands.
+        // that races in. A pause does not cancel the seek — but a newer seek or a
+        // replaced player does (seekGeneration + player identity).
         let fadeMs = call.getDouble("fadeMs") ?? 0
         let rampFrom = Float(call.getDouble("rampFrom") ?? 0)
         let wantRamp = p.isPlaying && rampFrom > 0 && currentRate > rampFrom + 0.03
         let preMs = p.currentTime * 1000          // where the listener WAS: hold 1× until back here
+        seekGeneration += 1
+        let seekGen = seekGeneration
         if p.isPlaying && fadeMs > 0 {
             fadeGeneration += 1
             let gen = fadeGeneration
             let secs = fadeMs / 1000.0
             p.setVolume(0.0, fadeDuration: secs)
             DispatchQueue.main.asyncAfter(deadline: .now() + secs) { [weak self] in
-                guard let self = self, let p = self.player else { return }
-                p.currentTime = target               // always land the seek
-                if wantRamp { self.startRateRamp(from: rampFrom, to: self.currentRate, seconds: Self.RAMP_SECONDS, holdUntilMs: preMs) }
-                self.updateNowPlaying()
-                self.postLiveTick(ms: Int(target * 1000), playing: p.isPlaying)
+                // Only the player this seek was issued against: a play() / title
+                // switch during the fade replaced it, and the old target must never
+                // land on the new one.
+                guard let self = self, let cur = self.player, cur === p else { return }
+                // A newer seek owns the position; this one still hands the volume back.
+                if self.seekGeneration == seekGen {
+                    p.currentTime = target
+                    if wantRamp { self.startRateRamp(from: rampFrom, to: self.currentRate, seconds: Self.RAMP_SECONDS, holdUntilMs: preMs) }
+                    self.updateNowPlaying()
+                    self.postLiveTick(ms: Int(target * 1000), playing: p.isPlaying)
+                    // A pause that raced in saved the pre-seek spot — persist the landing.
+                    if !p.isPlaying { self.saveLastPositionNow() }
+                }
                 guard self.fadeGeneration == gen else { return } // a pause/play raced in — it owns the volume
                 p.setVolume(1.0, fadeDuration: secs)
             }
@@ -1118,6 +1193,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             if wantRamp { startRateRamp(from: rampFrom, to: currentRate, seconds: Self.RAMP_SECONDS, holdUntilMs: preMs) }
             updateNowPlaying()
             postLiveTick(ms: Int(target * 1000), playing: p.isPlaying)
+            // Durable while paused: no position timer runs and no pause save follows,
+            // so a kill right after a paused seek used to restore the old spot.
+            if !p.isPlaying { saveLastPositionNow() }
         }
         call.resolve()
     }
@@ -1350,6 +1428,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             p.currentTime = max(0, min(p.duration, ms / 1000.0))
         }
         fadeGeneration += 1
+        seekGeneration += 1          // the scrub landing supersedes any seek still fading
         repeatGuardUntil = Date().timeIntervalSince1970 + 0.6; lastTickMs = -1; lastChapterIdx = -1
         let posMs = Int(p.currentTime * 1000)
         if resume {
@@ -1471,6 +1550,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             self.speakGen += 1; self.failsafeTimer?.invalidate(); self.failsafeTimer = nil; self.pendingSpeechCompletion = nil
             if self.speechSynth.isSpeaking { self.speechSynth.stopSpeaking(at: .immediate) }
             if let next = self.chapters.first(where: { $0.idx == curIdx + 1 }) {
+                self.seekGeneration += 1
                 p.currentTime = max(0, min(p.duration, TimeInterval(next.startMs) / 1000.0))
                 self.repeatGuardUntil = Date().timeIntervalSince1970 + 0.6
                 self.lastTickMs = Int(p.currentTime * 1000); self.lastChapterIdx = next.idx
@@ -1737,7 +1817,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     /// Pause → announce → (on speech finish/failsafe) seek back to chapter start →
-    /// resume. ALWAYS ends playing — never strands the book paused.
+    /// resume. Ends playing — unless the user paused, stopped, seeked or switched
+    /// title during the announcement, in which case their newer intent wins.
     private func doChapterRepeat(_ ch: ChapterBound, isFinal: Bool = false) {
         guard let p = player, !repeatBusy else { return }
         repeatBusy = true
@@ -1749,23 +1830,41 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // mid-announce restores to the chapter being repeated, never ahead of it.
         stopPositionTimer(); saveDurablePositionMs(ch.startMs); emitState(playing: false); updateNowPlaying()
         postLiveTick(ms: ch.startMs, playing: false)   // watch karaoke parks at the chapter start during the announce
-        speakAnnounce(ch.announce) { [weak self] in self?.finishRepeat(seekTo: target, passIdx: ch.idx, isFinal: isFinal) }
+        let transport = transportGen, seek = seekGeneration
+        speakAnnounce(ch.announce) { [weak self] in
+            self?.finishRepeat(seekTo: target, passIdx: ch.idx, isFinal: isFinal, owner: p, transport: transport, seek: seek)
+        }
     }
 
-    private func finishRepeat(seekTo target: TimeInterval, passIdx: Int, isFinal: Bool = false) {
-        guard let p = player else { repeatBusy = false; return }
-        if chapterRepeatOn && repeatPassIdx == passIdx {
+    private func finishRepeat(seekTo target: TimeInterval, passIdx: Int, isFinal: Bool,
+                              owner: KadokiPlayback, transport: Int, seek: Int) {
+        // Only the player this repeat paused: a title switch replaced it, and this
+        // completion must never seek or start the new title.
+        guard let p = player, p === owner else { repeatBusy = false; return }
+        let userSeeked = seekGeneration != seek          // they chose a position mid-announce
+        let userTransport = transportGen != transport    // they paused / resumed / stopped mid-announce
+        let passLive = chapterRepeatOn && repeatPassIdx == passIdx
+        // Land the chapter start — the spot doChapterRepeat already saved — unless a
+        // user seek chose another, or the user already resumed from where it was.
+        if passLive && !userSeeked && !(userTransport && p.isPlaying) {
             p.currentTime = max(0, min(p.duration, target))
+            seekGeneration += 1
             saveLastPositionNow()
             repeatGuardUntil = Date().timeIntervalSince1970 + 0.6
             lastTickMs = Int(p.currentTime * 1000); lastChapterIdx = passIdx
-            // The final chapter has no next crossing to clear the pass — clear it here
-            // so a later skipToNextChapter doesn't mis-mark this idx as the one left.
-            if isFinal { repeatPassIdx = -1 }
+        }
+        // The final chapter has no next crossing to clear the pass — clear it here
+        // so a later skipToNextChapter doesn't mis-mark this idx as the one left.
+        if passLive && isFinal { repeatPassIdx = -1 }
+        repeatBusy = false
+        if userTransport {
+            // Newest explicit intent wins: leave play/pause exactly as the user set it.
+            if !p.isPlaying { saveLastPositionNow() }
+            updateNowPlaying()
+            return
         }
         ensureSessionActive(); p.volume = 1.0; p.play()
         startPositionTimer(); emitState(playing: true); updateNowPlaying()
-        repeatBusy = false
     }
 
     /// Speak `text` (ja-JP) through the active session; the single-fire completion

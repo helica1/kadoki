@@ -1046,7 +1046,7 @@
      *              corresponding cue boundaries as the range expands or
      *              contracts.
      *   cueIndex — anchor cue (the one currently in focus).
-     * Returns a Promise that resolves to { startMs, endMs, text } when the
+     * Returns a Promise that resolves to { startMs, endMs, text, translation } when the
      * user taps "Send", or null if they Cancel.
      */
     edit({ srcPath, startMs, endMs, title, cues, cueIndex }) {
@@ -1073,8 +1073,8 @@
         const panel = document.createElement('div');
         panel.style.cssText = `
           background:var(--bg,#0c0c0c); border:1px solid var(--border,#2a2a2a);
-          border-radius:12px; width:min(720px,96vw); padding:16px;
-          max-height:92vh; overflow-y:auto;
+          border-radius:12px; width:min(720px,96vw); padding:16px; box-sizing:border-box;
+          max-height:92vh; overflow-y:auto; overflow-x:hidden; overscroll-behavior:contain;
         `;
         // Text picker: cues stack vertically inside a scrollable column so
         // long subtitle text can show in full and the user can scroll
@@ -1100,8 +1100,8 @@
               scrollbar-width:thin;
               padding:2px;"></div>
             <div style="display:flex;flex-direction:column;gap:6px;flex:0 0 32px;justify-content:center;">
-              <button data-role="right-plus"  class="tr-btn" title="Add next subtitle">+</button>
               <button data-role="right-minus" class="tr-btn" title="Drop last selected subtitle">−</button>
+              <button data-role="right-plus"  class="tr-btn" title="Add next subtitle">+</button>
             </div>
           </div>
         ` : `
@@ -1140,6 +1140,119 @@
               background:#0f0f0f; border:1px dashed #1f1f1f; color:#666;
             }
             #waveformEditorOverlay .bounce { transform: scale(1.05); }
+            /* ── Translation card ── */
+            #waveformEditorOverlay [hidden] { display:none !important; }
+            #waveformEditorOverlay .tr-card {
+              margin-top:16px; padding:12px 14px 14px; border-radius:16px;
+              background:linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.015));
+              border:1px solid rgba(255,255,255,0.07);
+            }
+            #waveformEditorOverlay .tr-head {
+              display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px;
+            }
+            #waveformEditorOverlay .tr-title {
+              display:flex; align-items:center; gap:9px; font-size:.78rem; font-weight:600;
+              letter-spacing:.09em; text-transform:uppercase; color:#a3a3a3;
+            }
+            #waveformEditorOverlay .tr-engine {
+              position:relative; display:inline-flex; align-items:center; gap:7px; min-width:0;
+              height:32px; padding:0 30px 0 12px; border-radius:999px;
+              background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.09);
+              color:#dcdcdc; font-size:.8rem; font-weight:500; white-space:nowrap; cursor:pointer;
+            }
+            #waveformEditorOverlay .tr-engine:active { background:rgba(255,255,255,0.1); }
+            #waveformEditorOverlay .tr-engine-dot {
+              flex:0 0 auto; width:6px; height:6px; border-radius:50%;
+              background:${modeColor}; box-shadow:0 0 8px ${rgba(modeColor, 0.7)};
+            }
+            #waveformEditorOverlay .tr-engine::after {
+              content:''; position:absolute; right:13px; top:50%; width:6px; height:6px;
+              border-right:1.5px solid #a3a3a3; border-bottom:1.5px solid #a3a3a3;
+              transform:translateY(-70%) rotate(45deg); pointer-events:none;
+            }
+            #waveformEditorOverlay .tr-engine select {
+              position:absolute; inset:0; width:100%; height:100%; opacity:0; cursor:pointer;
+              -webkit-appearance:none; appearance:none; font-size:16px;
+            }
+            #waveformEditorOverlay .tr-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+            #waveformEditorOverlay .tr-btn {
+              display:flex; align-items:center; justify-content:center; gap:9px;
+              height:46px; padding:0 14px; border-radius:12px; font-size:.95rem; font-weight:600;
+              color:${modeColor}; background:${rgba(modeColor, 0.12)}; border:1px solid ${rgba(modeColor, 0.28)};
+              cursor:pointer; touch-action:manipulation;
+              transition:background .15s ease, border-color .15s ease, transform .12s ease, opacity .15s ease;
+            }
+            #waveformEditorOverlay .tr-btn:active { transform:scale(0.97); }
+            #waveformEditorOverlay .tr-btn:disabled {
+              color:#6e6e6e; background:rgba(255,255,255,0.04); border-color:rgba(255,255,255,0.07);
+              cursor:default; transform:none;
+            }
+            #waveformEditorOverlay .tr-btn.on { background:${rgba(modeColor, 0.2)}; border-color:${rgba(modeColor, 0.5)}; }
+            #waveformEditorOverlay .tr-chev {
+              width:7px; height:7px; border-right:2px solid currentColor; border-bottom:2px solid currentColor;
+              transform:translateY(-2px) rotate(45deg); transition:transform .2s ease;
+            }
+            #waveformEditorOverlay .tr-btn.on .tr-chev { transform:translateY(2px) rotate(-135deg); }
+            #waveformEditorOverlay .tr-status {
+              display:flex; align-items:center; gap:9px; margin:11px 2px 0;
+              font-size:.8rem; line-height:1.4; color:#a3a3a3;
+            }
+            #waveformEditorOverlay .tr-status.err { color:#ef8a80; }
+            #waveformEditorOverlay .tr-spin {
+              flex:0 0 auto; width:14px; height:14px; border-radius:50%;
+              border:2px solid ${rgba(modeColor, 0.22)}; border-top-color:${modeColor};
+              animation:trSpin .8s linear infinite;
+            }
+            @keyframes trSpin { to { transform:rotate(360deg); } }
+            #waveformEditorOverlay .mk-panel { margin-top:14px; }
+            #waveformEditorOverlay .mk-hint { margin:0 2px 8px; font-size:.78rem; line-height:1.45; color:#8e8e8e; }
+            #waveformEditorOverlay .mk-text {
+              padding:12px 14px; border-radius:12px;
+              background:rgba(0,0,0,0.38); border:1px solid rgba(255,255,255,0.07);
+              font-family:var(--font-family-card,serif); font-size:1.15rem; line-height:2.1;
+              color:var(--text,#e8e8e8); overflow-wrap:anywhere; cursor:text;
+              touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
+            }
+            #waveformEditorOverlay .mk-ch { padding:4px 0; transition:background-color .12s ease; }
+            #waveformEditorOverlay .mk-ch.on {
+              background:${rgba(modeColor, 0.3)}; color:#fff; box-shadow:inset 0 -2px 0 ${rgba(modeColor, 0.95)};
+            }
+            #waveformEditorOverlay .mk-ch.s { border-top-left-radius:5px; border-bottom-left-radius:5px; }
+            #waveformEditorOverlay .mk-ch.e { border-top-right-radius:5px; border-bottom-right-radius:5px; }
+            #waveformEditorOverlay .mk-ch.anchor {
+              background:${rgba(modeColor, 0.14)}; box-shadow:inset 0 -2px 0 ${modeColor}; border-radius:5px;
+            }
+            #waveformEditorOverlay .mk-foot { display:flex; align-items:center; gap:12px; margin-top:10px; }
+            #waveformEditorOverlay .mk-foot .tr-btn { flex:1; }
+            #waveformEditorOverlay .tr-link {
+              background:none; border:none; padding:8px 6px; color:#a3a3a3;
+              font-size:.85rem; font-weight:500; cursor:pointer; touch-action:manipulation;
+            }
+            #waveformEditorOverlay .tr-link:active { color:#fff; }
+            #waveformEditorOverlay .tr-out {
+              margin-top:14px; border-radius:12px; overflow:hidden;
+              background:rgba(0,0,0,0.38); border:1px solid rgba(255,255,255,0.07);
+              transition:border-color .15s ease;
+            }
+            #waveformEditorOverlay .tr-out:focus-within { border-color:${rgba(modeColor, 0.45)}; }
+            #waveformEditorOverlay .tr-out-head {
+              display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 6px 0 14px;
+            }
+            #waveformEditorOverlay .tr-chip {
+              display:flex; align-items:center; gap:7px; min-width:0; font-size:.72rem;
+              letter-spacing:.02em; color:#9a9a9a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+            }
+            #waveformEditorOverlay .tr-chip::before {
+              content:''; flex:0 0 auto; width:5px; height:5px; border-radius:50%; background:${modeColor};
+            }
+            #waveformEditorOverlay [data-role="tr-result"] {
+              display:block; width:100%; box-sizing:border-box; min-height:3em; max-height:40vh; resize:none;
+              background:transparent; color:var(--text,#e8e8e8); border:none; outline:none;
+              padding:4px 14px 14px; font:inherit; font-size:.95rem; line-height:1.55;
+              -webkit-user-select:text; user-select:text; touch-action:auto;
+            }
+            #waveformEditorOverlay .tr-dest { margin:8px 4px 0; font-size:.75rem; line-height:1.4; color:#7f7f7f; }
+            #waveformEditorOverlay .tr-dest.stale { color:#e0a040; }
             #waveformEditorOverlay .btn-send-mode {
               background:${modeColor} !important; color:#000 !important;
               border:none !important; font-weight:700;
@@ -1147,10 +1260,41 @@
           </style>
           ${textRowHtml}
           <div data-role="wf-host"></div>
-          <div style="font-size:.7rem;color:#666;text-align:center;margin-top:6px;">
-            ${useTextHandles
-              ? 'Use + and − to grow or trim the selection · drag waveform handles for fine audio bounds'
-              : 'Drag vertically to zoom · drag horizontally to pan · drag handles to set bounds'}
+          <div data-role="tr-section" class="tr-card">
+            <div class="tr-head">
+              <div class="tr-title">Translation</div>
+              <label class="tr-engine">
+                <span class="tr-engine-dot"></span>
+                <span data-role="tr-eng-label">Apple · On-device</span>
+                <select data-role="tr-engine" aria-label="Translation engine">
+                  <option value="apple">Apple · On-device</option>
+                  <option value="ai">OpenRouter</option>
+                </select>
+              </label>
+            </div>
+            <div class="tr-actions">
+              <button data-role="tr-translate" class="tr-btn">Translate</button>
+              <button data-role="tr-explain" class="tr-btn" aria-expanded="false">Explain<span class="tr-chev"></span></button>
+            </div>
+            <div data-role="mk-panel" class="mk-panel" hidden>
+              <div class="mk-hint">Drag or tap to highlight what’s confusing. Leave it blank to explain only the advanced grammar.</div>
+              <div data-role="mk-text" class="mk-text"></div>
+              <div class="mk-foot">
+                <button data-role="mk-go" class="tr-btn">Explain advanced grammar</button>
+                <button data-role="mk-clear" class="tr-link" hidden>Clear</button>
+              </div>
+            </div>
+            <div data-role="tr-status" class="tr-status" hidden></div>
+            <div data-role="tr-wrap" hidden>
+              <div class="tr-out">
+                <div class="tr-out-head">
+                  <span data-role="tr-chip" class="tr-chip"></span>
+                  <button data-role="tr-clear" class="tr-link">Remove</button>
+                </div>
+                <textarea data-role="tr-result" rows="2" spellcheck="false"></textarea>
+              </div>
+              <div data-role="tr-note" class="tr-dest" hidden></div>
+            </div>
           </div>
           <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px;">
             <button data-role="cancel" class="btn">Cancel</button>
@@ -1217,6 +1361,7 @@
         function applyTextRange(bounceIdx) {
           if (!textRangeState) return;
           renderCueChips(bounceIdx);
+          onSelectionChanged();
           const newStart = cues[textRangeState.leftIdx].startMs;
           const newEnd   = cues[textRangeState.rightIdx].endMs;
           if (state) {
@@ -1299,7 +1444,313 @@
           });
         }
 
+        // ── Translation (Translate / Translate + explain — anki-translate.js) ──
+        // The result is shown, and editable, BEFORE sending; Send hands it to the
+        // swipe note type's translation field (Preferences → Anki).
+        let _trBusy = false, _trReq = 0, _trForText = null, _closed = false;
+        const trBtnT   = panel.querySelector('[data-role="tr-translate"]');
+        const trBtnX   = panel.querySelector('[data-role="tr-explain"]');
+        const trStatus = panel.querySelector('[data-role="tr-status"]');
+        const trWrap   = panel.querySelector('[data-role="tr-wrap"]');
+        const trBox    = panel.querySelector('[data-role="tr-result"]');
+        const trNote   = panel.querySelector('[data-role="tr-note"]');
+        const trClear  = panel.querySelector('[data-role="tr-clear"]');
+        const trChip   = panel.querySelector('[data-role="tr-chip"]');
+        // Translate engine: Apple (free, on-device) or the AI backend — remembered.
+        // A native <select> sits invisibly over the pill, so a tap opens the
+        // system menu while the pill shows a short label. Explain always uses AI.
+        const ENGINE_KEY = 'ANKI_TRANSLATE_ENGINE';
+        const trEngSel   = panel.querySelector('[data-role="tr-engine"]');
+        const trEngLabel = panel.querySelector('[data-role="tr-eng-label"]');
+        let _trEngine = 'apple';
+        try { if (localStorage.getItem(ENGINE_KEY) === 'ai') _trEngine = 'ai'; } catch (_) {}
+        let _appleOk = true, _aiName = 'OpenRouter';
+        // Renders the menu and returns the engine Translate will actually use.
+        function renderEngine() {
+          const eff = (!_appleOk && _trEngine === 'apple') ? 'ai' : _trEngine;
+          if (trEngSel) {
+            const optApple = trEngSel.querySelector('option[value="apple"]');
+            const optAi = trEngSel.querySelector('option[value="ai"]');
+            if (optApple) optApple.disabled = !_appleOk;
+            if (optAi) optAi.textContent = _aiName;
+            trEngSel.value = eff;
+          }
+          if (trEngLabel) trEngLabel.textContent = eff === 'apple' ? 'Apple · On-device' : _aiName;
+          // Explain needs the AI engine: greyed out on Apple, and its panel closes.
+          // (Looked up here rather than via mkPanel/mkGo, which are declared later.)
+          const explainOk = eff === 'ai';
+          if (trBtnX) {
+            trBtnX.disabled = _trBusy || !explainOk;
+            if (!explainOk && trBtnX.classList.contains('on')) {
+              trBtnX.classList.remove('on');
+              trBtnX.setAttribute('aria-expanded', 'false');
+              const mp = panel.querySelector('[data-role="mk-panel"]');
+              if (mp) mp.hidden = true;
+            }
+          }
+          const go = panel.querySelector('[data-role="mk-go"]');
+          if (go) go.disabled = _trBusy || !explainOk;
+          return eff;
+        }
+        renderEngine();
+        (async () => {
+          try {
+            if (!window.ankiTranslate) return;
+            _aiName = await window.ankiTranslate.aiName();
+            _appleOk = await window.ankiTranslate.appleAvailable();
+            if (!_closed) renderEngine();
+          } catch (_) {}
+        })();
+        // ── Highlight-to-explain: mark the confusing parts before Explain ──
+        // The passage is laid out as one span per character. Drag paints a range
+        // (starting on a highlight erases instead); a tap sets a start character
+        // and the next tap highlights through to it; a tap on a highlight clears
+        // that phrase. Maximal highlighted runs become the phrases sent to the AI.
+        const mkPanel = panel.querySelector('[data-role="mk-panel"]');
+        const mkText  = panel.querySelector('[data-role="mk-text"]');
+        const mkGo    = panel.querySelector('[data-role="mk-go"]');
+        const mkClear = panel.querySelector('[data-role="mk-clear"]');
+        let _mkChars = [], _mkOn = [], _mkFor = null, _mkAnchor = -1;
+        function markPhrases() {
+          const out = [];
+          let cur = '';
+          for (let i = 0; i < _mkChars.length; i++) {
+            if (_mkOn[i]) cur += _mkChars[i];
+            else if (cur) { if (cur.trim()) out.push(cur.trim()); cur = ''; }
+          }
+          if (cur.trim()) out.push(cur.trim());
+          return out;
+        }
+        function paintMarks() {
+          if (!mkText) return;
+          const spans = mkText.children;
+          for (let i = 0; i < spans.length; i++) {
+            const on = !!_mkOn[i];
+            spans[i].classList.toggle('on', on);
+            spans[i].classList.toggle('s', on && !_mkOn[i - 1]);   // rounded ends of each highlight
+            spans[i].classList.toggle('e', on && !_mkOn[i + 1]);
+            spans[i].classList.toggle('anchor', i === _mkAnchor);
+          }
+          const n = markPhrases().length;
+          if (mkGo) mkGo.textContent = n ? ('Explain ' + n + ' highlight' + (n > 1 ? 's' : '')) : 'Explain advanced grammar';
+          if (mkClear) mkClear.hidden = !n && _mkAnchor < 0;
+        }
+        function renderMarkText() {
+          if (!mkText) return;
+          const text = currentSelectionText();
+          if (text === _mkFor) return;          // same passage: keep the highlights
+          _mkFor = text;
+          _mkChars = Array.from(text);
+          _mkOn = _mkChars.map(() => false);
+          _mkAnchor = -1;
+          mkText.textContent = '';
+          _mkChars.forEach((ch, i) => {
+            const s = document.createElement('span');
+            s.className = 'mk-ch';
+            s.dataset.i = String(i);
+            s.textContent = ch;
+            mkText.appendChild(s);
+          });
+          paintMarks();
+        }
+        if (mkText) {
+          let drag = null;   // { anchor, value, before, moved, last }
+          const idxAt = (x, y) => {
+            const el = document.elementFromPoint(x, y);
+            const s = el && el.closest ? el.closest('.mk-ch') : null;
+            return (s && mkText.contains(s)) ? Number(s.dataset.i) : -1;
+          };
+          mkText.addEventListener('pointerdown', (e) => {
+            const i = idxAt(e.clientX, e.clientY);
+            if (i < 0) return;
+            e.preventDefault();
+            try { mkText.setPointerCapture(e.pointerId); } catch (_) {}
+            drag = { anchor: i, value: !_mkOn[i], before: _mkOn.slice(), moved: false, last: i };
+          });
+          mkText.addEventListener('pointermove', (e) => {
+            if (!drag) return;
+            const j = idxAt(e.clientX, e.clientY);
+            if (j < 0 || j === drag.last) return;
+            drag.last = j;
+            drag.moved = true;
+            const lo = Math.min(drag.anchor, j), hi = Math.max(drag.anchor, j);
+            for (let k = 0; k < _mkOn.length; k++) _mkOn[k] = (k >= lo && k <= hi) ? drag.value : drag.before[k];
+            _mkAnchor = -1;
+            paintMarks();
+          });
+          mkText.addEventListener('pointerup', () => {
+            if (!drag) return;
+            const d = drag;
+            drag = null;
+            if (d.moved) return;
+            const i = d.anchor;
+            if (_mkOn[i]) {
+              // Tap on a highlight clears that whole phrase.
+              let lo = i, hi = i;
+              while (lo > 0 && _mkOn[lo - 1]) lo--;
+              while (hi < _mkOn.length - 1 && _mkOn[hi + 1]) hi++;
+              for (let k = lo; k <= hi; k++) _mkOn[k] = false;
+              _mkAnchor = -1;
+            } else if (_mkAnchor >= 0) {
+              // Second tap: highlight from the first tapped character through this one.
+              const lo = Math.min(_mkAnchor, i), hi = Math.max(_mkAnchor, i);
+              for (let k = lo; k <= hi; k++) _mkOn[k] = true;
+              _mkAnchor = -1;
+            } else {
+              _mkAnchor = i;                    // first tap marks the start
+            }
+            paintMarks();
+          });
+          mkText.addEventListener('pointercancel', () => { drag = null; });
+        }
+        function currentSelectionText() {
+          if (textRangeState) {
+            let t = '';
+            for (let i = textRangeState.leftIdx; i <= textRangeState.rightIdx; i++) {
+              if (i > textRangeState.leftIdx) t += ' ';
+              t += cues[i].text;
+            }
+            return t;
+          }
+          return String(title || '').replace(/<[^>]+>/g, '').trim();
+        }
+        function renderTrNote() {
+          if (!trNote) return;
+          const stale = _trForText !== null && _trForText !== currentSelectionText();
+          trNote.textContent = stale ? 'The selection changed since this was made. Translate again to update it.' : '';
+          trNote.classList.toggle('stale', stale);
+          trNote.hidden = !stale;
+        }
+        function onSelectionChanged() {
+          if (trWrap && !trWrap.hidden) renderTrNote();
+          if (mkPanel && !mkPanel.hidden) renderMarkText();   // new passage: highlights reset
+        }
+        // Status line under the buttons: spinner + label while busy, red on error,
+        // hidden when there is nothing to say.
+        function setTrBusy(busy, label, isError) {
+          _trBusy = busy;
+          if (trBtnT) trBtnT.disabled = busy;
+          renderEngine();                        // Explain buttons: disabled while busy or on Apple
+          if (!trStatus) return;
+          trStatus.textContent = '';
+          trStatus.classList.toggle('err', !!isError);
+          if (busy) {
+            const spin = document.createElement('span');
+            spin.className = 'tr-spin';
+            trStatus.appendChild(spin);
+          }
+          if (label) trStatus.appendChild(document.createTextNode(label));
+          trStatus.hidden = !label;
+        }
+        // The result box grows with its text (up to 40% of the screen, then scrolls).
+        function autosizeResult() {
+          if (!trBox) return;
+          trBox.style.height = 'auto';
+          trBox.style.height = Math.min(trBox.scrollHeight, Math.round(window.innerHeight * 0.4)) + 'px';
+        }
+        if (trBox) trBox.addEventListener('input', autosizeResult);
+        // Key of the passage + highlights the current explanation was made for.
+        let _mkExplainedKey = null, _trPromise = null, _trMode = null;
+        const explainKey = (text, phrases) => text + '\u0000' + phrases.join('\u0001');
+        // Highlights the user marked but hasn't had explained yet (or changed since):
+        // Send finishes that explanation before the card can go out.
+        function explainPendingKey() {
+          if (!mkPanel || mkPanel.hidden || renderEngine() !== 'ai') return null;
+          const phrases = markPhrases();
+          if (!phrases.length) return null;
+          const key = explainKey(currentSelectionText(), phrases);
+          return key === _mkExplainedKey ? null : key;
+        }
+        // Resolves true when a result was shown, false otherwise. A request already
+        // running is shared, so Send can wait on the same one.
+        function runTranslation(mode) {
+          if (_trBusy && _trPromise) return _trPromise;
+          _trPromise = runTranslationNow(mode);
+          return _trPromise;
+        }
+        async function runTranslationNow(mode) {
+          if (_trBusy || !window.ankiTranslate) return false;
+          const text = currentSelectionText();
+          if (!text) return false;
+          _trMode = mode;
+          const req = ++_trReq;
+          const focus = mode === 'explain' ? markPhrases() : [];
+          setTrBusy(true, mode !== 'explain' ? 'Translating…'
+            : (focus.length ? 'Explaining the highlighted parts…' : 'Looking for advanced grammar…'));
+          try {
+            const r = await window.ankiTranslate.run(text, mode, { engine: renderEngine(), focus });
+            if (_closed || req !== _trReq) return false;
+            trBox.value = r.text;
+            _trForText = text;
+            _mkExplainedKey = mode === 'explain' ? explainKey(text, focus) : null;
+            trWrap.hidden = false;
+            if (trChip) {
+              const by = r.engine === 'apple' ? 'Apple · on-device'
+                : ((r.name || 'AI') + (r.model ? ' · ' + String(r.model).split('/').pop() : ''));
+              trChip.textContent = (mode === 'explain' ? 'Explanation' : 'Translation') + ' · ' + by;
+            }
+            setTrBusy(false, '');
+            autosizeResult();
+            renderTrNote();
+            return true;
+          } catch (e) {
+            if (_closed || req !== _trReq) return false;
+            setTrBusy(false, (e && e.message) || String(e), true);
+            return false;
+          }
+        }
+        // Same first-tap-safe wiring as the ± buttons (iOS drops the synthetic click).
+        const tapTr = (el, fn) => {
+          if (!el) return;
+          let last = 0;
+          const h = (e) => {
+            if (el.disabled) return;
+            const now = performance.now();
+            if (now - last < 350) return;
+            last = now;
+            try { if (e && e.cancelable) e.preventDefault(); } catch (_) {}
+            fn();
+          };
+          el.addEventListener('click', h);
+          el.addEventListener('touchend', h, { passive: false });
+        };
+        const chooseEngine = (eng) => {
+          if (eng === 'apple' && !_appleOk) return;
+          _trEngine = eng;
+          try { localStorage.setItem(ENGINE_KEY, eng); } catch (_) {}
+          renderEngine();
+        };
+        if (trEngSel) trEngSel.addEventListener('change', () => chooseEngine(trEngSel.value));
+        tapTr(trBtnT, () => runTranslation('translate'));
+        // Explain opens (or closes) the highlight panel; its own button runs it.
+        tapTr(trBtnX, () => {
+          if (!mkPanel) return runTranslation('explain');
+          const open = mkPanel.hidden;
+          mkPanel.hidden = !open;
+          trBtnX.classList.toggle('on', open);
+          trBtnX.setAttribute('aria-expanded', open ? 'true' : 'false');
+          if (open) {
+            renderMarkText();
+            try { mkPanel.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (_) {}
+          }
+        });
+        tapTr(mkGo, () => runTranslation('explain'));
+        tapTr(mkClear, () => {
+          _mkOn = _mkOn.map(() => false);
+          _mkAnchor = -1;
+          paintMarks();
+        });
+        tapTr(trClear, () => {
+          _trReq++;                    // drop any answer still on its way
+          if (trBox) trBox.value = '';
+          _trForText = null;
+          _mkExplainedKey = null;      // highlights count as unexplained again
+          if (trWrap) trWrap.hidden = true;
+          setTrBusy(false, '');
+        });
+
         const close = (result) => {
+          _closed = true;
           try { this.hide(); } catch (e) {}
           overlay.remove();
           document.body.classList.remove('prefs-open');
@@ -1315,18 +1766,46 @@
         _cancelBtn.addEventListener('click', () => close(null));
         _ft(_cancelBtn);
         const _sendBtn = panel.querySelector('[data-role="send"]');
-        _sendBtn.addEventListener('click', () => {
+        const SEND_LABEL = _sendBtn.textContent;
+        let _skipPendingKey = null;
+        _sendBtn.addEventListener('click', async () => {
+          if (_sendBtn.disabled) return;
+          // Unfinished work (user choice, 2026-09-14): highlighted phrases that
+          // haven't been explained, or a translation/explanation still running.
+          // Finish it, show it, and wait for a second Send, so the card never
+          // goes out without the explanation asked for, or before it was seen.
+          const pendingKey = explainPendingKey();
+          const waitFor = (_trBusy && _trPromise) ? _trPromise
+            : ((pendingKey && pendingKey !== _skipPendingKey) ? runTranslation('explain') : null);
+          if (waitFor) {
+            const kind = _trMode === 'translate' ? 'translation' : 'explanation';
+            _sendBtn.disabled = true;
+            _sendBtn.textContent = kind === 'translation' ? 'Translating…' : 'Explaining…';
+            let ok = false;
+            try { ok = await waitFor; } catch (_) {}
+            if (_closed) return;
+            _sendBtn.disabled = false;
+            _sendBtn.textContent = SEND_LABEL;
+            if (ok) {
+              setTrBusy(false, 'Review the ' + kind + ', then tap Send to Anki.');
+              try { trWrap.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (_) {}
+            } else {
+              // Don't trap the user behind a failing request (no key, offline):
+              // the next Send goes out without it.
+              _skipPendingKey = explainPendingKey();
+              if (trStatus) {
+                trStatus.hidden = false;
+                trStatus.appendChild(document.createTextNode(' Tap Send to Anki again to send without it.'));
+              }
+            }
+            return;
+          }
           const cur = this.current();
           if (!cur) return close(null);
-          let text = null;
-          if (textRangeState) {
-            text = '';
-            for (let i = textRangeState.leftIdx; i <= textRangeState.rightIdx; i++) {
-              if (i > textRangeState.leftIdx) text += ' ';
-              text += cues[i].text;
-            }
-          }
-          close({ startMs: cur.startMs, endMs: cur.endMs, text });
+          const text = textRangeState ? currentSelectionText() : null;
+          // The reviewed (possibly edited) translation, when one is showing.
+          const translation = (trWrap && !trWrap.hidden && trBox) ? trBox.value.trim() : '';
+          close({ startMs: cur.startMs, endMs: cur.endMs, text, translation });
         });
         _ft(_sendBtn);
       });

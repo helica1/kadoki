@@ -113,7 +113,15 @@
 
   function persistableShape(mode) {
     const t = timers[mode];
-    const out = { totalSec: t.totalSec };
+    // Checkpoint the OPEN interval too, settled through now. The committed total
+    // only grows at stopMode, so a process death mid-session used to lose the
+    // whole session. (load() zeroes runningSince, so nothing is counted twice.)
+    // Audio/video accrue per playhead sample and have no open segment.
+    let totalSec = t.totalSec;
+    if (t.runningSince && mode !== 'audio' && mode !== 'video') {
+      totalSec += Math.max(0, (Date.now() - t.runningSince) / 1000);
+    }
+    const out = { totalSec };
     if (mode === 'card')  { out.cards = t.cards; out.chars = t.chars; }
     if (mode === 'read')  { out.chars = t.chars; out.maxCharOffsetSeen = t.maxCharOffsetSeen; out.baselineSet = t.baselineSet; }
     if (mode === 'audio' || mode === 'video') { out.chars = t.chars; out.watchSec = t.watchSec || 0; }
@@ -341,7 +349,41 @@
     if (mode === 'audio' || mode === 'video') audioResetAnchor();
     t.runningSince = Date.now();
     if ('lastInteraction' in t) t.lastInteraction = Date.now();
+    if (mode === 'card' || mode === 'read') {
+      t.titleId = window._activeTitleId || null;
+      t.titleMarkTs = t.runningSince;
+      t.titlePend = 0;
+    }
     console.log('[stats] start ' + mode);
+  }
+
+  // Per-title time (library Stats card) for card/read: the SAME elapsed seconds
+  // the daily totals get, attributed to the title that was active when the
+  // interval opened. tick() advances it for running intervals (splitting on a
+  // title switch); stopMode finalizes it at the stop's capped end time. (It used
+  // to add 1 s per tick callback, so delayed ticks undercounted and a boundary
+  // tick could credit a stopped timer or the wrong title.)
+  function creditTitleTime(mode, untilTs) {
+    const t = timers[mode];
+    if (!(t.titleMarkTs > 0) || !(untilTs > t.titleMarkTs)) return;
+    const sec = (untilTs - t.titleMarkTs) / 1000;
+    t.titleMarkTs = untilTs;
+    if (!t.titleId) return;
+    t.titlePend = (t.titlePend || 0) + sec;
+    const whole = Math.floor(t.titlePend);
+    if (whole >= 1) {
+      t.titlePend -= whole;
+      try { window.titleStats?.noteTime?.(t.titleId, mode, whole); } catch (_) {}
+    }
+  }
+  function finishTitleTime(mode, endTs) {
+    const t = timers[mode];
+    creditTitleTime(mode, endTs);
+    const rest = Math.round(t.titlePend || 0);
+    if (rest > 0 && t.titleId) {
+      try { window.titleStats?.noteTime?.(t.titleId, mode, rest); } catch (_) {}
+    }
+    t.titleId = null; t.titleMarkTs = 0; t.titlePend = 0;
   }
 
   // Stop whichever timer is currently running. Used by openReadingStats
@@ -389,8 +431,12 @@
         if (capTs < endTs) endTs = capTs;
       }
     }
+    // Explicit end (a background stop settled late): the interval closed at the
+    // hide moment, however long JS took to get here.
+    if (Number.isFinite(opts?.endTs) && opts.endTs > 0 && opts.endTs < endTs) endTs = opts.endTs;
     const elapsed = Math.max(0, (endTs - t.runningSince) / 1000);
     t.totalSec += elapsed;
+    if (mode === 'card' || mode === 'read') finishTitleTime(mode, endTs);
     t.runningSince = 0;
     persist(mode);
     console.log('[stats] stop ' + mode + ' (+' + elapsed.toFixed(1) + 's, total ' + t.totalSec.toFixed(0) + 's)' +
@@ -561,8 +607,9 @@
     if (!newMode) newMode = currentMode();
     if (lastMode === null) lastMode = newMode;
     handleModeChange(newMode);
-    // Hidden read-mode listening (pocketed, no mode switch) counts as audio.
-    const hiddenListen = document.visibilityState === 'hidden' && !!window._bgPlaying && newMode === 'read' && !_ankiRoundtripActive;
+    // Hidden listening in Read or Card (pocketed, or resumed from the lock
+    // screen — the app never switches mode for it) counts as audio.
+    const hiddenListen = document.visibilityState === 'hidden' && !!window._bgPlaying && (newMode === 'read' || newMode === 'card') && !_ankiRoundtripActive;
     const audBucket = (newMode === 'audio' || newMode === 'video') ? newMode : (hiddenListen ? audFamilyBucket() : null);
     const inAudio = !!audBucket;
     if (window._bgPlaying && inAudio && !timers[audBucket].runningSince) startMode(audBucket);
@@ -594,21 +641,6 @@
       _lastDayCheck = Date.now();
       try { checkRollover(); } catch (e) {}
     }
-    // Per-title time-spent log (library Stats card): 1s per tick to whichever
-    // mode timer is currently running (the timers already encode all the
-    // active/idle/playback rules — this just attributes their seconds to the
-    // active title). audio is deliberately absent: it's credited from playhead
-    // samples in audioSample(), since a tick can't tell whether audio is
-    // really playing (it was inflating this log the same way it inflated the
-    // daily total).
-    try {
-      const _tid = window._activeTitleId;
-      if (_tid && window.titleStats?.noteTime) {
-        for (const _m of ['card', 'read']) {
-          if (timers[_m] && timers[_m].runningSince) window.titleStats.noteTime(_tid, _m, 1);
-        }
-      }
-    } catch (_) {}
     // Audio truth backstop. Position events are the primary heartbeat
     // (~150 ms–1 s while playing); this only fires when they've gone quiet for
     // 4 s while we still believe audio is live — i.e. exactly the situations
@@ -679,6 +711,19 @@
     if (window._bgPlaying && timers.read.runningSince) {
       timers.read.lastInteraction = now;
     }
+    // Per-title time for card/read intervals still running — AFTER the
+    // inactivity stops above, which finalized theirs at the capped end. A title
+    // switch mid-interval closes the old title's share and opens the new one's.
+    // (Audio is credited per playhead sample in audioSample.)
+    try {
+      for (const m of ['card', 'read']) {
+        const t = timers[m];
+        if (!t.runningSince) continue;
+        const tid = window._activeTitleId || null;
+        if (tid !== t.titleId) { finishTitleTime(m, now); t.titleId = tid; t.titleMarkTs = now; }
+        else creditTitleTime(m, now);
+      }
+    } catch (_) {}
   }
   // READ-ONLY PANEL WINDOW (panel-bridge.js): a second webview on the SAME origin
   // shares this storage, so it must never run a second copy of a writer — that
@@ -721,11 +766,12 @@
         const _liveEvent = !Number.isFinite(_sts) || _sts <= 0 || (Date.now() - _sts <= 5000);
         // (2026-09-10) NO automatic mode switch any more — the user rule is
         // that the app never changes mode on its own (earbud pause/resume
-        // while pocketed used to flip read → audio). A hidden read-mode
-        // listen simply accrues AUDIO time in place.
+        // while pocketed used to flip read → audio). A hidden read- or
+        // card-mode listen simply accrues AUDIO time in place.
         const inAudioMode = document.body.classList.contains('mode-audio');
         const inReadMode  = document.body.classList.contains('mode-read');
-        const hiddenListen = d.playing && _liveEvent && inReadMode && document.visibilityState === 'hidden' && !_ankiRoundtripActive;
+        const inCardMode  = document.body.classList.contains('mode-card');
+        const hiddenListen = d.playing && _liveEvent && (inReadMode || inCardMode) && document.visibilityState === 'hidden' && !_ankiRoundtripActive;
         if (d.playing && (inAudioMode || hiddenListen)) startMode(audFamilyBucket());
         else { if (timers.audio.runningSince) stopMode('audio'); if (timers.video.runningSince) stopMode('video'); }
         // Read-mode: audio start kicks the read timer alive (bumpRead).
@@ -775,14 +821,16 @@
   // On foreground, we do NOT auto-resume. The user has to do a real
   // card-mode swipe (bumpCard) or read-mode action (bumpRead) to
   // restart. Glancing at the app shouldn't count as time.
-  function stopInteractiveTimersForBackground() {
+  // `endTs`: the hide moment — hidden time is never reading, and the stop may be
+  // processed long after it (a suspended WebView).
+  function stopInteractiveTimersForBackground(endTs) {
     if (_ankiRoundtripActive) {
       console.log('[stats] background-stop suppressed: anki roundtrip in progress');
       return;
     }
     let any = false;
     for (const m of ['card', 'read', 'ai', 'srs']) {
-      if (timers[m].runningSince) { stopMode(m, { byBackground: true }); any = true; }
+      if (timers[m].runningSince) { stopMode(m, { byBackground: true, endTs }); any = true; }
     }
     if (any) console.log('[stats] stopped interactive timers for background');
   }
@@ -793,16 +841,17 @@
   // session. If the user comes back within 10 s the scheduled stop
   // is cancelled and the timers keep running.
   //
-  // If we WERE suspended during the grace window, the cap inside
-  // stopMode at `lastInteraction + timeout` ensures we don't credit
-  // hours of suspended time even if the timer fires much later.
+  // If we WERE suspended during the grace window the callback never runs;
+  // handleAppVisible then settles the stop itself. Either way the interval
+  // closes at the hide moment (_hiddenAt), not when JS got around to it.
   const BACKGROUND_GRACE_MS = 10000;
   let _backgroundGraceTimer = null;
+  let _hiddenAt = 0;   // wall clock of the hide that armed the pending stop
   function scheduleBackgroundStop() {
     if (_backgroundGraceTimer) return; // already scheduled
     _backgroundGraceTimer = setTimeout(() => {
       _backgroundGraceTimer = null;
-      stopInteractiveTimersForBackground();
+      stopInteractiveTimersForBackground(_hiddenAt);
     }, BACKGROUND_GRACE_MS);
   }
   function cancelBackgroundStop() {
@@ -837,13 +886,21 @@
     // (or wedge) the WebView — flush the native mirror now, bypassing the
     // MIRROR_MS throttle. One Preferences write per hide, negligible.
     try { _mirrorLastTs = Date.now(); mirrorWrite(); } catch (e) {}
+    // A duplicate hidden event (appStateChange + visibilitychange) must not move
+    // the hide moment later while its stop is still pending.
+    if (!_backgroundGraceTimer) _hiddenAt = Date.now();
     const b = document.body.classList;
     const interactive = b.contains('mode-read') ? 'read' : (b.contains('mode-card') ? 'card' : null);
     if (!_ankiRoundtripActive && interactive === 'read' && window._bgPlaying) {
       // (2026-09-10) Read-mode listening keeps playing in the background
       // WITHOUT switching to audio mode (the app never changes mode on its
       // own). The audio timer takes over through the hidden-listen rule in
-      // reconcileMode / the state listener; the read timer stops below.
+      // reconcileMode / the state listener.
+      // Reclassify NOW, not in the grace callback: iOS can freeze JS before it
+      // runs, and the foreground would then keep the original Read interval open
+      // across the whole locked listen. The hidden-listen rule starts the audio
+      // timer, which closes the Read interval at this hide moment.
+      try { reconcileMode(currentMode()); } catch (_) {}
       scheduleBackgroundStop();
       return;
     }
@@ -851,7 +908,14 @@
     scheduleBackgroundStop();
   }
   async function handleAppVisible() {
+    const graceWasPending = !!_backgroundGraceTimer;
     cancelBackgroundStop();
+    // A suspended WebView never ran the grace callback. Hidden past the grace
+    // window → settle that stop now, closing the intervals at the hide moment,
+    // instead of cancelling it and leaving them open across the whole gap.
+    if (graceWasPending && _hiddenAt > 0 && Date.now() - _hiddenAt >= BACKGROUND_GRACE_MS) {
+      stopInteractiveTimersForBackground(_hiddenAt);
+    }
     // Foreground truth heal: a play started from the LOCK SCREEN happens with
     // the WebView suspended, and its state/remoteCommand events may be lost or
     // dropped as stale on thaw — leaving _bgPlaying false while audio is
@@ -860,6 +924,17 @@
     // per foreground: heals the mirror, and reconcileMode starts the timer on
     // the next tick. One bridge call per foreground — no steady-state cost.
     try { audioTruthPoll(); } catch (_) {}
+    // Read-along picks back up: hiding with audio playing handed the interval to
+    // audio. If it is still playing in Read, visible read-along counts again.
+    try {
+      const bgs = window.Capacitor?.Plugins?.BackgroundAudio;
+      if (bgs?.getState && document.body.classList.contains('mode-read')) {
+        Promise.resolve(bgs.getState()).then((s) => {
+          if (s && s.playing && document.visibilityState === 'visible' &&
+              document.body.classList.contains('mode-read')) bumpRead();
+        }).catch(() => {});
+      }
+    } catch (_) {}
     const prev = window._autoAudioPrevMode;
     if (!prev) return;
     window._autoAudioPrevMode = null;

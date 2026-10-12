@@ -34,6 +34,13 @@
     return 0;
   }
 
+  async function _cachePathOf(name) {
+    try {
+      const u = await FS().getUri({ path: name, directory: 'CACHE' });
+      return (u && u.uri ? u.uri : '').replace(/^file:\/\//, '');
+    } catch (_) { return ''; }
+  }
+
   // Resolve a real filesystem path + size for a title attachment. Prefers an
   // existing cachePath; else materializes the uri (which also yields size).
   async function resolvePath(title, kind) {
@@ -93,15 +100,27 @@
     const fname = 'synced_' + localId + '_' + m.kind + '_' + sanitize(m.name);
     const dir = 'CACHE';
 
-    // Truncate/create the target, then append ranged chunks (bounded memory).
-    try { await fs.writeFile({ path: fname, directory: dir, data: '' }); } catch (_) {}
+    // Download into a .part file and swap it in only once COMPLETE. Writing the
+    // real target in place truncated a good file to 0 bytes first, so a download
+    // that was interrupted/failed (offline, backgrounded, token) destroyed the
+    // title's read source (2026-10-01: 0-byte synced .txt → "can't read the book").
+    const part = fname + '.part';
+    try { await fs.writeFile({ path: part, directory: dir, data: '' }); } catch (_) {}
     let offset = 0;
-    while (offset < m.size) {
-      const len = Math.min(CHUNK, m.size - offset);
-      const b64 = await window.driveApi.downloadRange(m.driveFileId, offset, len);
-      await fs.appendFile({ path: fname, directory: dir, data: b64 });   // no encoding ⇒ base64 → binary
-      offset += len;
-      onP({ phase: 'media', dir: 'down', kind: m.kind, current: offset, total: m.size });
+    try {
+      while (offset < m.size) {
+        const len = Math.min(CHUNK, m.size - offset);
+        const b64 = await window.driveApi.downloadRange(m.driveFileId, offset, len);
+        await fs.appendFile({ path: part, directory: dir, data: b64 });   // no encoding ⇒ base64 → binary
+        offset += len;
+        onP({ phase: 'media', dir: 'down', kind: m.kind, current: offset, total: m.size });
+      }
+      if ((await fileSize(await _cachePathOf(part))) < m.size) throw new Error('download incomplete');
+      try { await fs.deleteFile({ path: fname, directory: dir }); } catch (_) {}
+      await fs.rename({ from: part, to: fname, directory: dir, toDirectory: dir });
+    } catch (e) {
+      try { await fs.deleteFile({ path: part, directory: dir }); } catch (_) {}
+      throw e;
     }
 
     // Resolve to a real path and attach (keep the ORIGINAL name so codec

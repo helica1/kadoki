@@ -208,6 +208,45 @@ class KadokiDictSceneDelegate: NSObject, UIWindowSceneDelegate {
 }
 #endif
 
+#if os(iOS)
+// iPhone / iPad scene. Apps built with the iOS 27.1 SDK must adopt the scene
+// lifecycle (UIKit traps at launch otherwise), and 27.1 is the first SDK that
+// knows the iPhone Duo. This reproduces the legacy boot exactly: one window,
+// the Main storyboard's MainViewController. What moved is only how URLs and
+// user activities arrive — under scenes iOS stops calling the
+// application(_:open:) / continue: delegate methods and delivers them here.
+class KadokiPhoneSceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        guard let ws = scene as? UIWindowScene else { return }
+        // Cold launch via URL (AnkiMobile's x-success after iOS evicted us):
+        // stash it BEFORE the bridge boots, as the legacy launchOptions path did.
+        if let u = connectionOptions.urlContexts.first?.url {
+            NSLog("[AppDelegate] scene cold-launch url: \(u.absoluteString)")
+            AppDelegate.pendingLaunchUrl = u.absoluteString
+        }
+        let w = UIWindow(windowScene: ws)
+        w.rootViewController = UIStoryboard(name: "Main", bundle: nil).instantiateInitialViewController()
+        window = w
+        (UIApplication.shared.delegate as? AppDelegate)?.window = w
+        w.makeKeyAndVisible()
+        if let act = connectionOptions.userActivities.first {
+            _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, continue: act, restorationHandler: { _ in })
+        }
+    }
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        for ctx in URLContexts {
+            var opts: [UIApplication.OpenURLOptionsKey: Any] = [:]
+            if let src = ctx.options.sourceApplication { opts[.sourceApplication] = src }
+            AppDelegate.routeIncomingURL(ctx.url, options: opts)
+        }
+    }
+    func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+        _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, continue: userActivity, restorationHandler: { _ in })
+    }
+}
+#endif
+
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
 
@@ -226,10 +265,20 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return true
     }
 
+    #if os(iOS)
+    // Scene lifecycle on iPhone/iPad: one main window (see KadokiPhoneSceneDelegate).
+    func application(_ application: UIApplication,
+                     configurationForConnecting connectingSceneSession: UISceneSession,
+                     options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+        let cfg = UISceneConfiguration(name: "KadokiPhone", sessionRole: connectingSceneSession.role)
+        cfg.delegateClass = KadokiPhoneSceneDelegate.self
+        return cfg
+    }
+    #endif
+
     #if os(visionOS)
-    // Present ONLY on visionOS: implementing this opts the app into the scene
-    // lifecycle (required for the second dictionary window). iOS never sees
-    // it and keeps the legacy single-window boot.
+    // visionOS: the scene lifecycle with several window kinds (main,
+    // dictionary, panels).
     func application(_ application: UIApplication,
                      configurationForConnecting connectingSceneSession: UISceneSession,
                      options: UIScene.ConnectionOptions) -> UISceneConfiguration {

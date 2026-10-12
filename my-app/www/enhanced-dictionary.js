@@ -3079,6 +3079,7 @@
                       'AudioSlicer=' + (window.Capacitor?.Plugins?.AudioSlicer ? '✓' : 'MISSING'),
                       'ctx.source=' + (ctx?.source || 'none'));
                     let finalSentence = sentence;
+                    let finalTranslation = '';   // reviewed translation / explanation from the send dialog
                     if (!audioData && cueAudioPath &&
                         Number.isFinite(cueStartMs) && Number.isFinite(cueEndMs) &&
                         window.waveform?.edit && window.Capacitor?.Plugins?.AudioSlicer) {
@@ -3134,6 +3135,7 @@
                       if (adjusted.text && adjusted.text.trim() !== sentence.trim()) {
                         finalSentence = adjusted.text.trim();
                       }
+                      if (adjusted.translation) finalTranslation = adjusted.translation;
                       try {
                         const slicer = window.Capacitor.Plugins.AudioSlicer;
                         // Anki audio export contract: always 1.0x.
@@ -3179,7 +3181,8 @@
                         wordAudio: wordAudio,
                         dictionary: result.dictionary,
                         glossary: glossaryHtml,
-                        termFurigana: termFurigana
+                        termFurigana: termFurigana,
+                        translation: finalTranslation
                     };
                     window._lastDictSliceSrcPath = null;
 
@@ -3347,7 +3350,7 @@
 
     // ==================== ANKI INTEGRATION (FROM EXISTING CODE) ====================
     
-    async function sendWordToAnki({ expression, reading, sentence, meaning, imageData, audioData, audioSrcPath, wordAudio, dictionary, glossary, termFurigana }) {
+    async function sendWordToAnki({ expression, reading, sentence, meaning, imageData, audioData, audioSrcPath, wordAudio, dictionary, glossary, termFurigana, translation }) {
         // Pull live settings; fall back to generic field names with NO deck/model
         // (the user picks those in Preferences — no personal values ship).
         const cfg = (typeof window.getAnkiSettings === 'function')
@@ -3385,6 +3388,26 @@
         // anyone who hasn't opted in.
         if (cfg.fields.glossary)     fields[cfg.fields.glossary]     = glossary || '';
         if (cfg.fields.termFurigana) fields[cfg.fields.termFurigana] = termFurigana || '';
+        // Translation / explanation the user reviewed in the send dialog — plain
+        // text; escaped, with newlines as <br> for Anki's HTML fields. Never
+        // overwrites a field that another mapping already fills.
+        const translationText = String(translation || '').trim();
+        if (translationText) {
+            const tf = cfg.fields.translation;
+            const taken = ['term', 'reading', 'sentence', 'meaning', 'image', 'sentenceAudio', 'termAudio', 'glossary', 'termFurigana']
+                .some((k) => cfg.fields[k] && cfg.fields[k] === tf);
+            if (tf && !taken) {
+                fields[tf] = translationText
+                    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    .replace(/\r\n?|\n/g, '<br>');
+            } else {
+                try {
+                    window.showToast?.(tf
+                        ? 'The translation field is already used by another mapping — translation not added (Preferences → Anki)'
+                        : 'No translation field set (Preferences → Anki) — translation not added', 6000);
+                } catch (_) {}
+            }
+        }
 
         // --- AnkiConnect path (desktop Anki over LAN — priority when configured;
         // the only working route on visionOS, optional everywhere else) ---

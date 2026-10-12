@@ -1229,6 +1229,14 @@
     if (window.bookmarks && window.bookmarks.openHistory) {
       list.appendChild(mkItem(window.i18n.t('menu.history', 'History…'), () => { try { window.bookmarks.openHistory(); } catch (_) {} }));
     }
+    // Audio output (iOS): the system AirPods / speaker sheet, for when the
+    // AirPods stayed connected to another device.
+    if (window.Capacitor?.getPlatform?.() === 'ios' && !window.KADOKI_VISION && !window.KADOKI_MAC &&
+        window.Capacitor?.Plugins?.BackgroundAudio?.showRoutePicker) {
+      list.appendChild(mkItem(window.i18n.t('menu.audio_output', 'Audio output…'), () => {
+        try { window.Capacitor.Plugins.BackgroundAudio.showRoutePicker().catch(() => {}); } catch (_) {}
+      }));
+    }
     // Dictionary lookup history — words looked up, with context, → Anki.
     if (window.lookupLog && window.lookupLog.openScreen) {
       list.appendChild(mkItem(window.i18n.t('menu.lookup_history', 'Lookup history…'), () => { try { window.lookupLog.openScreen(); } catch (_) {} }));
@@ -1626,10 +1634,14 @@
       // with a saved cover attachment).
       let dataUri = null;
       let cacheKey = '';
+      // Mid-switch the outgoing title is still active; primeCardBackground
+      // already painted the incoming cover, so leave it alone.
+      if (window._titleSwitchInFlight) return;
       const id = window._activeTitleId;
       if (id && window.titleStore?.list) {
         try {
           const titles = await window.titleStore.list();
+          if (window._titleSwitchInFlight || id !== window._activeTitleId) return;   // switched while reading
           const t = titles.find(x => x.id === id);
           if (t?.attachments?.cover?.dataUri) {
             dataUri = t.attachments.cover.dataUri;
@@ -1660,6 +1672,18 @@
         delete bg.dataset.cacheKey;
       }
     }
+    // Title switch STARTED: swap the background to the incoming title's
+    // cover now instead of waiting for the watcher poll + async lookup.
+    window._shellPrimeCardBg = function (titleId, src) {
+      const bg = ensureCardBackground();
+      if (src) {
+        bg.style.backgroundImage = 'url("' + src + '")';
+        bg.dataset.cacheKey = 'title:' + titleId;
+      } else {
+        bg.style.backgroundImage = '';
+        delete bg.dataset.cacheKey;
+      }
+    };
     // Active-title watcher. Poll-based because there's no central
     // assignment event; whatever sets window._activeTitleId can be in
     // app.js, library, autoRestoreFromTitles, etc.

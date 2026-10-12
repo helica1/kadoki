@@ -6,6 +6,7 @@
 //   • BackgroundAudio  — the audiobook transport over one HTMLAudioElement
 //   • AudioSlicer      — native AVFoundation slicing/waveforms (kadokiSlicer)
 //   • AutoTranscribe   — native SpeechAnalyzer transcription (kadokiTranscribe)
+//   • Translator       — Apple on-device Translation (kadokiTranslate)
 //   • AnkiBridge       — desktop Anki via AnkiConnect (kadokiAnkiConnect proxy)
 //   • Filesystem       — CACHE/DATA dirs under the app media root (Drive sync
 //                        media transfer + auto-transcribe SRT finalize)
@@ -35,6 +36,7 @@
   const nFile = (req) => native('kadokiFile', req);
   const nSlicer = (req) => native('kadokiSlicer', req);
   const nTranscribe = (req) => native('kadokiTranscribe', req);
+  const nTranslate = (req) => native('kadokiTranslate', req);
 
   // ------------------------------------------------------------ event router
   // Swift pushes plugin events through window.__kadokiNativeEvent.
@@ -306,6 +308,22 @@
         samples: (opts && opts.samples) || 200,
       });
     },
+  };
+
+  // -------------------------------------------------------------- Translator
+  // Apple on-device Translation (macOS 15+) for the send-to-Anki dialog.
+  const Translator = {
+    status: (opts) => nTranslate({
+      op: 'status',
+      source: (opts && opts.source) || 'ja',
+      target: (opts && opts.target) || 'en',
+    }),
+    translate: (opts) => nTranslate({
+      op: 'translate',
+      text: (opts && opts.text) || '',
+      source: (opts && opts.source) || 'ja',
+      target: (opts && opts.target) || 'en',
+    }),
   };
 
   // ------------------------------------------------------------ AutoTranscribe
@@ -699,7 +717,7 @@
     convertFileSrc,
     Plugins: {
       FileAccess, BackgroundAudio, AudioSlicer, AutoTranscribe,
-      AnkiBridge, Filesystem, App, Browser,
+      AnkiBridge, Filesystem, App, Browser, Translator,
     },
   };
 })();

@@ -660,7 +660,7 @@ window.fetchModelFieldNames = fetchModelFieldNames;
 // ----------------------------------------------------------------------------
 // sendToAnki — swipe-up flow (card mode)
 // ----------------------------------------------------------------------------
-async function sendToAnki({ expression, imageData, audioData }) {
+async function sendToAnki({ expression, imageData, audioData, translation }) {
   const cfg = (typeof window.getAnkiSettings === 'function')
     ? await window.getAnkiSettings('swipe')
     : { deck: (await getPref('SELECTED_DECK')) || '',
@@ -720,6 +720,24 @@ async function sendToAnki({ expression, imageData, audioData }) {
   fields[cfg.fields.expression] = expression || '';
   if (cfg.fields.image) fields[cfg.fields.image] = '';
   if (cfg.fields.audio) fields[cfg.fields.audio] = '';
+  // Translation / explanation the user reviewed in the send dialog — plain text;
+  // escaped, with newlines as <br> for Anki's HTML fields. Never overwrites a
+  // field that already carries the sentence or media.
+  const translationText = String(translation || '').trim();
+  if (translationText) {
+    const tf = cfg.fields.translation;
+    if (tf && tf !== cfg.fields.expression && tf !== cfg.fields.image && tf !== cfg.fields.audio) {
+      fields[tf] = translationText
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/\r\n?|\n/g, '<br>');
+    } else {
+      try {
+        window.showToast?.(tf
+          ? 'The translation field is also mapped to the sentence or media — translation not added (Preferences → Anki)'
+          : 'No translation field set (Preferences → Anki) — translation not added', 6000);
+      } catch (_) {}
+    }
+  }
 
   // --- AnkiConnect path (desktop Anki over LAN — priority when configured) ---
   if (await ankiConnectEnabled()) {

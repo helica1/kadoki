@@ -212,6 +212,15 @@ speedyStream speedyCreateStream(int sample_rate) {
   }
   stream->window_size = (int)(1.5*sample_rate/(float)kFrameRateHz);
   stream->fft_size = 2*stream->window_size;
+#ifdef  KISS_FFT
+  /* Kadoki: KISS FFT is only fast for sizes factorable by 2, 3 and 5. At
+   * 44.1 kHz the size above is 1322 = 2*661 (661 is prime), which sends every
+   * FFT down kiss_fft's generic O(n*p) path — ~100x slower, measured as a
+   * quarter of a CPU core on iPhone. Rounding up only adds zero-padding
+   * (1350 at 44.1 kHz); bin frequencies are derived from fft_size, and 48 kHz
+   * (1440) is already a fast size so it is unchanged. */
+  stream->fft_size = kiss_fft_next_fast_size(stream->fft_size);
+#endif  /* KISS_FFT */
   stream->sample_rate = sample_rate;
   stream->current_time = 0;
   stream->preemph_state = 0.0;

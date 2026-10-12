@@ -425,7 +425,7 @@
         // en.label is persisted AI output — textContent, never innerHTML
         const sl = document.createElement('div');
         sl.style.cssText = 'font-size:.82rem;color:#b9aee0;';
-        sl.textContent = '📝 ' + (en.label || '要約');
+        sl.textContent = (en.label || '要約');
         const sw = document.createElement('div');
         sw.style.cssText = 'color:#7d72a3;font-size:.68rem;margin-top:2px;';
         sw.textContent = when;

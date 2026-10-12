@@ -668,7 +668,11 @@ class MainViewController: CAPBridgeViewController {
         // the JS side feature-tests with one call instead of having to catch a
         // "plugin not implemented" bridge error.
         bridge.registerPluginInstance(SpatialImagePlugin())
-        NSLog("[MainViewController] registered 9 app-target plugins")
+        // Apple on-device Translation for the send-to-Anki dialog. Same idea as
+        // SpatialImage: registered everywhere, reports available:false where the
+        // framework is missing (visionOS, iOS < 18) so JS falls back to AI.
+        bridge.registerPluginInstance(TranslatorPlugin())
+        NSLog("[MainViewController] registered 10 app-target plugins")
 
         // Boot the AnkiMediaServer eagerly while we're guaranteed to be on
         // the main thread (CAPBridgeViewController lifecycle). GCDWebServer
@@ -696,8 +700,35 @@ class MainViewController: CAPBridgeViewController {
         if let wv = self.bridge?.webView {
             KadokiVideoIOSHost.shared.install(webView: wv)
         }
+        installHingeObserver()
         #endif
     }
+
+    #if os(iOS)
+    // iPhone Duo. A hinge marks the device as a foldable for the web layer
+    // (window.KADOKI_DUO — every Duo-only behavior keys off it, so a phone
+    // without a hinge never changes) and streams hinge movement, which begins
+    // BEFORE the display switch. Status/angle: see KadokiHinge.h.
+    private var hingeFlagInstalled = false
+    private func installHingeObserver() {
+        _ = KadokiInstallHingeObserver(self.view) { [weak self] status, angle in
+            guard let self = self, let wv = self.bridge?.webView else { return }
+            if status >= 1 && !self.hingeFlagInstalled {   // closed / partly / fully open — a real hinge
+                self.hingeFlagInstalled = true
+                NSLog("[Hinge] foldable detected (status \(status))")
+                // Page loads (and reloads) from here on see the flag from the
+                // very first script; the evaluate below covers the loaded page.
+                let src = "window.KADOKI_DUO=true;document.documentElement.classList.add('kadoki-duo');"
+                wv.configuration.userContentController.addUserScript(
+                    WKUserScript(source: src, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            }
+            let js = (status >= 1 ? "window.KADOKI_DUO=true;document.documentElement.classList.add('kadoki-duo');" : "") +
+                "window.__kadokiHingeState={status:\(status),angle:\(angle)};" +
+                "window.__kadokiHinge&&window.__kadokiHinge(\(status),\(angle));"
+            wv.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+    #endif
 
     #if os(visionOS)
     // Look-to-Scroll (Safari's gaze-at-the-edge scrolling) for our web

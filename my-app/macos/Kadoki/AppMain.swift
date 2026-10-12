@@ -80,7 +80,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         ucc.addScriptMessageHandler(AudioSlicerHandler(), contentWorld: .page, name: "kadokiSlicer")
         // On-device SpeechAnalyzer transcription (AutoTranscribe port).
         ucc.addScriptMessageHandler(AutoTranscribeHandler(), contentWorld: .page, name: "kadokiTranscribe")
+        // Apple on-device Translation for the send-to-Anki dialog (macOS 15+).
+        let translator = TranslatorHandler()
+        ucc.addScriptMessageHandler(translator, contentWorld: .page, name: "kadokiTranslate")
         webView = WKWebView(frame: .zero, configuration: config)
+        translator.hostView = webView
         webView.uiDelegate = self
         webView.navigationDelegate = self
         webView.allowsMagnification = true

@@ -583,7 +583,7 @@
         created[0].lastMode = 'audio';
         setTimeout(() => { try { window.loadTitleFromLibrary(created[0]); } catch (_) {} }, 600);
       }
-      toast(`📁 Imported ${fresh.length} book${fresh.length === 1 ? '' : 's'}` + (skipped ? ` (${skipped} skipped)` : ''));
+      toast(`Imported ${fresh.length} book${fresh.length === 1 ? '' : 's'}` + (skipped ? ` (${skipped} skipped)` : ''));
       setTimeout(hideModal, 1100);
       // Cover art: best-effort BACKGROUND pass (don't block import completion).
       // The library shows letter avatars immediately; embedded covers fill in

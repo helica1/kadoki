@@ -11,6 +11,7 @@
     ANKI_SWIPE_F_EXPRESSION: 'ANKI_SWIPE_F_EXPRESSION',
     ANKI_SWIPE_F_IMAGE:      'ANKI_SWIPE_F_IMAGE',
     ANKI_SWIPE_F_AUDIO:      'ANKI_SWIPE_F_AUDIO',
+    ANKI_SWIPE_F_TRANSLATION: 'ANKI_SWIPE_F_TRANSLATION',
     // Anki: dictionary add-word
     ANKI_DICT_DECK:  'ANKI_DICT_DECK',
     ANKI_DICT_MODEL: 'ANKI_DICT_MODEL',
@@ -23,6 +24,7 @@
     ANKI_DICT_F_TERM_AUDIO:     'ANKI_DICT_F_TERM_AUDIO',
     ANKI_DICT_F_GLOSSARY:       'ANKI_DICT_F_GLOSSARY',
     ANKI_DICT_F_TERM_FURIGANA:  'ANKI_DICT_F_TERM_FURIGANA',
+    ANKI_DICT_F_TRANSLATION:    'ANKI_DICT_F_TRANSLATION',
   };
 
   // Defaults: NO personal deck/note-type (the user picks those in Preferences —
@@ -33,7 +35,7 @@
     swipe: {
       deck: '',
       model: '',
-      fields: { expression: 'Term', image: 'Image', audio: 'Sentence Audio' }
+      fields: { expression: 'Term', image: 'Image', audio: 'Sentence Audio', translation: 'Expanded Meaning' }
     },
     dict: {
       deck: '',
@@ -43,7 +45,9 @@
         image: 'Image', sentenceAudio: 'Sentence Audio', termAudio: 'Term Audio',
         // Optional rich extras — default unmapped so nothing changes until the
         // user picks a field for them.
-        glossary: '', termFurigana: ''
+        glossary: '', termFurigana: '',
+        // Translation / explanation from the send dialog.
+        translation: 'Expanded Meaning'
       }
     }
   };
@@ -1516,6 +1520,8 @@
     await setPref(PREF_KEYS.ANKI_SWIPE_F_EXPRESSION, document.getElementById('ankiSwipeFieldExpression').value);
     await setPref(PREF_KEYS.ANKI_SWIPE_F_IMAGE,      document.getElementById('ankiSwipeFieldImage').value);
     await setPref(PREF_KEYS.ANKI_SWIPE_F_AUDIO,      document.getElementById('ankiSwipeFieldAudio').value);
+    const _swipeTrSel = document.getElementById('ankiSwipeFieldTranslation');
+    if (_swipeTrSel) await setPref(PREF_KEYS.ANKI_SWIPE_F_TRANSLATION, _swipeTrSel.value);
 
     // Anki dictionary
     await setPref(PREF_KEYS.ANKI_DICT_DECK,  document.getElementById('ankiDictDeck').value);
@@ -1529,6 +1535,8 @@
     await setPref(PREF_KEYS.ANKI_DICT_F_TERM_AUDIO,     document.getElementById('ankiDictFieldTermAudio').value);
     await setPref(PREF_KEYS.ANKI_DICT_F_GLOSSARY,       document.getElementById('ankiDictFieldGlossary').value);
     await setPref(PREF_KEYS.ANKI_DICT_F_TERM_FURIGANA,  document.getElementById('ankiDictFieldFurigana').value);
+    const _dictTrSel = document.getElementById('ankiDictFieldTranslation');
+    if (_dictTrSel) await setPref(PREF_KEYS.ANKI_DICT_F_TRANSLATION, _dictTrSel.value);
 
     const timeoutInput = document.getElementById('timeoutInput');
     const audioSpeedSlider = document.getElementById('audioSpeedSlider');
@@ -1831,6 +1839,7 @@
     expression: 'ankiSwipeFieldExpression',
     image:      'ankiSwipeFieldImage',
     audio:      'ankiSwipeFieldAudio',
+    translation: 'ankiSwipeFieldTranslation',
   };
   const DICT_FIELD_IDS = {
     term:          'ankiDictFieldTerm',
@@ -1842,11 +1851,13 @@
     termAudio:     'ankiDictFieldTermAudio',
     glossary:      'ankiDictFieldGlossary',
     termFurigana:  'ankiDictFieldFurigana',
+    translation:   'ankiDictFieldTranslation',
   };
   const SWIPE_FIELD_PREFS = {
     expression: PREF_KEYS.ANKI_SWIPE_F_EXPRESSION,
     image:      PREF_KEYS.ANKI_SWIPE_F_IMAGE,
     audio:      PREF_KEYS.ANKI_SWIPE_F_AUDIO,
+    translation: PREF_KEYS.ANKI_SWIPE_F_TRANSLATION,
   };
   const DICT_FIELD_PREFS = {
     term:          PREF_KEYS.ANKI_DICT_F_TERM,
@@ -1858,7 +1869,16 @@
     termAudio:     PREF_KEYS.ANKI_DICT_F_TERM_AUDIO,
     glossary:      PREF_KEYS.ANKI_DICT_F_GLOSSARY,
     termFurigana:  PREF_KEYS.ANKI_DICT_F_TERM_FURIGANA,
+    translation:   PREF_KEYS.ANKI_DICT_F_TRANSLATION,
   };
+
+  // Like getOr, but an explicitly SAVED empty value means "(none)" and is kept.
+  // Used for the translation slot, whose default (Expanded Meaning) must not
+  // come back after the user deliberately unassigns it.
+  async function getOrKeepEmpty(key, fallback) {
+    const v = await getPref(key);
+    return v == null ? fallback : v;
+  }
 
   async function refreshFieldDropdowns(target) {
     const isSwipe = target === 'swipe';
@@ -1874,7 +1894,9 @@
     for (const slot of Object.keys(fieldIds)) {
       const sel = document.getElementById(fieldIds[slot]);
       if (!sel) continue;
-      const saved = await getOr(fieldPrefs[slot], defaults[slot]);
+      const saved = (slot === 'translation')
+        ? await getOrKeepEmpty(fieldPrefs[slot], defaults[slot])
+        : await getOr(fieldPrefs[slot], defaults[slot]);
       fillFieldSelect(sel, fields, saved);
     }
   }
@@ -2055,6 +2077,7 @@
           expression: await getOr(PREF_KEYS.ANKI_SWIPE_F_EXPRESSION, ANKI_DEFAULTS.swipe.fields.expression),
           image:      await getOr(PREF_KEYS.ANKI_SWIPE_F_IMAGE,      ANKI_DEFAULTS.swipe.fields.image),
           audio:      await getOr(PREF_KEYS.ANKI_SWIPE_F_AUDIO,      ANKI_DEFAULTS.swipe.fields.audio),
+          translation: await getOrKeepEmpty(PREF_KEYS.ANKI_SWIPE_F_TRANSLATION, ANKI_DEFAULTS.swipe.fields.translation),
         }
       };
     }
@@ -2072,6 +2095,7 @@
           termAudio:     await getOr(PREF_KEYS.ANKI_DICT_F_TERM_AUDIO,     ANKI_DEFAULTS.dict.fields.termAudio),
           glossary:      await getOr(PREF_KEYS.ANKI_DICT_F_GLOSSARY,       ANKI_DEFAULTS.dict.fields.glossary),
           termFurigana:  await getOr(PREF_KEYS.ANKI_DICT_F_TERM_FURIGANA,  ANKI_DEFAULTS.dict.fields.termFurigana),
+          translation:   await getOrKeepEmpty(PREF_KEYS.ANKI_DICT_F_TRANSLATION, ANKI_DEFAULTS.dict.fields.translation),
         }
       };
     }

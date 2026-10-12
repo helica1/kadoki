@@ -1022,6 +1022,9 @@ public class BackgroundAudioService extends Service {
             } else {
                 mp.seekTo(ms);
                 cachedPositionMs = ms;
+                // Durable while paused: no durableSaveTick runs and no pause save
+                // follows, so a kill right after a paused seek restored the old spot.
+                if (!playing) saveLastPositionNow();
             }
         });
         });
