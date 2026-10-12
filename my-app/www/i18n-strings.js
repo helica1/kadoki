@@ -72,6 +72,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   // ---- audio mode: chapter-repeat bar (static HTML in the audiobook view) ----
   'audio.repeat_chapter': { en: 'Repeat Chapter', ja: '章をリピート' },
   'audio.next_chapter': { en: 'Next Chapter', ja: '次の章へ' },
+  'audio.output_btn': { en: 'Audio output', ja: '音声出力' },
   'audio.chapter_summary_btn': { en: 'Chapter summary ›', ja: '章の要約 ›' },
   'audio.new_summary_toast': { en: '{label} summary available', ja: '{label}の要約が利用可能です' },
 

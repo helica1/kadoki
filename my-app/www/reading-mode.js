@@ -4041,6 +4041,30 @@
     }
     abReflectRepeatUI();
     abWireSummaryBtn();
+    abWireOutputBtn();
+  }
+
+  // "音声出力" — the system AirPods / speaker sheet (iOS only; native has no
+  // equivalent elsewhere, so the pill stays hidden there).
+  window.audioOutputPickerAvailable = function () {
+    try {
+      return window.Capacitor?.getPlatform?.() === 'ios' && !window.KADOKI_VISION && !window.KADOKI_MAC &&
+        !!window.Capacitor?.Plugins?.BackgroundAudio?.showRoutePicker;
+    } catch (_) { return false; }
+  };
+  let _abOutputWired = false;
+  function abWireOutputBtn() {
+    const btn = document.getElementById('abOutputBtn');
+    if (!btn || _abOutputWired) return;
+    _abOutputWired = true;
+    if (!window.audioOutputPickerAvailable()) return;   // stays display:none
+    btn.style.display = '';
+    const stop = (e) => { e.stopPropagation(); };
+    ['touchstart', 'touchend'].forEach((ev) => btn.addEventListener(ev, stop, { passive: true }));
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      try { abBg()?.showRoutePicker?.().catch(() => {}); } catch (_) {}
+    });
   }
 
   // "章の要約" — jump to the current chapter's Timeline & Scenes summary

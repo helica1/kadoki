@@ -1231,8 +1231,7 @@
     }
     // Audio output (iOS): the system AirPods / speaker sheet, for when the
     // AirPods stayed connected to another device.
-    if (window.Capacitor?.getPlatform?.() === 'ios' && !window.KADOKI_VISION && !window.KADOKI_MAC &&
-        window.Capacitor?.Plugins?.BackgroundAudio?.showRoutePicker) {
+    if (window.audioOutputPickerAvailable && window.audioOutputPickerAvailable()) {
       list.appendChild(mkItem(window.i18n.t('menu.audio_output', 'Audio output…'), () => {
         try { window.Capacitor.Plugins.BackgroundAudio.showRoutePicker().catch(() => {}); } catch (_) {}
       }));

@@ -553,6 +553,21 @@
           () => get().showNextSub === true,
           (on) => apply('audio', { showNextSub: on })
         )));
+        // The pills along the bottom of audio mode, each hideable.
+        block.appendChild(row(window.i18n.t('pj.show_repeat_pill', 'Show Repeat Chapter button'), toggle(
+          () => get().showRepeatPill !== false,
+          (on) => apply('audio', { showRepeatPill: on })
+        )));
+        block.appendChild(row(window.i18n.t('pj.show_summary_pill', 'Show Chapter summary button'), toggle(
+          () => get().showSummaryPill !== false,
+          (on) => apply('audio', { showSummaryPill: on })
+        )));
+        if (window.audioOutputPickerAvailable && window.audioOutputPickerAvailable()) {
+          block.appendChild(row(window.i18n.t('pj.show_output_pill', 'Show Audio output button'), toggle(
+            () => get().showOutputPill !== false,
+            (on) => apply('audio', { showOutputPill: on })
+          )));
+        }
         // Lock-screen subtitle artwork: when ON, every subtitle change
         // re-renders a 600px image and pushes it as the Now Playing cover
         // (~every few seconds for the whole listening session — a measurable

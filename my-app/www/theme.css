@@ -277,8 +277,13 @@ body.pref-card-bgimage-off   #cardBackgroundImage { opacity: 0 !important; }
   bottom: calc(env(safe-area-inset-bottom, 0px) + 86px);
   display: flex; justify-content: center; align-items: center; gap: 10px;
   padding: 0 16px; z-index: 6; pointer-events: none;
+  flex-wrap: wrap; row-gap: 8px;   /* three pills don't fit one row on a phone */
   transition: transform 0.22s ease, opacity 0.18s ease;
 }
+/* Per-pill show/hide (Preferences → Audio). */
+body.pref-audio-repeatpill-off  #abRepeatToggle { display: none !important; }
+body.pref-audio-summarypill-off #abSummaryBtn   { display: none !important; }
+body.pref-audio-outputpill-off  #abOutputBtn    { display: none !important; }
 body.pref-audio-waveform-off #abRepeatBar { bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); }
 
 /* Vision Pro transport bar — hidden unless the RealityDevice check sets
@@ -512,8 +517,9 @@ body.chrome-hidden #abRepeatBar * {
    repeat toggle), so it inherits that bar's position/show-hide-with-chrome
    rules; only its own pill styling is needed here. Trailing "›" in the label
    (index.html) marks it as a navigation action, same convention as
-   tl.view_scenes/tl.next_scene in Timeline & Scenes. */
-#abSummaryBtn {
+   tl.view_scenes/tl.next_scene in Timeline & Scenes.
+   #abOutputBtn (system audio-output sheet, iOS) shares the pill look. */
+#abSummaryBtn, #abOutputBtn {
   position: relative;
   pointer-events: auto; display: inline-flex; align-items: center; gap: 4px;
   background: rgba(183, 148, 246, 0.10); color: #cfc0f5;
@@ -1384,6 +1390,17 @@ body.prefs-open #progressBar { pointer-events: none; }
   /* TIMER and PAUSED captions overflow the pill border on very narrow
      widths; shrink them so they don't break the layout. */
   #appHeader #shellTimerLabel::before { font-size: 7px; letter-spacing: 0.12em; }
+}
+
+/* 431–480px (iPhone 17 Pro Max = 440pt): the full-size row is ~24px too wide
+   here and overflowed, shoving the hamburger against the right edge — but the
+   ≤430 tight layout above is too cramped for this width (tiny play button,
+   lopsided gaps). Keep the full-size timer + play button and claw the width
+   back from the hamburger's empty min-width and a little tab padding. */
+@media (min-width: 431px) and (max-width: 480px) {
+  #appHeader { padding-right: 6px; }
+  #appHeader .mode-tab { padding: 7px 11px; }
+  #appHeader #shellMoreBtn { min-width: 0; padding: 6px 4px 6px 8px !important; }
 }
 
 /* ANDROID-ONLY narrow-header tweak. The generic ≤430px rules above over-shrink

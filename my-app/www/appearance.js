@@ -178,6 +178,9 @@
     document.body.classList.toggle('pref-card-moviesubs-on', cardS.movieSubs === true);
     document.body.classList.toggle('pref-audio-waveform-off', audioS.showWaveform === false);
     document.body.classList.toggle('pref-audio-nextsub-on',   audioS.showNextSub === true);
+    document.body.classList.toggle('pref-audio-repeatpill-off',  audioS.showRepeatPill === false);
+    document.body.classList.toggle('pref-audio-summarypill-off', audioS.showSummaryPill === false);
+    document.body.classList.toggle('pref-audio-outputpill-off',  audioS.showOutputPill === false);
     try { window._liveWaveformApplyVisibility && window._liveWaveformApplyVisibility(); } catch (_) {}
     // A card font-size change alters how much text fits per screen → re-fit the
     // combined SRT cards to the new line budget (place-safe; debounced).
