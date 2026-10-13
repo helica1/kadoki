@@ -578,7 +578,7 @@
 
   async function runAlignSweep(reason) {
     const a = active;
-    if (!a || sweepBusy || !window.autoAlign?.readyFor?.(a.titleId)) return;
+    if (!a || !a.hasBookText || sweepBusy || !window.autoAlign?.readyFor?.(a.titleId)) return;
     sweepBusy = true;
     try {
       const changed = await window.autoAlign.sweep(a.cues);
@@ -604,7 +604,7 @@
   function mergeCues(incoming) {
     const a = active;
     if (!a || !Array.isArray(incoming) || !incoming.length) return 0;
-    const align = window.autoAlign?.readyFor?.(a.titleId) ? window.autoAlign : null;
+    const align = (a.hasBookText && window.autoAlign?.readyFor?.(a.titleId)) ? window.autoAlign : null;
     let added = 0, missed = 0, replaced = 0;
     for (const c of incoming) {
       const s = Math.floor(c.startMs), e = Math.floor(c.endMs);
@@ -1024,6 +1024,37 @@
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  // Layout version of the generated book. A book built by an older layout is
+  // rebuilt once even without growth.
+  const SYNTH_FMT = 2;
+
+  // Narrators read chapter names/numbers aloud, set off by silence. A cue is
+  // a SPOKEN HEADING when it is short, has no sentence punctuation inside,
+  // and is isolated by pauses on both sides — long pauses for a free-form
+  // title, shorter ones when the text is an explicit marker (第N章, a bare
+  // number, プロローグ…). The decision uses only the cue and its two
+  // neighbours, so it never changes once the following cue exists (the book
+  // stays append-only). Returns the cue indices, at least a minute apart.
+  const HEAD_MARK_RE = /^(第[0-9０-９一二三四五六七八九十百]+[章話部節回巻夜幕]|プロローグ|エピローグ|序章|終章|まえがき|あとがき)/;
+  const HEAD_NUM_RE = /^([0-9０-９]{1,3}|[一二三四五六七八九十百]{1,4})$/;
+  function spokenHeadings(cues) {
+    const out = [];
+    let lastMs = -Infinity;
+    for (let j = 1; j + 1 < cues.length; j++) {
+      const c = cues[j];
+      const core = String(c.text || '').trim().replace(/[。．.\s　]+$/, '');
+      if (!core || core.length > 24 || /[。！？!?「」『』、，]/.test(core)) continue;
+      const before = c.startMs - cues[j - 1].endMs;
+      const after = cues[j + 1].startMs - c.endMs;
+      const marked = HEAD_MARK_RE.test(core) || HEAD_NUM_RE.test(core);
+      const ok = marked ? (before >= 1500 && after >= 1000) : (before >= 2500 && after >= 1800);
+      if (!ok || c.startMs - lastMs < 60000) continue;
+      out.push(j);
+      lastMs = c.startMs;
+    }
+    return out;
+  }
+
   async function buildSyntheticEpub(titleId, opts) {
     const ts = window.titleStore;
     const fs = window.Capacitor?.Plugins?.Filesystem;
@@ -1044,16 +1075,19 @@
     if (!cues || cues.length < minCues) return { ok: false, reason: 'no-cues' };
     // Rebuild-of-an-existing synthetic book: only when it actually grew
     // (append-only — the reader relies on the prefix staying identical).
-    if (existing && Number.isFinite(existing.cueCount) && cues.length < existing.cueCount + minGrowth) {
+    if (existing && existing.fmt === SYNTH_FMT && Number.isFinite(existing.cueCount) && cues.length < existing.cueCount + minGrowth) {
       return { ok: false, reason: 'no-growth' };
     }
 
-    // Chapter bounds: m4b markers → 30-min slices → single section.
+    // Chapter bounds: the file's own chapter markers when they carry real
+    // names; otherwise the headings the narrator speaks. Never time slices —
+    // those cut sentences in half under a heading that said nothing.
     let markers = [];
     try { markers = await getAudioChapters(titleId, title.attachments?.audiobook?.cachePath || null); } catch (_) {}
-    const durMs = Math.max((await durationFor(titleId)) || 0, cues[cues.length - 1].endMs || 0);
     let bounds = [];
-    if (Array.isArray(markers) && markers.length >= 2) {
+    const headCue = new Set();
+    const named = new Set((markers || []).map(m => (m.title || '').trim()).filter(t => t && t !== (title.name || '').trim()));
+    if (Array.isArray(markers) && markers.length >= 2 && named.size >= 2) {
       for (const m of markers) {
         const last = bounds.length ? bounds[bounds.length - 1].ms : -Infinity;
         if (m.startMs - last < 60000) continue;   // micro-chapter guard
@@ -1061,10 +1095,12 @@
       }
       if (!bounds.length || bounds[0].ms > 60000) bounds.unshift({ ms: 0, title: null });
       else bounds[0].ms = 0;
-    } else if (durMs >= 40 * 60 * 1000) {
-      for (let ms = 0; ms < durMs - 5 * 60 * 1000; ms += 30 * 60 * 1000) bounds.push({ ms, title: null });
     } else {
       bounds = [{ ms: 0, title: null }];
+      for (const j of spokenHeadings(cues)) {
+        headCue.add(cues[j]);
+        bounds.push({ ms: cues[j].startMs, title: String(cues[j].text || '').trim().replace(/[。．.\s　]+$/, '') });
+      }
     }
     const chapters = bounds.map(b => ({ ms: b.ms, title: b.title, cues: [] }));
     let k = 0;
@@ -1091,6 +1127,7 @@
       let cur = '';
       for (let j = 0; j < ch.cues.length; j++) {
         const c = ch.cues[j];
+        if (headCue.has(c)) continue;   // spoken heading: rendered as this part's <h2>
         cur += (c.text || '');
         const next = ch.cues[j + 1];
         const gap = next ? next.startMs - c.endMs : Infinity;
@@ -1101,7 +1138,7 @@
         }
       }
       if (cur.trim()) paras.push(cur.trim());
-      const heading = ch.title || (parts.length > 1 ? String(i + 1) : '');
+      const heading = ch.title || '';
       let body = (heading ? '<h2>' + _xesc(heading) + '</h2>\n' : '') +
         paras.map(p => '<p>' + _xesc(p) + '</p>').join('\n');
       // Provenance notice on the first page: this text is machine-generated.
@@ -1145,7 +1182,8 @@
       name: (title.name || 'audiobook') + ' (auto).epub',
       size: Math.floor(b64.length * 3 / 4),
       auto: true,
-      cueCount: cues.length   // growth marker for the live-refresh cycle
+      cueCount: cues.length,   // growth marker for the live-refresh cycle
+      fmt: SYNTH_FMT
     });
     if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
     log('synthetic epub: ' + parts.length + ' sections, ' + cues.length + ' cues → ' + relPath);
@@ -1176,10 +1214,17 @@
 
     // A title that also carries a read source gets book-text alignment:
     // ASR cue text is replaced by the matched passage from the EPUB/TXT.
-    let hasEpub = false;
+    let hasEpub = false, synthBook = false;
     try {
       const tl = await window.titleStore?.list();
-      hasEpub = !!tl?.find(x => x.id === titleId)?.attachments?.epub;
+      // A GENERATED book (auto:true — built from these very cues) is not a
+      // source to match against: the aligner would index a snapshot that ends
+      // at the book's last rebuild, so every cue transcribed after it could
+      // never match, stayed "awaiting alignment" and was never phrase-split
+      // (sentence-long subtitles at the transcription frontier).
+      const ep = tl?.find(x => x.id === titleId)?.attachments?.epub;
+      hasEpub = !!ep;
+      synthBook = !!(ep && ep.auto);
     } catch (_) {}
 
     // TIMING-ONLY (2026-09-09): the title HAS subtitles (an SRT). Transcribe
@@ -1189,7 +1234,7 @@
     active = {
       titleId, audioPath, audioName: audioName || '',
       sig: '', durationMs: 0, cues: [], cov: [], done: false, retries: 0,
-      assetsDownloading: false, cardAnchorMs: null, hasBookText: hasEpub && !timingOnly,
+      assetsDownloading: false, cardAnchorMs: null, hasBookText: hasEpub && !synthBook && !timingOnly,
       timingOnly: !!timingOnly
     };
     const me = active;
@@ -1203,8 +1248,13 @@
         if (ok && active === me) {
           // Re-place anchors from cues matched in earlier sessions, then
           // upgrade whatever merged as plain ASR while the index built.
-          try { window.autoAlign.seedFromCues(me.cues); } catch (_) {}
-          runAlignSweep('ready');
+          // Generated book: the index is still needed — the reader maps book
+          // position <-> audio time through its anchors (without them it falls
+          // back to book-fraction x FULL duration, which on a partly
+          // transcribed title seeks hours ahead). Every cue IS book text, so
+          // all of them seed; nothing is matched or substituted.
+          try { window.autoAlign.seedFromCues(me.cues, { all: !me.hasBookText }); } catch (_) {}
+          if (me.hasBookText) runAlignSweep('ready');
         }
       }).catch((e) => log('autoAlign prepare failed: ' + (e?.message || e)));
     }
@@ -1524,6 +1574,7 @@
   }
 
   window.autoTranscribe = {
+    _spokenHeadings: spokenHeadings,
     progressState,      // () → null when nothing to wait on, else {progress, coveragePct, jobRunning}
     powerInfo,          // () → {charging, thermal, lowPower, parked, unlimited, aheadMs}
     refreshPower,

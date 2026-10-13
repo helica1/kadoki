@@ -1278,6 +1278,15 @@ body.mode-card .subtitle-text.card-rise { animation: cardRiseIn 0.5s ease-out; }
   opacity: .8;
 }
 body.mode-read.kadoki-synth-book #synthBookChip { display: block; }
+/* Generated books read in a soft warm tint: the text is machine-transcribed
+   and may contain errors, and the colour says so on every page. Kept pale so
+   it is not mistaken for the card-mode orange accent. */
+body.kadoki-synth-book #readingPagedInner { color: var(--synth-book-text, #f0d9b5); }
+body.kadoki-synth-book #synthBookChip {
+  color: #f0d9b5;
+  background: rgba(34, 27, 18, .55);
+  border-color: rgba(220, 180, 120, .35);
+}
 .prefs-row label {
   flex: 0 0 45%;
   color: var(--text-muted, #aaa);

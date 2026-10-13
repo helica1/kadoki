@@ -1882,8 +1882,16 @@
       document.body.classList.remove('has-cue-highlight');
     }
   }
+  // The green cue highlight belongs to this LEGACY reader only. With the paged
+  // reader in use (always, unless the PAGED_DISABLE kill switch is set) it
+  // must never register: these ranges sit on the hidden legacy DOM, use this
+  // reader's own cue map, and ::highlight paint bleeds onto visible text on
+  // WebKit — a green line in the wrong place.
+  function _legacyCueHlOn() {
+    try { return localStorage.getItem('PAGED_DISABLE') === '1'; } catch (_) { return false; }
+  }
   function setCueHighlightFor(name, chunkIdx, cueText) {
-    if (!window.CSS?.highlights || typeof Highlight === 'undefined' || !cueText) {
+    if (!_legacyCueHlOn() || !window.CSS?.highlights || typeof Highlight === 'undefined' || !cueText) {
       try { CSS.highlights?.delete?.(name); } catch (e) {}
       return;
     }

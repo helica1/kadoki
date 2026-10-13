@@ -1515,6 +1515,16 @@
       const frac = off / total;
       let est = null;
       try { const m = window.autoAlign?.msForProgress?.(frac); if (Number.isFinite(m) && m >= 0) est = m; } catch (_) {}
+      // GENERATED book: its text is the cue text in order, covering only the
+      // transcribed part of the audio — book fraction x full duration lands
+      // hours ahead (place loss 2026-10-13: 88% of a 1h53 book → 6h14 of 7h).
+      // Walk the cues' own text lengths to the chunk's offset instead.
+      if (est == null && window._synthBookLoadedCues > 0 && cues && cues.length) {
+        let acc = 0, k = 0;
+        while (k < cues.length - 1 && acc + (cues[k].text || '').length <= off) { acc += (cues[k].text || '').length; k++; }
+        const ms = cues[k].startMs;
+        if (Number.isFinite(ms)) return { est: ms, durMs, lastEnd: cues[cues.length - 1].endMs || ms, uncovered: false };
+      }
       if (est == null) { if (!(durMs > 60000)) return null; est = frac * durMs; }
       if (durMs > 60000) est = Math.min(est, durMs);
       const lastEnd = (cues && cues.length) ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
@@ -2594,8 +2604,11 @@
       if (!_readerHidden()) {
         // Word-timed cue → park the karaoke glow instead of the static block
         // highlight (same entry treatment as ensureGreenOnEnter).
+        // Deck-derived text that is not a cue still gets the indicator, parked
+        // via synthetic timing (it used to fall back to the block green).
         const _cCue = (pagedCues[_aCueIdx] && highlightText === pagedCues[_aCueIdx].text)
-          ? pagedCues[_aCueIdx] : null;
+          ? pagedCues[_aCueIdx]
+          : { text: highlightText, startMs: card.audiobookStartMs || 0, endMs: card.audiobookEndMs || 0 };
         const _cKw = !!(_cCue && window.wordHighlight);
         const _r = setCueRangeHighlight(chunk, highlightText, _cKw);
         if (_cKw && _r) {
@@ -2649,9 +2662,32 @@
   // vertical text line). Used to advance pages by WHOLE columns so no line is
   // partially rendered at a page boundary. Falls back when line-height is
   // 'normal'. Measured off a real chunk (chunks may override innerEl's line-height).
+  // The reference must be a BODY-TEXT chunk. chunks[0] is often not one: a
+  // generated book opens with a 0.72em notice paragraph, a real EPUB with a
+  // heading — both have a different line pitch, which put every edge mask,
+  // page turn and follow scroll on the wrong column grid (half-cut lines at
+  // both edges). Pick the chunk whose line-height is the most common in a
+  // sample spread over the book; re-picked whenever the chunk list changes.
+  let _colRefEl = null, _colRefFor = null;
+  function _colRef() {
+    if (!chunks || !chunks.length) return innerEl;
+    if (_colRefFor === chunks && _colRefEl && _colRefEl.isConnected) return _colRefEl;
+    const votes = new Map();
+    const n = chunks.length, step = Math.max(1, Math.floor(n / 24));
+    let best = chunks[0], bestN = 0;
+    for (let i = 0; i < n; i += step) {
+      const lh = Math.round(parseFloat(getComputedStyle(chunks[i]).lineHeight) * 10);
+      if (!(lh > 0)) continue;
+      const v = votes.get(lh) || { c: 0, el: chunks[i] };
+      v.c++; votes.set(lh, v);
+      if (v.c > bestN) { bestN = v.c; best = v.el; }
+    }
+    _colRefEl = best; _colRefFor = chunks;
+    return best;
+  }
   function _columnWidth() {
     try {
-      const el = (chunks && chunks[0]) || innerEl;
+      const el = _colRef() || innerEl;
       const cs = getComputedStyle(el);
       let lh = parseFloat(cs.lineHeight);
       if (!Number.isFinite(lh) || lh <= 0) lh = (parseFloat(cs.fontSize) || 18) * 1.7;
@@ -6835,12 +6871,8 @@
   // nodes (skip rt/rp), normalizes, locates the cue's normalized index
   // in the chunk's normalized text, maps back to raw offsets and finally
   // (node, offset) pairs for a Range.
-  // `suppressPaint` (audio-follow with word timings): compute + return the
-  // range for scroll/karaoke, but do NOT paint the block cue-active highlight
-  // — the karaoke glow is the live indicator, and skipping the block paint
-  // removes both the leftover activation flash and the "green ≠ what Anki
-  // gets" mismatch. Any lingering green from an explicit action (set-playhead,
-  // reader-entry centering — those still paint) is cleared.
+  // Computes + returns the cue's Range for scroll/karaoke. It paints NOTHING
+  // (the legacy third `suppressPaint` argument is ignored — always true now).
   // The chunk the reader is ON — the anchor a fold/unfold restores to. Kept
   // current by every cue paint (follow, jump, entry) and by the scroll scan
   // below, so it is already correct at the instant the screen changes size.
@@ -6926,52 +6958,12 @@
       const r = new Range();
       r.setStart(sNode, sOff);
       r.setEnd(eNode, Math.min(eOff, eNode.nodeValue.length));
-      if (suppressPaint) {
-        clearCueHighlight();
-        lastHighlightedChunkIdx = chunks.indexOf(chunk);
-        return r;
-      }
-      // PAINTED range: the precise range snapped OUTWARD to whole text nodes.
-      // A ::highlight boundary that lands MID-text-node makes WebKit split
-      // that node's paint run and re-rasterize the UN-highlighted remainder
-      // at different subpixel positions — the long-standing ~1px jiggle when
-      // a line turns green (lab-measured: a mid-node seam churns ~8-12% of
-      // the line's ink pixels; node-boundary seams churn ~0%). Snapping only
-      // widens the green to the sentence-segment edges (between rubies /
-      // chunk bounds); scroll + karaoke below still use the precise `r`.
-      const rp = new Range();
-      rp.setStart(sNode, 0);
-      rp.setEnd(eNode, eNode.nodeValue.length);
-      // Reuse a single Highlight across all paints — clear its range
-      // set, then add the new one, then re-set on the registry. Creating
-      // a fresh Highlight via `new Highlight(r)` + replace caused
-      // residual "ghost" green ranges to linger in iOS WKWebView, as if
-      // the previous Highlight's painted region was never invalidated.
-      // Mutating an existing Highlight via clear()+add() forces WebKit
-      // to recompute the painted area against the new range set.
-      if (!activeCueHighlight) {
-        activeCueHighlight = new Highlight();
-      }
-      activeCueHighlight.clear();
-      activeCueHighlight.add(rp);
-      // Re-set on the registry to ensure the registry knows the highlight
-      // is current (set-after-mutate is the documented pattern; some
-      // browsers paint immediately on add, others need the registry
-      // re-publish to trigger invalidation).
-      CSS.highlights.set('cue-active', activeCueHighlight);
-      // iOS: ::highlight color doesn't reach the kanji BASE of <ruby>, only the
-      // furigana — color the active cue's ruby elements directly (no DOM mutation).
-      // Uses the SNAPPED range so ruby coloring matches the painted extent.
-      try { window._applyCueRubyColor && window._applyCueRubyColor(rp, chunk); } catch (_) {}
-      document.body.classList.add('has-cue-highlight');
-      // Remember which chunk is green — anchors the bounded local search.
+      // The block cue-active (green) highlight is never painted any more: the
+      // karaoke indicator (word-highlight readerCuePainted, synthetic timing
+      // for w-less cues) is the reader's only audio cursor. Callers bind it
+      // from the returned range; any stale registration is cleared here.
+      clearCueHighlight();
       lastHighlightedChunkIdx = chunks.indexOf(chunk);
-      // Force a synchronous layout read so the new highlight invalidation
-      // is flushed before any subsequent paint queues up. Without this,
-      // rapid back-to-back paints during a smooth scroll animation could
-      // batch and the older range's paint would survive to the next
-      // frame.
-      void scrollEl.offsetWidth;
       return r;
     } catch (e) { return null; }
   }
@@ -7560,14 +7552,18 @@
       try { window.showToast?.('Cue data missing', 1800); } catch (_) {}
       return;
     }
-    // Paint the cue text GREEN via the existing reader-selection highlight.
-    // This is the same machinery the old swipe-up gesture used.
-    paintSelectionHighlight(chosen, fullCue.text || '');
+    // Park the karaoke indicator on the chosen cue. No green text: the old
+    // reader-selection paint here was never cleared by the follow, so it sat
+    // on this line while the audio moved on (the "wrong green").
+    clearSelection();
     selectedCue = { cue: fullCue, idx: nearest.idx, chunk: chosen };
-    // Paint cue-active (green) + reset BOTH cue gates so the highlight FOLLOWS
-    // as audio advances — legacy abUpdateCueDisplay's own `idx===abCurrentCueIdx`
-    // gate would otherwise swallow the first update. See pagedPlayFromCue.
-    try { setCueRangeHighlight(chosen, fullCue.text || ''); } catch (_) {}
+    // Reset BOTH cue gates so the indicator FOLLOWS as audio advances —
+    // legacy abUpdateCueDisplay's own `idx===abCurrentCueIdx` gate would
+    // otherwise swallow the first update. See pagedPlayFromCue.
+    try {
+      const _pr = setCueRangeHighlight(chosen, fullCue.text || '');
+      if (_pr) window.wordHighlight?.readerCuePainted(_pr, fullCue);
+    } catch (_) {}
     lastHighlightedCue = -1;
     try { window._resetAbCueGate?.(); } catch (_) {}
     note('setPlayhead → cue#' + nearest.idx + ' "' + (fullCue.text||'').slice(0,30) +

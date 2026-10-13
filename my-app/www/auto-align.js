@@ -429,14 +429,17 @@
   // restart — their text IS book text, so exact forward search re-places
   // them instantly. Without this a mid-book resume would have to re-anchor
   // from the ratio estimate alone. Cues must be time-sorted (they are).
-  function seedFromCues(cues) {
+  // opts.all: seed from every cue, not only b:1 ones (generated books, whose
+  // text is the cue text by construction).
+  function seedFromCues(cues, opts) {
+    const all = !!(opts && opts.all);
     const st = state;
     if (!st || st.disabled || !Array.isArray(cues) || !cues.length) return 0;
     let lastNe = 0, seeded = 0;
     const step = Math.max(1, Math.floor(cues.length / 200));
     for (let i = 0; i < cues.length; i += step) {
       const c = cues[i];
-      if (!c || !c.b || !c.text || !Number.isFinite(c.startMs)) continue;
+      if (!c || (!c.b && !all) || !c.text || !Number.isFinite(c.startMs)) continue;
       const needle = normalizeStr(c.text);
       if (needle.length < 8) continue;
       const p = st.normFlat.indexOf(needle, lastNe);   // forward-monotonic by construction

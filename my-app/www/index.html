@@ -2435,7 +2435,7 @@ body.dimmed .card-image {
                 ${title.author ? `<div style="color:#9a9aa6;font-size:.8rem;margin-top:2px;">${escapeHtml(title.author)}</div>` : ''}
                 <div class="title-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">
                   ${chipHtml('card',  'DECK',  !!a.deck)}
-                  ${chipHtml('read',  'EPUB',  !!a.epub)}
+                  ${chipHtml('read',  (a.epub && a.epub.auto) ? 'AUTO TEXT' : 'EPUB',  !!a.epub)}
                   ${(a.audiobook && (a.audiobook.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(a.audiobook.name || ''))) ? chipHtml('audio', Array.isArray(a.series) && a.series.length > 1 ? ('VIDEO ×' + a.series.length) : 'VIDEO', true) : chipHtml('audio', 'AUDIO', !!a.audiobook)}
                   ${chipHtml('srt',   'SRT',   !!a.srt)}
                 </div>
