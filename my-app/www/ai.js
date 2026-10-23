@@ -27,16 +27,40 @@
 
   // $/MTok (input, output). Cache write bills at in×1.25, cache read at in×0.1.
   // Local estimate only — actual billing is Anthropic's; surface as "~$".
+  // First match wins, so specific versions sit above their family. A model
+  // newer than this table is costed at its family's last known price (the
+  // models API carries no prices); the real bill is unaffected.
   const PRICES = [
-    { match: 'haiku',  inUsd: 1, outUsd: 5  },
-    { match: 'opus',   inUsd: 5, outUsd: 25 },
-    { match: 'sonnet', inUsd: 3, outUsd: 15 },
+    { match: 'fable',      inUsd: 10,  outUsd: 50 },
+    { match: 'mythos',     inUsd: 10,  outUsd: 50 },
+    { match: 'opus-5-5',   inUsd: 4,   outUsd: 20 },
+    { match: 'opus',       inUsd: 5,   outUsd: 25 },
+    { match: 'sonnet-5',   inUsd: 2,   outUsd: 10 },
+    { match: 'sonnet',     inUsd: 3,   outUsd: 15 },
+    { match: 'haiku-5',    inUsd: 0.1, outUsd: 0.5 },
+    { match: 'haiku',      inUsd: 1,   outUsd: 5  },
   ];
-  const MODELS = {
-    high:    'claude-opus-4-8',     // 高品質 tier (priceFor matches on 'opus')
-    default: 'claude-sonnet-4-6',   // summaries, chat
-    cheap:   'claude-haiku-4-5',    // segmentation, background extraction
+  // Model per quality tier. These are the built-in defaults; at runtime each
+  // tier follows the newest model of its family from the Anthropic models
+  // list (refreshModels, at most daily), unless the user pinned one in
+  // Preferences. Callers read MODELS.x at call time, so updates apply live.
+  const MODEL_DEFAULTS = {
+    high:    'claude-opus-5-5',     // 高品質 tier
+    default: 'claude-sonnet-5-5',   // summaries, chat
+    cheap:   'claude-haiku-5-5',    // segmentation, background extraction
   };
+  const TIER_FAMILY = { high: 'opus', default: 'sonnet', cheap: 'haiku' };
+  const MODELS = Object.assign({}, MODEL_DEFAULTS);
+  const RESOLVED_PREF = 'AI_MODELS_RESOLVED_V1'; // { at, tiers:{high,default,cheap}, list:[{id,name,created}] }
+  const PINS_PREF = 'AI_MODEL_PINS_V1';          // { high?, default?, cheap? } — model ids
+  const MODELS_URL = 'https://api.anthropic.com/v1/models';
+  const MODELS_TTL_MS = 24 * 60 * 60 * 1000;
+  let _resolved = null, _pins = {};
+  function applyModels() {
+    for (const k of Object.keys(MODEL_DEFAULTS)) {
+      MODELS[k] = _pins[k] || (_resolved && _resolved.tiers && _resolved.tiers[k]) || MODEL_DEFAULTS[k];
+    }
+  }
   const QUALITY_PREF = 'AI_QUALITY'; // economy | balanced | high
   const QUALITIES = ['economy', 'balanced', 'high'];
   const ACT_KEY = 'AIACT_V1';        // { [titleId]: { mode:'new'|'retro', ts } } — books the user activated AI for
@@ -79,6 +103,12 @@
     _backend = ((await getPref(BACKEND_PREF)) === 'openrouter') ? 'openrouter' : 'anthropic';
     _orKey = (await getPref(OR_KEY_PREF)) || '';
     try { _orModel = JSON.parse((await getPref(OR_MODEL_PREF)) || 'null') || null; } catch (_) { _orModel = null; }
+    try { _resolved = JSON.parse((await getPref(RESOLVED_PREF)) || 'null'); } catch (_) { _resolved = null; }
+    try { _pins = JSON.parse((await getPref(PINS_PREF)) || 'null') || {}; } catch (_) { _pins = {}; }
+    applyModels();
+    if (_key && (!_resolved || !(Date.now() - (_resolved.at || 0) < MODELS_TTL_MS))) {
+      setTimeout(() => { refreshModels().catch(() => {}); }, 4000);
+    }
     // ai-processor.js reads AI_AUTO_PROCESS synchronously from localStorage.
     // localStorage can be wiped while Capacitor Preferences survives — if the
     // local copy is gone, restore it from Preferences so the toggle sticks.
@@ -138,7 +168,7 @@
   function priceFor(model) {
     const m = String(model || '').toLowerCase();
     for (const p of PRICES) if (m.includes(p.match)) return p;
-    return PRICES[2]; // sonnet pricing as the neutral default
+    return PRICES.find(p => p.match === 'sonnet'); // neutral default
   }
   function entryCostUsd(e) {
     if (Number.isFinite(e.c)) return e.c;   // real cost recorded at request time (e.g. OpenRouter usage.cost)
@@ -303,14 +333,14 @@
     try {
       resp = await http.request({
         url: API_URL, method: 'POST',
-        headers: {
+        headers: Object.assign({
           'content-type': 'application/json',
           'x-api-key': _key,
           'anthropic-version': '2023-06-01',
-        },
+        }, body.fallbacks ? { 'anthropic-beta': FALLBACK_BETA } : {}),
         data: body,
         connectTimeout: 30000,
-        readTimeout: 180000,
+        readTimeout: opts.timeoutMs || 180000,
       });
     } catch (e) {
       throw new Error('Network error — check your connection');
@@ -345,6 +375,183 @@
     return { text, usage };
   }
 
+  // ---- model discovery ------------------------------------------------------
+  // GET /v1/models (newest first). Each tier takes the newest model of its
+  // family; ids look like claude-<family>-<version>. Kept in prefs so an
+  // offline launch uses the last answer.
+  async function getJson(url, headers) {
+    if (window.__kadokiHttp) {   // macOS shell: native HTTPS bridge
+      const r = await window.__kadokiHttp({ url, method: 'GET', headers });
+      let d = null; try { d = JSON.parse(r.body); } catch (_) {}
+      if (r.status !== 200) throw new Error((d && d.error && d.error.message) || ('models list ' + r.status));
+      return d;
+    }
+    const http = nativeHttp();
+    if (http) {
+      const r = await http.request({ url, method: 'GET', headers, connectTimeout: 15000, readTimeout: 30000 });
+      const d = (typeof r.data === 'string') ? JSON.parse(r.data) : r.data;
+      if (r.status !== 200) throw new Error((d && d.error && d.error.message) || ('models list ' + r.status));
+      return d;
+    }
+    const res = await fetch(url, { headers: Object.assign({ 'anthropic-dangerous-direct-browser-access': 'true' }, headers) });
+    const d = await res.json();
+    if (!res.ok) throw new Error((d && d.error && d.error.message) || ('models list ' + res.status));
+    return d;
+  }
+  async function refreshModels() {
+    await ready;
+    if (!_key) return null;
+    const headers = { 'x-api-key': _key, 'anthropic-version': '2023-06-01' };
+    const all = [];
+    let after = null;
+    for (let page = 0; page < 5; page++) {
+      const d = await getJson(MODELS_URL + '?limit=100' + (after ? '&after_id=' + encodeURIComponent(after) : ''), headers);
+      for (const m of (d && d.data) || []) {
+        if (m && typeof m.id === 'string') all.push({ id: m.id, name: m.display_name || m.id, created: Date.parse(m.created_at) || 0 });
+      }
+      if (!d || !d.has_more || !d.last_id) break;
+      after = d.last_id;
+    }
+    if (!all.length) return null;
+    all.sort((a, b) => b.created - a.created);
+    const tiers = {};
+    for (const [tier, fam] of Object.entries(TIER_FAMILY)) {
+      const hit = all.find(m => m.id.startsWith('claude-' + fam + '-'));
+      if (hit) tiers[tier] = hit.id;
+    }
+    _resolved = { at: Date.now(), tiers, list: all.filter(m => /^claude-(opus|sonnet|haiku)-/.test(m.id)) };
+    await setPref(RESOLVED_PREF, JSON.stringify(_resolved));
+    applyModels();
+    return _resolved;
+  }
+  async function setModelPin(tier, id) {
+    if (!(tier in MODEL_DEFAULTS)) return;
+    if (id) _pins[tier] = id; else delete _pins[tier];
+    await setPref(PINS_PREF, JSON.stringify(_pins));
+    applyModels();
+  }
+  function modelInfo() {
+    return {
+      models: Object.assign({}, MODELS), pins: Object.assign({}, _pins),
+      checkedAt: (_resolved && _resolved.at) || 0,
+      list: (_resolved && _resolved.list) || [],
+      families: Object.assign({}, TIER_FAMILY),
+    };
+  }
+  // Models that think before answering (adaptive, always on): thinking spends
+  // from max_tokens, so callers' small budgets need headroom.
+  function thinksAlways(model) {
+    return /^claude-(fable|mythos|(opus|sonnet|haiku)-([5-9]|\d\d))/.test(String(model || ''));
+  }
+  // Server-side refusal fallback (routes a declined request to a model that
+  // can answer, by refusal category).
+  function wantsFallback(model) {
+    return /^claude-(fable|opus-([5-9]|\d\d)|sonnet-5-5)/.test(String(model || ''));
+  }
+  const FALLBACK_BETA = 'server-side-fallback-2026-07-01';
+
+  // Messages API params for the request() contract — shared by live requests
+  // and Message Batches so the two can't drift apart.
+  function messageParams(opts) {
+    const model = opts.model || MODELS.default;
+    const body = { model, max_tokens: opts.maxTokens || 1500, messages: opts.messages };
+    if (opts.system) body.system = opts.system;
+    // Structured outputs: constrain the response to a JSON schema (used by
+    // the background character pipeline so results parse deterministically).
+    if (opts.outputSchema) {
+      body.output_config = { format: { type: 'json_schema', schema: opts.outputSchema } };
+    }
+    if (thinksAlways(model)) {
+      // Thinking comes out of max_tokens (only what is used is billed).
+      body.max_tokens = Math.min(128000, body.max_tokens + 8000);
+      if (!opts.effort) body.output_config = Object.assign({}, body.output_config, { effort: body.max_tokens <= 9000 ? 'low' : 'medium' });
+    }
+    if (opts.effort) body.output_config = Object.assign({}, body.output_config, { effort: opts.effort });
+    return body;
+  }
+
+  // ---- Message Batches -------------------------------------------------------
+  // Half price, asynchronous (usually well under an hour, at most 24 h).
+  // Results stay downloadable for 29 days. Anthropic backend only.
+  const BATCH_URL = 'https://api.anthropic.com/v1/messages/batches';
+  async function anthropicCall(method, url, body, wantText) {
+    await ready;
+    if (!_key) throw new Error('No API key — add one in Preferences → AI Features');
+    const headers = { 'x-api-key': _key, 'anthropic-version': '2023-06-01' };
+    if (body) headers['content-type'] = 'application/json';
+    const http = nativeHttp();
+    let status, data, text;
+    if (window.__kadokiHttp) {
+      // macOS shell: the Batches endpoint rejects the browser CORS preflight,
+      // so WebKit's fetch fails ("Load failed"); go native instead.
+      const r = await window.__kadokiHttp({ url, method, headers, body: body ? JSON.stringify(body) : undefined });
+      status = r.status;
+      if (wantText) text = r.body;
+      else { try { data = JSON.parse(r.body); } catch (_) { data = null; } }
+      if (wantText && (status < 200 || status >= 300)) { try { data = JSON.parse(r.body); } catch (_) {} }
+    } else if (http) {
+      const r = await http.request({ url, method, headers, data: body || undefined,
+        responseType: wantText ? 'text' : 'json', connectTimeout: 30000, readTimeout: 300000 });
+      status = r.status;
+      if (wantText) text = typeof r.data === 'string' ? r.data : JSON.stringify(r.data);
+      else data = (typeof r.data === 'string') ? (() => { try { return JSON.parse(r.data); } catch (_) { return null; } })() : r.data;
+    } else {
+      const res = await fetch(url, { method, body: body ? JSON.stringify(body) : undefined,
+        headers: Object.assign({ 'anthropic-dangerous-direct-browser-access': 'true' }, headers) });
+      status = res.status;
+      if (wantText && res.ok) text = await res.text();
+      else { try { data = await res.json(); } catch (_) { data = null; } }
+    }
+    if (status < 200 || status >= 300) {
+      const err = new Error((data && data.error && data.error.message) || ('API error ' + status));
+      err._status = status;
+      throw err;
+    }
+    return wantText ? text : data;
+  }
+  // requests: [{ customId, opts }] with request()-style opts.
+  async function batchCreate(requests) {
+    return anthropicCall('POST', BATCH_URL, {
+      requests: requests.map(r => ({ custom_id: r.customId, params: messageParams(r.opts) })),
+    });
+  }
+  async function batchGet(id) { return anthropicCall('GET', BATCH_URL + '/' + encodeURIComponent(id)); }
+  async function batchCancel(id) { return anthropicCall('POST', BATCH_URL + '/' + encodeURIComponent(id) + '/cancel'); }
+  // → [{ customId, ok, text, usage, model, error }]
+  async function batchResults(id) {
+    const b = await batchGet(id);
+    const url = (b && b.results_url) || (BATCH_URL + '/' + encodeURIComponent(id) + '/results');
+    const raw = await anthropicCall('GET', url, null, true);
+    const out = [];
+    for (const line of String(raw || '').split('\n')) {
+      if (!line.trim()) continue;
+      let o; try { o = JSON.parse(line); } catch (_) { continue; }
+      const r = o.result || {};
+      if (r.type === 'succeeded' && r.message) {
+        const m = r.message;
+        const text = (m.content || []).filter(x => x && x.type === 'text').map(x => x.text).join('');
+        out.push({ customId: o.custom_id, ok: m.stop_reason !== 'refusal', text, usage: m.usage || {}, model: m.model,
+                   error: m.stop_reason === 'refusal' ? 'declined' : null });
+      } else {
+        out.push({ customId: o.custom_id, ok: false, error: r.type + (r.error && r.error.error ? ': ' + r.error.error.message : '') });
+      }
+    }
+    return out;
+  }
+  // Ledger + per-title cost for batch results (billed at half price).
+  function recordBatchUsage(model, feature, u, titleId) {
+    const usage = {
+      input_tokens: u.input_tokens || 0, output_tokens: u.output_tokens || 0,
+      cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
+      cache_read_input_tokens: u.cache_read_input_tokens || 0,
+    };
+    const costUsd = 0.5 * entryCostUsd({ model, ti: usage.input_tokens, to: usage.output_tokens,
+      cw: usage.cache_creation_input_tokens, cr: usage.cache_read_input_tokens });
+    recordUsage(model, feature, usage, titleId, costUsd);
+    addCost(titleId, costUsd);
+    return costUsd;
+  }
+
   // Streaming Messages call. opts: { feature, model?, system?, messages,
   // maxTokens?, onText?(delta), outputSchema? }. Resolves { text, usage,
   // costUsd, model }. Throws Error with a user-presentable message.
@@ -352,18 +559,12 @@
     await ready;
     if (backend() === 'openrouter') return await requestOpenRouterFlow(opts);
     if (!_key) throw new Error('No API key — add one in Preferences → AI Features');
-    const model = opts.model || MODELS.default;
-    const body = {
-      model,
-      max_tokens: opts.maxTokens || 1500,
-      stream: true,
-      messages: opts.messages,
-    };
-    if (opts.system) body.system = opts.system;
-    // Structured outputs: constrain the response to a JSON schema (used by
-    // the background character pipeline so results parse deterministically).
-    if (opts.outputSchema) {
-      body.output_config = { format: { type: 'json_schema', schema: opts.outputSchema } };
+    const body = Object.assign(messageParams(opts), { stream: true });
+    const model = body.model;
+    if (wantsFallback(model)) body.fallbacks = 'default';
+    // Server-side web search (Anthropic runs it; results come back inline).
+    if (opts.webSearch) {
+      body.tools = [{ type: 'web_search_20260209', name: 'web_search', max_uses: opts.webSearch.maxUses || 5 }];
     }
 
     // Stream-first on every platform. If the stream produces NOTHING within
@@ -376,6 +577,11 @@
         return await requestStream(opts, body);
       } catch (e) {
         if (nativeHttp() && e && e._noOutput) return await requestNative(opts, body);
+        // A key/region that doesn't offer the refusal-fallback beta: drop it.
+        if (body.fallbacks && e && e._status === 400 && /fallback|beta/i.test(e.message || '')) {
+          delete body.fallbacks;
+          return await requestStream(opts, body);
+        }
         throw e;
       }
     };
@@ -408,7 +614,7 @@
   async function requestStream(opts, body) {
     const ctrl = new AbortController();
     let gotAny = false;
-    const timeout = setTimeout(() => ctrl.abort(), 120 * 1000);
+    const timeout = setTimeout(() => ctrl.abort(), opts.timeoutMs || 120 * 1000);
     // First-byte watchdog: a stalled stream (observed on iOS under VPN)
     // aborts after 15s so the native fallback can take over quickly.
     const firstByte = setTimeout(() => { if (!gotAny) ctrl.abort(); }, 15 * 1000);
@@ -417,12 +623,12 @@
       res = await fetch(API_URL, {
         method: 'POST',
         signal: ctrl.signal,
-        headers: {
+        headers: Object.assign({
           'content-type': 'application/json',
           'x-api-key': _key,
           'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true',
-        },
+        }, body.fallbacks ? { 'anthropic-beta': FALLBACK_BETA } : {}),
         body: JSON.stringify(body),
       });
     } catch (e) {
@@ -562,6 +768,20 @@
   // GET the public model catalog (no auth). Maps pricing (per-token USD) to
   // $/MTok, sorts by name, caches in memory + (best-effort) blobStore for
   // offline. opts.force bypasses the cache and re-fetches.
+  // First catalog model whose id matches one of `patterns` (in order), newest
+  // version first. Null when nothing matches or the catalog is unavailable.
+  async function pickOpenRouterModel(patterns) {
+    const list = await fetchOpenRouterModels();
+    for (const re of patterns) {
+      const hits = list.filter(m => re.test(m.id));
+      if (hits.length) {
+        hits.sort((a, b) => String(b.id).localeCompare(String(a.id), undefined, { numeric: true }));
+        return hits[0];
+      }
+    }
+    return null;
+  }
+
   async function fetchOpenRouterModels(opts) {
     const force = !!(opts && opts.force);
     if (!force && Array.isArray(_orModelsCache) && _orModelsCache.length) return _orModelsCache;
@@ -633,7 +853,7 @@
   async function requestOpenRouterFlow(opts) {
     await ready;
     const key = openrouterKey();
-    const meta = openrouterModel();
+    const meta = opts.orModel || openrouterModel();
     if (!key) throw new Error('No OpenRouter key — add one in Preferences → AI Features');
     if (!meta || !meta.id) throw new Error('No OpenRouter model selected — pick one in Preferences → AI Features');
     const model = meta.id;
@@ -656,8 +876,10 @@
       // Suppress chain-of-thought. Reasoning models (DeepSeek etc.) otherwise leak
       // their planning INTO message.content — self-talk mixed with the answer — which
       // breaks JSON parsing. `exclude:true` drops reasoning from the response entirely.
-      reasoning: { exclude: true },
+      reasoning: opts.effort ? { effort: opts.effort === 'medium' ? 'medium' : (opts.effort === 'low' ? 'low' : 'high'), exclude: true } : { exclude: true },
     };
+    // OpenRouter's web plugin (search results injected into the prompt).
+    if (opts.webSearch) baseBody.plugins = [{ id: 'web', max_results: opts.webSearch.maxUses || 5 }];
     const headers = {
       'content-type': 'application/json',
       'Authorization': 'Bearer ' + key,
@@ -690,7 +912,7 @@
         try {
           resp = await http.request({
             url: OR_CHAT_URL, method: 'POST', headers, data: body,
-            connectTimeout: 30000, readTimeout: 180000,
+            connectTimeout: 30000, readTimeout: opts.timeoutMs || 180000,
           });
         } catch (e) { throw new Error('Network error — check your connection'); }
         const data = (typeof resp.data === 'string')
@@ -702,7 +924,7 @@
       }
       let res;
       const ctrl = new AbortController();
-      const to = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, 180000);
+      const to = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, opts.timeoutMs || 180000);
       try {
         res = await fetch(OR_CHAT_URL, { method: 'POST', headers, body: JSON.stringify(body), signal: ctrl.signal });
       } catch (e) { throw new Error('Network error — check your connection'); }
@@ -807,6 +1029,10 @@
       await setPref(QUALITY_PREF, q);
     },
     modelFor,
+    refreshModels,      // async → re-read the Anthropic models list now
+    batchCreate, batchGet, batchResults, batchCancel, recordBatchUsage,   // Message Batches (Anthropic only)
+    setModelPin,        // (tier, id|null) → pin a tier to a model, or back to newest
+    modelInfo,          // () → { models, pins, checkedAt, list, families }
     estimateCostUsd,
     emitDataChanged,
     unseen,
@@ -826,5 +1052,6 @@
     openrouterModel,
     setOpenrouterModel,
     fetchOpenRouterModels,
+    pickOpenRouterModel,
   };
 })();

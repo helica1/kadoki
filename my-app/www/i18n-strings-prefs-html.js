@@ -92,6 +92,15 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
     en: 'Processing quality<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">Rough cost for a full ~20-chapter book is shown per option.</span>',
     ja: '処理品質<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">約20章の本1冊あたりのおおよその費用を選択肢ごとに表示します。</span>'
   },
+  'ph.ai_models': {
+    en: 'Models<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">Each quality level uses the newest model of its family automatically. Pick one to stay on it.</span>',
+    ja: 'モデル<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">各品質は、その系統の最新モデルを自動で使います。固定したい場合は選択してください。</span>'
+  },
+  'ph.ai_models_check': { en: 'Check now', ja: '今すぐ確認' },
+  'ph.ai_model_newest': { en: 'Newest', ja: '最新' },
+  'ph.ai_models_checked': { en: 'Checked', ja: '確認日時' },
+  'ph.ai_models_never': { en: 'Not checked yet — using built-in defaults', ja: '未確認（内蔵の既定値を使用中）' },
+  'ph.ai_models_failed': { en: 'Could not read the model list: ', ja: 'モデル一覧を取得できませんでした：' },
   'ph.ai_split': {
     en: 'Split long chapters over<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">A chapter longer than this many <b>thousand</b> characters is divided into roughly-even parts (1/n, 2/n…). 0 = never split. Re-detect/reset a book\'s AI data to apply to it.</span>',
     ja: '長い章を分割する基準<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">この<b>千</b>文字数を超える章は、ほぼ均等な複数パートに分割されます（1/n、2/n…）。0 = 分割しない。本のAIデータを再検出/リセットすると反映されます。</span>'

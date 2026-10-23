@@ -414,7 +414,17 @@ final class MacTranscribeJob: @unchecked Sendable {
                 feedError = "Audio read failed: \(error.localizedDescription)"
                 break
             }
-            if buf.frameLength == 0 { break }
+            if buf.frameLength == 0 {
+                // A zero-frame read short of the end is a decode/read stall, not
+                // EOF: reporting EOF here marked hours of untranscribed audio as
+                // covered (火車, 2026-10-22). Report where it stalled; JS restarts
+                // a fresh job there (keeps cue timing exact — skipping inside a
+                // job would shift the analyzer clock).
+                if remaining > AVAudioFramePosition(sampleRate) {
+                    feedError = "Audio read stalled at \(Int(Double(audioFile.framePosition) / sampleRate * 1000)) ms"
+                }
+                break
+            }
             guard let converted = Self.convert(buf, with: converter, to: analyzerFormat) else {
                 feedError = "Audio conversion failed"
                 break

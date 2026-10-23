@@ -525,7 +525,14 @@ final class TranscribeJob: @unchecked Sendable {
                 setFeedError("Audio read failed: \(error.localizedDescription)")
                 return nil
             }
-            if buf.frameLength == 0 { return nil }
+            if buf.frameLength == 0 {
+                // Short of the end this is a read stall, not EOF (it used to mark
+                // the rest of the book as transcribed). JS restarts from here.
+                if remaining > AVAudioFramePosition(sampleRate) {
+                    setFeedError("Audio read stalled at \(Int(Double(audioFile.framePosition) / sampleRate * 1000)) ms")
+                }
+                return nil
+            }
             guard let converted = Self.convert(buf, with: converter, to: format) else {
                 setFeedError("Audio conversion failed")
                 return nil

@@ -3,7 +3,8 @@
 // Injected by the Swift shell as a WKUserScript at document start, BEFORE any
 // app script runs. Provides the plugin surface the www code needs on desktop:
 //   • FileAccess       — native pickers + real on-disk paths (no copying)
-//   • BackgroundAudio  — the audiobook transport over one HTMLAudioElement
+//   • BackgroundAudio  — the audiobook transport: native AVPlayer (kadokiAudio,
+//                        precise VBR timing), HTMLAudioElement as fallback
 //   • AudioSlicer      — native AVFoundation slicing/waveforms (kadokiSlicer)
 //   • AutoTranscribe   — native SpeechAnalyzer transcription (kadokiTranscribe)
 //   • Translator       — Apple on-device Translation (kadokiTranslate)
@@ -37,6 +38,12 @@
   const nSlicer = (req) => native('kadokiSlicer', req);
   const nTranscribe = (req) => native('kadokiTranscribe', req);
   const nTranslate = (req) => native('kadokiTranslate', req);
+  const nAudio = (req) => native('kadokiAudio', req);
+  // api.anthropic.com over native HTTPS (ai.js: batches + model list) →
+  // { status, body } with body as text.
+  window.__kadokiHttp = (req) => native('kadokiHttp', req);
+  // Keep the Mac (and this app) from sleeping while long batch work runs.
+  window.__kadokiPreventSleep = (on) => nAudio({ op: 'keepAwake', on: !!on }).catch(() => {});
 
   // ------------------------------------------------------------ event router
   // Swift pushes plugin events through window.__kadokiNativeEvent.
@@ -194,17 +201,27 @@
   let bgTimer = null;
   let lastPersist = 0;
 
+  // Which engine owns the current file. 'native' = AVPlayer over a
+  // precise-timing asset: the <audio> element seeks VBR MP3s by average
+  // bitrate, so a resume landed seconds off and the read highlight trailed
+  // the voice by a phrase. 'web' is the fallback when the native player
+  // can't open the path (e.g. a legacy virtual /kadokimac/ path).
+  let engine = 'web';
+  let nPos = { positionMs: 0, durationMs: 0, playing: false };
+  const curMs = () => engine === 'native' ? nPos.positionMs : Math.round(audio.currentTime * 1000);
+
   function persistPos(force) {
     if (!bgUrl) return;
     const now = Date.now();
     if (!force && now - lastPersist < 3000) return;
     lastPersist = now;
     try {
-      localStorage.setItem(LASTPOS_KEY, JSON.stringify({ url: bgUrl, ms: Math.round(audio.currentTime * 1000) }));
+      localStorage.setItem(LASTPOS_KEY, JSON.stringify({ url: bgUrl, ms: curMs() }));
     } catch (_) {}
   }
 
   function emitPosition() {
+    if (engine === 'native') return;   // native pushes its own position events
     emit('BackgroundAudio', 'position', {
       positionMs: Math.round(audio.currentTime * 1000),
       durationMs: isFinite(audio.duration) ? Math.round(audio.duration * 1000) : 0,
@@ -222,10 +239,25 @@
     }, 150);
   }
 
-  audio.addEventListener('play',  () => { emit('BackgroundAudio', 'state', { playing: true,  ts: Date.now() }); emitPosition(); });
-  audio.addEventListener('pause', () => { emit('BackgroundAudio', 'state', { playing: false, ts: Date.now() }); persistPos(true); });
-  audio.addEventListener('ended', () => { persistPos(true); emit('BackgroundAudio', 'ended', {}); });
+  // Native events arrive through __kadokiNativeEvent straight to listeners;
+  // mirror them here for persistence and the stopped-state getters.
+  makeAddListener('BackgroundAudio')('position', (d) => {
+    if (engine !== 'native' || !d) return;
+    nPos = { positionMs: d.positionMs || 0, durationMs: d.durationMs || 0, playing: !!d.playing };
+    persistPos(false);
+  });
+  makeAddListener('BackgroundAudio')('state', (d) => {
+    if (engine !== 'native' || !d) return;
+    nPos.playing = !!d.playing;
+    if (!d.playing) persistPos(true);
+  });
+  // Web-element events only count while the web engine owns playback.
+  const webOnly = (fn) => () => { if (engine === 'web') fn(); };
+  audio.addEventListener('play',  () => { if (engine !== 'web') return; emit('BackgroundAudio', 'state', { playing: true,  ts: Date.now() }); emitPosition(); });
+  audio.addEventListener('pause', webOnly(() => { emit('BackgroundAudio', 'state', { playing: false, ts: Date.now() }); persistPos(true); }));
+  audio.addEventListener('ended', webOnly(() => { persistPos(true); emit('BackgroundAudio', 'ended', {}); }));
   audio.addEventListener('error', () => {
+    if (engine !== 'web') return;
     const e = audio.error;
     emit('BackgroundAudio', 'error', { message: 'audio error' + (e ? ' code=' + e.code : '') });
   });
@@ -242,6 +274,18 @@
   const BackgroundAudio = {
     async play(opts) {
       const url = String((opts && opts.url) || '');
+      try {
+        await nAudio({ op: 'play', path: url, startMs: (opts && typeof opts.startMs === 'number') ? opts.startMs : null,
+                       rate: (opts && opts.rate) || 1.0 });
+        if (engine === 'web') { try { audio.pause(); } catch (_) {} }
+        engine = 'native';
+        bgUrl = url;
+        if (opts && typeof opts.startMs === 'number') nPos.positionMs = opts.startMs;
+        return {};
+      } catch (e) {
+        if (engine === 'native') { try { await nAudio({ op: 'stop' }); } catch (_) {} }
+        engine = 'web';
+      }
       const src = convertFileSrc(url);
       if (audio.src !== src) { audio.src = src; audio.load(); }
       bgUrl = url;
@@ -255,17 +299,30 @@
       emitPosition();
       return {};
     },
-    async pause() { audio.pause(); return {}; },
-    async resume() { startTicker(); await audio.play(); return {}; },
-    async stop() { persistPos(true); audio.pause(); return {}; },
+    async pause() { if (engine === 'native') { await nAudio({ op: 'pause' }); return {}; } audio.pause(); return {}; },
+    async resume() { if (engine === 'native') { await nAudio({ op: 'resume' }); return {}; } startTicker(); await audio.play(); return {}; },
+    async stop() { persistPos(true); if (engine === 'native') { await nAudio({ op: 'stop' }); return {}; } audio.pause(); return {}; },
     async seek(opts) {
+      if (engine === 'native') {
+        nPos.positionMs = Math.max(0, (opts && opts.ms) || 0);
+        await nAudio({ op: 'seek', ms: nPos.positionMs });
+        persistPos(true);
+        return {};
+      }
       try { audio.currentTime = Math.max(0, ((opts && opts.ms) || 0)) / 1000; } catch (_) {}
       persistPos(true);
       emitPosition();
       return {};
     },
-    async setRate(opts) { audio.playbackRate = (opts && opts.rate) || 1.0; return {}; },
+    async setRate(opts) {
+      if (engine === 'native') { await nAudio({ op: 'setRate', rate: (opts && opts.rate) || 1.0 }); return {}; }
+      audio.playbackRate = (opts && opts.rate) || 1.0; return {};
+    },
     async getState() {
+      if (engine === 'native') {
+        try { const s = await nAudio({ op: 'getState' }); return Object.assign({}, s, { url: bgUrl || '' }); }
+        catch (_) { return { playing: nPos.playing, ready: true, positionMs: nPos.positionMs, durationMs: nPos.durationMs, url: bgUrl || '' }; }
+      }
       return {
         playing: !audio.paused && !audio.ended && !!audio.src,
         ready: audio.readyState >= 2,
@@ -347,9 +404,16 @@
   // Minimal surface for drive-sync-media.js (CACHE) and auto-transcribe.js
   // finalize (DATA). Directories live under the native media root so the
   // scheme handler can serve their contents.
+  // DOCUMENTS = the visible ~/Documents/Kadoki (exported books → Books/).
+  let _docRoot = null;
+  async function documentsRoot() {
+    if (!_docRoot) _docRoot = (await nFile({ op: 'documentsRoot' })).path;
+    return _docRoot;
+  }
   async function fsResolve(path, directory) {
     const bare = stripFile(String(path || ''));
     if (bare.startsWith('/')) return bare;
+    if (directory === 'DOCUMENTS') return (await documentsRoot()) + '/' + bare;
     const root = await mediaRoot();
     return root + '/fs/' + (directory || 'DATA') + '/' + bare;
   }

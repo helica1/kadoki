@@ -1153,7 +1153,39 @@
     const txt = node.nodeValue || '';
     let ch = txt[off] || txt[off - 1] || '';
     // Whitespace, full-width space, punctuation, brackets → not text.
-    return ch && !/[\s　「」『』、。・…！？!?,.;:""'']/u.test(ch);
+    if (!ch || /[\s　「」『』、。・…！？!?,.;:""'']/u.test(ch)) return false;
+    // The caret snaps to the NEAREST text position however far away it is: a
+    // tap in the empty space after a short paragraph-end column resolved to
+    // text several lines off and looked that word up (worst in generated
+    // books — long paragraphs, one big blank after each). Require the
+    // character to sit under or right beside the finger.
+    return _charNearPoint(node, off, x, y);
+  }
+  function _charNearPoint(node, off, x, y) {
+    try {
+      const len = (node.nodeValue || '').length;
+      // Ruby base text: Range rects report the annotation lane; use the element.
+      const rubyEl = node.parentElement && node.parentElement.closest && node.parentElement.closest('ruby');
+      const rects = [];
+      if (rubyEl) rects.push(rubyEl.getBoundingClientRect());
+      else {
+        const r = document.createRange();
+        for (const o of [off, off - 1]) {
+          if (o < 0 || o >= len) continue;
+          r.setStart(node, o); r.setEnd(node, o + 1);
+          for (const rc of r.getClientRects()) rects.push(rc);
+        }
+      }
+      if (!rects.length) return true;   // no geometry to judge by → keep the old behaviour
+      for (const rc of rects) {
+        if (!(rc.width > 0.5 && rc.height > 0.5)) continue;
+        const glyph = rubyEl ? Math.min(rc.width, rc.height) : Math.max(rc.width, rc.height);
+        const dx = Math.max(rc.left - x, 0, x - rc.right);
+        const dy = Math.max(rc.top - y, 0, y - rc.bottom);
+        if (Math.hypot(dx, dy) <= Math.max(6, glyph * 0.6)) return true;
+      }
+      return false;
+    } catch (_) { return true; }
   }
 
   // ---------- Swipe gestures ----------
@@ -1513,6 +1545,17 @@
       const off = parseInt(chunk?.dataset?.charOffset || '-1', 10);
       if (!(total > 0) || off < 0) return null;
       const frac = off / total;
+      // Generated book with an exact map: the chunk's first placed cue (or the
+      // nearest placed one before it) IS its audio time.
+      const sm = _synthMap();
+      if (sm && sm.cues === cues) {
+        for (let k = chunks.indexOf(chunk); k >= 0; k--) {
+          const i = sm.k2c[k];
+          if (i >= 0 && Number.isFinite(cues[i]?.startMs)) {
+            return { est: cues[i].startMs, durMs, lastEnd: cues[cues.length - 1].endMs || cues[i].startMs, uncovered: false };
+          }
+        }
+      }
       let est = null;
       try { const m = window.autoAlign?.msForProgress?.(frac); if (Number.isFinite(m) && m >= 0) est = m; } catch (_) {}
       // GENERATED book: its text is the cue text in order, covering only the
@@ -1569,7 +1612,13 @@
     // scanning all cues for ones whose normalized text appears in the
     // chunk (slower but works without prebuilt map).
     const candidateIdxs = [];
-    if (pagedCueToChunk && pagedCues?.length) {   // map indexes pagedCues only
+    const sm = _synthMap();
+    if (sm && sm.cues === cues && sm.k2c[chunkIdx] >= 0) {   // generated book: exact
+      for (let i = sm.k2c[chunkIdx]; i < sm.n && (sm.c2c[i] === chunkIdx || sm.c2c[i] < 0); i++) {
+        if (sm.c2c[i] === chunkIdx) candidateIdxs.push(i);
+      }
+    }
+    if (!candidateIdxs.length && pagedCueToChunk && pagedCues?.length) {   // map indexes pagedCues only
       for (let i = 0; i < pagedCueToChunk.length; i++) {
         if (pagedCueToChunk[i] === chunkIdx) candidateIdxs.push(i);
       }
@@ -1750,17 +1799,20 @@
     try {
       const cues = pagedCues?.length ? pagedCues : (window.__abCues || []);
       if (!cues.length || !chunks?.length || !(chunkIdx >= 0)) return -1;
-      if (pagedChunkToCue && pagedChunkToCue.length === chunks.length) {
-        if (pagedChunkToCue[chunkIdx] >= 0) return pagedChunkToCue[chunkIdx];
+      const sm = _synthMap();
+      const k2c = (sm && sm.cues === cues) ? sm.k2c
+        : ((pagedChunkToCue && pagedChunkToCue.length === chunks.length) ? pagedChunkToCue : null);
+      if (k2c) {
+        if (k2c[chunkIdx] >= 0) return k2c[chunkIdx];
         let lo = -1, hi = -1;
-        for (let i = chunkIdx - 1; i >= 0; i--) if (pagedChunkToCue[i] >= 0) { lo = i; break; }
-        for (let i = chunkIdx + 1; i < chunks.length; i++) if (pagedChunkToCue[i] >= 0) { hi = i; break; }
+        for (let i = chunkIdx - 1; i >= 0; i--) if (k2c[i] >= 0) { lo = i; break; }
+        for (let i = chunkIdx + 1; i < chunks.length; i++) if (k2c[i] >= 0) { hi = i; break; }
         if (lo >= 0 && hi >= 0) {
-          const a = pagedChunkToCue[lo], b = pagedChunkToCue[hi];
+          const a = k2c[lo], b = k2c[hi];
           return Math.round(a + (b - a) * (chunkIdx - lo) / Math.max(1, hi - lo));
         }
-        if (lo >= 0) return pagedChunkToCue[lo];
-        if (hi >= 0) return pagedChunkToCue[hi];
+        if (lo >= 0) return k2c[lo];
+        if (hi >= 0) return k2c[hi];
       }
       const expMs = expectedMsAtChunkPos(chunks[chunkIdx], 0);
       const lastEnd = cues.length ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
@@ -2127,6 +2179,71 @@
     } catch (_) { return -1; }
   }
 
+  // ── GENERATED-BOOK CUE MAP ─────────────────────────────────────────────────
+  // A generated book (attachments.epub.auto) IS its cue text, concatenated in
+  // order, so cue→chunk is known exactly — a sequential walk, no searching.
+  // Without it these books ran on text-search heuristics alone (no SRT ⇒ no
+  // alignment map until the transcription finalizes, which a single uncovered
+  // gap postpones indefinitely): the follow stalled or skipped, taps seeked to
+  // the wrong cue. Built against the list the follow indexes (pagedCues once a
+  // final SRT exists, else the live __abCues) and rebuilt when that list or the
+  // render changes — the live list grows and re-splits while transcribing.
+  // Cues the walk can't place (past the book's end, or rewritten since the
+  // build) stay -1 and fall through to the normal resolver.
+  let _sm = null;   // { cues, n, lastStart, chunks, c2c, k2c }
+  function _synthMap() {
+    try {
+      if (!(window._synthBookLoadedCues > 0) || !chunks.length) return null;
+      if (currentTitleId && window._activeTitleId && currentTitleId !== window._activeTitleId) return null;
+      const cues = pagedCues?.length ? pagedCues : (window.__abCues || []);
+      if (!cues.length) return null;
+      const lastStart = cues[cues.length - 1]?.startMs;
+      if (_sm && _sm.cues === cues && _sm.n === cues.length && _sm.chunks === chunks && _sm.lastStart === lastStart) return _sm;
+      const offs = new Array(chunks.length);
+      let flat = '';
+      for (let i = 0; i < chunks.length; i++) { offs[i] = flat.length; flat += chunkNormNoRuby(chunks[i]); }
+      const c2c = new Int32Array(cues.length).fill(-1);
+      const k2c = new Int32Array(chunks.length).fill(-1);
+      const WIN = 2000;
+      let cur = 0, ci = 0, placed = 0;
+      for (let i = 0; i < cues.length; i++) {
+        const t = normalizeJP(cues[i]?.text || '');
+        if (!t) continue;
+        const win = flat.slice(cur, cur + WIN + t.length);
+        let p = win.indexOf(t), len = t.length;
+        if (p >= 0 && t.length < 4 && p > 40) p = -1;     // a 2-3 char cue must sit right at the cursor
+        if (p < 0 && t.length >= 8) {
+          // Text rewritten since the build (word-timing re-transcription):
+          // place by its head, or by its tail.
+          for (const L of [12, 8]) {
+            if (t.length < L) continue;
+            const h = win.indexOf(t.slice(0, L));
+            if (h >= 0) { p = h; break; }
+            const e = win.indexOf(t.slice(-L));
+            if (e >= 0) { p = Math.max(0, e + L - t.length); len = e + L - p; break; }
+          }
+        }
+        if (p < 0) continue;
+        const at = cur + p;
+        while (ci + 1 < chunks.length && offs[ci + 1] <= at) ci++;
+        c2c[i] = ci;
+        if (k2c[ci] < 0) k2c[ci] = i;
+        cur = at + Math.min(len, t.length);
+        placed++;
+      }
+      _sm = { cues, n: cues.length, lastStart, chunks, c2c, k2c };
+      log('synth cue map: ' + placed + '/' + cues.length + ' cues placed over ' + chunks.length + ' chunks');
+      return _sm;
+    } catch (e) { log('synth cue map failed: ' + (e?.message || e)); return null; }
+  }
+  // Chunk for cue `idx`, only when the map's list holds that exact cue text.
+  function _synthChunkFor(idx, cueText) {
+    const sm = _synthMap();
+    if (!sm || !(idx >= 0) || idx >= sm.n || sm.c2c[idx] < 0) return null;
+    if (cueText != null && (sm.cues[idx]?.text || '') !== cueText) return null;
+    return chunks[sm.c2c[idx]] || null;
+  }
+
   // ── SEQUENTIAL FOLLOW CURSOR (engine 'cursor', default; revert via
   // Appearance → Read → Follow engine → Classic) ──────────────────────────
   // Cues and book are the same sequential text, so once the follow is locked
@@ -2269,6 +2386,8 @@
   }
   function resolveCueChunk(cueIdx, cueText, allowGlobal) {
     _lastResolveTrusted = false;
+    const sc = _synthChunkFor(cueIdx, cueText);
+    if (sc) { _noteTrusted(sc, cueIdx); _fcSyncFrom(cueIdx, cueText, sc); return sc; }
     if (pagedCueToChunk && cueIdx >= 0 && cueIdx < pagedCueToChunk.length &&
         pagedCueToChunk[cueIdx] >= 0) {
       const c = chunks[pagedCueToChunk[cueIdx]];
@@ -2398,13 +2517,22 @@
       //    behind do we fall back to the symmetric search, purely so the
       //    viewport is never left blank. (want is >=0 here — guarded above.)
       let matchCue = -1;
-      if (pagedCueToChunk && pagedCueToChunk.length) {
+      // Generated book: exact map — same backward bias, short reach.
+      let chunk = null;
+      const sm = _synthMap();
+      if (sm && sm.cues === cues) {
+        for (let i = Math.min(want, sm.n - 1); i >= 0 && i >= want - 20; i--) {
+          if (sm.c2c[i] >= 0) { matchCue = i; chunk = chunks[sm.c2c[i]] || null; break; }
+        }
+        if (!chunk) matchCue = -1;
+      }
+      if (!chunk && pagedCueToChunk && pagedCueToChunk.length) {
         for (let i = Math.min(want, pagedCueToChunk.length - 1); i >= 0; i--) {
           if (pagedCueToChunk[i] >= 0) { matchCue = i; break; }
         }
       }
-      if (matchCue < 0) matchCue = nearestMatchedCue(want);
-      let chunk = (matchCue >= 0) ? chunks[pagedCueToChunk[matchCue]] : null;
+      if (!chunk && matchCue < 0) matchCue = nearestMatchedCue(want);
+      if (!chunk && matchCue >= 0) chunk = chunks[pagedCueToChunk[matchCue]] || null;
       let paintText = (matchCue >= 0) ? cues[matchCue].text : (cues[want]?.text || '');
       // 3. absolute fallback — no matched cue (alignment empty / legacy map):
       //    resolve via book-wide text search so the viewport is never blank.
@@ -4535,6 +4663,7 @@
     _duoBandCheck();
     _duoPlaceSpeedCtl();
     _duoCapture();
+    try { window.dispatchEvent(new CustomEvent('kadoki:hinge', { detail: { status } })); } catch (_) {}
   };
   // Reader entry: take a first anchor once it has settled (entry scrolls
   // re-capture on their own; this covers an entry that lands without one).
@@ -7112,17 +7241,27 @@
   // "Generated text" chip: shown in read mode while the loaded book is a
   // SYNTHETIC one (built from the on-device transcription). Body-class gated
   // so it vanishes the moment a real book loads or the mode changes.
+  // Japanese-only for now (user choice). Reflects the LOADED book: how much
+  // of it was proofread (校正, ai-cleanup.js) when it was built.
   function _setSynthChip(on) {
     try {
       document.body.classList.toggle('kadoki-synth-book', !!on);
-      if (on && !document.getElementById('synthBookChip')) {
-        const d = document.createElement('div');
+      let d = document.getElementById('synthBookChip');
+      if (on && !d) {
+        d = document.createElement('div');
         d.id = 'synthBookChip';
-        d.textContent = (window.i18n && window.i18n.t) ? window.i18n.t('at.synth_chip', 'Generated text') : 'Generated text';
         document.body.appendChild(d);
       }
+      if (!d) return;
+      const done = window._synthBookLoadedAi || 0, total = window._synthBookLoadedCues || 0;
+      const running = !!window.aiCleanup?.isRunning?.(currentTitleId);
+      if (!(done > 0) || !(total > 0)) d.textContent = '生成テキスト';
+      else if (done >= total) d.textContent = '校正済みテキスト';
+      else d.textContent = (running ? '校正中 ' : '校正 ') + Math.floor(100 * done / total) + '%';
     } catch (_) {}
   }
+  // ai-cleanup.js loads after this file; it calls this on every state change.
+  window.__pagedRefreshSynthChip = () => { if (window._synthBookLoadedCues > 0) _setSynthChip(true); };
 
   async function tryLoadFromActiveTitle() {
     if (!window.titleStore || !window._activeTitleId) return false;
@@ -7138,6 +7277,8 @@
           const ec = t0?.attachments?.epub;
           grew = !!(ec?.auto && Number.isFinite(ec.cueCount) &&
                     ec.cueCount > window._synthBookLoadedCues + 5);
+          // AI clean-up rewrote text since this render (same cue count).
+          if (ec?.auto && (ec.aiCleaned || 0) !== (window._synthBookLoadedAi || 0)) grew = true;
         } catch (_) {}
       }
       if (!grew) return false;
@@ -7177,6 +7318,7 @@
         log(`Auto-load from active title: ${ep.name}`);
         await loadEpubFromUri(ep.uri || null, ep.name, ep.cachePath || null);
         window._synthBookLoadedCues = (ep.auto && Number.isFinite(ep.cueCount)) ? ep.cueCount : 0;
+        window._synthBookLoadedAi = ep.auto ? (ep.aiCleaned || 0) : 0;
         _setSynthChip(!!ep.auto);
         return true;
       } catch (e) {

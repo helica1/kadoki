@@ -299,6 +299,8 @@
     // Title kind for the Card-tab chooser: a BOOK (epub/audio, not an Anki deck,
     // not a video) may route its Card tab to Vocabulary / Timeline / Library.
     window._activeTitleKind = hasDeck ? 'deck' : hasVideo ? 'video' : (hasEpub || hasAudio) ? 'book' : 'none';
+    // stats.js: a book with an audiobook times READ mode by the playhead alone.
+    window._activeTitleHasAudio = !!(titleResolved && hasAudio && !hasVideo && !hasDeck);
     setTimeout(updateCardTabLabel, 0);   // after the data-empty marks below
     const setEmpty = (tab, empty) => {
       if (!tab) return;

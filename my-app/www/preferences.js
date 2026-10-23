@@ -937,6 +937,57 @@
 
   // AI assistant (BYOK). Key + enable toggle persist on change (not on Save)
   // so closing the modal without "Save" never silently drops a pasted key.
+  // Model per quality tier: "Newest (<id>)" follows the models list; picking
+  // a specific id pins the tier to it.
+  const PT = (k, fb) => (window.i18n && window.i18n.t) ? window.i18n.t(k, fb) : fb;
+  function renderAiModels() {
+    const host = document.getElementById('aiModelsRows');
+    const st = document.getElementById('aiModelsStatus');
+    if (!host || !window.ai?.modelInfo) return;
+    const info = window.ai.modelInfo();
+    const tiers = [['economy', 'cheap', 'エコノミー'], ['balanced', 'default', 'バランス'], ['high', 'high', '高品質']];
+    host.innerHTML = '';
+    for (const [, tier, label] of tiers) {
+      const fam = info.families[tier];
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:.8rem;';
+      const l = document.createElement('span');
+      l.style.flex = '1';
+      l.textContent = label;
+      const sel = document.createElement('select');
+      const auto = document.createElement('option');
+      auto.value = '';
+      const autoId = info.pins[tier] ? null : info.models[tier];
+      auto.textContent = PT('ph.ai_model_newest', 'Newest') + (autoId ? ' (' + autoId + ')' : '');
+      sel.appendChild(auto);
+      const ids = new Set();
+      for (const m of info.list) {
+        if (!m.id.startsWith('claude-' + fam + '-') || ids.has(m.id)) continue;
+        ids.add(m.id);
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = m.name + ' (' + m.id + ')';
+        sel.appendChild(o);
+      }
+      if (info.pins[tier] && !ids.has(info.pins[tier])) {
+        const o = document.createElement('option');
+        o.value = info.pins[tier]; o.textContent = info.pins[tier];
+        sel.appendChild(o);
+      }
+      sel.value = info.pins[tier] || '';
+      sel.addEventListener('change', async () => {
+        await window.ai.setModelPin(tier, sel.value || null);
+        renderAiModels();
+      });
+      row.append(l, sel);
+      host.appendChild(row);
+    }
+    if (st) {
+      st.textContent = info.checkedAt
+        ? PT('ph.ai_models_checked', 'Checked') + ' ' + new Date(info.checkedAt).toLocaleString()
+        : PT('ph.ai_models_never', 'Not checked yet — using built-in defaults');
+    }
+  }
+
   async function setupAiPrefs() {
     const cb = document.getElementById('aiEnabledToggle');
     const keyInput = document.getElementById('aiApiKeyInput');
@@ -945,6 +996,18 @@
     try { await window.ai.ready; } catch (_) {}
     cb.checked = window.ai.enabledFlag();
     keyInput.value = window.ai.getKey() || '';
+    renderAiModels();
+    const mCheck = document.getElementById('aiModelsCheck');
+    if (mCheck && !mCheck.dataset.wired) {
+      mCheck.dataset.wired = '1';
+      mCheck.addEventListener('click', async () => {
+        const st = document.getElementById('aiModelsStatus');
+        mCheck.disabled = true;
+        try { await window.ai.refreshModels(); renderAiModels(); }
+        catch (e) { if (st) st.textContent = PT('ph.ai_models_failed', 'Could not read the model list: ') + (e?.message || e); }
+        finally { mCheck.disabled = false; }
+      });
+    }
     const quality = document.getElementById('aiQualitySelect');
     if (quality) {
       try { quality.value = window.ai.getQuality ? window.ai.getQuality() : 'balanced'; } catch (_) {}
@@ -1021,7 +1084,11 @@
     if (!cb.dataset.wired) {
       cb.dataset.wired = '1';
       cb.addEventListener('change', () => { window.ai.setEnabled(cb.checked); });
-      keyInput.addEventListener('change', () => { window.ai.setKey(keyInput.value); });
+      keyInput.addEventListener('change', async () => {
+        await window.ai.setKey(keyInput.value);
+        try { await window.ai.refreshModels?.(); } catch (_) {}
+        renderAiModels();
+      });
     }
     if (usage) {
       usage.textContent = '';

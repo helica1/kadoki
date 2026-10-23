@@ -81,7 +81,23 @@
     if (_nativePowerHold) return false;
     if (_power.thermal === 'serious' || _power.thermal === 'critical') return false;
     if (_power.lowPower && !_power.charging) return false;
-    return kind === 'backfill' ? !!_power.charging : true;
+    return kind === 'backfill' ? (!!_power.charging || smallRemainder()) : true;
+  }
+  // Under two minutes of audio left untranscribed (the few-second hole a
+  // seek-restart leaves behind): filling it costs next to nothing, and until
+  // it is filled the title never finalizes — no SRT, and a generated book
+  // that never gets its last pages.
+  function smallRemainder() {
+    const a = active;
+    if (!a || !(a.durationMs > 0) || !a.cov || !a.cov.length) return false;
+    let covered = 0;
+    for (const r of a.cov) covered += Math.max(0, Math.min(r[1], a.durationMs) - r[0]);
+    return a.durationMs - covered < 120000;
+  }
+  // Transcription has reached the end of the file (holes may remain behind).
+  function reachedEnd(a) {
+    return !!(a && a.durationMs > 0 && a.cov && a.cov.length &&
+              a.cov[a.cov.length - 1][1] >= a.durationMs - GAP_OK_MS - 500);
   }
   function aheadCoveredMs(pos) {
     const a = active;
@@ -230,6 +246,27 @@
     return cov[cov.length - 1][1] >= durMs - GAP_OK_MS - 500;
   }
 
+  // Coverage the cues actually back up. A long stretch with no speech inside a
+  // "covered" range means the job ended early and still reported EOF (a read
+  // stall marked 12.7 h of 火車 as transcribed). Narration never pauses this
+  // long, so such stretches are reopened and transcribed again.
+  const HOLE_MS = 8 * 60 * 1000;
+  function realCoverage(cov, cues, durMs) {
+    if (!Array.isArray(cov) || !cov.length) return cov || [];
+    const holes = [];
+    let prevEnd = 0;
+    for (const c of cues || []) {
+      if (c.startMs - prevEnd > HOLE_MS) holes.push([prevEnd, c.startMs]);
+      if (c.endMs > prevEnd) prevEnd = c.endMs;
+    }
+    if (durMs > 0 && durMs - prevEnd > HOLE_MS) holes.push([prevEnd, durMs]);
+    return holes.length ? subtractRanges(cov, holes) : cov;
+  }
+  // EOF covers to the end of the file only when the job got there.
+  function eofEnd(fedMs, durMs) {
+    return (durMs > 0 && !(fedMs < durMs - 60000)) ? durMs : (fedMs || 0);
+  }
+
   // ── status line (audio-mode cue area, only while no cues are rendered) ───
 
   function setStatus(text) {
@@ -265,14 +302,23 @@
         cardAnchorMs: Number.isFinite(a.cardAnchorMs) ? a.cardAnchorMs : null,
         // b:1 = text is matched book text (auto-align) — never re-matched.
         // w = cue-relative word-timing quads (karaoke highlighting).
-        cues: a.cues.map(c => {
-          const o = { startMs: c.startMs, endMs: c.endMs, text: c.text };
-          if (c.b) o.b = 1;
-          if (c.w) o.w = c.w;
-          return o;
-        })
+        cues: a.cues.map(serializeCue)
       }));
     } catch (e) { log('persist failed: ' + (e?.message || e)); }
+  }
+
+  // b:1 = text is matched book text (auto-align) — never re-matched.
+  // w = cue-relative word-timing quads (karaoke highlighting).
+  // ai:1 = proofread by the AI clean-up (ai-cleanup.js); pb:1 = a paragraph
+  // starts at this cue (from the clean-up; the generated book uses it).
+  function serializeCue(c) {
+    const o = { startMs: c.startMs, endMs: c.endMs, text: c.text };
+    if (c.b) o.b = 1;
+    if (c.w) o.w = c.w;
+    if (c.ai) o.ai = 1;
+    if (c.pb) o.pb = 1;
+    if (Array.isArray(c.ruby) && c.ruby.length) o.ruby = c.ruby;
+    return o;
   }
 
   // ── shared cache/sig helpers + cold snapshot for the card loader ─────────
@@ -407,7 +453,9 @@
       // Growing synthetic book: create it as soon as enough text exists (the
       // READ tab lights up mid-transcription) and rebuild it as the text
       // grows. Append-only, so reader positions stay valid across reloads.
-      buildSyntheticEpub(a.titleId, { minCues: 50, minGrowth: 60 }).catch(() => {});
+      // Once the end of the audio is transcribed, any growth counts: the last
+      // few dozen cues would otherwise never reach the book.
+      buildSyntheticEpub(a.titleId, { minCues: 50, minGrowth: reachedEnd(a) ? 1 : 60 }).catch(() => {});
     }, 10000);
   }
 
@@ -552,6 +600,7 @@
     for (let i = 0; i < a.cues.length; i++) {
       const c = a.cues[i];
       if (a.hasBookText && !c.b) continue;   // aligner needs the whole sentence
+      if (c.ai) continue;                    // proofread: segmentation is final (cue indices stay put)
       const pieces = splitCuePhrases(c);
       if (pieces.length > 1) {
         a.cues.splice(i, 1, ...pieces);
@@ -841,7 +890,7 @@
     }
     if (j.stopping === 'power') { _parked = true; schedulePersist(true); return; }
     if (ev.reason === 'eof') {
-      const end = a.durationMs > 0 ? a.durationMs : (ev.fedThroughMs || j.fedThroughMs);
+      const end = a.durationMs > 0 ? eofEnd(ev.fedThroughMs || j.fedThroughMs, a.durationMs) : (ev.fedThroughMs || j.fedThroughMs);
       a.cov = addRange(a.cov, j.startMs, end);
       if (!(a.durationMs > 0) && ev.fedThroughMs > 0) a.durationMs = Math.floor(ev.fedThroughMs);
       schedulePersist(true);
@@ -949,6 +998,40 @@
     return out;
   }
 
+  // The finished transcription becomes the title's SRT (attached {auto:true})
+  // — shared by the live finalize and the headless whole-book transcriber.
+  async function writeFinalSrt(titleId, cues) {
+    const fs = window.Capacitor?.Plugins?.Filesystem;
+    const ts = window.titleStore;
+    if (!fs || !ts) return false;
+    const title = (await ts.list()).find(x => x.id === titleId);
+    if (!title) return false;
+    const srtText = cuesToSrt(cues);
+    const relPath = 'autosrt/' + titleId + '.srt';
+    await fs.writeFile({ path: relPath, data: srtText, directory: 'DATA', encoding: 'utf8', recursive: true });
+    const u = await fs.getUri({ path: relPath, directory: 'DATA' });
+    const cachePath = String(u?.uri || '').replace(/^file:\/\//, '');
+    if (!cachePath) return false;
+    const sizeBytes = new Blob([srtText]).size;
+    const srtName = (title.name || 'audiobook') + ' (auto).srt';
+    await ts.attach(titleId, 'srt', { cachePath, name: srtName, size: sizeBytes, auto: true });
+    // Legacy per-deck pairing prefs so audio mode finds the SRT immediately.
+    const pseudo = title.attachments?.deck?.name || title.name;
+    const P = window.Capacitor?.Plugins?.Preferences;
+    if (P && pseudo) {
+      try {
+        await P.set({ key: 'READING_SRT_PAIR_' + pseudo, value: cachePath });
+        await P.set({ key: 'READING_SRT_NAME_' + pseudo, value: srtName });
+      } catch (_) {}
+    }
+    // Pre-fill the card-mode cue cache so the first CARD open skips the parse.
+    try {
+      window.blobStore?.set('SRT_CUES_V1_' + titleId,
+        JSON.stringify({ sig: srtName + '|' + sizeBytes, cues }));
+    } catch (_) {}
+    return true;
+  }
+
   async function maybeFinalize() {
     const a = active;
     if (!a || a.done || a.finalizing) return false;
@@ -956,34 +1039,7 @@
     if (!isFullyCovered(a.cov, a.durationMs) || !a.cues.length) return false;
     a.finalizing = true;
     try {
-      const fs = window.Capacitor?.Plugins?.Filesystem;
-      const ts = window.titleStore;
-      if (!fs || !ts) return false;
-      const title = (await ts.list()).find(x => x.id === a.titleId);
-      if (!title) return false;
-      const srtText = cuesToSrt(a.cues);
-      const relPath = 'autosrt/' + a.titleId + '.srt';
-      await fs.writeFile({ path: relPath, data: srtText, directory: 'DATA', encoding: 'utf8', recursive: true });
-      const u = await fs.getUri({ path: relPath, directory: 'DATA' });
-      const cachePath = String(u?.uri || '').replace(/^file:\/\//, '');
-      if (!cachePath) return false;
-      const sizeBytes = new Blob([srtText]).size;
-      const srtName = (title.name || 'audiobook') + ' (auto).srt';
-      await ts.attach(a.titleId, 'srt', { cachePath, name: srtName, size: sizeBytes, auto: true });
-      // Legacy per-deck pairing prefs so audio mode finds the SRT immediately.
-      const pseudo = title.attachments?.deck?.name || title.name;
-      const P = window.Capacitor?.Plugins?.Preferences;
-      if (P && pseudo) {
-        try {
-          await P.set({ key: 'READING_SRT_PAIR_' + pseudo, value: cachePath });
-          await P.set({ key: 'READING_SRT_NAME_' + pseudo, value: srtName });
-        } catch (_) {}
-      }
-      // Pre-fill the card-mode cue cache so the first CARD open skips the parse.
-      try {
-        window.blobStore?.set('SRT_CUES_V1_' + a.titleId,
-          JSON.stringify({ sig: srtName + '|' + sizeBytes, cues: a.cues }));
-      } catch (_) {}
+      if (!(await writeFinalSrt(a.titleId, a.cues))) return false;
       a.done = true;
       schedulePersist(true);
       log('transcription complete: ' + a.cues.length + ' cues → ' + relPath);
@@ -1024,6 +1080,22 @@
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  // A cue's text as HTML, with its furigana (c.ruby = [[off, len, reading]…],
+  // from the batch furigana pass) as <ruby>. The base text is the cue text
+  // exactly, so readers that strip <rt> still see the cue text.
+  function cueHtml(c) {
+    const t = String(c.text || '');
+    const rb = Array.isArray(c.ruby) ? c.ruby.slice().sort((a, b) => a[0] - b[0]) : null;
+    if (!rb || !rb.length) return _xesc(t);
+    let out = '', at = 0;
+    for (const [off, len, rd] of rb) {
+      if (!(off >= at) || !(len > 0) || off + len > t.length || !rd) continue;
+      out += _xesc(t.slice(at, off)) + '<ruby>' + _xesc(t.slice(off, off + len)) + '<rt>' + _xesc(rd) + '</rt></ruby>';
+      at = off + len;
+    }
+    return out + _xesc(t.slice(at));
+  }
+
   // Layout version of the generated book. A book built by an older layout is
   // rebuilt once even without growth.
   const SYNTH_FMT = 2;
@@ -1055,6 +1127,11 @@
     return out;
   }
 
+  // Exported copies read as a Japanese novel in other readers (Apple Books):
+  // vertical text, pages turning right-to-left.
+  const VERT_CSS = '<style>html{-epub-writing-mode:vertical-rl;-webkit-writing-mode:vertical-rl;writing-mode:vertical-rl;}' +
+    'p{text-indent:1em;margin:0;}h2{margin:0 0 0 2em;}</style>';
+
   async function buildSyntheticEpub(titleId, opts) {
     const ts = window.titleStore;
     const fs = window.Capacitor?.Plugins?.Filesystem;
@@ -1075,7 +1152,9 @@
     if (!cues || cues.length < minCues) return { ok: false, reason: 'no-cues' };
     // Rebuild-of-an-existing synthetic book: only when it actually grew
     // (append-only — the reader relies on the prefix staying identical).
-    if (existing && existing.fmt === SYNTH_FMT && Number.isFinite(existing.cueCount) && cues.length < existing.cueCount + minGrowth) {
+    const aiCleaned = cues.reduce((n, c) => n + (c.ai ? 1 : 0), 0);
+    if (!(opts && opts.force) && existing && existing.fmt === SYNTH_FMT && Number.isFinite(existing.cueCount) &&
+        cues.length < existing.cueCount + minGrowth) {
       return { ok: false, reason: 'no-growth' };
     }
 
@@ -1118,39 +1197,65 @@
       '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">' +
       '<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>');
 
+    // EXPORT (opts.exportTo = path under Documents): a standalone copy with
+    // the cover art, written for the user instead of attached to the title.
+    const exportTo = (opts && opts.exportTo) || null;
     const items = [], refs = [], navLis = [];
+    let coverMeta = '';
+    const coverUri = exportTo ? String(title.attachments?.cover?.dataUri || '') : '';
+    const cm = coverUri.match(/^data:(image\/(jpeg|jpg|png|webp));base64,(.+)$/);
+    if (cm) {
+      const ext = cm[2] === 'png' ? 'png' : (cm[2] === 'webp' ? 'webp' : 'jpg');
+      const mime = cm[1] === 'image/jpg' ? 'image/jpeg' : cm[1];
+      zip.file('OEBPS/cover.' + ext, cm[3], { base64: true });
+      zip.file('OEBPS/cover.xhtml',
+        '<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n' +
+        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>' + _xesc(title.name || '') + '</title>' +
+        '<style>html,body{margin:0;padding:0;height:100%;}body{display:flex;align-items:center;justify-content:center;}img{max-width:100%;max-height:100%;}</style></head>' +
+        '<body epub:type="cover"><img src="cover.' + ext + '" alt="' + _xesc(title.name || '') + '"/></body></html>');
+      items.push('<item id="cover-img" href="cover.' + ext + '" media-type="' + mime + '" properties="cover-image"/>');
+      items.push('<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>');
+      refs.push('<itemref idref="cover" linear="no"/>');
+      coverMeta = '<meta name="cover" content="cover-img"/>';
+    }
     parts.forEach((ch, i) => {
       // Paragraphs: break at sentence ends when the narrator pauses (>2.5s)
       // or the paragraph has grown long. Phrase-split cues concatenate back
       // into the original sentences (the split points carry the punctuation).
+      // Paragraph = HTML (cue text with any furigana as <ruby>); `cur` tracks
+      // the plain text for the length rule.
       const paras = [];
-      let cur = '';
+      let cur = '', curHtml = '';
+      const flush = () => { if (cur.trim()) paras.push(curHtml.trim()); cur = ''; curHtml = ''; };
       for (let j = 0; j < ch.cues.length; j++) {
         const c = ch.cues[j];
         if (headCue.has(c)) continue;   // spoken heading: rendered as this part's <h2>
+        // Proofread text carries the model's own paragraph starts.
+        if (c.ai && c.pb && cur.trim()) flush();
         cur += (c.text || '');
+        curHtml += cueHtml(c);
         const next = ch.cues[j + 1];
+        if (next && next.ai) continue;  // the next cue's pb decides
         const gap = next ? next.startMs - c.endMs : Infinity;
         const sentEnd = /[。．！？!?」』]$/.test(c.text || '');
-        if (!next || (sentEnd && (gap > 2500 || cur.length > 500))) {
-          if (cur.trim()) paras.push(cur.trim());
-          cur = '';
-        }
+        if (!next || (!c.ai && sentEnd && (gap > 2500 || cur.length > 500))) flush();
       }
-      if (cur.trim()) paras.push(cur.trim());
+      flush();
       const heading = ch.title || '';
       let body = (heading ? '<h2>' + _xesc(heading) + '</h2>\n' : '') +
-        paras.map(p => '<p>' + _xesc(p) + '</p>').join('\n');
+        paras.map(p => '<p>' + p + '</p>').join('\n');
       // Provenance notice on the first page: this text is machine-generated.
       if (i === 0) {
-        body = '<p style="font-size:0.72em;color:#888;">' +
-          _xesc('音声から自動生成された本文です（認識誤りを含む場合があります）') + '</p>\n' + body;
+        const note = (exportTo && aiCleaned)
+          ? '音声から文字起こしし、校正した本文です（誤りを含む場合があります）'
+          : '音声から自動生成された本文です（認識誤りを含む場合があります）';
+        body = '<p style="font-size:0.72em;color:#888;">' + _xesc(note) + '</p>\n' + body;
       }
       const fn = 'ch' + i + '.xhtml';
       zip.file('OEBPS/' + fn,
         '<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n' +
         '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>' + _xesc(heading || title.name || '') +
-        '</title></head>\n<body>\n' + body + '\n</body></html>');
+        '</title>' + (exportTo ? VERT_CSS : '') + '</head>\n<body>\n' + body + '\n</body></html>');
       items.push('<item id="c' + i + '" href="' + fn + '" media-type="application/xhtml+xml"/>');
       refs.push('<itemref idref="c' + i + '"/>');
       navLis.push('<li><a href="' + fn + '">' + _xesc(heading || String(i + 1)) + '</a></li>');
@@ -1165,13 +1270,19 @@
       '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">' +
       '<dc:identifier id="uid">kadoki-auto-' + _xesc(titleId) + '</dc:identifier>' +
       '<dc:title>' + _xesc(title.name || 'Audiobook') + '</dc:title>' +
-      '<dc:language>ja</dc:language>' +
+      (exportTo && title.author ? '<dc:creator>' + _xesc(title.author) + '</dc:creator>' : '') +
+      '<dc:language>ja</dc:language>' + coverMeta +
       '<meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>' +
       '</metadata>\n<manifest>' +
       '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>' +
-      items.join('') + '</manifest>\n<spine>' + refs.join('') + '</spine>\n</package>');
+      items.join('') + '</manifest>\n<spine' + (exportTo ? ' page-progression-direction="rtl"' : '') + '>' + refs.join('') + '</spine>\n</package>');
 
     const b64 = await zip.generateAsync({ type: 'base64', compression: 'DEFLATE' });
+    if (exportTo) {
+      await fs.writeFile({ path: exportTo, data: b64, directory: 'DOCUMENTS', recursive: true });
+      log('exported epub: ' + parts.length + ' sections, cover=' + !!cm + ' → Documents/' + exportTo);
+      return { ok: true, path: exportTo, chapters: parts.length };
+    }
     const relPath = 'autoepub/' + titleId + '.epub';
     await fs.writeFile({ path: relPath, data: b64, directory: 'DATA', recursive: true });
     const u = await fs.getUri({ path: relPath, directory: 'DATA' });
@@ -1183,11 +1294,312 @@
       size: Math.floor(b64.length * 3 / 4),
       auto: true,
       cueCount: cues.length,   // growth marker for the live-refresh cycle
+      aiCleaned,               // proofread cues in this build (reader reloads on entry when it changes)
       fmt: SYNTH_FMT
     });
     if (typeof window.refreshTabAvailability === 'function') window.refreshTabAvailability();
     log('synthetic epub: ' + parts.length + ' sections, ' + cues.length + ' cues → ' + relPath);
     return { ok: true, chapters: parts.length };
+  }
+
+  // ── headless whole-book transcription (ai-batch.js queue) ──────────────────
+  //
+  // Transcribes a title that is NOT open: no playhead, no UI, the native job
+  // at full speed (aheadMs 0) from each uncovered gap to the end. Same cache
+  // (AUTO_CUES_V1_), same cue shape as the live path, so a later open simply
+  // adopts it. Finishes like the live path: SRT + generated book. While it
+  // runs the live transcriber stays off (one native job at a time).
+  let headless = null;   // { titleId, jobId, st, onCues, onDone }
+  let headlessListeners = false;
+  function headlessListen(p) {
+    if (headlessListeners) return;
+    headlessListeners = true;
+    p.addListener('cues', (ev) => { if (headless && ev?.jobId === headless.jobId) headless.onCues(ev); });
+    p.addListener('done', (ev) => { if (headless && ev?.jobId === headless.jobId) headless.onDone(ev); });
+  }
+  function headlessMerge(st, incoming) {
+    let added = 0;
+    for (const c of incoming || []) {
+      const s0 = Math.floor(c.startMs), e0 = Math.floor(c.endMs);
+      const text = String(c.text || '').trim();
+      if (!text || !(e0 > s0)) continue;
+      let lo = 0, hi = st.cues.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (st.cues[mid].startMs < s0) lo = mid + 1; else hi = mid; }
+      const near = (i) => i >= 0 && i < st.cues.length && Math.abs(st.cues[i].startMs - s0) < DEDUPE_MS;
+      if (near(lo) || near(lo - 1)) continue;
+      const cue = { index: 0, startMs: s0, endMs: e0, text, b: 0 };
+      const w = normW(c.w, s0);
+      if (w) cue.w = w;
+      const pieces = phraseOn() ? splitCuePhrases(cue) : [cue];
+      st.cues.splice(lo, 0, ...pieces);
+      added += pieces.length;
+    }
+    return added;
+  }
+  function headlessPersist(titleId, st) {
+    try {
+      window.blobStore?.set(CACHE_PREFIX + titleId, JSON.stringify({
+        sig: st.sig, durMs: st.durMs || 0, cov: st.cov, cardAnchorMs: st.cardAnchorMs ?? null,
+        cues: st.cues.map(serializeCue),
+      }));
+    } catch (_) {}
+  }
+  async function audioPathFor(title) {
+    const ab = title?.attachments?.audiobook;
+    if (!ab) return null;
+    if (ab.uri) {
+      try { const m = await window.Capacitor.Plugins.FileAccess.materializeToCache({ uri: ab.uri }); if (m?.path) return m.path; } catch (_) {}
+    }
+    return ab.cachePath || null;
+  }
+  // opts: { onProgress(fraction), shouldStop() }. Resolves { ok, cancelled? }.
+  async function transcribeTitle(titleId, opts) {
+    const p = plugin();
+    if (!p || !hasNativeTranscribe()) throw new Error('on-device transcription unavailable');
+    const av = await checkAvail();
+    if (!av.supported) throw new Error('on-device transcription unsupported');
+    if (!av.installed) { await p.ensureAssets(); avail.installed = true; }
+    const title = (await window.titleStore.list()).find(x => x.id === titleId);
+    if (!title) throw new Error('title not found');
+    const path = await audioPathFor(title);
+    if (!path) throw new Error('audio file unavailable');
+    if (active) deactivate();
+    headlessListen(p);
+    const sig = await computeSig(path, title.attachments.audiobook.name || '');
+    const obj = await loadCacheObj(titleId);
+    const useObj = obj && sigMatches(obj.sig, sig) && Array.isArray(obj.cues);
+    const st = {
+      sig: (useObj && obj.sig) || sig, durMs: (useObj && obj.durMs) || 0,
+      cov: (useObj && Array.isArray(obj.cov)) ? obj.cov : [],
+      cues: useObj ? normalizeCues(obj.cues) : [], cardAnchorMs: useObj ? obj.cardAnchorMs : null,
+    };
+    st.cov = realCoverage(st.cov, st.cues, st.durMs);
+    const progress = () => {
+      if (!(st.durMs > 0)) return 0;
+      let c = 0;
+      for (const r of st.cov) c += Math.max(0, Math.min(r[1], st.durMs) - r[0]);
+      return Math.min(1, c / st.durMs);
+    };
+    let fails = 0, stallSkips = 0, lastStallAt = -1e9, lastJobFed = 0;
+    const job0Fed = () => lastJobFed;
+    try {
+      while (!(st.durMs > 0 && isFullyCovered(st.cov, st.durMs))) {
+        if (opts?.shouldStop?.()) { headlessPersist(titleId, st); return { ok: false, cancelled: true }; }
+        const startMs = st.durMs > 0 ? nextUncovered(st.cov, 0) : 0;
+        if (st.durMs > 0 && startMs >= st.durMs - 500) break;
+        const jobId = 'h' + (++jobSeq);
+        let lastPersist = Date.now();
+        const result = await new Promise((resolve) => {
+          const job = { startMs, fed: startMs };
+          const covAtStart = st.cov.map(r => r.slice());   // the skip test must not see this job's own range
+          headless = {
+            titleId, jobId, st,
+            onCues: (ev) => {
+              if (Number.isFinite(ev.fedThroughMs)) { job.fed = ev.fedThroughMs; lastJobFed = job.fed; }
+              headlessMerge(st, ev.cues);
+              let maxEnd = startMs;
+              for (const c of (ev.cues || [])) if (c.endMs > maxEnd) maxEnd = c.endMs;
+              st.cov = addRange(st.cov, startMs, Math.max(maxEnd, Math.min(job.fed, st.durMs || job.fed)));
+              opts?.onProgress?.(progress());
+              if (Date.now() - lastPersist > 20000) { lastPersist = Date.now(); headlessPersist(titleId, st); }
+              // Ran into audio transcribed earlier: stop; the loop jumps ahead.
+              const cr = coveringRange(covAtStart, job.fed + 1500);
+              if ((cr && cr[1] - job.fed > SKIP_AHEAD_MIN_MS) || opts?.shouldStop?.()) {
+                try { p.stop({ jobId }); } catch (_) {}
+              }
+            },
+            onDone: (ev) => {
+              if (ev.reason === 'eof') st.cov = addRange(st.cov, startMs, st.durMs > 0 ? eofEnd(ev.fedThroughMs || job.fed, st.durMs) : (ev.fedThroughMs || job.fed));
+              else if (Number.isFinite(ev.fedThroughMs) && ev.fedThroughMs > startMs) st.cov = addRange(st.cov, startMs, ev.fedThroughMs);
+              if (!(st.durMs > 0) && ev.fedThroughMs > 0 && ev.reason === 'eof') st.durMs = Math.floor(ev.fedThroughMs);
+              resolve(ev);
+            },
+          };
+          p.start({ jobId, srcPath: path, startMs, targetMs: startMs, aheadMs: 0, powerUnlimited: true })
+            .then((r) => { if (r?.durationMs > 0 && !(st.durMs > 0)) st.durMs = Math.floor(r.durationMs); })
+            .catch((e) => resolve({ reason: 'error', error: e?.message || String(e) }));
+        });
+        headless = null;
+        st.cues.forEach((c, i) => { c.index = i; });
+        headlessPersist(titleId, st);
+        opts?.onProgress?.(progress());
+        // Ended short of the file's end (read stall, or an EOF that wasn't):
+        // restart from where it got to; the same spot failing twice gets 3 s
+        // skipped (a few lost words beat a book that never finishes).
+        const fed = Number.isFinite(result.fedThroughMs) ? result.fedThroughMs : job0Fed();
+        const stalled = (result.reason === 'eof' && st.durMs > 0 && fed < st.durMs - 60000) ||
+                        (result.reason === 'error' && /stall/i.test(result.error || ''));
+        if (stalled) {
+          if (Math.abs(fed - lastStallAt) < 5000) {
+            st.cov = addRange(st.cov, fed, fed + 3000);
+            if (++stallSkips > 30) throw new Error('audio unreadable near ' + Math.round(fed / 60000) + ' min');
+          }
+          lastStallAt = fed;
+          log('headless: stalled at ' + Math.round(fed / 1000) + 's — restarting there');
+          continue;
+        }
+        if (result.reason === 'error') {
+          if (++fails > MAX_JOB_RETRIES) throw new Error(result.error || 'transcription failed');
+          await new Promise(r => setTimeout(r, 3000));
+        }
+      }
+    } finally { headless = null; }
+    st.cues.forEach((c, i) => { c.index = i; });
+    headlessPersist(titleId, st);
+    await writeFinalSrt(titleId, st.cues);   // also replaces an SRT finalized from a truncated run
+    try { window.aiChunks?.refreshCueMap?.(titleId); } catch (_) {}
+    await buildSyntheticEpub(titleId, { force: true, minCues: 1 });
+    return { ok: true };
+  }
+  function stopHeadless() {
+    const h = headless;
+    if (h) { try { plugin()?.stop({ jobId: h.jobId }); } catch (_) {} }
+  }
+
+  // ── AI clean-up support (ai-cleanup.js) ───────────────────────────────────
+
+  // The title's cue list: the LIVE list while transcribing it (edits must
+  // land there or the next persist overwrites them), else the cache.
+  // `complete`: the whole file is transcribed.
+  async function cuesFor(titleId) {
+    if (active && active.titleId === titleId && !active.timingOnly) {
+      return { cues: active.cues, complete: isFullyCovered(realCoverage(active.cov, active.cues, active.durationMs), active.durationMs), live: true };
+    }
+    const obj = await loadCacheObj(titleId);
+    if (!obj || !Array.isArray(obj.cues)) return null;
+    const cues = normalizeCues(obj.cues);
+    const cov = realCoverage(Array.isArray(obj.cov) ? obj.cov : [], cues, obj.durMs || 0);
+    return { cues, complete: isFullyCovered(cov, obj.durMs || 0), live: false, obj };
+  }
+
+  // Word-timing quads re-pointed from oldT onto newT (character alignment).
+  function remapWText(w, oldT, newT) {
+    if (!w || !w.length) return null;
+    if (oldT === newT) return w;
+    const pairs = _alignChars(Array.from(oldT), Array.from(newT));
+    if (!pairs.length) return null;
+    const wmap = new Array(oldT.length + 1).fill(-1);
+    for (const [i, j] of pairs) wmap[i] = j;
+    wmap[oldT.length] = newT.length;
+    for (let i = oldT.length - 1; i >= 0; i--) if (wmap[i] < 0) wmap[i] = wmap[i + 1];
+    return window.autoAlign?.remapW ? window.autoAlign.remapW(w, wmap, newT.length) : null;
+  }
+
+  // Apply proofread text: edits = [{ startMs, orig, text, pb }]. A cue is
+  // only touched when its text still equals `orig` (re-transcribed since →
+  // skipped; the clean-up picks it up again). Returns cues changed.
+  async function applyCleanEdits(titleId, edits) {
+    const src = await cuesFor(titleId);
+    if (!src || !Array.isArray(edits) || !edits.length) return 0;
+    const byStart = new Map();
+    for (const c of src.cues) byStart.set(c.startMs, c);
+    let n = 0;
+    for (const e of edits) {
+      const c = byStart.get(e.startMs);
+      if (!c || c.text !== e.orig) continue;
+      if (typeof e.text === 'string' && e.text && e.text !== c.text) {
+        if (c.w) { const nw = remapWText(c.w, c.text, e.text); if (nw) c.w = nw; else delete c.w; }
+        c.text = e.text;
+        delete c.ruby;   // offsets belonged to the old text
+      }
+      c.ai = 1;
+      if (e.pb) c.pb = 1; else delete c.pb;
+      n++;
+    }
+    if (!n) return 0;
+    if (src.live && active && active.titleId === titleId) {
+      if (typeof window.abIngestAutoCues === 'function' && titleId === window._activeTitleId) window.abIngestAutoCues(active.cues);
+      schedulePersist(true);
+    } else {
+      src.obj.cues = src.cues.map(serializeCue);
+      await window.blobStore?.set(CACHE_PREFIX + titleId, JSON.stringify(src.obj));
+    }
+    return n;
+  }
+
+  // Furigana from the batch pass: items = [{ startMs, text, ruby:[[off,len,reading]] }].
+  // Replaces each matching cue's furigana (cue text must still equal `text`).
+  async function applyRuby(titleId, items) {
+    const src = await cuesFor(titleId);
+    if (!src || !Array.isArray(items)) return 0;
+    const byStart = new Map();
+    for (const c of src.cues) byStart.set(c.startMs, c);
+    let n = 0;
+    for (const it of items) {
+      const c = byStart.get(it.startMs);
+      if (!c || c.text !== it.text) continue;
+      if (Array.isArray(it.ruby) && it.ruby.length) c.ruby = it.ruby; else delete c.ruby;
+      n++;
+    }
+    if (!n) return 0;
+    if (src.live && active && active.titleId === titleId) schedulePersist(true);
+    else {
+      src.obj.cues = src.cues.map(serializeCue);
+      await window.blobStore?.set(CACHE_PREFIX + titleId, JSON.stringify(src.obj));
+    }
+    return n;
+  }
+
+  // A finished title reads its cues from the generated SRT: rewrite it from
+  // the current cue list (clean-up edits). No-op without an auto SRT.
+  async function rewriteAutoSrt(titleId) {
+    const ts = window.titleStore, fs = window.Capacitor?.Plugins?.Filesystem;
+    if (!ts || !fs) return false;
+    const title = (await ts.list()).find(x => x.id === titleId);
+    const srt = title?.attachments?.srt;
+    if (!srt || !srt.auto) return false;
+    const src = await cuesFor(titleId);
+    if (!src || !src.cues.length) return false;
+    const srtText = cuesToSrt(src.cues);
+    await fs.writeFile({ path: 'autosrt/' + titleId + '.srt', data: srtText, directory: 'DATA', encoding: 'utf8', recursive: true });
+    const sizeBytes = new Blob([srtText]).size;
+    await ts.attach(titleId, 'srt', Object.assign({}, srt, { size: sizeBytes }));
+    try {
+      await window.blobStore?.set('SRT_CUES_V1_' + titleId, JSON.stringify({ sig: srt.name + '|' + sizeBytes, cues: src.cues }));
+    } catch (_) {}
+    try { await window.cueAlignment?.clearAlignment?.(titleId); } catch (_) {}
+    return true;
+  }
+
+  // Undo backup: the cue cache as it was before the first clean-up.
+  const PRECLEAN = '_PRECLEAN';
+  async function backupBeforeClean(titleId) {
+    const bs = window.blobStore;
+    if (!bs || await bs.get(CACHE_PREFIX + titleId + PRECLEAN)) return;
+    const src = await cuesFor(titleId);
+    if (!src) return;
+    const obj = src.live
+      ? { sig: active.sig, durMs: active.durationMs || 0, cov: active.cov, cues: active.cues.map(serializeCue) }
+      : src.obj;
+    await bs.set(CACHE_PREFIX + titleId + PRECLEAN, JSON.stringify(obj));
+  }
+  // Put the original transcript back: every proofread cue whose start time
+  // is in the backup gets its original text/timings; nothing else changes.
+  async function restoreBeforeClean(titleId) {
+    const bs = window.blobStore;
+    const raw = bs && await bs.get(CACHE_PREFIX + titleId + PRECLEAN);
+    if (!raw) return 0;
+    const orig = new Map();
+    for (const c of (JSON.parse(raw).cues || [])) orig.set(c.startMs, c);
+    const src = await cuesFor(titleId);
+    if (!src) return 0;
+    let n = 0;
+    for (const c of src.cues) {
+      if (!c.ai) continue;
+      const o = orig.get(c.startMs);
+      if (o) { c.text = o.text; if (o.w) c.w = o.w; else delete c.w; }
+      delete c.ai; delete c.pb; delete c.ruby;
+      n++;
+    }
+    if (src.live && active && active.titleId === titleId) {
+      if (typeof window.abIngestAutoCues === 'function' && titleId === window._activeTitleId) window.abIngestAutoCues(active.cues);
+      schedulePersist(true);
+    } else {
+      src.obj.cues = src.cues.map(serializeCue);
+      await bs.set(CACHE_PREFIX + titleId, JSON.stringify(src.obj));
+    }
+    try { await bs.remove?.(CACHE_PREFIX + titleId + PRECLEAN); } catch (_) {}
+    return n;
   }
 
   // ── lifecycle ─────────────────────────────────────────────────────────────
@@ -1209,6 +1621,8 @@
       }
       return true;
     }
+    // The batch queue is transcribing another title (one native job at a time).
+    if (headless) { diag('activate: headless transcription running for ' + headless.titleId); return false; }
     deactivate();
     attachListenersOnce();
 
@@ -1329,6 +1743,7 @@
       me.cues = normalizeCues(obj.cues);
       me.cov = Array.isArray(obj.cov) ? obj.cov.filter(r => Array.isArray(r) && r.length === 2) : [];
       me.durationMs = obj.durMs > 0 ? obj.durMs : 0;
+      me.cov = realCoverage(me.cov, me.cues, me.durationMs);
       me.cardAnchorMs = Number.isFinite(obj.cardAnchorMs) ? obj.cardAnchorMs : null;
       // Cached cues from a sentence-grained session re-split to phrases here.
       if (splitLongCues(me)) me.cues.forEach((c, i) => { c.index = i; });
@@ -1357,6 +1772,10 @@
     // Cache-adopted cues from a pre-alignment session are plain ASR text —
     // queue them for the aligner (no-op until prepare() resolves).
     if (me.hasBookText && me.cues.some(c => !c.b)) scheduleSweep();
+    // A generated book built before the transcription reached the end of the
+    // file is missing its tail (rebuilds wait for 60 new cues, and none may
+    // ever arrive). Top it up now.
+    if (synthBook && reachedEnd(me)) buildSyntheticEpub(titleId, { minCues: 50, minGrowth: 1 }).catch(() => {});
 
     // Kick the first job from the best playhead estimate; position events
     // take over from here. getState covers the paused-on-open case.
@@ -1592,7 +2011,16 @@
     stableFp,           // (titleId) → stable AI-map fingerprint or null
     durationFor,        // (titleId) → full audio duration ms (0 unknown)
     enrichWordTimes,    // (titleId, cues) → copy cached word timings onto SRT-parsed cues
-    buildSyntheticEpub, // (titleId) → package the transcription as an EPUB attachment
+    buildSyntheticEpub, // (titleId, {force?}) → package the transcription as an EPUB attachment
+    cuesFor,            // (titleId) → {cues, complete, live} — live list or cache
+    transcribeTitle,    // (titleId, {onProgress, shouldStop}) → whole book, headless; finishes SRT + book
+    stopHeadless,
+    isHeadlessBusy: () => !!headless,
+    applyCleanEdits,    // (titleId, [{startMs, orig, text, pb}]) → cues changed
+    applyRuby,          // (titleId, [{startMs, text, ruby}]) → cues given furigana
+    rewriteAutoSrt,     // (titleId) → regenerate a finished title's auto SRT from its cues
+    backupBeforeClean,  // (titleId) → keep the pre-clean-up transcript for undo
+    restoreBeforeClean, // (titleId) → undo the clean-up; cues restored
   };
 
   // Warm the availability check at boot so the audio-mode gate's await is instant.

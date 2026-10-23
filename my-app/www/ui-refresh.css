@@ -1,0 +1,307 @@
+/* ui-refresh.css — Library + Preferences restyle (2026-10-22).
+ *
+ * Takes its look from the OC8NT plug-in window: slate surfaces, grouped
+ * cards with quiet section titles, label-left / control-right rows divided by
+ * hairlines, flat rectangular buttons, dark input wells, teal switches.
+ * Kadoki's mode colours stay as small dots on the title badges.
+ *
+ * Scoped to #libraryPage, #preferencesModal and the library sheets; loaded
+ * after theme.css. Inline styles in the markup need !important to override.
+ * Remove the <link> in index.html to revert.
+ */
+:root {
+  --ui-bg:      #0d1316;   /* page */
+  --ui-surface: #1a2428;   /* modal / header */
+  --ui-card:    #131b1f;   /* grouped card, list row */
+  --ui-card-hi: #172126;   /* row hover / expanded */
+  --ui-well:    #091013;   /* inputs */
+  --ui-line:    #24333a;   /* hairlines */
+  --ui-edge:    #2b3a41;   /* card borders */
+  --ui-btn:     #303d44;
+  --ui-btn-hi:  #3a4a52;
+  --ui-btn-edge:#3d4c53;
+  --ui-on:      #436b73;   /* switch on, primary button */
+  --ui-on-hi:   #4f7e87;
+  --ui-teal:    #6db3b6;   /* section titles */
+  --ui-text:    #d4dbde;
+  --ui-muted:   #8c989d;
+  --ui-faint:   #5f6b70;
+  --ui-radius:  5px;
+}
+
+/* ── shared controls ─────────────────────────────────────────────────────── */
+
+#libraryPage button, #preferencesModal button, .lib-sheet button {
+  font-family: inherit;
+}
+#preferencesModal button,
+#libraryPage .library-header button,
+#libraryPage .lib-btn,
+#libraryPage .lib-chip,
+#libraryPage .lib-seg button,
+#libraryPage .lib-selbar button {
+  background: var(--ui-btn) !important;
+  color: var(--ui-text) !important;
+  border: 1px solid var(--ui-btn-edge) !important;
+  border-radius: var(--ui-radius) !important;
+  padding: 6px 12px !important;
+  font-size: .8rem !important;
+  font-weight: 500 !important;
+  letter-spacing: 0 !important;
+  box-shadow: none !important;
+  transition: background .12s, border-color .12s;
+  cursor: pointer;
+}
+#preferencesModal button:hover, #libraryPage .library-header button:hover,
+#libraryPage .lib-btn:hover, #libraryPage .lib-chip:hover, #libraryPage .lib-selbar button:hover {
+  background: var(--ui-btn-hi) !important;
+}
+#preferencesModal button:disabled, #libraryPage button:disabled { opacity: .45; }
+
+/* Selected / "on" states read as teal, like OC8NT's active page buttons. */
+#libraryPage .lib-chip[data-on="1"],
+#libraryPage .lib-seg button.on, #libraryPage .lib-seg button[data-on="1"], #libraryPage .lib-seg button.active,
+#libraryPage .lib-btn.on {
+  background: var(--ui-on) !important;
+  border-color: var(--ui-on-hi) !important;
+  color: #eef6f6 !important;
+}
+
+/* Inputs: dark wells. */
+#preferencesModal select,
+#preferencesModal input[type="text"],
+#preferencesModal input[type="number"],
+#preferencesModal input[type="password"],
+#preferencesModal input[type="search"],
+#preferencesModal textarea,
+#libraryPage select, #libraryPage input[type="search"], #libraryPage input[type="text"] {
+  background-color: var(--ui-well) !important;
+  color: var(--ui-text) !important;
+  border: 1px solid var(--ui-line) !important;
+  border-radius: var(--ui-radius) !important;
+  font-family: inherit;
+  font-size: .82rem !important;
+  padding: 6px 10px !important;
+  min-height: 30px;
+  box-shadow: none !important;
+}
+#preferencesModal select, #libraryPage select {
+  -webkit-appearance: none; appearance: none;
+  padding-right: 28px !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238c989d' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 10px center !important;
+}
+#preferencesModal select:focus, #preferencesModal input:focus, #libraryPage input:focus {
+  outline: none; border-color: var(--ui-on-hi) !important;
+}
+
+/* Checkboxes become OC8NT switches. */
+#preferencesModal input[type="checkbox"] {
+  -webkit-appearance: none; appearance: none;
+  width: 36px !important; height: 20px !important; min-width: 36px;
+  margin: 0 !important;
+  border-radius: 10px;
+  background: var(--ui-btn) !important;
+  border: 1px solid var(--ui-btn-edge) !important;
+  position: relative; cursor: pointer; flex: none;
+  transition: background .15s, border-color .15s;
+  accent-color: unset;
+}
+#preferencesModal input[type="checkbox"]::before {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #8e9a9f;
+  transition: transform .15s, background .15s;
+}
+#preferencesModal input[type="checkbox"]:checked {
+  background: var(--ui-on) !important; border-color: var(--ui-on-hi) !important;
+}
+#preferencesModal input[type="checkbox"]:checked::before {
+  transform: translateX(16px); background: #e9f4f4;
+}
+
+/* Sliders: thin well track, small light thumb. */
+#preferencesModal input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  height: 4px; border-radius: 2px;
+  background: var(--ui-well) !important;
+  border: 1px solid var(--ui-line);
+}
+#preferencesModal input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #b9d6d8; border: 1px solid var(--ui-on-hi);
+}
+
+/* ── Preferences ─────────────────────────────────────────────────────────── */
+
+#preferencesModal { background: rgba(4, 6, 7, .78) !important; }
+#preferencesModal .prefs-panel {
+  background: var(--ui-surface) !important;
+  border: 1px solid var(--ui-edge) !important;
+  border-radius: 10px !important;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, .55);
+  color: var(--ui-text);
+}
+#preferencesModal .prefs-panel > div:first-child { border-bottom-color: var(--ui-line) !important; }
+#preferencesModal .prefs-panel h3 {
+  text-transform: none !important; letter-spacing: 0 !important;
+  font-size: 1.1rem !important; font-weight: 600 !important; color: var(--ui-text) !important;
+}
+/* Save = the primary action (teal); Cancel stays a plain flat button. */
+#preferencesModal button[onclick^="savePreferences"] {
+  background: var(--ui-on) !important; border-color: var(--ui-on-hi) !important; color: #f2fafa !important;
+  font-weight: 600 !important;
+}
+#preferencesModal button[onclick^="savePreferences"]:hover { background: var(--ui-on-hi) !important; }
+#prefsScroll { padding: 14px !important; }
+
+/* Each section is a grouped card. */
+#preferencesModal .prefs-section {
+  background: var(--ui-card);
+  border: 1px solid var(--ui-edge) !important;
+  border-radius: 8px;
+  margin: 0 0 10px !important;
+  padding: 0 12px !important;
+}
+#preferencesModal .prefs-section[open] { padding-bottom: 4px !important; }
+#preferencesModal .prefs-heading {
+  color: var(--ui-teal) !important;
+  text-transform: none !important; letter-spacing: 0 !important;
+  font-size: .86rem !important; font-weight: 600 !important;
+  padding: 10px 0 !important; margin: 0 !important;
+}
+#preferencesModal .prefs-heading::before {
+  content: '' !important; display: inline-block; width: 6px; height: 6px; margin: 0 8px 1px 1px;
+  border-right: 1.5px solid var(--ui-muted); border-bottom: 1.5px solid var(--ui-muted);
+  transform: rotate(-45deg); transition: transform .15s;
+}
+#preferencesModal .prefs-section[open] > .prefs-heading::before { transform: rotate(45deg); }
+
+/* Rows: label left, control right, hairline between. */
+#preferencesModal .prefs-row {
+  border-top: 1px solid var(--ui-line);
+  padding: 9px 0 !important; margin: 0 !important;
+  gap: 10px; min-height: 40px; align-items: center;
+}
+#preferencesModal .prefs-row label, #preferencesModal .prefs-row > span {
+  color: var(--ui-text) !important; font-size: .84rem;
+}
+#preferencesModal .prefs-row label span, #preferencesModal .prefs-row > span span {
+  color: var(--ui-muted) !important;
+}
+/* Per-mode boxes (Card / Read / Audio) inside Appearance: an inset card. */
+#preferencesModal .appearance-mode {
+  background: var(--ui-bg) !important;
+  border: 1px solid var(--ui-line) !important;
+  border-radius: 6px !important;
+  padding: 2px 10px 4px !important;
+  margin: 8px 0 !important;
+}
+#preferencesModal .appearance-mode .mode-label {
+  font-size: .78rem !important; letter-spacing: 0 !important; text-transform: none !important;
+  font-weight: 600 !important; padding: 8px 0 6px !important;
+}
+#preferencesModal .appearance-mode .prefs-row:first-of-type { border-top-color: transparent; }
+/* Description paragraphs inside sections. */
+#preferencesModal .prefs-section > div[style*="font-size:.74rem"],
+#preferencesModal .prefs-section > div[style*="font-size: .74rem"] { color: var(--ui-muted) !important; }
+
+/* ── Library ─────────────────────────────────────────────────────────────── */
+
+#libraryPage { background: var(--ui-bg) !important; color: var(--ui-text); }
+#libraryPage .library-header {
+  border-bottom: 1px solid var(--ui-line) !important;
+  background: var(--ui-bg) !important;
+}
+#libraryPage .library-header h2 {
+  text-transform: none !important; letter-spacing: 0 !important;
+  font-size: 1.25rem !important; font-weight: 600 !important; color: var(--ui-text) !important;
+}
+#libraryPage .close-library { padding: 6px 12px !important; font-size: .95rem !important; }
+#libraryPage .library-swipe-hint { color: var(--ui-faint) !important; }
+
+/* Title rows: compact OC8NT browser rows. */
+#libraryPage .deck-item {
+  background: var(--ui-card) !important;
+  border: 1px solid var(--ui-edge) !important;
+  border-radius: 7px !important;
+  margin-bottom: 6px !important;
+}
+#libraryPage .deck-item-content { background: var(--ui-card) !important; padding: 10px 12px !important; }
+#libraryPage .deck-item:hover .deck-item-content { background: var(--ui-card-hi) !important; }
+#libraryPage .deck-item.expanded { border-color: var(--ui-on) !important; }
+#libraryPage .deck-item.expanded .deck-item-content { background: var(--ui-card-hi) !important; }
+#libraryPage .deck-item[data-sel="1"] { border-color: var(--ui-on-hi) !important; }
+#libraryPage .deck-name { font-size: .98rem !important; font-weight: 600 !important; color: var(--ui-text) !important; }
+#libraryPage .deck-item img, #libraryPage .title-avatar {
+  width: 48px !important; height: 48px !important; border-radius: 5px !important;
+}
+#libraryPage .title-avatar { background: var(--ui-bg) !important; border-color: var(--ui-line) !important; font-size: 1.2rem !important; }
+#libraryPage .deck-info { color: var(--ui-muted) !important; font-size: .76rem !important; }
+
+/* Badges: only what the title HAS, as quiet tags with a mode-colour dot. */
+#libraryPage .title-chips { gap: 5px !important; margin: 6px 0 5px !important; }
+#libraryPage .title-chip.off { display: none !important; }
+#libraryPage .title-chip.on {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: rgba(255, 255, 255, .045) !important;
+  border: none !important; border-radius: 3px !important;
+  padding: 2px 7px !important;
+  color: #b7c2c6 !important;
+  font-size: .64rem !important; font-weight: 600 !important; letter-spacing: .04em !important;
+}
+#libraryPage .title-chip.on::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--chip-c, var(--ui-teal));
+}
+
+/* Swipe actions behind a row. */
+#libraryPage .deck-action { border-radius: 0 !important; font-size: .78rem !important; }
+
+/* Folders, series, pinned row. */
+#libraryPage .lib-folder, #libraryPage .lib-series {
+  background: var(--ui-card) !important; border: 1px solid var(--ui-edge) !important; border-radius: 7px !important;
+}
+#libraryPage .lib-folder-new {
+  background: transparent !important; border: 1px dashed var(--ui-edge) !important;
+  border-radius: 7px !important; color: var(--ui-muted) !important;
+}
+#libraryPage .lib-meta, #libraryPage .lib-note { color: var(--ui-muted) !important; }
+#libraryPage .lib-details { border-top: 1px solid var(--ui-line) !important; }
+
+/* Select-mode bar + sheets. */
+#libraryPage .lib-selbar {
+  background: var(--ui-surface) !important; border: 1px solid var(--ui-edge) !important; border-radius: 8px !important;
+}
+#libraryPage .lib-check {
+  border-radius: 4px !important; border: 1px solid var(--ui-btn-edge) !important; background: var(--ui-well) !important;
+}
+#libraryPage .lib-check[data-on="1"] { background: var(--ui-on) !important; border-color: var(--ui-on-hi) !important; color: #fff !important; }
+.lib-sheet-box {
+  background: var(--ui-surface) !important; border: 1px solid var(--ui-edge) !important; border-radius: 10px !important; color: var(--ui-text);
+}
+.lib-sheet-opt {
+  background: var(--ui-card) !important; border: 1px solid var(--ui-edge) !important; border-radius: 6px !important; color: var(--ui-text) !important;
+}
+.lib-sheet-cancel {
+  background: var(--ui-btn) !important; border: 1px solid var(--ui-btn-edge) !important; border-radius: var(--ui-radius) !important; color: var(--ui-text) !important;
+}
+
+/* ── follow-up tweaks ────────────────────────────────────────────────────── */
+#preferencesModal .prefs-row input[type="checkbox"] { margin-left: auto !important; }
+#preferencesModal input[type="number"]::-webkit-inner-spin-button,
+#preferencesModal input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+#preferencesModal .appearance-mode .mode-label { text-transform: capitalize !important; }
+#libraryPage .deck-list { gap: 6px !important; }
+#libraryPage .deck-item { margin-bottom: 0 !important; }
+#libraryPage .lib-more {
+  background: var(--ui-btn) !important; color: var(--ui-text) !important;
+  border: 1px solid var(--ui-btn-edge) !important; border-radius: var(--ui-radius) !important;
+  padding: 6px 12px !important; font-size: .8rem !important; font-weight: 500 !important;
+}
+#libraryPage .lib-more[data-on="1"] { background: var(--ui-on) !important; border-color: var(--ui-on-hi) !important; }
+#libraryPage .lib-seg { border: 1px solid var(--ui-btn-edge) !important; border-radius: var(--ui-radius) !important; gap: 0; }
+#libraryPage .lib-seg button { border: none !important; border-radius: 0 !important; }
+#libraryPage .lib-seg button + button { border-left: 1px solid var(--ui-btn-edge) !important; }

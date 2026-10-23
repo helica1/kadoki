@@ -38,6 +38,26 @@
   // Strict post-pause tracking for the read timer (see the tick below).
   let _readWasPlaying = false;
   let _readPlayheadStopAt = 0;
+  // READ = PLAYHEAD (user, 2026-10-22; supersedes the post-pause rule below
+  // for titles with an audiobook): in read mode the timer runs exactly while
+  // the playhead moves. Position events advancing start it; no advance for
+  // READ_PH_GAP_MS stops it, credited up to the last advance. Scrolling and
+  // lookups neither start nor extend it. Driven by the position events
+  // themselves, not the _bgPlaying mirror (which can stick).
+  const READ_PH_GAP_MS = 2000;
+  let _readPhLastPos = -1, _readPhLastAdvTs = 0;
+  function readTiedToPlayhead() {
+    return !!window._activeTitleHasAudio && currentMode() === 'read';
+  }
+  function readPlayheadSample(posMs, tsIn) {
+    if (!Number.isFinite(posMs) || posMs < 0) return;
+    const prev = _readPhLastPos;
+    _readPhLastPos = posMs;
+    if (prev < 0 || !(posMs > prev) || posMs - prev > 5000) return;   // first sample, paused, or a seek
+    _readPhLastAdvTs = Date.now();
+    if (readTiedToPlayhead() && !timers.read.runningSince && !_shouldIgnoreBump()) startMode('read');
+    if (timers.read.runningSince) timers.read.lastInteraction = _readPhLastAdvTs;
+  }
   // AI-material pages (Characters / Timeline / Scenes overlays) accrue time
   // while open + screen-on; 30 s of no interaction stops the timer.
   const TIMEOUT_AI_SEC = 30;
@@ -495,6 +515,7 @@
   // no anki round-trip is in flight (see _shouldIgnoreBump).
   function bumpRead() {
     if (_shouldIgnoreBump()) return;
+    if (readTiedToPlayhead()) return;   // the playhead alone drives read time for audiobook titles
     const t = timers.read;
     t.lastInteraction = Date.now();
     if (!t.runningSince) startMode('read');
@@ -692,7 +713,11 @@
     // stops with NO interaction since, the read timer stops. An interaction
     // after the pause means silent reading — the normal 120 s rule applies;
     // a later bumpRead restarts the timer as always.
-    if (timers.read.runningSince) {
+    if (timers.read.runningSince && readTiedToPlayhead()) {
+      if (now - _readPhLastAdvTs > READ_PH_GAP_MS) {
+        stopMode('read', { endTs: Math.max(timers.read.runningSince, _readPhLastAdvTs || timers.read.runningSince) });
+      }
+    } else if (timers.read.runningSince) {
       const idleSec = (now - timers.read.lastInteraction) / 1000;
       const audioPlaying = !!window._bgPlaying;
       if (audioPlaying) { _readWasPlaying = true; _readPlayheadStopAt = 0; }
@@ -791,6 +816,7 @@
       // collapsing it into "now".
       bg.addListener('position', (d) => {
         try { audioSample(Number(d?.positionMs), Number(d?.ts)); } catch (_) {}
+        try { readPlayheadSample(Number(d?.positionMs), Number(d?.ts)); } catch (_) {}
       });
     } catch (e) {}
   }

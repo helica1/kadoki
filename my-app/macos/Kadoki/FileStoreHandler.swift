@@ -22,6 +22,10 @@ final class FileStoreHandler: NSObject, WKScriptMessageHandlerWithReply {
     private(set) var grantedPaths: Set<String>
 
     let mediaRoot: URL
+    /// The user-visible folder behind Filesystem 'DOCUMENTS' (~/Documents/Kadoki):
+    /// exported books land in Books/ there, like Files › Kadoki › Books on iOS.
+    let documentsRoot: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Kadoki", isDirectory: true)
 
     override init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -36,7 +40,7 @@ final class FileStoreHandler: NSObject, WKScriptMessageHandlerWithReply {
     /// The scheme handler consults this before serving an absolute path.
     func isPathAllowed(_ path: String) -> Bool {
         let p = (path as NSString).standardizingPath
-        if p.hasPrefix(mediaRoot.path) { return true }
+        if p.hasPrefix(mediaRoot.path) || p.hasPrefix(documentsRoot.path + "/") { return true }
         return grantedPaths.contains { p == $0 || p.hasPrefix($0 + "/") }
     }
 
@@ -62,6 +66,7 @@ final class FileStoreHandler: NSObject, WKScriptMessageHandlerWithReply {
         case "readChunk":  readChunk(req, replyHandler)
         case "writeChunk": writeChunk(req, replyHandler)
         case "mediaRoot":  replyHandler(["path": mediaRoot.path], nil)
+        case "documentsRoot": replyHandler(["path": documentsRoot.path], nil)
         case "granted":    replyHandler(["paths": Array(grantedPaths)], nil)
         default:           replyHandler(nil, "unknown op \(op)")
         }
@@ -175,9 +180,11 @@ final class FileStoreHandler: NSObject, WKScriptMessageHandlerWithReply {
               let b64 = req["dataBase64"] as? String,
               let data = Data(base64Encoded: b64) else { reply(nil, "writeChunk: bad args"); return }
         let append = (req["append"] as? Bool) ?? false
-        // Writes only land inside the app's media root.
+        // Writes only land inside the app's media root or ~/Documents/Kadoki.
         let std = (path as NSString).standardizingPath
-        guard std.hasPrefix(mediaRoot.path) else { reply(nil, "writeChunk: outside media root"); return }
+        guard std.hasPrefix(mediaRoot.path) || std.hasPrefix(documentsRoot.path + "/") else {
+            reply(nil, "writeChunk: outside media root"); return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let url = URL(fileURLWithPath: std)

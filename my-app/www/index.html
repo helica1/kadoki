@@ -850,6 +850,7 @@ body.dimmed .card-image {
 }
 </style>
 <link rel="stylesheet" href="theme.css">
+<link rel="stylesheet" href="ui-refresh.css">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css"><!-- place-name map popup (ai-places-ui.js); vendored, no CDN dependency -->
 <script src="ai-perf.js"></script><!-- must load FIRST: wraps setInterval/setTimeout for the perf probe -->
 <script src="i18n-strings.js"></script><!-- UI-chrome string table (before i18n.js) -->
@@ -1162,10 +1163,20 @@ body.dimmed .card-image {
               </span>
             </label>
             <select id="aiQualitySelect">
-              <option value="economy">エコノミー (Haiku) — ~$0.5/book</option>
-              <option value="balanced">バランス (Sonnet) — ~$2–3/book</option>
-              <option value="high">高品質 (Opus) — ~$6–8/book</option>
+              <option value="economy">エコノミー (Haiku) — ~$0.1/book</option>
+              <option value="balanced">バランス (Sonnet) — ~$2/book</option>
+              <option value="high">高品質 (Opus) — ~$5/book</option>
             </select>
+          </div>
+          <!-- Model per tier: newest of each family from the Anthropic models
+               list (checked daily), or pinned. Rendered by preferences.js. -->
+          <div class="prefs-row ai-anthropic-only" style="flex-direction:column;align-items:stretch;gap:6px;">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="flex:1;line-height:1.35;" data-i18n-html="ph.ai_models">Models<span style="display:block;font-size:.7em;color:var(--text-muted,#888);margin-top:2px;">Each quality level uses the newest model of its family automatically. Pick one to stay on it.</span></span>
+              <button type="button" id="aiModelsCheck" data-i18n="ph.ai_models_check" style="background:transparent;border:1px solid #3a3450;border-radius:8px;color:#b9a9e0;font-size:.74rem;padding:6px 12px;cursor:pointer;">Check now</button>
+            </div>
+            <div id="aiModelsRows" style="display:flex;flex-direction:column;gap:6px;"></div>
+            <div id="aiModelsStatus" style="font-size:.7rem;color:var(--text-muted,#888);"></div>
           </div>
           <div class="prefs-row" style="align-items:center;">
             <label for="aiSplitTargetInput" style="flex:1;line-height:1.35;" data-i18n-html="ph.ai_split">Split long chapters over
@@ -2135,6 +2146,9 @@ body.dimmed .card-image {
   <!-- visionOS video Titles: native video plane rect sync + AI-3D toggle
        (window.kadokiVideoMode). Inert everywhere else; see video-mode.js. -->
   <script src="video-mode.js"></script>
+  <script src="duo-reading.js"></script>
+  <script src="ai-cleanup.js"></script>
+  <script src="ai-batch.js"></script>
 <!-- visionOS: pop Timeline & Scenes / chapter summary / Characters out into
      their own system-placeable windows (second webview, same origin). No-op
      everywhere else — kadokiPanel.available() gates every affordance. -->
@@ -2265,9 +2279,13 @@ body.dimmed .card-image {
       // [[modal-pause]] in stats.js: opening Library shouldn't credit
       // session time. Resume on dismiss if it was running.
       if (window.stats?.pauseForModal) window.stats.pauseForModal();
-      await populateLibrary();
-      try { Promise.resolve(window.libraryBlurb?.runQueue?.()).catch(() => {}).finally(() => { try { window.libraryMeta?.ensureAll?.(); } catch (_) {} }); } catch (_) {}
+      // Show the page first: the list fills in as soon as it is built (the
+      // previous render stays up meanwhile) instead of the tap doing nothing.
       document.getElementById('libraryPage').classList.add('visible');
+      const _t0 = performance.now();
+      await populateLibrary();
+      debugLog('[lib] populated in ' + Math.round(performance.now() - _t0) + ' ms');
+      try { Promise.resolve(window.libraryBlurb?.runQueue?.()).catch(() => {}).finally(() => { try { window.libraryMeta?.ensureAll?.(); } catch (_) {} }); } catch (_) {}
     }
 
     function closeLibrary() {
@@ -2287,7 +2305,7 @@ body.dimmed .card-image {
             audio: 'var(--accent-audio)', srt: 'var(--accent-warn,#ffd54a)' }[kind] || 'var(--accent-cyan)'
         : null;
       return on
-        ? `<span class="title-chip on" style="color:${colorVar};">${label}</span>`
+        ? `<span class="title-chip on" style="color:${colorVar};--chip-c:${colorVar};">${label}</span>`
         : `<span class="title-chip off">${label}</span>`;
     }
 
@@ -2358,7 +2376,14 @@ body.dimmed .card-image {
       deckList.innerHTML = '';
       // ---- Browser toolbar: view (list / gallery), filter, sort ----
       const blurbs = {};
-      try { if (window.libraryBlurb) for (const t of here) blurbs[t.id] = await window.libraryBlurb.get(t.id); } catch (_) {}
+      // All summaries at once: one IndexedDB read per title, awaited one by one,
+      // was most of the first-open delay (later opens hit libraryBlurb's cache).
+      try {
+        if (window.libraryBlurb) {
+          const got = await Promise.all(here.map(t => window.libraryBlurb.get(t.id).catch(() => null)));
+          here.forEach((t, i) => { blurbs[t.id] = got[i]; });
+        }
+      } catch (_) {}
       deckList.appendChild(buildLibToolbar(all.length));
       if (cur) deckList.appendChild(buildFolderCrumb(cur, here.length));
       else deckList.appendChild(buildFolderRows(folders));
@@ -2608,7 +2633,7 @@ body.dimmed .card-image {
       const bar = list.querySelector('.lib-selbar');
       if (bar) {
         bar.querySelector('.n').textContent = window.i18n?.fmt ? window.i18n.fmt('lib.n_selected', { n: _libSel.size }, _libSel.size + ' selected') : (_libSel.size + ' selected');
-        bar.querySelector('.go').disabled = !_libSel.size;
+        bar.querySelectorAll('.go').forEach(b => { b.disabled = !_libSel.size; });
       }
     }
     function buildSelBar(visible) {
@@ -2625,6 +2650,12 @@ body.dimmed .card-image {
       const go = document.createElement('button'); go.className = 'go'; go.textContent = LT('lib.move_to', 'Move to…');
       go.addEventListener('click', () => { if (_libSel && _libSel.size) { try { window.kHaptic?.(); } catch (_) {} openMoveSheet([..._libSel]); } });
       bar.appendChild(n); bar.appendChild(allBtn); bar.appendChild(go);
+      // Mac: queue the selection for overnight transcription + proofreading.
+      if (window.aiBatch?.available?.()) {
+        const bq = document.createElement('button'); bq.className = 'go bq'; bq.textContent = '一括校正…';
+        bq.addEventListener('click', () => { if (_libSel && _libSel.size) window.aiBatch.confirmAndEnqueue([..._libSel]); });
+        bar.appendChild(bq);
+      }
       return bar;
     }
 
@@ -2897,6 +2928,15 @@ body.dimmed .card-image {
         await populateLibrary();
       } catch (_) {}
     }
+    async function toggleReadingBook(title) {
+      try {
+        const cur = await window.titleStore.get(title.id);
+        const on = !(cur && cur.readingBook);
+        await window.duoReading.setReadingBook(title.id, on);
+        window.showToast?.(on ? LT('lib.reading_set', 'Unfolding while listening opens this book') : LT('lib.reading_cleared', 'No longer the reading book'), 1800);
+        await populateLibrary();
+      } catch (_) {}
+    }
     function actionsRow(title, blurb, refresh, withMove) {
       const wrap = document.createElement('div');
       const row1 = document.createElement('div'); row1.className = 'lib-actions';
@@ -2912,6 +2952,9 @@ body.dimmed .card-image {
       };
       row2.appendChild(mk(title.pinnedAt ? ('✦ ' + LT('lib.unpin', 'Unpin')) : ('✦ ' + LT('lib.pin', 'Pin')), () => togglePinTitle(title), !!title.pinnedAt));
       row2.appendChild(mk((title.wantToRead ? '♥ ' : '♡ ') + LT('lib.want', 'Want to read'), () => toggleWantToRead(title), !!title.wantToRead));
+      if (window.KADOKI_DUO && window.duoReading && title.attachments?.epub) {
+        row2.appendChild(mk((title.readingBook ? '★ ' : '☆ ') + LT('lib.reading_book', 'Reading book'), () => toggleReadingBook(title), !!title.readingBook));
+      }
       if (withMove) row2.appendChild(mk(LT('lib.move', 'Move'), () => openMoveSheet([title.id])));
       if (title.attachments?.epub && window.libraryBlurb && window.ai?.isEnabled?.()) {
         row2.appendChild(mk(blurb ? LT('lib.new_summary', 'New summary') : LT('lib.summarize', 'Summarize'), async (b) => {

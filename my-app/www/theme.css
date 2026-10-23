@@ -519,7 +519,7 @@ body.chrome-hidden #abRepeatBar * {
    (index.html) marks it as a navigation action, same convention as
    tl.view_scenes/tl.next_scene in Timeline & Scenes.
    #abOutputBtn (system audio-output sheet, iOS) shares the pill look. */
-#abSummaryBtn, #abOutputBtn {
+#abSummaryBtn, #abOutputBtn, #abCleanBtn {
   position: relative;
   pointer-events: auto; display: inline-flex; align-items: center; gap: 4px;
   background: rgba(183, 148, 246, 0.10); color: #cfc0f5;
@@ -532,6 +532,10 @@ body.chrome-hidden #abRepeatBar * {
    window.aiTimeline.currentChapterStatus and toggles this class) — a small
    dot badge plus a warmer border/text so it reads as "there's something new"
    even with chrome dimmed, alongside the one-time toast on the same event. */
+/* AI clean-up (ai-cleanup.js): pulses while running, quiet once done. */
+#abCleanBtn { font-variant-numeric: tabular-nums; }
+#abCleanBtn.running { animation: kaiPulse 2.8s ease-in-out infinite; }
+#abCleanBtn.done { opacity: .6; font-weight: 500; }
 #abSummaryBtn.has-new {
   background: rgba(255, 158, 100, 0.14); color: #ffd9b8;
   border-color: rgba(255, 158, 100, 0.55);

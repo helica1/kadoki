@@ -43,10 +43,10 @@
     schema: {
       type: 'object',
       properties: {
-        ja: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 4 },
-        en: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 4 },
-        difficulty: { type: 'integer', minimum: 1, maximum: 5 },
-        difficulty_score: { type: 'number', minimum: 1, maximum: 5 },
+        ja: { type: 'array', items: { type: 'string' } },   // 3-4 paragraphs: asked in the prompt (the API's schema allows minItems 0/1 only)
+        en: { type: 'array', items: { type: 'string' } },
+        difficulty: { type: 'integer' },          // 1-5, clamped after parsing
+        difficulty_score: { type: 'number' },
         difficulty_ja: { type: 'string' },
         difficulty_en: { type: 'string' },
         tags_ja: { type: 'array', items: { type: 'string' } },
@@ -65,6 +65,15 @@
     mem.set(titleId, b);
     return b;
   }
+  // Warm the cache shortly after launch so the first Library open doesn't wait
+  // on one IndexedDB read per title.
+  setTimeout(async () => {
+    try {
+      const list = (await window.titleStore?.list?.()) || [];
+      await Promise.all(list.map(t => get(t.id).catch(() => null)));
+    } catch (_) {}
+  }, 8000);
+
   function parseJson(text) {
     const s = String(text || '');
     try { return JSON.parse(s); } catch (_) {}

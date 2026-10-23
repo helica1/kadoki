@@ -78,6 +78,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         ucc.addScriptMessageHandler(FileStoreHandler.shared, contentWorld: .page, name: "kadokiFile")
         // AVFoundation clip slicing / waveform decoding (AudioSlicer port).
         ucc.addScriptMessageHandler(AudioSlicerHandler(), contentWorld: .page, name: "kadokiSlicer")
+        // Native HTTPS to api.anthropic.com (Message Batches reject browser CORS).
+        ucc.addScriptMessageHandler(AnthropicHttpHandler(), contentWorld: .page, name: "kadokiHttp")
+        // Native audiobook playback (AVPlayer, precise VBR timing) behind the
+        // shim's BackgroundAudio.
+        ucc.addScriptMessageHandler(AudioPlayerHandler(), contentWorld: .page, name: "kadokiAudio")
         // On-device SpeechAnalyzer transcription (AutoTranscribe port).
         ucc.addScriptMessageHandler(AutoTranscribeHandler(), contentWorld: .page, name: "kadokiTranscribe")
         // Apple on-device Translation for the send-to-Anki dialog (macOS 15+).
