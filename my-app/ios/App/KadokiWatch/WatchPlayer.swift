@@ -35,6 +35,12 @@ final class WatchPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     private var player: AVAudioPlayer?
     private var tick: Timer?
+    // Click-free transport: a pause ramps out over fadeSec first. fadeGen
+    // cancels a pending faded pause when play (or a title load) races in.
+    private static let fadeSec: TimeInterval = 0.02
+    private var fadeGen = 0
+    private var pausePending = false
+    private var audible: Bool { (player?.isPlaying ?? false) && !pausePending }
     private var lastPersist = Date.distantPast
     private var listenAccSec: Double = 0
     private var lastTickDate: Date?
@@ -55,7 +61,14 @@ final class WatchPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
         flushListenDelta()
         persistNow()                                            // previous title's spot
-        player?.stop()
+        fadeGen += 1; pausePending = false
+        if let old = player {
+            old.delegate = nil
+            if old.isPlaying {
+                old.setVolume(0, fadeDuration: Self.fadeSec)     // click-free switch
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeSec) { old.stop() }
+            } else { old.stop() }
+        }
         do {
             let p = try AVAudioPlayer(contentsOf: url)
             p.delegate = self
@@ -116,14 +129,25 @@ final class WatchPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     func togglePlay() {
         guard let p = player else { return }
-        if p.isPlaying {
-            p.pause()
+        if audible {
+            // Ramp out, THEN pause and checkpoint (the saved spot is where the
+            // sound actually stopped).
+            fadeGen += 1
+            let gen = fadeGen
+            pausePending = true
             isPlaying = false
-            persistNow()
-            flushListenDelta()
-            stopTick()
-            updateNowPlaying()
-            updateWidgetSnapshot(reload: true)
+            p.setVolume(0, fadeDuration: Self.fadeSec)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeSec) { [weak self] in
+                guard let self, self.fadeGen == gen, self.player === p else { return }
+                self.pausePending = false
+                p.pause()
+                p.volume = 1
+                self.persistNow()
+                self.flushListenDelta()
+                self.stopTick()
+                self.updateNowPlaying()
+                self.updateWidgetSnapshot(reload: true)
+            }
             return
         }
         let session = AVAudioSession.sharedInstance()
@@ -138,7 +162,11 @@ final class WatchPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 guard let self else { return }
                 if let err { self.statusText = "Route: \(err.localizedDescription)"; return }
                 guard ok, let p = self.player else { return }
-                p.play()
+                // Fade in (from the current level if a pause was still ramping out).
+                self.fadeGen += 1
+                self.pausePending = false
+                if !p.isPlaying { p.volume = 0; p.play() }
+                p.setVolume(1, fadeDuration: Self.fadeSec)
                 self.isPlaying = true
                 self.statusText = ""
                 self.lastTickDate = Date()
@@ -253,11 +281,11 @@ final class WatchPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
         commandsWired = true
         let c = MPRemoteCommandCenter.shared()
         c.playCommand.addTarget { [weak self] _ in
-            guard let self, let p = self.player, !p.isPlaying else { return .commandFailed }
+            guard let self, self.player != nil, !self.audible else { return .commandFailed }
             self.togglePlay(); return .success
         }
         c.pauseCommand.addTarget { [weak self] _ in
-            guard let self, let p = self.player, p.isPlaying else { return .commandFailed }
+            guard let self, self.audible else { return .commandFailed }
             self.togglePlay(); return .success
         }
         c.skipForwardCommand.preferredIntervals = [15]

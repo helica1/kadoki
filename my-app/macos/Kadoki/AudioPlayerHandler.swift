@@ -21,6 +21,11 @@ final class AudioPlayerHandler: NSObject, WKScriptMessageHandlerWithReply, AVAud
     private var rate: Float = 1.0
     private var timer: Timer?
     private var awakeToken: NSObjectProtocol?
+    // Click-free transport (rule: audio never starts or stops with a click):
+    // every start ramps in, every pause/stop/jump ramps out first. fadeGen
+    // cancels a pending ramp-then-act when newer transport races in.
+    private static let fadeSec: TimeInterval = 0.02
+    private var fadeGen = 0
 
     private static func nowMs() -> Double { Date().timeIntervalSince1970 * 1000 }
     private var positionMs: Double { (player?.currentTime ?? 0) * 1000 }
@@ -48,6 +53,27 @@ final class AudioPlayerHandler: NSObject, WKScriptMessageHandlerWithReply, AVAud
     }
     private func stopTimer() { timer?.invalidate(); timer = nil }
 
+    /// Start (or keep) `p` playing with a fade-in — from the current level when
+    /// a pending fade-out is cancelled mid-ramp.
+    private func fadeInPlay(_ p: AVAudioPlayer) {
+        fadeGen += 1
+        if !p.isPlaying { p.volume = 0; p.play() }
+        p.setVolume(1, fadeDuration: Self.fadeSec)
+    }
+
+    /// Ramp the current player out, then run `then` with it (pause / jump).
+    /// Runs `then` at once when nothing is audible.
+    private func fadeOut(then: @escaping (AVAudioPlayer?) -> Void) {
+        fadeGen += 1
+        let gen = fadeGen
+        guard let p = player, p.isPlaying else { then(player); return }
+        p.setVolume(0, fadeDuration: Self.fadeSec)
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeSec) { [weak self] in
+            guard let self = self, self.fadeGen == gen, self.player === p else { return }
+            then(p)
+        }
+    }
+
     func userContentController(_ userContentController: WKUserContentController,
                                didReceive message: WKScriptMessage,
                                replyHandler: @escaping (Any?, String?) -> Void) {
@@ -62,14 +88,32 @@ final class AudioPlayerHandler: NSObject, WKScriptMessageHandlerWithReply, AVAud
         case "play":
             play(req, reply)
         case "pause", "stop":
-            player?.pause(); stopTimer(); emitState(); reply([:], nil)
+            // Replies at once (like iOS); the state event follows the ramp.
+            fadeOut { [weak self] p in
+                p?.pause(); p?.volume = 1
+                self?.stopTimer(); self?.emitState()
+            }
+            reply([:], nil)
         case "resume":
-            player?.play(); startTimer(); emitState(); reply([:], nil)
+            if let p = player { fadeInPlay(p) }
+            startTimer(); emitState(); reply([:], nil)
         case "seek":
             if let p = player {
                 let ms = max(0, (req["ms"] as? Double) ?? 0)
-                p.currentTime = min(p.duration, ms / 1000)
-                emitPosition()
+                let target = min(p.duration, ms / 1000)
+                // fadeMs > 0 while playing (cue swipes): dip, jump while silent,
+                // ramp back. Otherwise jump at once (scrub-bar precision).
+                if ((req["fadeMs"] as? Double) ?? 0) > 0 && p.isPlaying {
+                    fadeOut { [weak self] q in
+                        guard let self = self, let q = q else { return }
+                        q.currentTime = target
+                        self.fadeInPlay(q)
+                        self.emitPosition()
+                    }
+                } else {
+                    p.currentTime = target
+                    emitPosition()
+                }
             }
             reply([:], nil)
         case "setRate":
@@ -101,20 +145,36 @@ final class AudioPlayerHandler: NSObject, WKScriptMessageHandlerWithReply, AVAud
         guard FileManager.default.fileExists(atPath: p) else { reply(nil, "file not found"); return }
         rate = Float((req["rate"] as? Double) ?? 1.0)
         let startMs = req["startMs"] as? Double
-        let begin = { [weak self] (pl: AVAudioPlayer) in
+        let begin = { [weak self] (pl: AVAudioPlayer, done: ((Any?, String?) -> Void)?) in
             guard let self = self else { return }
             pl.rate = self.rate
             if let s = startMs { pl.currentTime = max(0, min(pl.duration, s / 1000)) }
-            pl.play()
+            self.fadeInPlay(pl)
             self.startTimer()
             self.emitState()
-            reply([:], nil)
+            done?([:], nil)
         }
-        if path == p, let pl = player { begin(pl); return }
+        if path == p, let pl = player {
+            // Same file, still playing (card replay): ramp out before the jump.
+            // Reply now — a newer op may supersede the deferred jump.
+            if pl.isPlaying, startMs != nil {
+                reply([:], nil)
+                fadeOut { q in if let q = q { begin(q, nil) } }
+            } else { begin(pl, reply) }
+            return
+        }
 
         // Opening a long VBR MP3 scans it for its packet table; do it off the
-        // main thread.
-        player?.stop(); stopTimer()
+        // main thread. The outgoing player ramps out instead of cutting.
+        fadeGen += 1
+        if let old = player {
+            old.delegate = nil
+            if old.isPlaying {
+                old.setVolume(0, fadeDuration: Self.fadeSec)
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.fadeSec) { old.stop() }
+            } else { old.stop() }
+        }
+        stopTimer()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let pl = try AVAudioPlayer(contentsOf: URL(fileURLWithPath: p))
@@ -125,7 +185,7 @@ final class AudioPlayerHandler: NSObject, WKScriptMessageHandlerWithReply, AVAud
                     pl.delegate = self
                     self.player = pl
                     self.path = p
-                    begin(pl)
+                    begin(pl, reply)
                 }
             } catch {
                 reply(nil, "could not open audio: \(error.localizedDescription)")

@@ -611,6 +611,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     /// right after open (pause) would be undone by the still-pending
     /// asyncAfter pause. (Android's cancelFade already handles this.)
     private var fadeGeneration = 0
+    /// True while a faded pause waits out its ramp (the player still reports
+    /// isPlaying). A toggle / play that lands then means "keep playing", and a
+    /// faded seek skips its own dip (the pause already owns the volume). Any
+    /// later fadeGeneration bump (play, resume, scrub, engine switch) clears it.
+    private var pauseFadeGen = -1
+    private var pauseFadePending: Bool { pauseFadeGen == fadeGeneration }
     /// Bumped by EVERY seek (JS seek, lock-screen scrub, scrub end, chapter skip /
     /// repeat, a new play). A faded seek lands its target only if nothing newer
     /// superseded it, so an older delayed callback never overwrites a newer spot.
@@ -799,7 +805,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             guard let p = self?.player else { return .commandFailed }
             self?.noteUserTransport()
             self?.ensureSessionActive()
-            p.play()
+            self?.startFaded(p)
             self?.startPositionTimer()
             self?.emitState(playing: true)
             self?.postLiveTick(ms: Int(p.currentTime * 1000), playing: true)
@@ -813,14 +819,19 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return .success
         }
         cmd.pauseCommand.addTarget { [weak self] _ in
-            self?.noteUserTransport()
-            let ms = Int((self?.player?.currentTime ?? 0) * 1000)
-            self?.player?.pause()
-            self?.stopPositionTimer()
-            self?.saveLastPositionNow()   // durable: a paused suspended app can be jetsam-killed with no further save
-            self?.emitState(playing: false)
-            self?.postLiveTick(ms: ms, playing: false)
-            self?.updateNowPlaying()
+            guard let self = self else { return .success }
+            self.noteUserTransport()
+            let finish: () -> Void = { [weak self] in
+                guard let self = self else { return }
+                let ms = Int((self.player?.currentTime ?? 0) * 1000)
+                self.stopPositionTimer()
+                self.saveLastPositionNow()   // durable: a paused suspended app can be jetsam-killed with no further save
+                self.emitState(playing: false)
+                self.postLiveTick(ms: ms, playing: false)
+                self.updateNowPlaying()
+            }
+            // Faded like JS pause(); the saves/emits run once the ramp lands.
+            if let p = self.player { self.pauseFaded(p, after: finish) } else { finish() }
             return .success
         }
         cmd.togglePlayPauseCommand.addTarget { [weak self] _ in
@@ -902,20 +913,81 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    // MARK: - Click-free transport helpers
+    //
+    // Rule: audio never starts or stops with a click. Every start ramps up from
+    // silence and every stop ramps down first (defaultFadeMs). Position is never
+    // touched here: a faded pause reads the playhead for its saves/emits AFTER
+    // the ramp, exactly where the audio actually stopped.
+
+    /// Start (or keep) `p` playing with a fade-in. A start that lands during a
+    /// pending faded pause ramps back up from the current level instead of
+    /// snapping to 0, and supersedes that pause.
+    private func startFaded(_ p: KadokiPlayback, fadeMs: Double = BackgroundAudioPlugin.defaultFadeMs) {
+        fadeGeneration += 1
+        if fadeMs <= 0 { p.volume = 1.0; p.play(); return }
+        if !p.isPlaying { p.volume = 0.0; p.play() }
+        p.setVolume(1.0, fadeDuration: fadeMs / 1000.0)
+    }
+
+    /// Fade `p` out, THEN pause it, then run `after` (state emits + durable save,
+    /// which read the playhead where the sound actually stopped). A play /
+    /// resume / stop / scrub that races in bumps fadeGeneration and cancels it.
+    private func pauseFaded(_ p: KadokiPlayback, fadeMs: Double = BackgroundAudioPlugin.defaultFadeMs,
+                            after: @escaping () -> Void) {
+        fadeGeneration += 1
+        let gen = fadeGeneration
+        guard fadeMs > 0, p.isPlaying else {
+            p.volume = 0.0; p.pause(); p.volume = 1.0
+            after()
+            return
+        }
+        pauseFadeGen = gen
+        p.setVolume(0.0, fadeDuration: fadeMs / 1000.0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + fadeMs / 1000.0) { [weak self] in
+            guard let self = self, self.fadeGeneration == gen else { return }
+            self.pauseFadeGen = -1
+            p.pause()
+            p.volume = 1.0 // restore for next play
+            after()
+        }
+    }
+
+    /// Retire a player that is being replaced or stopped: detach its end/error
+    /// callbacks (it is no longer the plugin's player), ramp it to silence, then
+    /// stop it. The caller has already swapped `player`, so every position/state
+    /// read sees the new state at once; only the sound lingers for the ramp.
+    private func retireFaded(_ old: KadokiPlayback, fadeMs: Double = BackgroundAudioPlugin.defaultFadeMs,
+                             completion: (() -> Void)? = nil) {
+        if let a = old as? AVAudioPlayer { a.delegate = nil }
+        if let e = old as? KadokiReadEngine { e.onEnded = nil; e.onError = nil }
+        if let v = old as? KadokiVideoPlayer { v.onEnded = nil; v.onError = nil }
+        guard fadeMs > 0, old.isPlaying else { old.stop(); completion?(); return }
+        old.setVolume(0.0, fadeDuration: fadeMs / 1000.0)
+        DispatchQueue.main.asyncAfter(deadline: .now() + fadeMs / 1000.0 + 0.005) {
+            old.stop()
+            completion?()
+        }
+    }
+
     // Shared by the lock-screen toggle button and the watch's tap-to-toggle
     // (Phase B) — both are "remote, no context on current state" triggers.
     private func performTogglePlayPause() {
         guard let p = player else { NSLog("[BackgroundAudio] performTogglePlayPause: no active player"); return }
         noteUserTransport()
-        if p.isPlaying {
-            p.pause()
-            stopPositionTimer()
-            saveLastPositionNow()
-            emitState(playing: false)
-            postLiveTick(ms: Int(p.currentTime * 1000), playing: false)
+        if p.isPlaying && !pauseFadePending {
+            pauseFaded(p) { [weak self] in
+                guard let self = self else { return }
+                self.stopPositionTimer()
+                self.saveLastPositionNow()
+                self.emitState(playing: false)
+                self.postLiveTick(ms: Int(p.currentTime * 1000), playing: false)
+                self.updateNowPlaying()
+            }
+            return
         } else {
             ensureSessionActive()
-            p.play()
+            startFaded(p)
             startPositionTimer()
             emitState(playing: true)
             postLiveTick(ms: Int(p.currentTime * 1000), playing: true)
@@ -953,7 +1025,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // with a video track. Same events, fades, floors and timer as audio.
         if KadokiVideoPlayer.isVideoUrl(url) {
             stopPositionTimer()
-            player?.stop()
+            if let old = player { retireFaded(old) }   // fade the outgoing voice out (no click on a switch)
             player = nil
 
             let v = KadokiVideoPlayer(url: url)
@@ -989,7 +1061,10 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             // Tear down any prior player. Doing this synchronously avoids the
             // late-state-event race the Android plugin had.
             stopPositionTimer()
-            player?.stop()
+            // Click-free: a still-playing previous player (title switch, card
+            // replay) ramps out while the new one ramps in — a ~20 ms cross-fade.
+            // `player` is swapped at once, so position/state reads never see it.
+            if let old = player { retireFaded(old) }
             player = nil
             #if os(visionOS)
             Task { @MainActor in KadokiVideoModel.shared.clear() }
@@ -1063,40 +1138,20 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // boundary). The fadeGeneration token lets a resume/play that races in
         // during the fade window — e.g. a quick dictionary close — cancel this
         // pending pause instead of stopping the freshly-resumed audio.
+        // fadeMs 0 (no caller passes it today) still silences the player right
+        // before pause so the buffer flushes with zero amplitude; a very faint
+        // click can slip through there — the trade for instant response.
         noteUserTransport()
         let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
-        fadeGeneration += 1
-        let gen = fadeGeneration
-        if let p = player, fadeMs > 0 {
-            p.setVolume(0.0, fadeDuration: fadeMs / 1000.0)
-            DispatchQueue.main.asyncAfter(deadline: .now() + fadeMs / 1000.0) { [weak self] in
-                guard let self = self else { return }
-                guard self.fadeGeneration == gen else { return } // resume/play raced in — keep playing
-                self.player?.pause()
-                self.player?.volume = 1.0 // restore for next play
-                self.stopPositionTimer()
-                self.saveLastPositionNow()   // durable on every pause (parity with Android ACTION_PAUSE)
-                self.emitState(playing: false)
-                self.postLiveTick(ms: Int((self.player?.currentTime ?? 0) * 1000), playing: false)
-                self.updateNowPlaying()
-            }
-        } else {
-            // No fade — but still silence the player right before
-            // pause so the buffer flushes with zero amplitude,
-            // suppressing the click. The setter may not take effect
-            // for all samples already in the hardware buffer, so a
-            // very faint click can still slip through; that's the
-            // trade for instant response. Restore volume so the next
-            // play / resume starts at full level.
-            player?.volume = 0.0
-            player?.pause()
-            player?.volume = 1.0
-            stopPositionTimer()
-            saveLastPositionNow()   // durable on every pause (parity with Android ACTION_PAUSE)
-            emitState(playing: false)
-            postLiveTick(ms: Int((player?.currentTime ?? 0) * 1000), playing: false)
-            updateNowPlaying()
+        let finish: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.stopPositionTimer()
+            self.saveLastPositionNow()   // durable on every pause (parity with Android ACTION_PAUSE)
+            self.emitState(playing: false)
+            self.postLiveTick(ms: Int((self.player?.currentTime ?? 0) * 1000), playing: false)
+            self.updateNowPlaying()
         }
+        if let p = player { pauseFaded(p, fadeMs: fadeMs, after: finish) } else { fadeGeneration += 1; finish() }
         call.resolve()
     }
 
@@ -1104,16 +1159,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let p = player else { call.resolve(); return }
         noteUserTransport()
         ensureSessionActive()   // re-activate if a prior stop() deactivated it
-        fadeGeneration += 1 // supersede any pending faded-pause so it doesn't stop us
-        let fadeMs = call.getDouble("fadeMs") ?? Self.defaultFadeMs
-        if fadeMs > 0 {
-            p.volume = 0.0
-            p.play()
-            p.setVolume(1.0, fadeDuration: fadeMs / 1000.0)
-        } else {
-            p.volume = 1.0
-            p.play()
-        }
+        // Supersedes any pending faded-pause so it doesn't stop us; mid-fade it
+        // ramps back up from the current level (no snap to 0).
+        startFaded(p, fadeMs: call.getDouble("fadeMs") ?? Self.defaultFadeMs)
         startPositionTimer()
         emitState(playing: true)
         postLiveTick(ms: Int(p.currentTime * 1000), playing: true)
@@ -1126,7 +1174,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         stopPositionTimer()
         saveLastPositionNow()   // before the player/url are cleared (parity with Android ACTION_STOP)
         let msAtStop = Int((player?.currentTime ?? 0) * 1000)
-        player?.stop()
+        fadeGeneration += 1          // a pending faded pause must not emit for a player we're dropping
+        let old = player
         player = nil
         currentUrlStr = ""
         #if os(visionOS)
@@ -1139,8 +1188,15 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         // playing (an always-active .playback session kept the process resident
         // and Doze-resistant). .notifyOthersOnDeactivation lets other apps' audio
         // resume. Re-activated lazily on the next play()/resume().
-        do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
-        catch { NSLog("[BackgroundAudio] session deactivate failed: \(error.localizedDescription)") }
+        // State is cleared above at once; only the sound fades out (click-free
+        // stop), and the session goes down after it — unless a new play() took
+        // the session meanwhile.
+        let deactivate: () -> Void = { [weak self] in
+            guard let self = self, self.player == nil else { return }
+            do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+            catch { NSLog("[BackgroundAudio] session deactivate failed: \(error.localizedDescription)") }
+        }
+        if let old = old { retireFaded(old, completion: deactivate) } else { deactivate() }
         call.resolve()
     }
 
@@ -1166,7 +1222,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let preMs = p.currentTime * 1000          // where the listener WAS: hold 1× until back here
         seekGeneration += 1
         let seekGen = seekGeneration
-        if p.isPlaying && fadeMs > 0 {
+        // A faded pause already ramping down owns the volume: jump immediately
+        // under it (it saves the landing once the pause lands).
+        if p.isPlaying && fadeMs > 0 && !pauseFadePending {
             fadeGeneration += 1
             let gen = fadeGeneration
             let secs = fadeMs / 1000.0
@@ -1557,7 +1615,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                 self.saveLastPositionNow()
                 self.notifyChapter(idx: next.idx, repeating: false, reason: "skip")
             } else { self.notifyChapter(idx: curIdx, repeating: false, reason: "skip") }
-            self.ensureSessionActive(); p.volume = 1.0; p.play()
+            self.ensureSessionActive(); self.startFaded(p)
             self.startPositionTimer(); self.emitState(playing: true); self.updateNowPlaying()
             self.repeatBusy = false; call.resolve()
         }
@@ -1571,11 +1629,12 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         if speechSynth.isSpeaking { speechSynth.stopSpeaking(at: .immediate) }
         let wasBusy = repeatBusy
         repeatBusy = false
-        guard wasBusy, let p = player, !p.isPlaying else { return }
+        // A repeat pause still fading out counts as paused (startFaded cancels it).
+        guard wasBusy, let p = player, !p.isPlaying || pauseFadePending else { return }
         // If we paused for the FINAL chapter's EOF announce, the playhead sits at end —
         // play() there can restart the file from 0 (place jump). End the book cleanly.
         if p.duration > 0, p.currentTime >= p.duration - 0.05 { finishBookAtEof(); return }
-        ensureSessionActive(); p.volume = 1.0; p.play(); startPositionTimer(); emitState(playing: true); updateNowPlaying()
+        ensureSessionActive(); startFaded(p); startPositionTimer(); emitState(playing: true); updateNowPlaying()
     }
 
     private func notifyChapter(idx: Int, repeating: Bool, reason: String) {
@@ -1824,7 +1883,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         repeatBusy = true
         let target = TimeInterval(ch.startMs) / 1000.0
         notifyChapter(idx: ch.idx, repeating: true, reason: "repeat")
-        p.volume = 1.0; p.pause()
+        pauseFaded(p) {}   // click-free: the boundary's sound ramps out before the announce
         // Save the SEEK TARGET (chapter start), not the live playhead — which at a
         // boundary is the NEXT chapter's start and at EOF is end-of-book — so a kill
         // mid-announce restores to the chapter being repeated, never ahead of it.
@@ -1863,7 +1922,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             updateNowPlaying()
             return
         }
-        ensureSessionActive(); p.volume = 1.0; p.play()
+        ensureSessionActive(); startFaded(p)
         startPositionTimer(); emitState(playing: true); updateNowPlaying()
     }
 

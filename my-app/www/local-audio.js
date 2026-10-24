@@ -482,14 +482,21 @@
         cleanup();
         resolve(false);
       };
-      try {
-        audio.src = url;
-        audio.load();
-      } catch (e) {
-        settled = true;
-        cleanup();
-        resolve(false);
-      }
+      const load = () => {
+        try {
+          audio.src = url;
+          audio.load();
+        } catch (e) {
+          settled = true;
+          cleanup();
+          resolve(false);
+        }
+      };
+      // A previous word still sounding: ramp it out (~30 ms) before the src
+      // swap cuts it — no click (app.js kadokiElFade; no-op where .volume is
+      // read-only, i.e. iOS).
+      if (!audio.paused && window.kadokiElFade) window.kadokiElFade.pause(audio, load);
+      else load();
     });
   }
 

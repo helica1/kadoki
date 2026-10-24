@@ -582,6 +582,15 @@
           delete body.fallbacks;
           return await requestStream(opts, body);
         }
+        // A schema too big for structured outputs (over 24 optional fields, or
+        // a grammar too large to compile — the chapter schema is both): send it
+        // unconstrained. The prompt spells out the JSON shape and the callers
+        // parse plain-text JSON (the OpenRouter path already runs this way).
+        if (body.output_config?.format && e && e._status === 400 &&
+            /grammar|optional param|schema/i.test(e.message || '')) {
+          delete body.output_config.format;
+          return await requestStream(opts, body);
+        }
         throw e;
       }
     };
@@ -1020,7 +1029,14 @@
     hasKey() { return !!_key; },
     getKey() { return _key; },
     enabledFlag() { return _enabled; },
-    async setKey(k) { _key = (k || '').trim(); await setPref(KEY_PREF, _key); },
+    // A paste that carries extra words around the key (copied with its label
+    // or a sentence) keeps just the sk-ant- token.
+    async setKey(k) {
+      _key = (k || '').trim();
+      const m = _key.match(/sk-ant-[A-Za-z0-9_-]+/);
+      if (m && m[0] !== _key) _key = m[0];
+      await setPref(KEY_PREF, _key);
+    },
     async setEnabled(b) { _enabled = !!b; await setPref(ENABLED_PREF, b ? '1' : '0'); },
     getQuality() { return _quality; },
     async setQuality(q) {

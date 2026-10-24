@@ -4655,7 +4655,7 @@
   // Hinge movement from native (see MainViewController.installHingeObserver).
   // The hinge starts to move before the display switches, so this refreshes
   // the anchor while the old layout is still on screen.
-  window.__kadokiHinge = function (status) {
+  window.__kadokiHinge = function (status, angle) {
     if (status >= 1) {
       window.KADOKI_DUO = true;
       try { localStorage.setItem('KADOKI_IS_DUO', '1'); } catch (_) {}
@@ -4663,7 +4663,7 @@
     _duoBandCheck();
     _duoPlaceSpeedCtl();
     _duoCapture();
-    try { window.dispatchEvent(new CustomEvent('kadoki:hinge', { detail: { status } })); } catch (_) {}
+    try { window.dispatchEvent(new CustomEvent('kadoki:hinge', { detail: { status, angle } })); } catch (_) {}
   };
   // Reader entry: take a first anchor once it has settled (entry scrolls
   // re-capture on their own; this covers an entry that lands without one).

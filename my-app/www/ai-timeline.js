@@ -1291,6 +1291,9 @@
   function _clipPlayheadTick() {
     if (!_clipAudio || _clipAudio.paused) { _clipRaf = null; return; }
     try { const ms = _clipStartMs + (_clipAudio.currentTime || 0) * 1000; if (window.waveform && window.waveform.setPlayheadMs) window.waveform.setPlayheadMs(ms); if (_clipTimeCb) _clipTimeCb(ms); } catch (_) {}
+    // The slice's own end is a hard cut where no ramp is baked in (Android /
+    // Mac passthrough slices): duck the last ~40 ms so it never clicks.
+    try { const d = _clipAudio.duration; if (isFinite(d) && d - (_clipAudio.currentTime || 0) < 0.06) window.kadokiElFade?.duck(_clipAudio, 40); } catch (_) {}
     _clipRaf = requestAnimationFrame(_clipPlayheadTick);
   }
   function _clipPlayheadStart() { if (_clipRaf == null) _clipRaf = requestAnimationFrame(_clipPlayheadTick); }
@@ -1328,8 +1331,14 @@
       return '';
     }
   }
-  function clipStop() { _clipPlayheadStop(false); try { if (_clipAudio) _clipAudio.pause(); } catch (_) {} _clipIcon(false); _clipResumeBook(); }
-  function clipDispose() { _clipPlayheadStop(false); try { if (_clipAudio) { _clipDetach(_clipAudio); _clipAudio.pause(); _clipAudio.src = ''; } } catch (_) {} _clipAudio = null; _clipKey = ''; _clipBtn = null; _clipResumeBook(); }
+  // Click-free clip stop: ~30 ms fade-out, then pause (see app.js kadokiElFade).
+  function _clipFadeStop(a, release) {
+    const fin = () => { if (release) { try { a.src = ''; } catch (_) {} } };
+    if (window.kadokiElFade) window.kadokiElFade.pause(a, fin); else { try { a.pause(); } catch (_) {} fin(); }
+  }
+  function _clipFadePlay(a) { return window.kadokiElFade ? window.kadokiElFade.play(a) : a.play(); }
+  function clipStop() { _clipPlayheadStop(false); try { if (_clipAudio) _clipFadeStop(_clipAudio, false); } catch (_) {} _clipIcon(false); _clipResumeBook(); }
+  function clipDispose() { _clipPlayheadStop(false); try { if (_clipAudio) { _clipDetach(_clipAudio); _clipFadeStop(_clipAudio, true); } } catch (_) {} _clipAudio = null; _clipKey = ''; _clipBtn = null; _clipResumeBook(); }
   async function clipPlay(bounds, btn, srcPath, onTime) {
     _clipBtn = btn;
     try {
@@ -1341,19 +1350,19 @@
       // Pause the book so the clip doesn't overlap it. POSITION is never touched
       // (no seek) → the user's place is structurally safe; resumed on stop/leave.
       try { const bg = BG(); if (bg && typeof bg.getState === 'function') { const st = await bg.getState(); if (st && (st.playing !== undefined ? st.playing : st.isPlaying)) { _clipBookWasPlaying = true; try { await bg.pause(); } catch (_) {} } } } catch (_) {}
-      if (_clipAudio && _clipKey === key && _clipAudio.src) { try { _clipAudio.currentTime = 0; } catch (_) {} try { await _clipAudio.play(); } catch (_) {} return; }
+      if (_clipAudio && _clipKey === key && _clipAudio.src) { try { _clipAudio.currentTime = 0; } catch (_) {} try { await _clipFadePlay(_clipAudio); } catch (_) {} return; }
       if (_clipBusy) return; _clipBusy = true;
       if (_clipBtn) { try { _clipBtn.textContent = '…'; } catch (_) {} }
       const uri = await _sliceToUri(srcPath, bounds.startMs, bounds.endMs);
       _clipBusy = false;
       if (!uri) { _clipIcon(false); _clipResumeBook(); try { window.showToast && window.showToast(window.i18n.t('tl.cannot_play_audio', 'この音声を再生できませんでした') + (_lastSliceErr ? ' — ' + _lastSliceErr : ''), 4500); } catch (_) {} return; }
-      if (_clipAudio) { try { _clipDetach(_clipAudio); _clipAudio.pause(); _clipAudio.src = ''; } catch (_) {} }
+      if (_clipAudio) { try { _clipDetach(_clipAudio); _clipFadeStop(_clipAudio, true); } catch (_) {} }
       _clipAudio = new Audio(uri); _clipKey = key;
       _clipAudio.onended = () => { _clipPlayheadStop(true); _clipIcon(false); _clipResumeBook(); };   // ends on its own → STOP, cursor back to start
       _clipAudio.onpause = () => { _clipPlayheadStop(false); _clipIcon(false); };
       _clipAudio.onplay = () => { _clipPlayheadStart(); _clipIcon(true); };
       _clipAudio.onerror = () => { _clipPlayheadStop(false); _clipIcon(false); _clipResumeBook(); try { window.showToast && window.showToast(window.i18n.t('tl.cannot_play_preview', 'プレビューを再生できません'), 3500); } catch (_) {} };
-      try { await _clipAudio.play(); } catch (_) { _clipIcon(false); _clipResumeBook(); }
+      try { await _clipFadePlay(_clipAudio); } catch (_) { _clipIcon(false); _clipResumeBook(); }
     } catch (_) { _clipBusy = false; _clipIcon(false); _clipResumeBook(); }
   }
 

@@ -262,6 +262,38 @@
     emit('BackgroundAudio', 'error', { message: 'audio error' + (e ? ' code=' + e.code : '') });
   });
 
+  // Click-free pause for the web-engine fallback: ramp .volume down over
+  // ~25 ms, then pause (macOS WKWebView honours .volume, unlike iOS). A play
+  // that races in bumps webFadeGen and cancels it.
+  let webFadeGen = 0;
+  function webFadeIn() {
+    webFadeGen++;
+    if (audio.paused) audio.volume = 0;
+    const gen = webFadeGen, v0 = audio.volume, t0 = performance.now();
+    const step = () => {
+      if (gen !== webFadeGen) return;
+      const k = Math.min(1, (performance.now() - t0) / 25);
+      audio.volume = v0 + (1 - v0) * k;
+      if (k < 1) setTimeout(step, 4);
+    };
+    setTimeout(step, 4);
+  }
+  function webFadePause() {
+    webFadeGen++;
+    if (audio.paused) return Promise.resolve();
+    const gen = webFadeGen, v0 = audio.volume, t0 = performance.now();
+    return new Promise((resolve) => {
+      const step = () => {
+        if (gen !== webFadeGen) { resolve(); return; }
+        const k = Math.min(1, (performance.now() - t0) / 25);
+        audio.volume = v0 * (1 - k);
+        if (k < 1) { setTimeout(step, 4); return; }
+        audio.pause(); audio.volume = 1; resolve();
+      };
+      setTimeout(step, 4);
+    });
+  }
+
   function waitReady(timeoutMs) {
     if (audio.readyState >= 1) return Promise.resolve();
     return new Promise((resolve) => {
@@ -295,17 +327,18 @@
       }
       audio.playbackRate = (opts && opts.rate) || 1.0;
       startTicker();
+      webFadeIn();
       await audio.play();
       emitPosition();
       return {};
     },
-    async pause() { if (engine === 'native') { await nAudio({ op: 'pause' }); return {}; } audio.pause(); return {}; },
-    async resume() { if (engine === 'native') { await nAudio({ op: 'resume' }); return {}; } startTicker(); await audio.play(); return {}; },
-    async stop() { persistPos(true); if (engine === 'native') { await nAudio({ op: 'stop' }); return {}; } audio.pause(); return {}; },
+    async pause() { if (engine === 'native') { await nAudio({ op: 'pause' }); return {}; } await webFadePause(); return {}; },
+    async resume() { if (engine === 'native') { await nAudio({ op: 'resume' }); return {}; } startTicker(); webFadeIn(); await audio.play(); return {}; },
+    async stop() { persistPos(true); if (engine === 'native') { await nAudio({ op: 'stop' }); return {}; } await webFadePause(); return {}; },
     async seek(opts) {
       if (engine === 'native') {
         nPos.positionMs = Math.max(0, (opts && opts.ms) || 0);
-        await nAudio({ op: 'seek', ms: nPos.positionMs });
+        await nAudio({ op: 'seek', ms: nPos.positionMs, fadeMs: (opts && opts.fadeMs) || 0 });
         persistPos(true);
         return {};
       }

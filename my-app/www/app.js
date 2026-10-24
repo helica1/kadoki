@@ -77,6 +77,69 @@ window.AUDIO_START_OFFSET_MS = 150;
 let allNotes = [];
 let currentCardIndex = 0;
 let currentAudio = null;
+
+// Click-free <audio> element start/stop (rule: audio never starts or stops
+// with a click). Steps .volume over ~30 ms before a pause / after a play.
+// iOS WKWebView ignores .volume (always reads 1), so there these degrade to
+// the plain pause()/play() — iOS clips that need it carry ramps baked in by
+// AudioSlicer instead. Android WebView + macOS WKWebView honour .volume.
+// A play that races a pending fade-out cancels it (per-element generation).
+window.kadokiElFade = (function () {
+  const MS = 30;
+  let volOk = null;
+  const supported = () => {
+    if (volOk === null) {
+      try { const a = new Audio(); a.volume = 0.5; volOk = Math.abs(a.volume - 0.5) < 0.01; }
+      catch (_) { volOk = false; }
+    }
+    return volOk;
+  };
+  function ramp(el, to, ms, done) {
+    const gen = el._kFadeGen = (el._kFadeGen || 0) + 1;
+    const v0 = el.volume, t0 = performance.now();
+    const step = () => {
+      if (el._kFadeGen !== gen) return;
+      const k = Math.min(1, (performance.now() - t0) / ms);
+      try { el.volume = v0 + (to - v0) * k; } catch (_) {}
+      if (k < 1) setTimeout(step, 5); else if (done) done();
+    };
+    setTimeout(step, 5);
+  }
+  return {
+    // Fade out, then pause; `after` runs once the element is paused (also
+    // immediately when already paused / unsupported).
+    pause(el, after, ms) {
+      if (!el) { if (after) after(); return; }
+      if (el.paused || !supported()) {
+        el._kFadeGen = (el._kFadeGen || 0) + 1;   // drop any ramp still running
+        try { el.pause(); } catch (_) {}
+        if (after) after();
+        return;
+      }
+      ramp(el, 0, ms || MS, () => {
+        try { el.pause(); } catch (_) {}
+        try { el.volume = 1; } catch (_) {}
+        if (after) after();
+      });
+    },
+    // play() with a fade-in (from the current level when a fade-out was
+    // still running). Returns the play() promise.
+    play(el, ms) {
+      if (!el) return Promise.resolve();
+      if (!supported()) return el.play();
+      el._kDucked = false;
+      if (el.paused) { try { el.volume = 0; } catch (_) {} }
+      const pr = el.play();
+      ramp(el, 1, ms || MS);
+      return pr;
+    },
+    // Ramp toward silence WITHOUT pausing — the tail of a clip whose own
+    // end is a hard cut (onended still fires naturally).
+    duck(el, ms) { if (el && !el.paused && supported() && el._kDucked !== true) { el._kDucked = true; ramp(el, 0, ms || MS); } },
+    supported,
+  };
+})();
+
 let stopwatchSeconds = 0;
 let stopwatchTimeout = 20; // default timeout in seconds
 let stopwatchInterval = null;
@@ -2096,12 +2159,12 @@ function cleanupMemory() {
     fieldMappingBtn.style.display = 'none';
   }
   
-  // Stop audio
+  // Stop audio (faded; the element is released once silent)
   if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.src = '';
-    currentAudio.load();
+    const _old = currentAudio;
+    _old._kRetired = true;
     currentAudio = null;
+    window.kadokiElFade.pause(_old, () => { try { _old.src = ''; _old.load(); } catch (_) {} });
   }
   
   // Clear stopwatch
@@ -3524,9 +3587,11 @@ async function displayCard() {
     return !!(v && v.style.display !== 'none');
   })();
   if (audioSrc && !audiobookViewOpen) {
-    // Stop previous audio synchronously so nothing overlaps.
+    // Stop previous audio now so nothing overlaps (a ~30 ms fade-out; it is
+    // flagged retired so a stray 'ended' in that window can't auto-advance).
     if (currentAudio) {
-      try { currentAudio.pause(); } catch (_) {}
+      currentAudio._kRetired = true;
+      window.kadokiElFade.pause(currentAudio);
     }
     // DEFER the new audio off the swipe's critical render path. `new Audio(
     // data:audio/mpeg;base64,...)` makes Android's WebView base64-decode + parse
@@ -3541,6 +3606,7 @@ async function displayCard() {
       const a = new Audio(_src);
       a.playbackRate = window.audioPlaybackRate || 1;
       a.addEventListener('ended', () => {
+        if (a._kRetired) return;   // replaced / stopped while fading out
         // Don't auto-advance if audiobook mode has taken over.
         const ab = document.getElementById('audiobookModeView');
         if (ab && ab.style.display !== 'none') return;
@@ -3554,7 +3620,7 @@ async function displayCard() {
       // Suppress auto-play on the very first card after app launch (quiet
       // startup); NOT consumed here — lifted by a real card advance / PLAY.
       if (!window.startupAutoPlayBlocked) {
-        a.play().catch(err => { debugLog(`Audio play error: ${err.message}`); });
+        window.kadokiElFade.play(a).catch(err => { debugLog(`Audio play error: ${err.message}`); });
       }
     }, 0);
   }
@@ -3754,9 +3820,14 @@ function setupSwipe() {
                   })();
                 }
               } else if (currentAudio) {
-                currentAudio.currentTime = 0;
-                currentAudio.play().catch(err => {
-                  debugLog(`Audio replay error: ${err.message}`);
+                // Ramp out (if playing) before the jump back to 0, then ramp in.
+                const _el = currentAudio;
+                window.kadokiElFade.pause(_el, () => {
+                  if (currentAudio !== _el) return;
+                  _el.currentTime = 0;
+                  window.kadokiElFade.play(_el).catch(err => {
+                    debugLog(`Audio replay error: ${err.message}`);
+                  });
                 });
               }
             } else if (deltaY < -30) {
@@ -3934,9 +4005,13 @@ document.addEventListener('keydown', (e) => {
     case 'Space':
       e.preventDefault();
       if (currentAudio) {
-        currentAudio.currentTime = 0;
-        currentAudio.play().catch(err => {
-          debugLog(`Audio replay error: ${err.message}`);
+        const _el = currentAudio;
+        window.kadokiElFade.pause(_el, () => {
+          if (currentAudio !== _el) return;
+          _el.currentTime = 0;
+          window.kadokiElFade.play(_el).catch(err => {
+            debugLog(`Audio replay error: ${err.message}`);
+          });
         });
       }
       break;
@@ -4320,9 +4395,10 @@ window.updateCardIndex = updateCardIndex;
 // double-play over the audiobook.
 window.stopCardAudio = function () {
   if (currentAudio) {
-    try { currentAudio.pause(); } catch (e) {}
-    try { currentAudio.src = ''; } catch (e) {}
+    const _old = currentAudio;
+    _old._kRetired = true;
     currentAudio = null;
+    window.kadokiElFade.pause(_old, () => { try { _old.src = ''; } catch (e) {} });
   }
 };
 
@@ -5446,7 +5522,7 @@ window.toggleReadingPlayback = function () {
         } else {
           // Pause any deck-mode card audio first so we don't get a
           // cacophony of two sources.
-          try { if (currentAudio && !currentAudio.paused) currentAudio.pause(); } catch (e) {}
+          try { if (currentAudio && !currentAudio.paused) window.kadokiElFade.pause(currentAudio); } catch (e) {}
           (async () => {
             let ms = startMs;
             // Cold start with NO cue context: resolve the best known position
@@ -5514,10 +5590,10 @@ window.toggleReadingPlayback = function () {
   }
   if (currentAudio.paused || currentAudio.ended) {
     try { currentAudio.currentTime = 0; } catch (e) {}
-    currentAudio.play().catch(err => debugLog(`Play toggle error: ${err.message}`));
+    window.kadokiElFade.play(currentAudio).catch(err => debugLog(`Play toggle error: ${err.message}`));
     return true;
   }
-  currentAudio.pause();
+  window.kadokiElFade.pause(currentAudio);
   return false;
 };
 

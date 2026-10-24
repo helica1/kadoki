@@ -712,12 +712,12 @@ public class BackgroundAudioService extends Service {
         currentUrl = null; // nothing loaded → next ACTION_PLAY must rebuild
         cancelFade();
         clearSuppression();
+        pendingSeekMs = -1;
         ExoPlayer p = exo;
         if (p != null) {
             exo = null;
             try { p.removeListener(playerListener); } catch (Exception ignored) {}
-            try { p.stop(); } catch (Exception ignored) {}
-            try { p.release(); } catch (Exception ignored) {}
+            retireFaded(p);
             cachedPositionMs = -1;
             cachedDurationMs = -1;
             if (listener != null) listener.onPlayingStateChanged(false);
@@ -742,31 +742,56 @@ public class BackgroundAudioService extends Service {
     private void replayLoaded(int startMs, int fadeMs) {
         final ExoPlayer p = exo;
         if (p == null || !prepared) { startPlayback(currentUrl); return; }
-        cancelFade(); // drop any in-flight pause-after-fade / volume ramp
-        // Fresh explicit play: forget any pending suppression bookkeeping.
-        // If the player is in fact still suppressed (call ongoing), the
-        // mirrorSuppressionIfActive check at the end of this method re-reads
-        // the live reason and re-engages the mirror with a fresh deadline.
-        clearSuppression();
-        applyRate(pendingRate);
-        try {
-            p.seekTo(Math.max(0, startMs));
-            cachedPositionMs = Math.max(0, startMs);
-            // Fade in from silence so the (re)start onset matches a fresh play
-            // and never clicks on a non-zero waveform left by a prior pause.
-            if (fadeMs > 0) {
-                try { p.setVolume(0f); } catch (Exception ignored) {}
-                p.play();
-                rampVolume(0f, 1f, fadeMs);
-            } else {
-                try { p.setVolume(1f); } catch (Exception ignored) {}
-                p.play();
-            }
+        final int target = Math.max(0, startMs);
+        boolean audible = false;
+        try { audible = p.isPlaying(); } catch (Exception ignored) {}
+        if (audible && fadeMs > 0 && pendingSeekMs >= 0) {
+            // A faded jump is already ramping out: just retarget it (its
+            // landing reads pendingSeekMs) instead of restarting the ramp.
+            applyRate(pendingRate);
+            pendingSeekMs = target;
+            cachedPositionMs = target;
             wantPlaying = true;
-        } catch (Exception e) {
-            Log.w(TAG, "replayLoaded failed; falling back to full rebuild", e);
-            startPlayback(currentUrl);
-            return;
+        } else {
+            cancelFade(); // drop any in-flight pause-after-fade / volume ramp
+            // Fresh explicit play: forget any pending suppression bookkeeping.
+            // If the player is in fact still suppressed (call ongoing), the
+            // mirrorSuppressionIfActive check at the end of this method re-reads
+            // the live reason and re-engages the mirror with a fresh deadline.
+            clearSuppression();
+            applyRate(pendingRate);
+            try {
+                if (audible && fadeMs > 0) {
+                    // Still playing (card replay / swipe while listening): ramp the
+                    // OLD spot out first, jump while silent, ramp back in — a bare
+                    // seekTo at full volume was a click. The target is reported as
+                    // the position at once (pendingSeekMs) and lands even if a
+                    // pause/scrub interrupts the ramp (cancelFade).
+                    final int f = fadeMs;
+                    rampVolume(p.getVolume(), 0f, f);
+                    pendingSeekMs = target;
+                    cachedPositionMs = target;
+                    fadeHandler.postDelayed(() -> landPendingSeek(p, f, true), f);
+                } else {
+                    p.seekTo(target);
+                    cachedPositionMs = target;
+                    // Fade in from silence so the (re)start onset matches a fresh play
+                    // and never clicks on a non-zero waveform left by a prior pause.
+                    if (fadeMs > 0) {
+                        try { p.setVolume(0f); } catch (Exception ignored) {}
+                        p.play();
+                        rampVolume(0f, 1f, fadeMs);
+                    } else {
+                        try { p.setVolume(1f); } catch (Exception ignored) {}
+                        p.play();
+                    }
+                }
+                wantPlaying = true;
+            } catch (Exception e) {
+                Log.w(TAG, "replayLoaded failed; falling back to full rebuild", e);
+                startPlayback(currentUrl);
+                return;
+            }
         }
         // Same prepare-window rule as onFirstReady: if focus is currently held
         // by a call, the player is suppressed right now — mirror it instead of
@@ -799,10 +824,50 @@ public class BackgroundAudioService extends Service {
     // ramps and the pending pause — can never purge a queued command.
     private final Handler playerHandler = new Handler(Looper.getMainLooper());
     private Runnable pendingPauseAfterFade = null;
+    // Target of a faded seek / replay whose jump waits out the fade-out ramp.
+    // Reported as the position meanwhile (getPositionMs), and LANDED by
+    // cancelFade if anything interrupts the ramp — a pause/scrub racing a
+    // faded seek used to drop it and leave the playhead at the old spot.
+    // Main looper only (like every ExoPlayer call).
+    private volatile int pendingSeekMs = -1;
 
     private void cancelFade() {
         fadeHandler.removeCallbacksAndMessages(null);
         pendingPauseAfterFade = null;
+        int ps = pendingSeekMs;
+        if (ps >= 0) {
+            pendingSeekMs = -1;
+            ExoPlayer p = exo;
+            if (p != null) { try { p.seekTo(ps); cachedPositionMs = ps; } catch (Exception ignored) {} }
+        }
+    }
+
+    // Click-free teardown of a player being replaced (new title) or stopped:
+    // ramp it to silence on playerHandler (NOT fadeHandler — the next player's
+    // rampVolume/cancelFade would purge the steps and leave it running), then
+    // stop + release. Its listener is already removed and `exo` already points
+    // elsewhere, so no state, position or event comes from it any more. Main
+    // looper only: ExoPlayer is touched solely on its own thread.
+    private static final int RETIRE_FADE_MS = 24;
+    private void retireFaded(final ExoPlayer old) {
+        boolean audible = false;
+        float v0 = 1f;
+        try { audible = old.isPlaying(); v0 = old.getVolume(); } catch (Exception ignored) {}
+        if (!audible || v0 <= 0f) {
+            try { old.stop(); } catch (Exception ignored) {}
+            try { old.release(); } catch (Exception ignored) {}
+            return;
+        }
+        final int steps = 8;
+        final float from = v0;
+        for (int i = 1; i <= steps; i++) {
+            final float v = from * (1f - (float) i / steps);
+            playerHandler.postDelayed(() -> { try { old.setVolume(v); } catch (Exception ignored) {} }, (long) i * RETIRE_FADE_MS / steps);
+        }
+        playerHandler.postDelayed(() -> {
+            try { old.stop(); } catch (Exception ignored) {}
+            try { old.release(); } catch (Exception ignored) {}
+        }, RETIRE_FADE_MS + 4);
     }
 
     private void rampVolume(float from, float to, int durationMs) {
@@ -829,6 +894,26 @@ public class BackgroundAudioService extends Service {
         }
     }
 
+    // Landing of a faded seek / replay, once its fade-out ramp is done: jump to
+    // the (possibly retargeted) pendingSeekMs while muted, then ramp back in.
+    // Only un-mutes if this is still the active player and we still intend to
+    // play; otherwise a pause that landed during the seek would get un-muted.
+    // Volume goes back to 1 for the next play either way.
+    private void landPendingSeek(ExoPlayer mp, int fadeMs, boolean play) {
+        int target = pendingSeekMs;
+        pendingSeekMs = -1;
+        try {
+            mp.setVolume(0f);              // ensure silence even if the ramp didn't quite finish
+            if (target >= 0) { mp.seekTo(target); cachedPositionMs = target; }
+            if (exo == mp && wantPlaying) {
+                if (play) mp.play();
+                rampVolume(0f, 1f, fadeMs); // fade back in
+            } else {
+                mp.setVolume(1f);
+            }
+        } catch (Exception ignored) {}
+    }
+
     private void fadeOutThenPause(int fadeMs) {
         final ExoPlayer mp = exo;
         if (mp == null) return;
@@ -850,7 +935,10 @@ public class BackgroundAudioService extends Service {
             showPausedNotification("Paused");
             return;
         }
-        rampVolume(1f, 0f, fadeMs);
+        // From the CURRENT level: a pause landing mid fade-in must not jump up to 1.
+        float v0 = 1f;
+        try { v0 = mp.getVolume(); } catch (Exception ignored) {}
+        rampVolume(v0, 0f, fadeMs);
         // Schedule the actual pause AFTER the ramp completes.
         // Belt-and-suspenders: also set volume to 0 inside the runnable
         // so if the ramp didn't quite finish before this fires (handler
@@ -900,11 +988,16 @@ public class BackgroundAudioService extends Service {
             if (listener != null) listener.onPlayingStateChanged(true);
             return;
         }
-        try { mp.setVolume(0f); } catch (Exception ignored) {}
+        // A resume that lands while a faded pause is still ramping out keeps
+        // playing from the current level (no snap to 0 = no click).
+        boolean live = false;
+        float from = 0f;
+        try { live = mp.isPlaying(); if (live) from = mp.getVolume(); } catch (Exception ignored) {}
+        if (!live) { try { mp.setVolume(0f); } catch (Exception ignored) {} }
         try { mp.play(); } catch (Exception ignored) {}
         wantPlaying = true;
         if (listener != null) listener.onPlayingStateChanged(true);
-        rampVolume(0f, 1f, fadeMs);
+        rampVolume(from, 1f, fadeMs);
     }
 
     // ----- Public API for direct calls from BackgroundAudioPlugin -----
@@ -950,6 +1043,9 @@ public class BackgroundAudioService extends Service {
     public boolean isVideoLoaded() { return exo != null && isVideoUrl(currentUrl); }
 
     public int getPositionMs() {
+        // A faded seek/replay waiting out its ramp: the target IS the position.
+        int ps = pendingSeekMs;
+        if (ps >= 0 && prepared) return ps;
         // Refresh the cache when called on the player (main) looper — the
         // plugin's 150 ms position poll runs there, keeping it fresh. Off-thread
         // callers (getState) get the most recent cached value.
@@ -985,9 +1081,11 @@ public class BackgroundAudioService extends Service {
     // abrupt seekTo makes mid-playback. fadeMs == 0 (or while paused → nothing
     // audible) seeks immediately, so continuous scrub-bar dragging stays instant.
     // Mirrors the iOS fade and reuses the same fadeHandler/rampVolume the play/
-    // pause fades use. A racing pause/play/seek cancels via cancelFade — the seek
-    // may then be dropped, but consecutive swipes recompute the target so the end
-    // position is still right, and whatever cancelled it restores the volume.
+    // pause fades use. The target is reported as the position at once
+    // (pendingSeekMs); a racing pause/play/scrub cancels the ramp via cancelFade,
+    // which LANDS the pending target, and whatever cancelled it owns the volume.
+    // A swipe during a ramp just retargets it. Under a faded pause the jump is
+    // immediate (the pause already owns the volume).
     public void seekToMs(int ms, int fadeMs) {
         runOnPlayer(() -> {
         // An external seek invalidates the chapter-crossing baseline; arm a
@@ -999,32 +1097,27 @@ public class BackgroundAudioService extends Service {
             if (mp == null || !prepared) return;
             boolean playing = false;
             try { playing = mp.isPlaying(); } catch (Exception ignored) {}
-            if (playing && fadeMs > 0) {
-                final int target = ms;
+            if (pendingSeekMs >= 0 && playing) {
+                // A faded jump is already ramping out: retarget it — its landing
+                // reads pendingSeekMs (and owns the volume restore).
+                pendingSeekMs = ms;
+                cachedPositionMs = ms;
+            } else if (playing && fadeMs > 0 && pendingPauseAfterFade == null) {
                 final int f = fadeMs;
-                rampVolume(1f, 0f, f);
-                fadeHandler.postDelayed(() -> {
-                    try {
-                        mp.setVolume(0f);          // ensure silence even if the ramp didn't quite finish
-                        mp.seekTo(target);         // land the seek while muted
-                        cachedPositionMs = target;
-                        // Only fade back in if this is still the active player and
-                        // we still intend to play; otherwise a pause that landed
-                        // during the seek would get un-muted. Restore volume to 1
-                        // for the next play either way.
-                        if (exo == mp && wantPlaying) {
-                            rampVolume(0f, 1f, f); // fade back in
-                        } else {
-                            mp.setVolume(1f);
-                        }
-                    } catch (Exception ignored) {}
-                }, f);
+                float v0 = 1f;
+                try { v0 = mp.getVolume(); } catch (Exception ignored) {}
+                rampVolume(v0, 0f, f);
+                pendingSeekMs = ms;                // reported meanwhile; landed by cancelFade if interrupted
+                cachedPositionMs = ms;
+                fadeHandler.postDelayed(() -> landPendingSeek(mp, f, false), f);
             } else {
+                pendingSeekMs = -1;                // this seek supersedes any older pending target
                 mp.seekTo(ms);
                 cachedPositionMs = ms;
                 // Durable while paused: no durableSaveTick runs and no pause save
                 // follows, so a kill right after a paused seek restored the old spot.
-                if (!playing) saveLastPositionNow();
+                // (Same under a pause still fading out: its save already ran.)
+                if (!playing || pendingPauseAfterFade != null) saveLastPositionNow();
             }
         });
         });
@@ -1092,7 +1185,9 @@ public class BackgroundAudioService extends Service {
             try { if (mp != null && mp.isPlaying()) pl = true; } catch (Exception ignored) {}
             scrubWasPlaying = pl;
             if (mp != null && pl) {
-                rampVolume(1f, 0f, 12);
+                float v0 = 1f;
+                try { v0 = mp.getVolume(); } catch (Exception ignored) {}
+                rampVolume(v0, 0f, 12);
                 playerHandler.postDelayed(() -> { if (scrubActive && scrubGen == gen) { try { mp.pause(); } catch (Exception ignored) {} } }, 18);
             }
         });
@@ -1268,9 +1363,18 @@ public class BackgroundAudioService extends Service {
         final long token = ++repeatUtterToken;
         repeatPendingTarget = (int) Math.max(0, ch.startMs);
         final String announce = ch.announce;
-        cancelFade();
         ExoPlayer p = exo;
-        if (p != null) { try { p.setVolume(1f); p.pause(); } catch (Exception ignored) {} }
+        if (p != null) {
+            // Click-free: ramp the boundary's sound out, then pause. Both on
+            // fadeHandler, so an explicit transport that races in (cancelFade)
+            // owns the outcome instead.
+            float v0 = 1f;
+            try { v0 = p.getVolume(); } catch (Exception ignored) {}
+            rampVolume(v0, 0f, DEFAULT_FADE_MS);
+            fadeHandler.postDelayed(() -> { try { p.pause(); p.setVolume(1f); } catch (Exception ignored) {} }, DEFAULT_FADE_MS);
+        } else {
+            cancelFade();
+        }
         playerHandler.postDelayed(() -> finishRepeat(token), ANNOUNCE_FAILSAFE_MS);
         if (ttsReady && tts != null && announce != null && !announce.isEmpty()) {
             try {
@@ -1313,7 +1417,15 @@ public class BackgroundAudioService extends Service {
     private void resumeInPlace() {
         ExoPlayer p = exo;
         if (p == null || !prepared) return;
-        try { p.setVolume(1f); p.play(); } catch (Exception ignored) {}
+        // Fade in (from the current level if still audible — e.g. a repeat
+        // pause that hadn't landed yet); never a bare full-volume start.
+        try {
+            boolean live = p.isPlaying();
+            float from = live ? p.getVolume() : 0f;
+            if (!live) p.setVolume(0f);
+            p.play();
+            rampVolume(from, 1f, DEFAULT_FADE_MS);
+        } catch (Exception ignored) {}
         wantPlaying = true;
         saveLastPositionNow();
         updatePlaybackState();
@@ -1417,19 +1529,15 @@ public class BackgroundAudioService extends Service {
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
             @Override public void onPlay() {
                 if (exo != null && prepared) {
-                    if (suppressed) {
-                        // Play pressed during a call: honor the intent (resume
-                        // when focus returns, no hard-pause deadline) but don't
-                        // claim "playing" while the sound is still suppressed —
-                        // the suppression-NONE mirror announces it then.
-                        playerHandler.removeCallbacks(suppressionHardPause);
-                        wantPlaying = true;
-                        exo.play();
-                    } else {
-                        exo.play();
-                        wantPlaying = true;
+                    // Play pressed during a call: fadeInOnResume honors the
+                    // intent (resume when focus returns, no hard-pause deadline)
+                    // without claiming "playing" while the sound is still
+                    // suppressed — the suppression-NONE mirror announces it then.
+                    // Otherwise it fades in (click-free) and fires the listener.
+                    boolean wasSuppressed = suppressed;
+                    fadeInOnResume(DEFAULT_FADE_MS);
+                    if (!wasSuppressed) {
                         startInForeground("Playing");   // re-pin the notification while playing
-                        if (listener != null) listener.onPlayingStateChanged(true);
                         updatePlaybackState();
                     }
                 }
@@ -1443,11 +1551,10 @@ public class BackgroundAudioService extends Service {
                 // Same suppressed-pause rule as ACTION_PAUSE: a lock-screen pause
                 // during a phone call must clear playWhenReady or the player
                 // auto-resumes when the call ends despite the user's pause.
+                // Faded exactly like ACTION_PAUSE (fadeOutThenPause clears the
+                // suppression and publishes the paused state once it lands).
                 if (exo != null && (exo.isPlaying() || suppressed)) {
-                    clearSuppression();
-                    exo.pause();
-                    wantPlaying = false;
-                    if (listener != null) listener.onPlayingStateChanged(false);
+                    fadeOutThenPause(DEFAULT_FADE_MS);
                     updatePlaybackState();
                 }
                 saveLastPositionNow();              // persist before the demote makes us reapable

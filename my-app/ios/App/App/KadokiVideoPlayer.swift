@@ -135,14 +135,15 @@ final class KadokiVideoPlayer: NSObject, KadokiPlayback {
     func stop() { avPlayer.pause() }
 
     /// AVAudioPlayer.setVolume(_:fadeDuration:)-compatible ramp; AVPlayer has
-    /// no built-in fade, so step the volume on a short timer. Fades here are
-    /// 20–150 ms UI ramps — 20 ms steps are inaudible.
+    /// no built-in fade, so step the volume on a short timer. At least 5 steps
+    /// per ramp (≥ 4 ms apart): the old fixed 20 ms grid made the default 20 ms
+    /// play/pause fade a single hard step — a click, not a fade.
     func setVolume(_ target: Float, fadeDuration duration: TimeInterval) {
         cancelFade()
-        guard duration > 0.01 else { avPlayer.volume = target; return }
+        guard duration > 0.004 else { avPlayer.volume = target; return }
         let start = avPlayer.volume
-        let stepMs = 20.0
-        let steps = max(1, Int(duration * 1000.0 / stepMs))
+        let stepMs = max(4.0, min(20.0, duration * 1000.0 / 5.0))
+        let steps = max(1, Int((duration * 1000.0 / stepMs).rounded()))
         var i = 0
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + .milliseconds(Int(stepMs)),
