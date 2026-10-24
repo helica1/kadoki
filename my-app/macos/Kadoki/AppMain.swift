@@ -21,11 +21,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     }
 
     private var window: NSWindow!
+    #if DEBUG
+    private var devHook: KadokiDevHook?
+    #endif
     private(set) var webView: WKWebView!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        KadokiSandbox.migrate()   // before the web view opens its data store
         buildWebView()
+        #if DEBUG
+        devHook = KadokiDevHook(webView: webView)
+        #endif
         buildWindow()
         buildMenus()
         // Native → web event push (transcription cues, OAuth redirects, …).
@@ -38,6 +45,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         }
         NSApp.activate(ignoringOtherApps: true)
         webView.load(URLRequest(url: URL(string: "\(KadokiSchemeHandler.scheme)://localhost/index.html")!))
+        // A library migrated from the pre-sandbox build: re-grant its book folders.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            if FileStoreHandler.shared.promptForLegacyGrants(in: self?.window) { self?.webView.reload() }
+        }
     }
 
     // Custom URL scheme callbacks (Google OAuth redirect) → the web layer's
@@ -46,6 +57,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         for url in urls {
             KadokiEvents.push?("App", "appUrlOpen", ["url": url.absoluteString])
         }
+    }
+
+    /// Sandboxed, books outside the container open only from folders the user
+    /// granted; reload so titles that failed to load try again.
+    @objc func allowFolderAccess(_ sender: Any?) {
+        if FileStoreHandler.shared.grantFolderInteractively() { webView.reload() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -149,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         fileMenu.addItem(JSMenuItem("Library…", js: "typeof openLibrary==='function' && openLibrary();", key: "l"))
         fileMenu.addItem(JSMenuItem("New Title…", js: "typeof createNewTitle==='function' && createNewTitle();", key: "n"))
         fileMenu.addItem(JSMenuItem("Import Folder…", js: "typeof importFolder==='function' && importFolder();", key: "o"))
+        fileMenu.addItem(withTitle: "Allow Access to Folder…", action: #selector(AppDelegate.allowFolderAccess(_:)), keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(JSMenuItem("Print…", js: "window.openPrintDialog && window.openPrintDialog();", key: "p"))
         fileMenu.addItem(JSMenuItem("Log Printed Reading…", js: "window.openLogPrintedReadingDialog && window.openLogPrintedReadingDialog();"))

@@ -11,33 +11,42 @@
 		1D169AC9A71EFE5B95C66E1C /* mac-shim.js in Resources */ = {isa = PBXBuildFile; fileRef = 64C9F37DE5E21F0D2DAA7C63 /* mac-shim.js */; };
 		2608F780AA96EEF0E3C37199 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 80BFD81B07CAEBF108DFA35F /* AppIcon.icns */; };
 		37B1C38B4EDC0C5F7FF8FF7D /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C12A9D0D55F5B29740554FCA /* Cocoa.framework */; };
+		46FC5202B90DB251E849EEBF /* SandboxSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0278B5EB43D59EB607AC0685 /* SandboxSupport.swift */; };
 		4DDCB517E7324DA32F5FCF4D /* www in Resources */ = {isa = PBXBuildFile; fileRef = 08186950BC1AFC4E31FECAAB /* www */; };
 		58BC21653E8D345568AE6C00 /* AnthropicHttpHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F1A5F5088838CA3B6A9C929 /* AnthropicHttpHandler.swift */; };
 		5BDD758FD6BA98BAAFAE0009 /* AppMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F6D8A3B8ED4479B3F1546D2 /* AppMain.swift */; };
 		927D48993143E95527F800A8 /* AudioSlicerHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0A75F790764BB2738428F9 /* AudioSlicerHandler.swift */; };
+		9EBD0CA45CE559C8E1AADE87 /* container-migration.plist in Resources */ = {isa = PBXBuildFile; fileRef = E57FF77E4EBFB9C4A9016FFE /* container-migration.plist */; };
+		B5EC6A8ACEBA724A2C2105A0 /* DevHook.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53B952B087819E63AA7F5CAC /* DevHook.swift */; };
 		B703EB00A8C01976348E4F1E /* FileStoreHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5276E79CCA38E13EEE64F5A9 /* FileStoreHandler.swift */; };
 		BABC82A8DDA5DB1B04F30117 /* SchemeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98A8C8019D3FCB1A89CA1F16 /* SchemeHandler.swift */; };
 		C43343B3C2B463D9CB7197EA /* TranslatorHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E92D9ED80AA3FD5246D62637 /* TranslatorHandler.swift */; };
 		C48F5777B20C3566B4973FAD /* AudioPlayerHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8260B84CE11207B68AA1DCFB /* AudioPlayerHandler.swift */; };
 		CC328405CB21F9A367F2A7CD /* KadokiEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68E6B1781B75631A9DE5D7E5 /* KadokiEvents.swift */; };
+		DAACE499A419151E3E3804B2 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 917508630C7EF7B8373C11D5 /* PrivacyInfo.xcprivacy */; };
 		EA56BE233E2305B39EF8AAFA /* AutoTranscribeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F3A4DAE1DA97BCD581A18 /* AutoTranscribeHandler.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		0278B5EB43D59EB607AC0685 /* SandboxSupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SandboxSupport.swift; sourceTree = "<group>"; };
 		08186950BC1AFC4E31FECAAB /* www */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder; name = www; path = ../www; sourceTree = "<group>"; };
+		159FF96886FCA0973A25A2D8 /* Kadoki.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = Kadoki.entitlements; sourceTree = "<group>"; };
 		1F6D8A3B8ED4479B3F1546D2 /* AppMain.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppMain.swift; sourceTree = "<group>"; };
 		2A0A75F790764BB2738428F9 /* AudioSlicerHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSlicerHandler.swift; sourceTree = "<group>"; };
 		2F1A5F5088838CA3B6A9C929 /* AnthropicHttpHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnthropicHttpHandler.swift; sourceTree = "<group>"; };
 		5276E79CCA38E13EEE64F5A9 /* FileStoreHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileStoreHandler.swift; sourceTree = "<group>"; };
+		53B952B087819E63AA7F5CAC /* DevHook.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DevHook.swift; sourceTree = "<group>"; };
 		64C9F37DE5E21F0D2DAA7C63 /* mac-shim.js */ = {isa = PBXFileReference; includeInIndex = 1; path = "mac-shim.js"; sourceTree = "<group>"; };
 		68E6B1781B75631A9DE5D7E5 /* KadokiEvents.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiEvents.swift; sourceTree = "<group>"; };
 		766FCECFE7789564371557A2 /* AnkiConnectProxy.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiConnectProxy.swift; sourceTree = "<group>"; };
 		80BFD81B07CAEBF108DFA35F /* AppIcon.icns */ = {isa = PBXFileReference; includeInIndex = 1; path = AppIcon.icns; sourceTree = "<group>"; };
 		8260B84CE11207B68AA1DCFB /* AudioPlayerHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioPlayerHandler.swift; sourceTree = "<group>"; };
 		886F3A4DAE1DA97BCD581A18 /* AutoTranscribeHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutoTranscribeHandler.swift; sourceTree = "<group>"; };
+		917508630C7EF7B8373C11D5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		98A8C8019D3FCB1A89CA1F16 /* SchemeHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SchemeHandler.swift; sourceTree = "<group>"; };
 		C12A9D0D55F5B29740554FCA /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		C8A7CD935AEFBFED2AA59D13 /* Kadoki.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kadoki.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57FF77E4EBFB9C4A9016FFE /* container-migration.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "container-migration.plist"; sourceTree = "<group>"; };
 		E92D9ED80AA3FD5246D62637 /* TranslatorHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TranslatorHandler.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -94,6 +103,11 @@
 				8260B84CE11207B68AA1DCFB /* AudioPlayerHandler.swift */,
 				80BFD81B07CAEBF108DFA35F /* AppIcon.icns */,
 				2F1A5F5088838CA3B6A9C929 /* AnthropicHttpHandler.swift */,
+				0278B5EB43D59EB607AC0685 /* SandboxSupport.swift */,
+				E57FF77E4EBFB9C4A9016FFE /* container-migration.plist */,
+				917508630C7EF7B8373C11D5 /* PrivacyInfo.xcprivacy */,
+				159FF96886FCA0973A25A2D8 /* Kadoki.entitlements */,
+				53B952B087819E63AA7F5CAC /* DevHook.swift */,
 			);
 			name = Kadoki;
 			path = Kadoki;
@@ -164,6 +178,8 @@
 				4DDCB517E7324DA32F5FCF4D /* www in Resources */,
 				1D169AC9A71EFE5B95C66E1C /* mac-shim.js in Resources */,
 				2608F780AA96EEF0E3C37199 /* AppIcon.icns in Resources */,
+				9EBD0CA45CE559C8E1AADE87 /* container-migration.plist in Resources */,
+				DAACE499A419151E3E3804B2 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -184,6 +200,8 @@
 				C43343B3C2B463D9CB7197EA /* TranslatorHandler.swift in Sources */,
 				C48F5777B20C3566B4973FAD /* AudioPlayerHandler.swift in Sources */,
 				58BC21653E8D345568AE6C00 /* AnthropicHttpHandler.swift in Sources */,
+				46FC5202B90DB251E849EEBF /* SandboxSupport.swift in Sources */,
+				B5EC6A8ACEBA724A2C2105A0 /* DevHook.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -310,19 +328,21 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_ENTITLEMENTS = Kadoki/Kadoki.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Kadoki/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.6.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.kadoki.mac;
+				MARKETING_VERSION = 1.9.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama;
 				PRODUCT_NAME = Kadoki;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;
@@ -334,19 +354,21 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_IDENTITY = "-";
-				CODE_SIGN_STYLE = Manual;
+				CODE_SIGN_ENTITLEMENTS = Kadoki/Kadoki.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Kadoki/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 1.6.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.kadoki.mac;
+				MARKETING_VERSION = 1.9.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama;
 				PRODUCT_NAME = Kadoki;
 				SDKROOT = macosx;
 				SWIFT_VERSION = 5.0;

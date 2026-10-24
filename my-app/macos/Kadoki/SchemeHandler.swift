@@ -108,7 +108,7 @@ final class KadokiSchemeHandler: NSObject, WKURLSchemeHandler {
 
     private func serveAbsolute(path rawPath: String, task: WKURLSchemeTask) {
         guard let url = task.request.url else { return }
-        let path = (rawPath as NSString).standardizingPath
+        let path = (KadokiSandbox.local(rawPath) as NSString).standardizingPath
         guard !path.isEmpty, FileStoreHandler.shared.isPathAllowed(path),
               let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let total = attrs[.size] as? Int, total >= 0 else {

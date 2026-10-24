@@ -217,7 +217,7 @@ final class AutoTranscribeHandler: NSObject, WKScriptMessageHandlerWithReply {
     }
 
     private func stripFileScheme(_ s: String) -> String {
-        return s.hasPrefix("file://") ? String(s.dropFirst(7)) : s
+        return KadokiSandbox.local(s.hasPrefix("file://") ? String(s.dropFirst(7)) : s)
     }
 
     // MARK: - embedded chapter markers (m4b / m4a)

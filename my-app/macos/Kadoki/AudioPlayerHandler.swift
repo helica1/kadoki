@@ -142,6 +142,7 @@ final class AudioPlayerHandler: NSObject, WKScriptMessageHandlerWithReply, AVAud
     private func play(_ req: [String: Any], _ reply: @escaping (Any?, String?) -> Void) {
         guard var p = req["path"] as? String, !p.isEmpty else { reply(nil, "path required"); return }
         if p.hasPrefix("file://") { p = String(p.dropFirst(7)).removingPercentEncoding ?? String(p.dropFirst(7)) }
+        p = KadokiSandbox.local(p)
         guard FileManager.default.fileExists(atPath: p) else { reply(nil, "file not found"); return }
         rate = Float((req["rate"] as? Double) ?? 1.0)
         let startMs = req["startMs"] as? Double

@@ -28,7 +28,7 @@ final class AudioSlicerHandler: NSObject, WKScriptMessageHandlerWithReply {
     }
 
     private static func stripFileScheme(_ p: String) -> String {
-        p.hasPrefix("file://") ? String(p.dropFirst(7)) : p
+        KadokiSandbox.local(p.hasPrefix("file://") ? String(p.dropFirst(7)) : p)
     }
 
     /// Slices are written under the media root so the scheme handler can serve
