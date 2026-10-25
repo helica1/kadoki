@@ -10,6 +10,7 @@
 		03A23D56002A34C262E2F1EF /* WatchKaraoke.swift in Sources */ = {isa = PBXBuildFile; fileRef = 185C6E878D8E8340EF596D5B /* WatchKaraoke.swift */; };
 		05FF0594F8EB556FD1B63E77 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A380C7719E1A050488C62B /* MainViewController.swift */; };
 		0A1BD52A38B08C225EEC589F /* Stereo.usda in Resources */ = {isa = PBXBuildFile; fileRef = E39F93AC09029512B91BE647 /* Stereo.usda */; };
+		0B0DC6DB9A8A0823ED499CB5 /* NativeLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D86C671BE9F38D4F6B24A2D /* NativeLibrary.swift */; };
 		1DA20AFDDE5D377CFC6562EB /* DepthAnythingV2SmallF16.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 40456775542510E4F6C3DFD4 /* DepthAnythingV2SmallF16.mlpackage */; };
 		21386B71231DC2DDB43AA65A /* VideoFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB25F0F3ECF37A58D8BEEE03 /* VideoFormat.swift */; };
 		26E3E9023D7C3FE44FBA62EC /* KadokiVideoPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 624F6C94595E034FC5DCBD6E /* KadokiVideoPlayer.swift */; };
@@ -36,6 +37,7 @@
 		77A1B2C3D4E5F60718293A4B /* AutoTranscribePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */; };
 		89FA94E6170CADEA9D06609A /* KadokiLockWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10CF8B633B1A1CE39687EF4 /* KadokiLockWidget.swift */; };
 		8E60C14E1A34E9B535E2E79B /* KadokiReadEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D3FA1B1B9EBF0D83BD4DE0 /* KadokiReadEngine.swift */; };
+		93632E963BCBAEBF6763FC59 /* NativePrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F16D4D7731BB0F6448A171 /* NativePrefs.swift */; };
 		9C7EF869A099728BD538EBA5 /* kiss_fft.c in Sources */ = {isa = PBXBuildFile; fileRef = F34EE787CCD18F537D8D0E50 /* kiss_fft.c */; settings = {COMPILER_FLAGS = "-Dkiss_fft_scalar=float -w"; }; };
 		9EEFB05EDE94CC3691A6989B /* soniclib.c in Sources */ = {isa = PBXBuildFile; fileRef = 9CFAA4E29A898E6C6A5FA8A8 /* soniclib.c */; settings = {COMPILER_FLAGS = "-UDEBUG -w"; }; };
 		A084ECDBA7D38E1E42DFC39D /* Pods_App.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */; };
@@ -63,6 +65,7 @@
 		DF1B17BAC81C72DEB33B7E91 /* KadokiLockWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */; platformFilters = (ios, ); };
 		E04A373FE0634D55B8A4B4BE /* KadokiVideoIOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11DC002FECA73D02592DD93A /* KadokiVideoIOS.swift */; };
 		EF8A04896EEFB1F1528F779D /* FileAccessPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */; };
+		FF5C208F8B794C6B89A32DAE /* NativeChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4167E3396F070B02ACF5DDA8 /* NativeChrome.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -139,6 +142,7 @@
 		2FDDB295D144E056F5A721F4 /* demo-video.srt */ = {isa = PBXFileReference; includeInIndex = 1; path = "demo-video.srt"; sourceTree = "<group>"; };
 		33AD625AEB6775006D341B67 /* KadokiHinge.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = KadokiHinge.m; sourceTree = "<group>"; };
 		40456775542510E4F6C3DFD4 /* DepthAnythingV2SmallF16.mlpackage */ = {isa = PBXFileReference; includeInIndex = 1; path = DepthAnythingV2SmallF16.mlpackage; sourceTree = "<group>"; };
+		4167E3396F070B02ACF5DDA8 /* NativeChrome.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativeChrome.swift; sourceTree = "<group>"; };
 		4F37D91C7A2151450FF9CE65 /* kiss_fft.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = kiss_fft.h; sourceTree = "<group>"; };
 		50379B222058CBB4000EE86E /* capacitor.config.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = capacitor.config.json; sourceTree = "<group>"; };
 		504EC3041FED79650016851F /* App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = App.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -158,6 +162,7 @@
 		88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutoTranscribePlugin.swift; sourceTree = "<group>"; };
 		8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = KadokiLockWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		8C3A78BACB8C1D5C68162BE6 /* sonic.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = sonic.h; sourceTree = "<group>"; };
+		8D86C671BE9F38D4F6B24A2D /* NativeLibrary.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativeLibrary.swift; sourceTree = "<group>"; };
 		8ED7087512EE4319DE456390 /* PdfExportPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PdfExportPlugin.swift; sourceTree = "<group>"; };
 		936ABC0B66FB81ECA48CB6FF /* App-Bridging-Header.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "App-Bridging-Header.h"; sourceTree = "<group>"; };
 		9B2FCAF3399E64682C1BBD19 /* LiveView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LiveView.swift; sourceTree = "<group>"; };
@@ -184,6 +189,7 @@
 		B2C3D4E500000000000000F3 /* KadokiWatch.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = KadokiWatch.entitlements; sourceTree = "<group>"; };
 		B2C3D4E500000000000000F4 /* KadokiWatchWidgets.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = KadokiWatchWidgets.entitlements; sourceTree = "<group>"; };
 		B4328E110C4956F780BB66F5 /* TranslatorPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TranslatorPlugin.swift; sourceTree = "<group>"; };
+		B6F16D4D7731BB0F6448A171 /* NativePrefs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativePrefs.swift; sourceTree = "<group>"; };
 		BB25F0F3ECF37A58D8BEEE03 /* VideoFormat.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = VideoFormat.swift; sourceTree = "<group>"; };
 		BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileAccessPlugin.swift; sourceTree = "<group>"; };
 		C0C5C153D6878E67920EBA06 /* libkadokiremux-ios.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; path = "libkadokiremux-ios.a"; sourceTree = "<group>"; };
@@ -321,6 +327,9 @@
 				B4328E110C4956F780BB66F5 /* TranslatorPlugin.swift */,
 				83CFC24BA7A628D2D5E14FEB /* KadokiHinge.h */,
 				33AD625AEB6775006D341B67 /* KadokiHinge.m */,
+				4167E3396F070B02ACF5DDA8 /* NativeChrome.swift */,
+				B6F16D4D7731BB0F6448A171 /* NativePrefs.swift */,
+				8D86C671BE9F38D4F6B24A2D /* NativeLibrary.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -664,6 +673,9 @@
 				9C7EF869A099728BD538EBA5 /* kiss_fft.c in Sources */,
 				73B4DEED4977D9AC3D3484BF /* TranslatorPlugin.swift in Sources */,
 				CD875F29B7C77121FF1219A3 /* KadokiHinge.m in Sources */,
+				FF5C208F8B794C6B89A32DAE /* NativeChrome.swift in Sources */,
+				93632E963BCBAEBF6763FC59 /* NativePrefs.swift in Sources */,
+				0B0DC6DB9A8A0823ED499CB5 /* NativeLibrary.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

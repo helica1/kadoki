@@ -32,4 +32,5 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'menu.sync_down':           { en: 'Sync ↓  (get latest)',      ja: '同期 ↓  (最新を取得)' },
   'menu.browse_drive':        { en: 'Manage Drive Files…', ja: 'ドライブのファイルを管理…' },
   'menu.preferences':         { en: 'Preferences…',       ja: '設定…' },
+  'menu.processing':          { en: 'Processing…',        ja: '処理中…' },
 });

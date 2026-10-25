@@ -1145,6 +1145,104 @@
     document.body.appendChild(ov);
   }
 
+  // The hamburger menu's rows, in order. { divider } separates groups; a row
+  // has either fn (run on tap) or children (a submenu of { id, label, fn }).
+  // icon is an SF Symbol name for the native iOS menu, and top rows go in its
+  // compact icon row at the top. Built fresh on every
+  // open: rows depend on the active title, the AI setup and pending prints.
+  function shellMenuEntries() {
+    const t = (k, d) => window.i18n.t(k, d);
+    const out = [];
+    const div = () => { if (out.length && !out[out.length - 1].divider) out.push({ divider: true }); };
+    out.push({ id: 'library', label: t('menu.library', 'Library…'), icon: 'books.vertical', top: true,
+      fn: () => { if (typeof openLibrary === 'function') openLibrary(); } });
+    // Episode/subtitle browser (iPhone/iPad video Titles only — Vision has
+    // its own ornament button; only shown when a video Title is loaded).
+    if (window.kadokiVideoMode?.isVideoTitle?.()) {
+      out.push({ id: 'episodes', label: t('menu.episodes', 'Episodes…'), icon: 'film.stack',
+        fn: () => { try { window.kadokiVideoMode.openBrowser(); } catch (_) {} } });
+    }
+    div();
+    const aiOn = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled());
+    // AI configured → the AI surfaces glow.
+    out.push({ id: 'timeline', label: t('menu.timeline_scenes', 'Timeline & Scenes…'), icon: 'sparkles',
+      glow: aiOn, procRow: true, countKey: 'timeline',
+      fn: () => { if (window.bookmarks?.openMenu) window.bookmarks.openMenu(); } });
+    // "Characters…" removed from the menu (2026-08-30, user request): the
+    // Characters screen stays reachable from the Timeline panel and from the
+    // character links inside chapter summaries — one AI row here is enough.
+    // History: the 3 most recent reading sessions (read / audio / card), each
+    // tappable to jump back to that place.
+    if (window.bookmarks && window.bookmarks.openHistory) {
+      out.push({ id: 'history', label: t('menu.history', 'History…'), icon: 'clock.arrow.circlepath',
+        fn: () => { try { window.bookmarks.openHistory(); } catch (_) {} } });
+    }
+    // Dictionary lookup history — words looked up, with context, → Anki.
+    if (window.lookupLog && window.lookupLog.openScreen) {
+      out.push({ id: 'lookup_history', label: t('menu.lookup_history', 'Lookup history…'), icon: 'character.book.closed',
+        fn: () => { try { window.lookupLog.openScreen(); } catch (_) {} } });
+    }
+    // Vocab SRS (in-app review of the AI 語彙 picks) — due count added live.
+    if (window.vocabSrs && window.vocabSrs.openHub) {
+      out.push({ id: 'srs', label: t('menu.srs', 'SRS…'), icon: 'rectangle.stack',
+        fn: () => { try { window.vocabSrs.openHub(); } catch (_) {} } });
+    }
+    out.push({ id: 'stats', label: t('menu.stats', 'Stats…'), icon: 'chart.bar', top: true,
+      fn: () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); } });
+    div();
+    out.push({ id: 'speed', label: t('menu.playback_speed', 'Playback Speed…'), icon: 'gauge.with.dots.needle.67percent',
+      fn: () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); } });
+    // Audio output (iOS): the system AirPods / speaker sheet, for when the
+    // AirPods stayed connected to another device.
+    if (window.audioOutputPickerAvailable && window.audioOutputPickerAvailable()) {
+      out.push({ id: 'audio_output', label: t('menu.audio_output', 'Audio output…'), icon: 'airplayaudio',
+        fn: () => { try { window.Capacitor.Plugins.BackgroundAudio.showRoutePicker().catch(() => {}); } catch (_) {} } });
+    }
+    div();
+    // Print group: one row. With a pending printed-reading log the row opens
+    // a small chooser (Print again / Log the reading); otherwise straight to
+    // the print dialog.
+    const openPrint = () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); };
+    const pending = (typeof window.hasPendingPrintedReading === 'function' && window.hasPendingPrintedReading());
+    out.push(pending
+      ? { id: 'print', label: t('menu.print', 'Print…'), icon: 'printer', children: [
+          { id: 'print_new', label: t('menu.print_new', 'New print…'), icon: 'printer', fn: openPrint },
+          { id: 'print_log', label: t('menu.log_printed_reading', 'Log printed reading…'), icon: 'square.and.pencil',
+            fn: () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); } },
+        ] }
+      : { id: 'print', label: t('menu.print', 'Print…'), icon: 'printer', fn: openPrint });
+    // Sync group: ONE row for all cross-device sync (2026-08-30, user
+    // request) — the LAN handoff poke plus the three Drive actions live in a
+    // submenu instead of four separate menu rows.
+    if (window.kadokiHandoff || window.driveSyncUI) {
+      const items = [];
+      if (window.kadokiHandoff) {
+        items.push({ id: 'sync_nearby', label: t('menu.handoff', 'Sync nearby device'), icon: 'iphone.radiowaves.left.and.right',
+          fn: () => { try { window.kadokiHandoff.syncNow(false); } catch (_) {} } });
+      }
+      if (window.driveSyncUI) {
+        if (window._activeTitleId && window.driveSyncUI.syncUp) {
+          items.push({ id: 'sync_up', label: t('menu.sync_up', 'Sync ↑  (push this title)'), icon: 'arrow.up.circle',
+            fn: () => { try { window.driveSyncUI.syncUp(); } catch (_) {} } });
+        }
+        if (window.driveSyncUI.syncDown) {
+          items.push({ id: 'sync_down', label: t('menu.sync_down', 'Sync ↓  (get latest)'), icon: 'arrow.down.circle',
+            fn: () => { try { window.driveSyncUI.syncDown(); } catch (_) {} } });
+        }
+        if (window.driveSyncUI.browseDrive) {
+          items.push({ id: 'browse_drive', label: t('menu.browse_drive', 'Browse Drive…'), icon: 'folder',
+            fn: () => { try { window.driveSyncUI.browseDrive(); } catch (_) {} } });
+        }
+      }
+      out.push({ id: 'sync', label: t('menu.sync_group', 'Sync…'), icon: 'arrow.triangle.2.circlepath', children: items });
+    }
+    out.push({ id: 'preferences', label: t('menu.preferences', 'Preferences…'), icon: 'gearshape', top: true,
+      fn: () => { if (typeof openPreferences === 'function') openPreferences(); } });
+    return out;
+  }
+  window.shellMenuEntries = shellMenuEntries;
+  window.aiUnseenForActiveTitle = () => aiUnseenForActiveTitle();
+
   window.openShellMoreMenu = function (ev) {
     ev?.stopPropagation();
     dismissShellMenu();
@@ -1209,99 +1307,30 @@
       return d;
     };
 
-    list.appendChild(mkItem(window.i18n.t('menu.library', 'Library…'),        () => { if (typeof openLibrary === 'function') openLibrary(); }));
-    // Episode/subtitle browser (iPhone/iPad video Titles only — Vision has
-    // its own ornament button; only shown when a video Title is loaded).
-    if (window.kadokiVideoMode?.isVideoTitle?.()) {
-      list.appendChild(mkItem(window.i18n.t('menu.episodes', 'Episodes…'), () => { try { window.kadokiVideoMode.openBrowser(); } catch (_) {} }));
+    // Rows come from shellMenuEntries(), the same list the native iOS menu
+    // (native-menu.js) renders, so the two can't drift apart.
+    for (const it of shellMenuEntries()) {
+      if (it.divider) { list.appendChild(mkDivider()); continue; }
+      const fn = it.children
+        ? () => openShellSubMenu(it.label, it.children.map(c => ({ label: c.label, fn: c.fn })))
+        : it.fn;
+      const row = mkItem(it.label, fn);
+      if (it.glow) row.classList.add('kai-glow-text');
+      if (it.procRow) row.dataset.kaiProcRow = '1';
+      if (it.countKey) row.dataset.kaiCountKey = it.countKey;
+      if (it.id === 'srs') {
+        (async () => {
+          try {
+            const c = await window.vocabSrs.counts();
+            if (c && c.due > 0) {
+              row.textContent = it.label + '  (' + c.due + ')';
+              row.classList.add('kai-glow-text');
+            }
+          } catch (_) {}
+        })();
+      }
+      list.appendChild(row);
     }
-    list.appendChild(mkDivider());
-    const aiOn = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled());
-    const bmItem = mkItem(window.i18n.t('menu.timeline_scenes', 'Timeline & Scenes…'), () => { if (window.bookmarks?.openMenu) window.bookmarks.openMenu(); });
-    // AI configured → the AI surfaces glow.
-    if (aiOn) bmItem.classList.add('kai-glow-text');
-    bmItem.dataset.kaiProcRow = '1';
-    bmItem.dataset.kaiCountKey = 'timeline';
-    list.appendChild(bmItem);
-    // "Characters…" removed from the menu (2026-08-30, user request): the
-    // Characters screen stays reachable from the Timeline panel and from the
-    // character links inside chapter summaries — one AI row here is enough.
-    // History: the 3 most recent reading sessions (read / audio / card), each
-    // tappable to jump back to that place.
-    if (window.bookmarks && window.bookmarks.openHistory) {
-      list.appendChild(mkItem(window.i18n.t('menu.history', 'History…'), () => { try { window.bookmarks.openHistory(); } catch (_) {} }));
-    }
-    // Audio output (iOS): the system AirPods / speaker sheet, for when the
-    // AirPods stayed connected to another device.
-    if (window.audioOutputPickerAvailable && window.audioOutputPickerAvailable()) {
-      list.appendChild(mkItem(window.i18n.t('menu.audio_output', 'Audio output…'), () => {
-        try { window.Capacitor.Plugins.BackgroundAudio.showRoutePicker().catch(() => {}); } catch (_) {}
-      }));
-    }
-    // Dictionary lookup history — words looked up, with context, → Anki.
-    if (window.lookupLog && window.lookupLog.openScreen) {
-      list.appendChild(mkItem(window.i18n.t('menu.lookup_history', 'Lookup history…'), () => { try { window.lookupLog.openScreen(); } catch (_) {} }));
-    }
-    // Vocab SRS (in-app review of the AI 語彙 picks) — due count appended live.
-    if (window.vocabSrs && window.vocabSrs.openHub) {
-      const srsItem = mkItem(window.i18n.t('menu.srs', 'SRS…'), () => { try { window.vocabSrs.openHub(); } catch (_) {} });
-      (async () => {
-        try {
-          const c = await window.vocabSrs.counts();
-          if (c && c.due > 0) {
-            srsItem.textContent = window.i18n.t('menu.srs', 'SRS…') + '  (' + c.due + ')';
-            srsItem.classList.add('kai-glow-text');
-          }
-        } catch (_) {}
-      })();
-      list.appendChild(srsItem);
-    }
-    // Glowing "(N)" badges = count of new (unseen) timeline/character updates
-    // for the active title. Computed AFTER the menu is appended (below, via
-    // updateShellAiCountBadges) so the SAME idempotent path also live-updates
-    // the badges if a new chapter is summarized while the menu is still open.
-    list.appendChild(mkDivider());
-    list.appendChild(mkItem(window.i18n.t('menu.stats', 'Stats…'),          () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); }));
-    list.appendChild(mkDivider());
-    list.appendChild(mkItem(window.i18n.t('menu.playback_speed', 'Playback Speed…'), () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); }));
-    list.appendChild(mkDivider());
-    // Print group: one row. With a pending printed-reading log the row opens
-    // a small chooser (Print again / Log the reading); otherwise straight to
-    // the print dialog.
-    list.appendChild(mkItem(window.i18n.t('menu.print', 'Print…'), () => {
-      const pending = (typeof window.hasPendingPrintedReading === 'function' && window.hasPendingPrintedReading());
-      if (!pending) { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); return; }
-      openShellSubMenu(window.i18n.t('menu.print', 'Print…'), [
-        { label: window.i18n.t('menu.print_new', 'New print…'), fn: () => { if (typeof window.openPrintDialog === 'function') window.openPrintDialog(); } },
-        { label: window.i18n.t('menu.log_printed_reading', 'Log printed reading…'), fn: () => { if (typeof window.openLogPrintedReadingDialog === 'function') window.openLogPrintedReadingDialog(); } },
-      ]);
-    }));
-    // Sync group: ONE row for all cross-device sync (2026-08-30, user
-    // request) — the LAN handoff poke plus the three Drive actions live in a
-    // popup chooser instead of four separate menu rows.
-    if (window.kadokiHandoff || window.driveSyncUI) {
-      list.appendChild(mkDivider());
-      list.appendChild(mkItem(window.i18n.t('menu.sync_group', 'Sync…'), () => {
-        const items = [];
-        if (window.kadokiHandoff) {
-          items.push({ label: window.i18n.t('menu.handoff', 'Sync nearby device'), fn: () => { try { window.kadokiHandoff.syncNow(false); } catch (_) {} } });
-        }
-        if (window.driveSyncUI) {
-          if (window._activeTitleId && window.driveSyncUI.syncUp) {
-            items.push({ label: window.i18n.t('menu.sync_up', 'Sync ↑  (push this title)'), fn: () => { try { window.driveSyncUI.syncUp(); } catch (_) {} } });
-          }
-          if (window.driveSyncUI.syncDown) {
-            items.push({ label: window.i18n.t('menu.sync_down', 'Sync ↓  (get latest)'), fn: () => { try { window.driveSyncUI.syncDown(); } catch (_) {} } });
-          }
-          if (window.driveSyncUI.browseDrive) {
-            items.push({ label: window.i18n.t('menu.browse_drive', 'Browse Drive…'), fn: () => { try { window.driveSyncUI.browseDrive(); } catch (_) {} } });
-          }
-        }
-        openShellSubMenu(window.i18n.t('menu.sync_group', 'Sync…'), items);
-      }));
-    }
-    list.appendChild(mkDivider());
-    list.appendChild(mkItem(window.i18n.t('menu.preferences', 'Preferences…'),    () => { if (typeof openPreferences === 'function') openPreferences(); }));
 
     document.body.appendChild(menu);
     updateShellProcSpinners();   // chapter processing in flight → spinner on both AI rows

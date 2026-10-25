@@ -699,12 +699,32 @@ class MainViewController: CAPBridgeViewController {
         // (positioned by the JS videoSurface stream; see KadokiVideoIOS.swift).
         if let wv = self.bridge?.webView {
             KadokiVideoIOSHost.shared.install(webView: wv)
+            // Native UIMenu over the toolbar's hamburger (NativeChrome.swift).
+            wv.configuration.userContentController.addUserScript(KadokiNativeMenu.userScript())
+            nativeMenu.install(in: self.view, webView: wv)
+            // Native Preferences generated from the web panel (NativePrefs.swift)
+            // and the native Library; iOS 16+, older systems keep the web ones.
+            if #available(iOS 16.0, *) {
+                let prefs = KadokiNativePrefs()
+                wv.configuration.userContentController.addUserScript(KadokiNativePrefs.userScript())
+                prefs.install(in: self, webView: wv)
+                nativePrefs = prefs
+                // Native Library (NativeLibrary.swift).
+                let lib = KadokiNativeLibrary()
+                wv.configuration.userContentController.addUserScript(KadokiNativeLibrary.userScript())
+                lib.install(in: self, webView: wv)
+                nativeLibrary = lib
+            }
         }
         installHingeObserver()
         #endif
     }
 
     #if os(iOS)
+    private let nativeMenu = KadokiNativeMenu()
+    private var nativePrefs: AnyObject?
+    private var nativeLibrary: AnyObject?
+
     // iPhone Duo. A hinge marks the device as a foldable for the web layer
     // (window.KADOKI_DUO — every Duo-only behavior keys off it, so a phone
     // without a hinge never changes) and streams hinge movement, which begins
