@@ -4092,15 +4092,9 @@
     });
   }
 
-  // Badge (dot on abSummaryBtn) + a one-time toast when the CURRENT chapter's
-  // AI summary becomes available and hasn't been read yet. Without this,
-  // crossing into a newly-summarized chapter is silent — the button just sits
-  // there with no signal, and it's usually hidden behind chrome-hidden during
-  // an actual listening session anyway, so the toast is the one moment
-  // that's guaranteed visible regardless of chrome state; the badge is the
-  // quieter persistent cue for whenever chrome IS shown.
+  // Badge (dot on abSummaryBtn) when the CURRENT chapter's AI summary is
+  // available and hasn't been read yet.
   let _abSummaryPollTimer = null;
-  let _abLastToastedIdx = null;
   async function abCheckSummaryStatus() {
     try {
       if (!document.body.classList.contains('mode-audio') || document.hidden) return;
@@ -4110,14 +4104,8 @@
       const st = await window.aiTimeline.currentChapterStatus(tid);
       const show = !!(st && st.hasSummary && st.unread);
       btn.classList.toggle('has-new', show);
-      if (show && st.idx !== _abLastToastedIdx) {
-        _abLastToastedIdx = st.idx;
-        try {
-          if (window.showToast) {
-            window.showToast(window.i18n.fmt('audio.new_summary_toast', { label: st.label }, st.label + 'の要約が利用可能です'), 3200);
-          }
-        } catch (_) {}
-      }
+      // No toast (2026-10-25, user: "random toasts"): it re-announced the same
+      // unread summary after every launch. The badge is the cue.
     } catch (_) {}
   }
   function abStartSummaryStatusPoll() {
@@ -4127,7 +4115,6 @@
   }
   function abStopSummaryStatusPoll() {
     if (_abSummaryPollTimer) { clearInterval(_abSummaryPollTimer); _abSummaryPollTimer = null; }
-    _abLastToastedIdx = null;   // fresh session next time audio mode opens
     try { const btn = document.getElementById('abSummaryBtn'); if (btn) btn.classList.remove('has-new'); } catch (_) {}
   }
 

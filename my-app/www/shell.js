@@ -313,18 +313,22 @@
     setEmpty(readTab, !hasEpub);
     setEmpty(cardTab, !hasCards);
     // Only the title's own tabs (two at most by default; long-press the tabs
-    // to choose). No active title: all, as before.
-    const setHidden = (tab, hidden) => {
-      if (!tab) return;
-      if (hidden) tab.dataset.hidden = '1';
-      else delete tab.dataset.hidden;
-    };
-    setHidden(cardTab, shown && !shown.includes('card'));
-    setHidden(readTab, shown && !shown.includes('read'));
-    setHidden(audioTab, shown && !shown.includes('audio'));
-    setHidden(document.getElementById('kvVideoTab'), shown && !shown.includes('audio'));
-    // Remembered for the next launch (applied before the title has loaded).
-    try { if (shown) localStorage.setItem('SHOWN_TABS_V1', JSON.stringify(shown)); } catch (_) {}
+    // to choose). When the active title can't be resolved (launch, a title
+    // still loading) the tabs stay as they are: resetting to all three here
+    // undid the remembered tabs and showed CARD on a READ / AUDIO book.
+    if (shown) {
+      const setHidden = (tab, hidden) => {
+        if (!tab) return;
+        if (hidden) tab.dataset.hidden = '1';
+        else delete tab.dataset.hidden;
+      };
+      setHidden(cardTab, !shown.includes('card'));
+      setHidden(readTab, !shown.includes('read'));
+      setHidden(audioTab, !shown.includes('audio'));
+      setHidden(document.getElementById('kvVideoTab'), !shown.includes('audio'));
+      // Remembered for the next launch (applied before the title has loaded).
+      try { localStorage.setItem('SHOWN_TABS_V1', JSON.stringify(shown)); } catch (_) {}
+    }
 
     // Play/pause button only makes sense when there's something to play — an
     // audiobook (read-along / audio mode) or cards (card audio). An EPUB-only
@@ -371,6 +375,7 @@
     // The long-press must not also switch modes on release.
     bar.addEventListener('click', (e) => { if (fired) { fired = false; e.stopPropagation(); e.preventDefault(); } }, true);
   }
+  window.openTabChooser = () => openTabChooser();   // the native toolbar's long-press
   async function openTabChooser() {
     const id = window._activeTitleId;
     const ts = window.titleStore;

@@ -1,0 +1,96 @@
+// Native iOS toolbar controls (NativeToolbar in NativeChrome.swift): the mode
+// tabs as a UISegmentedControl and play / pause as a native button, laid over
+// the web controls (which stay in place, invisible, so layout and hit tests
+// don't change). Every tap is forwarded to the web control itself, so mode
+// switching and playback run exactly the code they always did.
+// This file reports where the controls are, whether each is the top-most
+// thing at its spot (never steal a tap meant for a popup over it), which tabs
+// the title shows, the selected one, its accent and the play state.
+// Inert unless native injected window.KADOKI_NATIVE_TOOLBAR (iPhone / iPad).
+(function () {
+  'use strict';
+  if (!window.KADOKI_NATIVE_TOOLBAR) return;
+  document.documentElement.classList.add('kadoki-native-toolbar');
+  const post = (msg) => { try { window.webkit.messageHandlers.kadokiNativeToolbar.postMessage(msg); } catch (_) {} };
+
+  const root = () => getComputedStyle(document.documentElement);
+  const accent = (mode) => {
+    const v = { card: '--accent-card', read: '--accent-read', audio: '--accent-audio', video: '--accent-audio' }[mode] || '--accent-read';
+    return root().getPropertyValue(v).trim() || '#4caf50';
+  };
+  const onTop = (el) => {
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) return null;
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!(hit && (hit === el || el.contains(hit)))) return null;
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  };
+  const covered = () => {
+    const cl = document.body.classList;
+    return document.hidden || cl.contains('prefs-open') || cl.contains('native-library-open');
+  };
+
+  function state() {
+    const out = { tabs: { visible: false }, play: { visible: false } };
+    if (covered()) return out;
+    const bar = document.getElementById('shellModeTabs');
+    if (bar) {
+      const tabs = [...bar.querySelectorAll('.mode-tab')].filter(t => t.dataset.hidden !== '1' && getComputedStyle(t).display !== 'none');
+      const rect = tabs.length ? onTop(bar) : null;
+      if (rect) {
+        const sel = tabs.findIndex(t => t.dataset.active === '1');
+        out.tabs = {
+          visible: true, ...rect,
+          items: tabs.map(t => ({ mode: t.dataset.mode, label: t.textContent.trim(), disabled: t.dataset.empty === '1' })),
+          selected: sel,
+          accent: accent(sel >= 0 ? tabs[sel].dataset.mode : ''),
+          accents: Object.fromEntries(tabs.map(t => [t.dataset.mode, accent(t.dataset.mode)])),
+        };
+      }
+    }
+    const play = document.getElementById('shellPlayBtn');
+    if (play && getComputedStyle(play).display !== 'none') {
+      const rect = onTop(play);
+      if (rect) {
+        const pause = play.querySelector('[data-role="pause"]');
+        const active = document.querySelector('#shellModeTabs .mode-tab[data-active="1"]');
+        out.play = { visible: true, ...rect, playing: !!(pause && getComputedStyle(pause).display !== 'none'), accent: accent(active ? active.dataset.mode : '') };
+      }
+    }
+    return out;
+  }
+
+  let last = '', queued = false;
+  function report() {
+    queued = false;
+    const s = state();
+    const k = JSON.stringify(s);
+    if (k !== last) { last = k; post(s); }
+  }
+  function schedule() { if (!queued) { queued = true; requestAnimationFrame(report); } }
+
+  window.__kadokiToolbarTab = (mode) => {
+    const tab = document.querySelector('#shellModeTabs .mode-tab[data-mode="' + mode + '"]');
+    if (tab) tab.click();
+    schedule();
+  };
+  window.__kadokiToolbarPlay = () => { document.getElementById('shellPlayBtn')?.click(); schedule(); };
+  window.__kadokiToolbarChooser = () => { try { window.openTabChooser?.(); } catch (_) {} };
+
+  const start = () => {
+    try {
+      const head = document.getElementById('appHeader');
+      if (head) new MutationObserver(schedule).observe(head, { subtree: true, attributes: true, childList: true, characterData: true });
+      new MutationObserver(schedule).observe(document.body, { childList: true, attributes: true, attributeFilter: ['class', 'style'] });
+    } catch (_) {}
+    window.addEventListener('resize', schedule);
+    window.addEventListener('shell:mode-change', schedule);
+    window.addEventListener('kai:lang', schedule);
+    document.addEventListener('visibilitychange', schedule);
+    document.addEventListener('transitionend', schedule, true);
+    setInterval(() => { if (!document.hidden) schedule(); }, 1500);
+    schedule();
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();

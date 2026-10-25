@@ -101,3 +101,8 @@ html.kadoki-ios .lib-sheet-cancel {
   font-weight: 600 !important;
 }
 html.kadoki-ios .lib-sheet-cancel:active { background: rgb(72, 72, 74) !important; opacity: 1; }
+
+/* ── native toolbar (native-toolbar.js): the web tabs and play button stay in
+   place for layout and hit tests but are drawn natively on top ─────────── */
+html.kadoki-native-toolbar #shellModeTabs,
+html.kadoki-native-toolbar #shellPlayBtn { opacity: 0 !important; }

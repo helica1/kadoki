@@ -706,6 +706,8 @@ class MainViewController: CAPBridgeViewController {
             wv.configuration.userContentController.addUserScript(KadokiActionSheet.userScript())
             actionSheet.install(in: self, webView: wv)
             nativeToast.install(in: self.view, webView: wv)
+            wv.configuration.userContentController.addUserScript(KadokiNativeToolbar.userScript())
+            nativeToolbar.install(in: self.view, webView: wv)
             // Native Preferences generated from the web panel (NativePrefs.swift)
             // and the native Library; iOS 16+, older systems keep the web ones.
             if #available(iOS 16.0, *) {
@@ -728,6 +730,7 @@ class MainViewController: CAPBridgeViewController {
     private let nativeMenu = KadokiNativeMenu()
     private let actionSheet = KadokiActionSheet()
     private let nativeToast = KadokiToast()
+    private let nativeToolbar = KadokiNativeToolbar()
     private var nativePrefs: AnyObject?
     private var nativeLibrary: AnyObject?
 

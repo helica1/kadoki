@@ -115,6 +115,152 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// Native toolbar controls over the web toolbar (native-toolbar.js): the mode
+/// tabs as a UISegmentedControl (only the title's own tabs, its mode accent)
+/// and play / pause as a native button. Each sits exactly over its web
+/// control, is shown only while that control is the top-most thing there,
+/// and forwards taps to it, so mode switches and playback run the web code
+/// unchanged. Long-press the tabs → the per-title tab chooser.
+final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
+    private weak var webView: WKWebView?
+    private let tabs = UISegmentedControl()
+    private let play = UIButton(type: .system)
+    private var modes: [String] = []
+    private var labels: [String] = []
+    private var accent = ""
+    private var accents: [String: String] = [:]
+    private var playAccent = ""
+    private var shownPlaying: Bool?
+    // A tap is shown at once; reports that still carry the old state (the web
+    // side hasn't switched yet) don't undo it until they catch up or time out.
+    private var pendingMode: String?
+    private var pendingModeUntil = Date.distantPast
+    private var pendingPlaying: Bool?
+    private var pendingPlayUntil = Date.distantPast
+
+    static func userScript() -> WKUserScript {
+        WKUserScript(source: "window.KADOKI_NATIVE_TOOLBAR=true;", injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
+    func install(in host: UIView, webView: WKWebView) {
+        self.webView = webView
+        webView.configuration.userContentController.add(WeakMessageHandler(self), name: "kadokiNativeToolbar")
+        tabs.isHidden = true
+        tabs.setTitleTextAttributes([.foregroundColor: UIColor.black, .font: UIFont.systemFont(ofSize: 13, weight: .semibold)], for: .selected)
+        tabs.setTitleTextAttributes([.foregroundColor: UIColor.secondaryLabel, .font: UIFont.systemFont(ofSize: 13, weight: .medium)], for: .normal)
+        tabs.addTarget(self, action: #selector(tabChanged), for: .valueChanged)
+        tabs.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(tabsLongPress(_:))))
+        play.isHidden = true
+        play.accessibilityLabel = NSLocalizedString("Play/pause", comment: "")
+        play.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
+        host.addSubview(tabs)
+        host.addSubview(play)
+    }
+
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let d = message.body as? [String: Any], let wv = webView, let host = tabs.superview else { return }
+        func rect(_ o: [String: Any]) -> CGRect? {
+            guard let x = o["x"] as? Double, let y = o["y"] as? Double, let w = o["w"] as? Double, let h = o["h"] as? Double else { return nil }
+            return wv.convert(CGRect(x: x, y: y, width: w, height: h), to: host)
+        }
+        // Tabs
+        let t = d["tabs"] as? [String: Any] ?? [:]
+        if (t["visible"] as? Bool) == true, let r = rect(t), let items = t["items"] as? [[String: Any]], !items.isEmpty {
+            let m = items.map { $0["mode"] as? String ?? "" }
+            let l = items.map { $0["label"] as? String ?? "" }
+            if m != modes || l != labels {
+                modes = m; labels = l
+                tabs.removeAllSegments()
+                for (i, title) in l.enumerated() { tabs.insertSegment(withTitle: title, at: i, animated: false) }
+            }
+            for (i, it) in items.enumerated() {
+                let on = !((it["disabled"] as? Bool) ?? false)
+                if tabs.isEnabledForSegment(at: i) != on { tabs.setEnabled(on, forSegmentAt: i) }
+            }
+            accents = (t["accents"] as? [String: String]) ?? accents
+            var sel = t["selected"] as? Int ?? -1
+            if let pm = pendingMode {
+                let reported = (sel >= 0 && sel < m.count) ? m[sel] : ""
+                if reported == pm || Date() > pendingModeUntil { pendingMode = nil }
+                else if let pi = m.firstIndex(of: pm) { sel = pi }
+            }
+            let want = (sel >= 0 && sel < m.count) ? sel : UISegmentedControl.noSegment
+            if tabs.selectedSegmentIndex != want { tabs.selectedSegmentIndex = want }
+            let a = pendingMode == nil ? ((t["accent"] as? String) ?? "") : accent
+            if a != accent { accent = a; tabs.selectedSegmentTintColor = Self.color(a) }
+            let h = max(r.height, 32)
+            let f = CGRect(x: r.minX, y: r.midY - h / 2, width: r.width, height: h)
+            if abs(f.minX - tabs.frame.minX) > 0.5 || abs(f.minY - tabs.frame.minY) > 0.5 || abs(f.width - tabs.frame.width) > 0.5 { tabs.frame = f }
+            host.bringSubviewToFront(tabs)
+            tabs.isHidden = false
+        } else {
+            tabs.isHidden = true
+        }
+        // Play / pause
+        let p = d["play"] as? [String: Any] ?? [:]
+        if (p["visible"] as? Bool) == true, let r = rect(p) {
+            var playing = (p["playing"] as? Bool) ?? false
+            if let pp = pendingPlaying {
+                if playing == pp || Date() > pendingPlayUntil { pendingPlaying = nil } else { playing = pp }
+            }
+            setPlay(playing: playing, accent: (p["accent"] as? String) ?? playAccent)
+            let f = r.insetBy(dx: 0, dy: min(0, (r.height - 34) / 2))
+            if f != play.frame { play.frame = f }
+            host.bringSubviewToFront(play)
+            play.isHidden = false
+        } else {
+            play.isHidden = true
+        }
+    }
+
+    private func setPlay(playing: Bool, accent a: String) {
+        guard playing != shownPlaying || a != playAccent else { return }
+        shownPlaying = playing
+        playAccent = a
+        var cfg = UIButton.Configuration.tinted()
+        cfg.image = UIImage(systemName: playing ? "pause.fill" : "play.fill")
+        cfg.cornerStyle = .capsule
+        cfg.baseForegroundColor = Self.color(a)
+        cfg.baseBackgroundColor = Self.color(a)
+        play.configuration = cfg
+    }
+
+    @objc private func tabChanged() {
+        let i = tabs.selectedSegmentIndex
+        guard i >= 0, i < modes.count else { return }
+        pendingMode = modes[i]
+        pendingModeUntil = Date().addingTimeInterval(2.5)
+        // The bubble takes the new mode's color as it slides.
+        if let a = accents[modes[i]], a != accent { accent = a; tabs.selectedSegmentTintColor = Self.color(a) }
+        js("window.__kadokiToolbarTab(\(Self.quoted(modes[i])))")
+    }
+    @objc private func tabsLongPress(_ g: UILongPressGestureRecognizer) {
+        if g.state == .began { UIImpactFeedbackGenerator(style: .medium).impactOccurred(); js("window.__kadokiToolbarChooser()") }
+    }
+    @objc private func playTapped() {
+        // Flip at once (the real state confirms it a moment later).
+        let next = !(shownPlaying ?? false)
+        pendingPlaying = next
+        pendingPlayUntil = Date().addingTimeInterval(2)
+        setPlay(playing: next, accent: playAccent)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        js("window.__kadokiToolbarPlay()")
+    }
+    private func js(_ s: String) { webView?.evaluateJavaScript(s, completionHandler: nil) }
+
+    private static func quoted(_ s: String) -> String {
+        let d = (try? JSONSerialization.data(withJSONObject: [s])) ?? Data("[\"\"]".utf8)
+        return String(String(decoding: d, as: UTF8.self).dropFirst().dropLast())
+    }
+    private static func color(_ css: String?) -> UIColor {
+        var s = (css ?? "").trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
+        guard s.count == 6, let n = UInt64(s, radix: 16) else { return .systemGreen }
+        return UIColor(red: CGFloat((n >> 16) & 0xFF) / 255, green: CGFloat((n >> 8) & 0xFF) / 255, blue: CGFloat(n & 0xFF) / 255, alpha: 1)
+    }
+}
+
 /// Native iOS action sheets for the web choosers (ios-feel.js routes a
 /// libSheet that holds only plain choices here). Message: {id, title,
 /// options: [{label, sub, destructive}], cancel}; the pick goes back as
