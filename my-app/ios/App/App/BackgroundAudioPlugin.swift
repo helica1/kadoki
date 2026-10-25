@@ -4,6 +4,7 @@ import Capacitor
 import UIKit
 import AVFoundation
 import AVKit
+import Accelerate
 import MediaPlayer
 
 // Native position tap for the Apple Watch live-subtitle stream (Phase B):
@@ -1406,6 +1407,71 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         updateNowPlaying()
         NSLog("[BackgroundAudio] engine → %@ at %.2fs playing=%d", toRead ? "speech" : "default", pos, wasPlaying ? 1 : 0)
         return true
+    }
+
+    // MARK: - Spectrum (toolbar bars)
+
+    private var fftSetup: FFTSetup?
+    private var meterPhase: Float = 0
+
+    /// `bands` levels 0…1 for the toolbar's spectrum bars, or nil when nothing
+    /// is playing. The read engine yields a real spectrum (FFT of its output);
+    /// AVAudioPlayer only meters loudness, so there the bars follow the
+    /// narration's level with a gentle per-band variation.
+    func spectrum(bands: Int) -> [Float]? {
+        guard let p = player, p.isPlaying, bands > 0 else { return nil }
+        if let e = p as? KadokiReadEngine {
+            let x = e.recentSamples()
+            let n = 512, log2n: vDSP_Length = 9
+            if fftSetup == nil { fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) }
+            guard let setup = fftSetup, x.count >= n else { return nil }
+            var window = [Float](repeating: 0, count: n)
+            vDSP_hann_window(&window, vDSP_Length(n), Int32(vDSP_HANN_NORM))
+            var seg = Array(x.suffix(n))
+            vDSP_vmul(seg, 1, window, 1, &seg, 1, vDSP_Length(n))
+            var re = [Float](repeating: 0, count: n / 2), im = [Float](repeating: 0, count: n / 2)
+            var mags = [Float](repeating: 0, count: n / 2)
+            re.withUnsafeMutableBufferPointer { rp in
+                im.withUnsafeMutableBufferPointer { ip in
+                    var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                    seg.withUnsafeBufferPointer { sp in
+                        sp.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: n / 2) { cp in
+                            vDSP_ctoz(cp, 2, &split, 1, vDSP_Length(n / 2))
+                        }
+                    }
+                    vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                    vDSP_zvabs(&split, 1, &mags, 1, vDSP_Length(n / 2))
+                }
+            }
+            // Log-spaced bands across the voice range (~100 Hz – 6 kHz).
+            let sr = e.scopeSampleRate, binHz = sr / Double(n)
+            var out = [Float]()
+            for b in 0..<bands {
+                let lo = 100.0 * pow(60.0, Double(b) / Double(bands))
+                let hi = 100.0 * pow(60.0, Double(b + 1) / Double(bands))
+                let i0 = max(1, Int(lo / binHz)), i1 = max(i0 + 1, min(n / 2, Int(hi / binHz)))
+                var m: Float = 0
+                for i in i0..<i1 { m = max(m, mags[i]) }
+                let db = 20 * log10(max(m, 1e-6))
+                out.append(max(0, min(1, (db + 10) / 50)))
+            }
+            return out
+        }
+        if let a = p as? AVAudioPlayer {
+            if !a.isMeteringEnabled { a.isMeteringEnabled = true }
+            a.updateMeters()
+            let db = a.averagePower(forChannel: 0)
+            let level = max(0, min(1, (db + 45) / 40))
+            meterPhase += 0.37
+            return (0..<bands).map { b in
+                // Voice-like tilt: strongest in the low-mids, tapering up.
+                let x = (Float(b) + 0.5) / Float(bands)
+                let shape: Float = 0.45 + 0.55 * sin(Float.pi * min(1, x * 1.4))
+                let wobble = 0.85 + 0.15 * sin(meterPhase * (1.3 + Float(b) * 0.7))
+                return max(0, min(1, level * shape * wobble))
+            }
+        }
+        return nil
     }
 
     @objc func scrubBegin(_ call: CAPPluginCall) {

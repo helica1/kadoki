@@ -1139,7 +1139,11 @@
     const btn = el('shellPlayBtn');
 
     if (currentMode === 'audio') {
-      const willPlay = !window._lastBgPlaying;
+      // From the live state (kept by the native 'state' event), not the
+      // label's 800 ms copy: after a swipe-to-play the copy still said
+      // paused, so a tap predicted PLAY while the toggle actually paused.
+      const pinned = _shellPlayOptimistic && Date.now() <= _shellPlayOptimistic.until;
+      const willPlay = !(pinned ? _shellPlayOptimistic.playing : !!window._bgPlaying);
       window._lastBgPlaying = willPlay;
       _shellPlayOptimistic = { playing: willPlay, until: Date.now() + SHELL_PLAY_OPTIMISTIC_MS };
       if (btn) setPlayBtnState(btn, willPlay);
@@ -1688,6 +1692,13 @@
     attachShellButtonListeners();
     startTimerPoll();
     setInterval(() => { if (!document.hidden) refreshShellPlayLabel(); }, 800);
+    // Follow play / pause from anywhere (swipe, lock screen, headphones) at
+    // once instead of on the next 800 ms poll.
+    try {
+      window.Capacitor?.Plugins?.BackgroundAudio?.addListener?.('state', () => {
+        setTimeout(() => { if (!document.hidden) refreshShellPlayLabel(); }, 0);
+      });
+    } catch (_) {}
     setInterval(() => { if (!document.hidden) resyncTabsFromDom(); }, 800);
     refreshTabAvailability();
     setInterval(() => { if (!document.hidden) refreshTabAvailability(); }, 3000);

@@ -5,17 +5,21 @@ import WebKit
 #if os(iOS)
 /// Native iOS menu for the web toolbar's hamburger (#shellMoreBtn).
 ///
-/// iOS only presents a UIMenu from a control the user taps, so a transparent
-/// UIButton sits exactly over the web button (native-menu.js reports where it
-/// is and whether it is the top-most element there). The web button still
-/// draws the icon and the red "new AI data" dot underneath.
+/// iOS only presents a UIMenu from a control the user taps, so a native
+/// button (glass on iOS 26, a gray circle before) sits over the web button,
+/// which stays in place invisible (native-menu.js reports where it is and
+/// whether it is the top-most element there). A red dot on it mirrors the
+/// web button's "new AI data" dot.
 ///
 /// The menu is built fresh on every open from window.__kadokiMenuModel() — the
 /// same rows the web menu draws (shell.js shellMenuEntries) — and a pick runs
 /// window.__kadokiMenuSelect(id).
 final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
-    private let button = UIButton(type: .custom)
+    private let button = UIButton(type: .system)
+    private let dot = UIView()
+    private var chromeHidden = false
+    private static let size: CGFloat = 40
 
     /// Flag the page before any script runs so native-menu.js arms itself.
     static func userScript() -> WKUserScript {
@@ -26,26 +30,48 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
         self.webView = webView
         webView.configuration.userContentController.add(WeakMessageHandler(self), name: "kadokiNativeMenu")
         button.isHidden = true
-        button.backgroundColor = .clear
+        var cfg: UIButton.Configuration
+        if #available(iOS 26.0, *) { cfg = .glass() } else { cfg = .gray() }
+        cfg.image = UIImage(systemName: "line.3.horizontal", withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold))
+        cfg.cornerStyle = .capsule
+        cfg.baseForegroundColor = .label
+        cfg.contentInsets = .zero
+        button.configuration = cfg
         button.accessibilityLabel = NSLocalizedString("Menu", comment: "hamburger menu")
         button.showsMenuAsPrimaryAction = true
         button.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] completion in
             self?.loadMenu(completion) ?? completion([])
         }])
+        dot.backgroundColor = .systemRed
+        dot.layer.cornerRadius = 4.5
+        dot.isUserInteractionEnabled = false
+        dot.isHidden = true
+        dot.frame = CGRect(x: Self.size - 11, y: 2, width: 9, height: 9)
+        button.addSubview(dot)
         host.addSubview(button)
     }
 
-    // Anchor report: {visible, x, y, w, h} in web CSS px (= points in the web view).
+    // Anchor report: {visible, x, y, w, h, dot, chrome} in web CSS px (= points in the web view).
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let d = message.body as? [String: Any], let wv = webView, let host = button.superview else { return }
+        defer {
+            if let c = d["chrome"] as? Bool, c == chromeHidden {
+                chromeHidden = !c
+                KadokiChromeSlide.apply([button], hidden: chromeHidden)
+            }
+        }
         let visible = (d["visible"] as? Bool) ?? false
         guard visible, let x = d["x"] as? Double, let y = d["y"] as? Double,
               let w = d["w"] as? Double, let h = d["h"] as? Double else {
             button.isHidden = true
             return
         }
-        let inWeb = CGRect(x: x, y: y, width: w, height: h)
-        button.frame = wv.convert(inWeb, to: host)
+        let r = wv.convert(CGRect(x: x, y: y, width: w, height: h), to: host)
+        let s = Self.size
+        // Centered on the web button, but never past the screen's right edge.
+        let cx = min(r.midX, host.bounds.width - host.safeAreaInsets.right - 8 - s / 2)
+        KadokiChromeSlide.place(button, CGRect(x: cx - s / 2, y: r.midY - s / 2, width: s, height: s))
+        dot.isHidden = !((d["dot"] as? Bool) ?? false)
         host.bringSubviewToFront(button)
         button.isHidden = false
     }
@@ -115,6 +141,185 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// The web header slides up and fades when the reader hides its chrome
+/// (theme.css body.chrome-hidden #appHeader: translateY(-110%) over 0.22 s
+/// ease, opacity over 0.18 s). The native controls laid over it run the same
+/// animation themselves on the same frame, instead of chasing position
+/// reports, so the whole bar moves as one.
+enum KadokiChromeSlide {
+    static let headerHeight: CGFloat = 48
+
+    static func apply(_ views: [UIView], hidden: Bool) {
+        let ease = (CGPoint(x: 0.25, y: 0.1), CGPoint(x: 0.25, y: 1))
+        let move = UIViewPropertyAnimator(duration: 0.22, controlPoint1: ease.0, controlPoint2: ease.1) {
+            for v in views { v.transform = hidden ? CGAffineTransform(translationX: 0, y: -headerHeight * 1.1) : .identity }
+        }
+        let fade = UIViewPropertyAnimator(duration: 0.18, controlPoint1: ease.0, controlPoint2: ease.1) {
+            for v in views { v.alpha = hidden ? 0 : 1 }
+        }
+        move.isUserInteractionEnabled = !hidden
+        fade.isUserInteractionEnabled = !hidden
+        move.startAnimation()
+        fade.startAnimation()
+    }
+
+    /// Place by center + size so a frame set mid-slide doesn't fight the transform.
+    static func place(_ v: UIView, _ f: CGRect) {
+        let c = CGPoint(x: f.midX, y: f.midY)
+        if abs(v.center.x - c.x) > 0.5 || abs(v.center.y - c.y) > 0.5 { v.center = c }
+        if abs(v.bounds.width - f.width) > 0.5 || abs(v.bounds.height - f.height) > 0.5 { v.bounds.size = f.size }
+    }
+
+    static func color(_ css: String?) -> UIColor {
+        var s = (css ?? "").trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("#") { s.removeFirst() }
+        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
+        guard s.count == 6, let n = UInt64(s, radix: 16) else { return .systemGreen }
+        return UIColor(red: CGFloat((n >> 16) & 0xFF) / 255, green: CGFloat((n >> 8) & 0xFF) / 255, blue: CGFloat(n & 0xFF) / 255, alpha: 1)
+    }
+}
+
+/// The toolbar's play / pause: a flat capsule in the mode accent that springs
+/// when pressed. Paused it shows the play glyph; playing, a little spectrum
+/// analyzer that follows the audio takes the glyph's place (tap = pause). The
+/// bars only animate while audio plays and the button is on screen.
+final class KadokiPlayButton: UIControl {
+    var spectrum: ((Int) -> [Float]?)?
+    private(set) var playing = false
+    private let fill = CAGradientLayer()
+    private let glyph = UIImageView()
+    private let barCount = 7
+    private var bars: [CALayer] = []
+    private var levels: [Float] = []
+    private var link: CADisplayLink?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        layer.addSublayer(fill)
+        for _ in 0..<barCount {
+            let b = CALayer()
+            b.backgroundColor = UIColor(white: 0.06, alpha: 0.85).cgColor
+            b.cornerRadius = 1.5
+            layer.addSublayer(b)
+            bars.append(b)
+        }
+        levels = Array(repeating: 0, count: barCount)
+        glyph.tintColor = UIColor(white: 0.06, alpha: 0.9)
+        glyph.contentMode = .center
+        glyph.isUserInteractionEnabled = false
+        addSubview(glyph)
+        isAccessibilityElement = true
+        accessibilityTraits = .button
+        addTarget(self, action: #selector(down), for: [.touchDown, .touchDragEnter])
+        addTarget(self, action: #selector(up), for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
+        set(playing: false, accent: .systemGreen)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func set(playing p: Bool, accent: UIColor) {
+        playing = p
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        accent.getHue(&h, saturation: &s, brightness: &b, alpha: &a)
+        // Flat, with only a hint of light from above.
+        let top = UIColor(hue: h, saturation: s * 0.94, brightness: min(1, b * 1.04), alpha: 1)
+        let bottom = UIColor(hue: h, saturation: s, brightness: b * 0.96, alpha: 1)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        fill.colors = [top.cgColor, bottom.cgColor]
+        CATransaction.commit()
+        glyph.image = UIImage(systemName: "play.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .bold))
+        accessibilityLabel = p ? NSLocalizedString("Pause", comment: "") : NSLocalizedString("Play", comment: "")
+        UIView.animate(withDuration: 0.18, delay: 0, options: [.beginFromCurrentState, .curveEaseOut]) {
+            self.glyph.alpha = p ? 0 : 1
+        }
+        if !p { for i in levels.indices { levels[i] = 0 } }
+        updateLink()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let r = bounds.height / 2
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        fill.frame = bounds
+        fill.cornerRadius = r
+        CATransaction.commit()
+        glyph.frame = CGRect(x: bounds.midX - 8, y: 0, width: 18, height: bounds.height)
+        drawBars()
+    }
+
+    private func drawBars() {
+        let bw: CGFloat = 3, gap: CGFloat = 2.5
+        let total = CGFloat(barCount) * bw + CGFloat(barCount - 1) * gap
+        let x0 = bounds.midX - total / 2, maxH = bounds.height - 12, minH: CGFloat = 3
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        for (i, b) in bars.enumerated() {
+            let h = minH + (maxH - minH) * CGFloat(levels[i])
+            b.frame = CGRect(x: x0 + CGFloat(i) * (bw + gap), y: bounds.midY - h / 2, width: bw, height: h)
+            b.opacity = playing ? 1 : 0
+        }
+        CATransaction.commit()
+    }
+
+    override func didMoveToWindow() { super.didMoveToWindow(); updateLink() }
+    override var isHidden: Bool { didSet { updateLink() } }
+
+    private func updateLink() {
+        let want = playing && window != nil && !isHidden && spectrum != nil
+        if want, link == nil {
+            let l = CADisplayLink(target: KadokiWeakTarget(self), selector: #selector(KadokiWeakTarget.tick))
+            l.preferredFrameRateRange = CAFrameRateRange(minimum: 20, maximum: 30, preferred: 30)
+            l.add(to: .main, forMode: .common)
+            link = l
+        } else if !want, let l = link {
+            l.invalidate()
+            link = nil
+            drawBars()
+        }
+    }
+
+    fileprivate func tick() {
+        guard alpha > 0.01 else { return }
+        let target = spectrum?(barCount) ?? Array(repeating: 0, count: barCount)
+        for i in 0..<barCount {
+            let t = i < target.count ? target[i] : 0
+            // Quick rise, slower fall, like a meter.
+            levels[i] += (t - levels[i]) * (t > levels[i] ? 0.6 : 0.2)
+        }
+        drawBars()
+    }
+
+    @objc private func down() {
+        UIView.animate(withDuration: 0.12, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.glyph.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+            self.fill.opacity = 0.85
+        }
+        // Scale the contents, not the view: the view's transform belongs to the chrome slide.
+        layer.sublayerTransform = CATransform3DMakeScale(0.93, 0.93, 1)
+    }
+    @objc private func up() {
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.55, initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.glyph.transform = .identity
+        }
+        let spring = CASpringAnimation(keyPath: "sublayerTransform.scale")
+        spring.fromValue = 0.93
+        spring.toValue = 1
+        spring.damping = 11
+        spring.stiffness = 300
+        spring.duration = spring.settlingDuration
+        layer.sublayerTransform = CATransform3DIdentity
+        layer.add(spring, forKey: "press")
+        fill.opacity = 1
+    }
+
+    deinit { link?.invalidate() }
+}
+
+/// CADisplayLink retains its target; this breaks the cycle.
+private final class KadokiWeakTarget: NSObject {
+    weak var button: KadokiPlayButton?
+    init(_ b: KadokiPlayButton) { button = b }
+    @objc func tick() { button?.tick() }
+}
+
 /// Native toolbar controls over the web toolbar (native-toolbar.js): the mode
 /// tabs as a UISegmentedControl (only the title's own tabs, its mode accent)
 /// and play / pause as a native button. Each sits exactly over its web
@@ -124,13 +329,14 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
 final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
     private let tabs = UISegmentedControl()
-    private let play = UIButton(type: .system)
+    private let play = KadokiPlayButton()
     private var modes: [String] = []
     private var labels: [String] = []
     private var accent = ""
     private var accents: [String: String] = [:]
     private var playAccent = ""
     private var shownPlaying: Bool?
+    private var chromeHidden = false
     // A tap is shown at once; reports that still carry the old state (the web
     // side hasn't switched yet) don't undo it until they catch up or time out.
     private var pendingMode: String?
@@ -142,7 +348,8 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
         WKUserScript(source: "window.KADOKI_NATIVE_TOOLBAR=true;", injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
 
-    func install(in host: UIView, webView: WKWebView) {
+    /// audio: the live player's spectrum for the play button's bars.
+    func install(in host: UIView, webView: WKWebView, spectrum: ((Int) -> [Float]?)? = nil) {
         self.webView = webView
         webView.configuration.userContentController.add(WeakMessageHandler(self), name: "kadokiNativeToolbar")
         tabs.isHidden = true
@@ -151,7 +358,7 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
         tabs.addTarget(self, action: #selector(tabChanged), for: .valueChanged)
         tabs.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(tabsLongPress(_:))))
         play.isHidden = true
-        play.accessibilityLabel = NSLocalizedString("Play/pause", comment: "")
+        play.spectrum = spectrum
         play.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
         host.addSubview(tabs)
         host.addSubview(play)
@@ -187,16 +394,16 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
             let want = (sel >= 0 && sel < m.count) ? sel : UISegmentedControl.noSegment
             if tabs.selectedSegmentIndex != want { tabs.selectedSegmentIndex = want }
             let a = pendingMode == nil ? ((t["accent"] as? String) ?? "") : accent
-            if a != accent { accent = a; tabs.selectedSegmentTintColor = Self.color(a) }
+            if a != accent { accent = a; tabs.selectedSegmentTintColor = KadokiChromeSlide.color(a) }
             let h = max(r.height, 32)
-            let f = CGRect(x: r.minX, y: r.midY - h / 2, width: r.width, height: h)
-            if abs(f.minX - tabs.frame.minX) > 0.5 || abs(f.minY - tabs.frame.minY) > 0.5 || abs(f.width - tabs.frame.width) > 0.5 { tabs.frame = f }
+            KadokiChromeSlide.place(tabs, CGRect(x: r.minX, y: r.midY - h / 2, width: r.width, height: h))
             host.bringSubviewToFront(tabs)
             tabs.isHidden = false
         } else {
             tabs.isHidden = true
         }
-        // Play / pause
+        // Play / pause: a fixed-size capsule, wider than the web button, so it
+        // grows leftward (the hamburger is to its right).
         let p = d["play"] as? [String: Any] ?? [:]
         if (p["visible"] as? Bool) == true, let r = rect(p) {
             var playing = (p["playing"] as? Bool) ?? false
@@ -204,12 +411,15 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
                 if playing == pp || Date() > pendingPlayUntil { pendingPlaying = nil } else { playing = pp }
             }
             setPlay(playing: playing, accent: (p["accent"] as? String) ?? playAccent)
-            let f = r.insetBy(dx: 0, dy: min(0, (r.height - 34) / 2))
-            if f != play.frame { play.frame = f }
+            KadokiChromeSlide.place(play, CGRect(x: r.maxX - 76, y: r.midY - 17, width: 62, height: 34))
             host.bringSubviewToFront(play)
             play.isHidden = false
         } else {
             play.isHidden = true
+        }
+        if let c = d["chrome"] as? Bool, c == chromeHidden {
+            chromeHidden = !c
+            KadokiChromeSlide.apply([tabs, play], hidden: chromeHidden)
         }
     }
 
@@ -217,12 +427,7 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
         guard playing != shownPlaying || a != playAccent else { return }
         shownPlaying = playing
         playAccent = a
-        var cfg = UIButton.Configuration.tinted()
-        cfg.image = UIImage(systemName: playing ? "pause.fill" : "play.fill")
-        cfg.cornerStyle = .capsule
-        cfg.baseForegroundColor = Self.color(a)
-        cfg.baseBackgroundColor = Self.color(a)
-        play.configuration = cfg
+        play.set(playing: playing, accent: KadokiChromeSlide.color(a))
     }
 
     @objc private func tabChanged() {
@@ -231,7 +436,7 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
         pendingMode = modes[i]
         pendingModeUntil = Date().addingTimeInterval(2.5)
         // The bubble takes the new mode's color as it slides.
-        if let a = accents[modes[i]], a != accent { accent = a; tabs.selectedSegmentTintColor = Self.color(a) }
+        if let a = accents[modes[i]], a != accent { accent = a; tabs.selectedSegmentTintColor = KadokiChromeSlide.color(a) }
         js("window.__kadokiToolbarTab(\(Self.quoted(modes[i])))")
     }
     @objc private func tabsLongPress(_ g: UILongPressGestureRecognizer) {
@@ -251,13 +456,6 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
     private static func quoted(_ s: String) -> String {
         let d = (try? JSONSerialization.data(withJSONObject: [s])) ?? Data("[\"\"]".utf8)
         return String(String(decoding: d, as: UTF8.self).dropFirst().dropLast())
-    }
-    private static func color(_ css: String?) -> UIColor {
-        var s = (css ?? "").trimmingCharacters(in: .whitespaces)
-        if s.hasPrefix("#") { s.removeFirst() }
-        if s.count == 3 { s = s.map { "\($0)\($0)" }.joined() }
-        guard s.count == 6, let n = UInt64(s, radix: 16) else { return .systemGreen }
-        return UIColor(red: CGFloat((n >> 16) & 0xFF) / 255, green: CGFloat((n >> 8) & 0xFF) / 255, blue: CGFloat(n & 0xFF) / 255, alpha: 1)
     }
 }
 

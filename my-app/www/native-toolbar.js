@@ -30,9 +30,20 @@
     return document.hidden || cl.contains('prefs-open') || cl.contains('native-library-open');
   };
 
+  // While the header slides (chrome hide / show) its controls are mid-flight:
+  // native runs the same slide itself, so keep reporting the resting state.
+  const chromeShown = () => !document.body.classList.contains('chrome-hidden');
+  const headerMoving = () => {
+    const h = document.getElementById('appHeader');
+    const t = h ? getComputedStyle(h).transform : 'none';
+    return !!t && t !== 'none' && t !== 'matrix(1, 0, 0, 1, 0, 0)';
+  };
+  let resting = null;
+
   function state() {
-    const out = { tabs: { visible: false }, play: { visible: false } };
+    const out = { tabs: { visible: false }, play: { visible: false }, chrome: chromeShown() };
     if (covered()) return out;
+    if (resting && (!out.chrome || headerMoving())) return { ...resting, chrome: out.chrome };
     const bar = document.getElementById('shellModeTabs');
     if (bar) {
       const tabs = [...bar.querySelectorAll('.mode-tab')].filter(t => t.dataset.hidden !== '1' && getComputedStyle(t).display !== 'none');
@@ -57,6 +68,7 @@
         out.play = { visible: true, ...rect, playing: !!(pause && getComputedStyle(pause).display !== 'none'), accent: accent(active ? active.dataset.mode : '') };
       }
     }
+    if (out.chrome && !headerMoving()) resting = { tabs: out.tabs, play: out.play };
     return out;
   }
 

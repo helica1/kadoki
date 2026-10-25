@@ -2371,10 +2371,28 @@
   // follow far from the last trusted spot during sequential listening.
   let _lastResolveTrusted = false;                 // how resolveCueChunk got its last answer
   let _lastTrustedCi = -1, _lastTrustedCueIdx = -1;
+  // Where each line already followed was placed (trusted resolutions only).
+  // Going BACK over heard text — a backward scrub, a back swipe — reuses
+  // these exact spots: the sequential cursor only runs forward, and the
+  // text-search fallbacks can match a short line pages away.
+  let _heard = new Map(), _heardRef = null;
+  function _heardMap() {
+    if (_heardRef !== chunks) { _heard = new Map(); _heardRef = chunks; }
+    return _heard;
+  }
+  function _heardChunk(cueIdx) {
+    const c = _heardMap().get(cueIdx);
+    return (c && c.isConnected) ? c : null;
+  }
   function _noteTrusted(chunk, cueIdx) {
     _lastResolveTrusted = true;
     const ci = chunks.indexOf(chunk);
     if (ci >= 0) { _lastTrustedCi = ci; _lastTrustedCueIdx = cueIdx; }
+    if (ci >= 0 && cueIdx >= 0) {
+      const m = _heardMap();
+      m.delete(cueIdx); m.set(cueIdx, chunk);
+      if (m.size > 5000) m.delete(m.keys().next().value);
+    }
   }
   function _rejectTeleport(chunk, cueIdx) {
     if (_lastTrustedCi < 0) return false;
@@ -2397,15 +2415,23 @@
     // Head-matched from a trusted lock in a tiny window → trusted.
     const cc = _fcAdvance(cueIdx, cueText);
     if (cc) { _noteTrusted(cc, cueIdx); return cc; }
+    const heard = _heardChunk(cueIdx);
+    if (heard) { _noteTrusted(heard, cueIdx); _fcSyncFrom(cueIdx, cueText, heard); return heard; }
     const near = findChunkForTextNear(cueText, lastHighlightedChunkIdx, 8);
     if (near) {
       if (_lastNearWasFuzzy) {
+        // A scrub never moves the page on a guess (it read as the reader
+        // flying pages back mid-drag); the bridge keeps the last good paint.
+        if (_scrubPainting) return null;
         if (_rejectTeleport(near, cueIdx)) return null;
         _fcSyncFrom(cueIdx, cueText, near);
         return near;                               // paint-only: _lastResolveTrusted stays false
       }
       _noteTrusted(near, cueIdx); _fcSyncFrom(cueIdx, cueText, near); return near;
     }
+    // Wide searches below are for live audio re-acquiring after a jump; under
+    // the finger they only risk a far, wrong page.
+    if (_scrubPainting) return null;
     const expIdx = expectedChunkForCue(cueIdx);
     if (expIdx >= 0) {
       // ~2% of the book each side, floor 20 / cap 200 chunks.

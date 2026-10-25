@@ -106,3 +106,14 @@ html.kadoki-ios .lib-sheet-cancel:active { background: rgb(72, 72, 74) !importan
    place for layout and hit tests but are drawn natively on top ─────────── */
 html.kadoki-native-toolbar #shellModeTabs,
 html.kadoki-native-toolbar #shellPlayBtn { opacity: 0 !important; }
+
+/* The native hamburger (native-menu.js) draws its own button and dot. */
+html.kadoki-native-menu #shellMoreBtn { opacity: 0 !important; }
+
+/* With the slimmer native tabs there's room to center the timer in the bar. */
+html.kadoki-native-toolbar #appHeader #shellTimerLabel {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}

@@ -40,6 +40,9 @@ final class KadokiReadEngine: NSObject, KadokiPlayback {
 
     // Ring of INTERLEAVED processed frames.
     private let ringLock = NSLock()
+    // The last 1024 output samples (mono), for the toolbar's spectrum bars.
+    private var scope = [Float](repeating: 0, count: 1024)
+    private var scopeAt = 0
     private var ring: [Float]
     private let ringCap: Int             // frames
     private var ringHead = 0             // read index (frames)
@@ -391,6 +394,8 @@ final class KadokiReadEngine: NSObject, KadokiPlayback {
                 if g != gT { g = (g < gT) ? min(gT, g + gS) : max(gT, g - gS) }
                 outL[i] = l * g
                 outR[i] = r * g
+                scope[scopeAt] = (l + r) * 0.5 * g
+                scopeAt = (scopeAt + 1) & 1023
                 h += 1; if h == ringCap { h = 0 }
             }
         }
@@ -408,6 +413,13 @@ final class KadokiReadEngine: NSObject, KadokiPlayback {
         ringLock.unlock()
         if take < count { for i in take..<count { outL[i] = 0; outR[i] = 0 } }
         if avail < Int(Self.HIGH_WATER_SEC * sampleRate) { sem.signal() }
+    }
+
+    /// The most recent output samples, oldest first (spectrum display).
+    var scopeSampleRate: Double { sampleRate }
+    func recentSamples() -> [Float] {
+        ringLock.lock(); defer { ringLock.unlock() }
+        return Array(scope[scopeAt...] + scope[..<scopeAt])
     }
 
     // MARK: notifications

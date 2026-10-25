@@ -13,6 +13,7 @@
 (function () {
   'use strict';
   if (!window.KADOKI_NATIVE_MENU) return;
+  document.documentElement.classList.add('kadoki-native-menu');
   const post = (msg) => { try { window.webkit.messageHandlers.kadokiNativeMenu.postMessage(msg); } catch (_) {} };
 
   let actions = new Map();
@@ -61,10 +62,19 @@
   // ---- anchor tracking ----
   let last = '';
   let queued = false;
+  // While the header slides (chrome hide / show) the button is mid-flight;
+  // native runs the same slide itself, so keep reporting the resting spot.
+  let resting = null;
+  const headerMoving = () => {
+    const h = document.getElementById('appHeader');
+    const t = h ? getComputedStyle(h).transform : 'none';
+    return !!t && t !== 'none' && t !== 'matrix(1, 0, 0, 1, 0, 0)';
+  };
   function report() {
     queued = false;
     const btn = document.getElementById('shellMoreBtn');
-    let msg = { visible: false };
+    const chrome = !document.body.classList.contains('chrome-hidden');
+    let msg = { visible: false, chrome };
     // A native Preferences / Library screen covers the hamburger, but the web
     // page under it doesn't know (the web panels stay invisible or closed).
     const cl = document.body.classList;
@@ -73,8 +83,10 @@
       if (r.width > 4 && r.height > 4) {
         const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
         const top = !!(hit && (hit === btn || btn.contains(hit)));
-        msg = { visible: top, x: r.left, y: r.top, w: r.width, h: r.height };
+        msg = { visible: top, x: r.left, y: r.top, w: r.width, h: r.height, dot: !!btn.querySelector('.kai-reddot-btn'), chrome };
       }
+      if (resting && (!chrome || headerMoving())) msg = { ...resting, chrome };
+      else if (msg.visible) resting = msg;
     }
     const key = JSON.stringify(msg);
     if (key !== last) { last = key; post(msg); }
@@ -91,7 +103,7 @@
     try {
       new MutationObserver(schedule).observe(document.body, { childList: true, attributes: true, attributeFilter: ['class', 'style'] });
       const bar = document.getElementById('shellMoreBtn')?.parentElement;
-      if (bar) new MutationObserver(schedule).observe(bar, { attributes: true, subtree: true, attributeFilter: ['class', 'style'] });
+      if (bar) new MutationObserver(schedule).observe(bar, { attributes: true, childList: true, subtree: true, attributeFilter: ['class', 'style'] });
     } catch (_) {}
     window.addEventListener('resize', schedule);
     window.addEventListener('shell:mode-change', schedule);

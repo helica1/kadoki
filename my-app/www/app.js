@@ -5033,6 +5033,16 @@ function _ensureBgListenersForSrtCards() {
     }
   });
 }
+// The play-state mirror (window._bgPlaying), the playhead mirror and the
+// lock-screen handlers live in these listeners, and every title needs them —
+// not only one whose subtitle cards were built. An EPUB + audiobook title that
+// shows only READ / AUDIO never builds cards, so the play button and the timer
+// sat on a stale "paused" while audio played. Attach at boot.
+(function attachBgListenersAtBoot(tries) {
+  if (_srtEndListenerAttached) return;
+  if (window.Capacitor?.Plugins?.BackgroundAudio) { _ensureBgListenersForSrtCards(); return; }
+  if (tries > 0) setTimeout(() => attachBgListenersAtBoot(tries - 1), 250);
+})(40);
 
 // ---------------------------------------------------------------------------
 // Screen-fit card sizing. The combine grouper packs subtitles until a card

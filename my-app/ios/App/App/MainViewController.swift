@@ -647,6 +647,8 @@ final class KadokiHoverTargetView: UIView {
 
 class MainViewController: CAPBridgeViewController {
 
+    private weak var backgroundAudio: BackgroundAudioPlugin?
+
     override open func capacitorDidLoad() {
         #if os(visionOS)
         installVideoLayer()                   // idempotent; covers a late bridge
@@ -655,7 +657,9 @@ class MainViewController: CAPBridgeViewController {
             NSLog("[MainViewController] bridge nil at capacitorDidLoad — cannot register plugins")
             return
         }
-        bridge.registerPluginInstance(BackgroundAudioPlugin())
+        let audio = BackgroundAudioPlugin()
+        backgroundAudio = audio
+        bridge.registerPluginInstance(audio)
         bridge.registerPluginInstance(AudioSlicerPlugin())
         bridge.registerPluginInstance(AnkiBridgePlugin())
         bridge.registerPluginInstance(FileAccessNativePlugin())
@@ -707,7 +711,9 @@ class MainViewController: CAPBridgeViewController {
             actionSheet.install(in: self, webView: wv)
             nativeToast.install(in: self.view, webView: wv)
             wv.configuration.userContentController.addUserScript(KadokiNativeToolbar.userScript())
-            nativeToolbar.install(in: self.view, webView: wv)
+            nativeToolbar.install(in: self.view, webView: wv) { [weak self] bands in
+                self?.backgroundAudio?.spectrum(bands: bands)
+            }
             // Native Preferences generated from the web panel (NativePrefs.swift)
             // and the native Library; iOS 16+, older systems keep the web ones.
             if #available(iOS 16.0, *) {
