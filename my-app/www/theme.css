@@ -792,6 +792,8 @@ html[lang="ja"] #appHeader .mode-tab { font-size: .86rem; letter-spacing: .04em;
 /* Empty-mode visual hint: mode has no required attachments for current deck.
    Tappable (mode view shows its own empty-state) but visually muted. */
 #appHeader .mode-tab[data-empty="1"] { color: var(--text-faint); opacity: 0.55; }
+/* Tabs the active title doesn't show (titleStore.shownModes; long-press to choose). */
+#shellModeTabs .mode-tab[data-hidden="1"] { display: none !important; }
 
 /* Icon buttons in the header (hamburger menu). */
 #appHeader .shell-icon-btn {

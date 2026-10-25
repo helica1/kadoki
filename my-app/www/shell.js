@@ -245,12 +245,14 @@
     // legacy per-deck pref read only when no Title is active.
     let hasAudio = false, hasEpub = false, hasDeck = false, hasSrt = false, hasVideo = false;
     let source = 'none';
+    let shown = null;   // the active title's tabs (titleStore.shownModes)
     const idsToCheck = [window._activeTitleId, window._editingTitleId].filter(Boolean);
     try {
       if (window.titleStore?.get) {
         for (const id of idsToCheck) {
           const t = await window.titleStore.get(id);
           if (!t) continue;
+          if (!shown && id === window._activeTitleId && window.titleStore.shownModes) shown = window.titleStore.shownModes(t);
           if (t.attachments?.audiobook) hasAudio = true;
           if (t.attachments?.epub) hasEpub = true;
           if (t.attachments?.deck) hasDeck = true;
@@ -310,6 +312,17 @@
     setEmpty(audioTab, !hasAudio);
     setEmpty(readTab, !hasEpub);
     setEmpty(cardTab, !hasCards);
+    // Only the title's own tabs (two at most by default; long-press the tabs
+    // to choose). No active title: all, as before.
+    const setHidden = (tab, hidden) => {
+      if (!tab) return;
+      if (hidden) tab.dataset.hidden = '1';
+      else delete tab.dataset.hidden;
+    };
+    setHidden(cardTab, shown && !shown.includes('card'));
+    setHidden(readTab, shown && !shown.includes('read'));
+    setHidden(audioTab, shown && !shown.includes('audio'));
+    setHidden(document.getElementById('kvVideoTab'), shown && !shown.includes('audio'));
 
     // Play/pause button only makes sense when there's something to play — an
     // audiobook (read-along / audio mode) or cards (card audio). An EPUB-only
@@ -318,6 +331,73 @@
     const playBtn = document.getElementById('shellPlayBtn');
     if (playBtn) playBtn.style.display = (hasAudio || hasCards) ? '' : 'none';
   }
+
+  // Long-press the mode tabs → choose which tabs this title shows (saved on
+  // the title as `modes`; "Default" clears it back to titleStore.defaultModes).
+  function wireTabChooser() {
+    const bar = el('shellModeTabs');
+    if (!bar || bar._kChooser) return;
+    bar._kChooser = true;
+    // Haptic at the threshold, sheet on release: opening under a finger that is
+    // still down started a text selection in the sheet.
+    bar.style.webkitUserSelect = 'none';
+    bar.style.userSelect = 'none';
+    let timer = 0, x0 = 0, y0 = 0, fired = false;
+    const start = (x, y) => {
+      clearTimeout(timer); fired = false; x0 = x; y0 = y;
+      timer = setTimeout(() => { fired = true; try { window.kHaptic?.('MEDIUM'); } catch (_) {} }, 550);
+    };
+    const move = (x, y) => { if (Math.abs(x - x0) > 10 || Math.abs(y - y0) > 10) { clearTimeout(timer); fired = false; } };
+    bar.addEventListener('touchstart', (e) => { const t = e.touches[0]; if (t) start(t.clientX, t.clientY); }, { passive: true });
+    bar.addEventListener('touchmove', (e) => { const t = e.touches[0]; if (t) move(t.clientX, t.clientY); }, { passive: true });
+    bar.addEventListener('touchend', (e) => {
+      clearTimeout(timer);
+      if (fired) { if (e.cancelable) e.preventDefault(); openTabChooser(); }
+    }, { passive: false });
+    bar.addEventListener('contextmenu', (e) => { e.preventDefault(); openTabChooser(); });
+    // The long-press must not also switch modes on release.
+    bar.addEventListener('click', (e) => { if (fired) { fired = false; e.stopPropagation(); e.preventDefault(); } }, true);
+  }
+  async function openTabChooser() {
+    const id = window._activeTitleId;
+    const ts = window.titleStore;
+    if (!id || !ts || typeof window.libSheet !== 'function') return;
+    const title = await ts.get(id);
+    if (!title) return;
+    const can = ts.enabledModes(title);
+    const video = ts.isVideoTitle(title);
+    const names = { card: tabText('nav.mode_card', 'CARD'), read: tabText('nav.mode_read', 'READ'), audio: video ? tabText('nav.mode_video', 'VIDEO') : tabText('nav.mode_audio', 'AUDIO') };
+    const sh = window.libSheet(tabText('tabs.choose', 'Tabs for this title'));
+    const render = async () => {
+      const cur = await ts.get(id);
+      const shown = ts.shownModes(cur);
+      [...sh.box.querySelectorAll('.lib-sheet-opt')].forEach(b => b.remove());
+      for (const m of ['card', 'read', 'audio']) {
+        if (!can[m]) continue;
+        const on = shown.includes(m);
+        // The tab you are in stays: hiding it would mean switching modes under you.
+        const here = document.body.classList.contains('mode-' + m);
+        sh.box.appendChild(window.libOpt((on ? '✓ ' : '    ') + names[m], here ? tabText('tabs.current', 'current') : '', async () => {
+          if (on && here) return;
+          const next = on ? shown.filter(x => x !== m) : shown.concat(m);
+          if (!next.length) return;   // at least one tab
+          await ts.update(id, { modes: next });
+          await refreshTabAvailability();
+          render();
+        }));
+      }
+      sh.box.appendChild(window.libOpt(tabText('tabs.default', 'Default'), ts.defaultModes(cur).filter(m => can[m]).map(m => names[m]).join(' · '), async () => {
+        await ts.update(id, { modes: null });
+        await refreshTabAvailability();
+        render();
+      }));
+      const cancel = sh.box.querySelector('.lib-sheet-cancel');
+      if (cancel) sh.box.appendChild(cancel);
+    };
+    await render();
+    sh.finish();
+  }
+  function tabText(k, d) { return window.i18n ? window.i18n.t(k, d) : d; }
 
   // Authoritative "what mode is actually visible right now" — checks the DOM,
   // not just shell's internal state. Catches cases where reading or audiobook
@@ -1567,6 +1647,7 @@
     wire('shellTimerLabel', 'shellToggleTimer');
     wire('shellPlayBtn',    'shellTogglePlay');
     wire('shellMoreBtn',    'openShellMoreMenu');
+    wireTabChooser();
   }
 
   function init() {

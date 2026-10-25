@@ -1056,7 +1056,12 @@
     if (!Number.isFinite(charPosition) || charPosition <= 0) return;
     // Per-title daily progress log (library Stats card): jp-position high-water
     // per day. Own daily-max semantics inside — safe at any call cadence.
-    try { window.titleStats?.noteRead(window._activeTitleId, charPosition, window._pagedTotalJpChars); } catch (_) {}
+    // Not while a title switch is in flight or the live book is another
+    // title's: the previous book's position and length would be credited to
+    // the incoming title (same guard as the position saves).
+    try {
+      if (!window._positionSaveBlocked?.()) window.titleStats?.noteRead(window._activeTitleId, charPosition, window._pagedTotalJpChars);
+    } catch (_) {}
     const t = timers.read;
     const nowTs = Date.now();
     const prevNoteTs = t.lastNoteTs || 0;   // in-memory only: a fresh boot re-anchors

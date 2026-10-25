@@ -4099,7 +4099,11 @@ body.dimmed .card-image {
       // Audio-only titles (card enabled only via auto-transcription) still
       // default to AUDIO — cards may not exist yet on first open.
       if (a.audiobook && !a.srt && !a.deck && !a.epub) _defMode = 'audio';
-      const targetMode = (title.lastMode && _en[title.lastMode]) ? title.lastMode : _defMode;
+      // Only among the title's shown tabs (titleStore.shownModes): a last mode
+      // that is no longer shown opens in the first shown one.
+      const _shown = window.titleStore?.shownModes ? window.titleStore.shownModes(title) : null;
+      let targetMode = (title.lastMode && _en[title.lastMode]) ? title.lastMode : _defMode;
+      if (_shown && _shown.length && !_shown.includes(targetMode)) targetMode = _shown.includes(_defMode) ? _defMode : _shown[0];
       // If a deck is attached, reuse the existing deck-restore path. That
       // path already restores per-deck pairings (EPUB / audiobook / SRT)
       // from prefs which we kept in sync via migration.

@@ -505,6 +505,31 @@
     };
   }
 
+  // Which mode tabs a title shows: two at most by default, chosen per title
+  // (title.modes, set from a long-press on the tabs). Defaults by kind: a book
+  // with its audiobook READ / AUDIO, a video VIDEO / CARD (VIDEO is the audio
+  // mode presenting the video), an Anki deck CARD. Other kinds show what they
+  // can do. Never a mode the title can't do (enabledModes).
+  function isVideoTitle(title) {
+    const ab = title && title.attachments && title.attachments.audiobook;
+    return !!(ab && (ab.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(ab.name || '')));
+  }
+  function defaultModes(title) {
+    const a = (title && title.attachments) || {};
+    if (a.deck) return ['card'];
+    if (isVideoTitle(title)) return ['audio', 'card'];
+    if (a.epub && a.audiobook) return ['read', 'audio'];
+    return ['card', 'read', 'audio'];
+  }
+  function shownModes(title) {
+    const can = enabledModes(title);
+    const order = ['card', 'read', 'audio'];
+    let want = Array.isArray(title && title.modes) ? title.modes : null;
+    if (!want || !want.some(m => can[m])) want = defaultModes(title);
+    const out = order.filter(m => want.includes(m) && can[m]);
+    return out.length ? out : order.filter(m => can[m]);
+  }
+
   window.titleStore = {
     list,
     load,
@@ -522,6 +547,9 @@
     setCardIndex,
     setMode,
     enabledModes,
+    shownModes,
+    defaultModes,
+    isVideoTitle,
     // cross-device sync
     ensureSyncId,
     findBySyncId,

@@ -105,10 +105,131 @@ window.kadokiElFade = (function () {
     };
     setTimeout(step, 5);
   }
+  // ---- Anki card clips (el._kCard): 10 ms in, 10 ms out — at a stop or swipe
+  // AND just before the clip's own end. On iOS a card clip plays through a Web
+  // Audio gain node (scheduled ramps): iOS has long ignored <audio>.volume
+  // while still reading back what was set, so the probe can't be trusted. The
+  // context runs only while clips play (an idle running context keeps the
+  // audio hardware awake) and is suspended shortly after they stop.
+  const CARD_MS = 10;
+  let ctx = null, idleTimer = 0;
+  function audioCtx() {
+    // Pure Web Audio (no <audio> playing) counts as "ambient" on iOS and is
+    // muted by the ring/silent switch; card clips are playback, like the
+    // app's own player.
+    try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch (_) {}
+    if (ctx === null) {
+      try { const C = window.AudioContext || window.webkitAudioContext; ctx = C ? new C() : false; } catch (_) { ctx = false; }
+    }
+    if (!ctx) return null;
+    clearTimeout(idleTimer);
+    if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
+    return ctx;
+  }
+  // iOS starts (and resumes) an AudioContext only from a user gesture; a
+  // context made outside one (the next card's pre-decode) stays suspended
+  // and plays silence. Every tap or swipe wakes it — the swipe that brings a
+  // card in unlocks that card's clip.
+  for (const t of ['touchend', 'pointerup', 'keydown']) {
+    document.addEventListener(t, () => {
+      if (ctx && ctx.state !== 'running') { try { ctx.resume(); } catch (_) {} }
+    }, { capture: true, passive: true });
+  }
+  function idleSoon() {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { try { if (ctx && ctx.state === 'running') ctx.suspend(); } catch (_) {} }, 30000);
+  }
+  // Route once, on first play (an element can't be un-routed). Without a
+  // usable context the clip just plays unfaded, as before.
+  function gainOf(el) {
+    if (el._kGain !== undefined) return el._kGain;
+    el._kGain = null;
+    const c = audioCtx();
+    if (c && c.state === 'running') {   // routing into a stalled context = silence
+      try {
+        const g = c.createGain();
+        c.createMediaElementSource(el).connect(g);
+        g.connect(c.destination);
+        g.gain.value = 0;
+        el._kGain = g;
+        el.addEventListener('playing', () => cardShape(el));
+        el.addEventListener('ratechange', () => { if (!el.paused) cardShape(el); });
+        el.addEventListener('pause', idleSoon);
+        el.addEventListener('ended', idleSoon);
+      } catch (_) {}
+    }
+    return el._kGain;
+  }
+  // From the current position: ramp in, hold, ramp out ending at the clip's end.
+  function cardShape(el) {
+    const g = el._kGain, c = ctx;
+    if (!g || !c) return;
+    const t = c.currentTime, k = CARD_MS / 1000;
+    const p = g.gain;
+    p.cancelScheduledValues(t);
+    p.setValueAtTime(p.value, t);
+    p.linearRampToValueAtTime(1, t + k);
+    const left = (el.duration - el.currentTime) / (el.playbackRate || 1);
+    if (Number.isFinite(left) && left > 3 * k) {
+      p.setValueAtTime(1, t + left - k - 0.002);
+      p.linearRampToValueAtTime(0, t + left - 0.002);
+    }
+  }
+  const useGain = () => !supported() || window.Capacitor?.getPlatform?.() === 'ios';
+  // Volume path (Android / Mac): the same shape on el.volume.
+  function cardTail(el) {
+    clearTimeout(el._kTail);
+    const left = (el.duration - el.currentTime) / (el.playbackRate || 1);
+    if (Number.isFinite(left) && left > 0.03) {
+      el._kTail = setTimeout(() => { el._kDucked = false; if (!el.paused) { el._kDucked = true; ramp(el, 0, CARD_MS); } }, (left - CARD_MS / 1000 - 0.002) * 1000);
+    }
+  }
+  function cardPlay(el) {
+    if (useGain()) {
+      const g = gainOf(el);
+      if (g) { audioCtx(); try { g.gain.cancelScheduledValues(ctx.currentTime); g.gain.setValueAtTime(0, ctx.currentTime); } catch (_) {} }
+      return el.play();   // 'playing' shapes the ramps once sound actually starts
+    }
+    el._kDucked = false;
+    if (el.paused) { try { el.volume = 0; } catch (_) {} }
+    if (!el._kTailWired) {
+      el._kTailWired = true;
+      el.addEventListener('playing', () => cardTail(el));
+      el.addEventListener('ratechange', () => { if (!el.paused) cardTail(el); });
+    }
+    const pr = el.play();
+    ramp(el, 1, CARD_MS);
+    return pr;
+  }
+  function cardPause(el, after) {
+    clearTimeout(el._kTail);
+    const g = el._kGain;
+    if (useGain() && g && ctx && !el.paused) {
+      const t = ctx.currentTime;
+      try { g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value, t); g.gain.linearRampToValueAtTime(0, t + CARD_MS / 1000); } catch (_) {}
+      const gen = el._kFadeGen = (el._kFadeGen || 0) + 1;
+      setTimeout(() => { if (el._kFadeGen === gen) { try { el.pause(); } catch (_) {} } if (after) after(); }, CARD_MS + 4);
+      return;
+    }
+    if (el.paused || !supported()) {
+      el._kFadeGen = (el._kFadeGen || 0) + 1;
+      try { el.pause(); } catch (_) {}
+      if (after) after();
+      return;
+    }
+    ramp(el, 0, CARD_MS, () => {
+      try { el.pause(); } catch (_) {}
+      try { el.volume = 1; } catch (_) {}
+      if (after) after();
+    });
+  }
+
   return {
     // Fade out, then pause; `after` runs once the element is paused (also
     // immediately when already paused / unsupported).
     pause(el, after, ms) {
+      if (el && el._kBuf) { el.pause(); if (after) after(); return; }   // kadokiClip: fades itself
+      if (el && el._kCard) return cardPause(el, after);
       if (!el) { if (after) after(); return; }
       if (el.paused || !supported()) {
         el._kFadeGen = (el._kFadeGen || 0) + 1;   // drop any ramp still running
@@ -126,6 +247,8 @@ window.kadokiElFade = (function () {
     // still running). Returns the play() promise.
     play(el, ms) {
       if (!el) return Promise.resolve();
+      if (el._kBuf) return el.play();
+      if (el._kCard) return cardPlay(el);
       if (!supported()) return el.play();
       el._kDucked = false;
       if (el.paused) { try { el.volume = 0; } catch (_) {} }
@@ -137,6 +260,152 @@ window.kadokiElFade = (function () {
     // end is a hard cut (onended still fires naturally).
     duck(el, ms) { if (el && !el.paused && supported() && el._kDucked !== true) { el._kDucked = true; ramp(el, 0, ms || MS); } },
     supported,
+    useGain,
+    audioCtx,
+    idleSoon,
+  };
+})();
+
+// iOS Anki card clips, decoded into memory and played straight from Web Audio
+// (an <audio> element routed through Web Audio waits on its own buffering on
+// every start, which made fast swiping lag). Start is immediate; every start
+// and stop is a 10 ms ramp, so a swipe before the clip ends crossfades the old
+// clip out under the new one. Decoded clips are kept for the last few cards
+// and the next card is decoded ahead (prefetch).
+// Plays the element-shaped subset card mode uses: play / pause / paused /
+// ended / currentTime / duration / playbackRate / 'ended' / src / load.
+// At a speed other than 1x (a buffer source would change the pitch) or for a
+// clip the system can't decode, it falls back to an <audio> element.
+window.kadokiClip = (function () {
+  const MS = 10;
+  const cache = new Map();   // src → Promise<AudioBuffer>; most recent last
+  function decode(src) {
+    if (cache.has(src)) { const p = cache.get(src); cache.delete(src); cache.set(src, p); return p; }
+    const c = window.kadokiElFade.audioCtx();
+    const p = (async () => {
+      if (!c) throw new Error('no audio context');
+      const ab = await (await fetch(src)).arrayBuffer();
+      return await new Promise((res, rej) => c.decodeAudioData(ab, res, rej));
+    })();
+    p.catch(() => cache.delete(src));
+    cache.set(src, p);
+    while (cache.size > 8) cache.delete(cache.keys().next().value);
+    return p;
+  }
+  // Needs the Audio Session API to escape the silent switch (iOS 16.4+);
+  // without it card clips stay on <audio> elements.
+  const usable = () => window.kadokiElFade.useGain() && (window.audioPlaybackRate || 1) === 1 && !!navigator.audioSession;
+
+  class Clip {
+    constructor(src) {
+      this._kBuf = true;
+      this.src = src;
+      this.paused = true;
+      this.ended = false;
+      this.playbackRate = 1;
+      this._off = 0; this._t0 = 0; this._gen = 0;
+      this._node = null; this._gain = null; this._dur = NaN; this._el = null;
+      this._ls = {};
+      this._buf = decode(src);
+    }
+    addEventListener(t, fn) { (this._ls[t] = this._ls[t] || []).push(fn); }
+    _fire(t) { for (const fn of (this._ls[t] || [])) { try { fn(); } catch (_) {} } }
+    get duration() { return this._el ? this._el.duration : this._dur; }
+    get currentTime() {
+      if (this._el) return this._el.currentTime;
+      const c = window.kadokiElFade.audioCtx();
+      return (this._node && c) ? this._off + (c.currentTime - this._t0) : this._off;
+    }
+    set currentTime(v) {
+      if (this._el) { this._el.currentTime = v; return; }
+      const playing = !this.paused;
+      if (playing) this._stop(0);
+      this._off = Math.max(0, +v || 0);
+      this.ended = false;
+      if (playing) this.play();
+    }
+    async play() {
+      if (this._el) { this.paused = false; this.ended = false; return this._el.play(); }
+      this.paused = false; this.ended = false;
+      const gen = ++this._gen;
+      let buf;
+      try { buf = await this._buf; }
+      catch (_) {   // undecodable here: the <audio> element path
+        if (gen !== this._gen || this.paused) return;
+        return this._fallback();
+      }
+      const c = window.kadokiElFade.audioCtx();
+      if (gen !== this._gen || this.paused) return;
+      // Never silent: no running context (iOS hasn't allowed it to start) →
+      // this clip plays on an <audio> element instead.
+      if (!c || c.state !== 'running') {
+        if (c) { try { await Promise.race([c.resume(), new Promise(r => setTimeout(r, 120))]); } catch (_) {} }
+        if (gen !== this._gen || this.paused) return;
+        if (!c || c.state !== 'running') return this._fallback();
+      }
+      this._dur = buf.duration;
+      if (this._off >= buf.duration) this._off = 0;
+      const g = c.createGain(), n = c.createBufferSource();
+      n.buffer = buf;
+      n.connect(g); g.connect(c.destination);
+      const t = c.currentTime, k = MS / 1000, left = buf.duration - this._off;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(1, t + k);
+      if (left > 3 * k) {
+        g.gain.setValueAtTime(1, t + left - k);
+        g.gain.linearRampToValueAtTime(0, t + left);
+      }
+      n.onended = () => {
+        if (this._node !== n) return;   // stopped / replaced
+        this._node = null; this._gain = null;
+        this.paused = true; this.ended = true; this._off = 0;
+        this._fire('ended');
+        window.kadokiElFade.idleSoon();
+      };
+      n.start(t, this._off);
+      this._node = n; this._gain = g; this._t0 = t;
+    }
+    // A plain <audio> (not routed through the context that isn't running;
+    // unfaded, as card clips played before).
+    _fallback() {
+      this._el = new Audio(this.src);
+      this._el.currentTime = this._off || 0;
+      this._el.addEventListener('ended', () => { this.ended = true; this.paused = true; this._fire('ended'); });
+      return this._el.play();
+    }
+    // Ramp out over 10 ms and stop (the next clip may already be fading in).
+    _stop(ms) {
+      const n = this._node, g = this._gain, c = window.kadokiElFade.audioCtx();
+      this._node = null; this._gain = null;
+      if (!n || !c) return;
+      const t = c.currentTime, k = ms / 1000;
+      try {
+        g.gain.cancelScheduledValues(t);
+        g.gain.setValueAtTime(g.gain.value, t);
+        g.gain.linearRampToValueAtTime(0, t + k);
+        n.stop(t + k + 0.002);
+      } catch (_) { try { n.stop(); } catch (_) {} }
+    }
+    pause() {
+      if (this._el) { try { this._el.pause(); } catch (_) {} this.paused = true; return; }
+      this._gen++;
+      if (this.paused) return;
+      this._off = this.currentTime;
+      this.paused = true;
+      this._stop(MS);
+      window.kadokiElFade.idleSoon();
+    }
+    load() {}
+  }
+
+  return {
+    // A card clip: the in-memory player where it applies, else an <audio>.
+    create(src) {
+      if (!usable()) { const a = new Audio(src); a._kCard = true; return a; }
+      return new Clip(src);
+    },
+    // Decode ahead (the next card), so its swipe never waits on a decode.
+    prefetch(src) { if (src && usable()) decode(src).catch(() => {}); },
   };
 })();
 
@@ -3331,7 +3600,10 @@ async function displayCard() {
       setTimeout(() => {
         try {
           if (_nx.imageFilename && !_nx.imageHtml) loadMediaFile(_nx.imageFilename, window.mediaPromises);
-          if (_nx.audioFilename && !_nx.audioSrc) loadMediaFile(_nx.audioFilename, window.mediaPromises);
+          if (_nx.audioFilename && !_nx.audioSrc) {
+            Promise.resolve(loadMediaFile(_nx.audioFilename, window.mediaPromises))
+              .then((src) => { if (src) window.kadokiClip.prefetch(src); }).catch(() => {});
+          } else if (_nx.audioSrc) window.kadokiClip.prefetch(_nx.audioSrc);
         } catch (_) {}
       }, 150);
     }
@@ -3603,7 +3875,9 @@ async function displayCard() {
     const _src = audioSrc;
     setTimeout(() => {
       if (currentCardIndex !== _audioForIdx) return; // swiped on → stale, skip
-      const a = new Audio(_src);
+      // 10 ms fades in / out, also at the clip's own end; instant in-memory
+      // playback with crossfades on iOS (kadokiClip).
+      const a = window.kadokiClip.create(_src);
       a.playbackRate = window.audioPlaybackRate || 1;
       a.addEventListener('ended', () => {
         if (a._kRetired) return;   // replaced / stopped while fading out

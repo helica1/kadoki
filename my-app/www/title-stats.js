@@ -103,12 +103,15 @@
     }).catch(() => {});
   }
 
-  // Read forward progress (jp-char position + the book's jp total).
+  // Read forward progress (jp-char position + the book's jp total). The total
+  // follows the book as it is now (not a high-water mark), so a total once
+  // recorded from another book during a title switch corrects itself.
   function noteRead(tid, jpPos, jpTotal) {
     note(tid, 'rCh', jpPos);
     if (Number.isFinite(jpTotal) && jpTotal > 0) {
       load(tid).then((o) => {
-        if (jpTotal > (o.tCh || 0)) { o.tCh = Math.round(jpTotal); dirty.add(tid); }
+        const n = Math.round(jpTotal);
+        if (n !== (o.tCh || 0)) { o.tCh = n; dirty.add(tid); }
       }).catch(() => {});
     }
   }

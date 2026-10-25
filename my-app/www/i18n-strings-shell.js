@@ -33,4 +33,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'menu.browse_drive':        { en: 'Manage Drive Files…', ja: 'ドライブのファイルを管理…' },
   'menu.preferences':         { en: 'Preferences…',       ja: '設定…' },
   'menu.processing':          { en: 'Processing…',        ja: '処理中…' },
+  'tabs.choose':              { en: 'Tabs for this title',  ja: 'このタイトルのタブ' },
+  'tabs.default':             { en: 'Default',              ja: 'デフォルト' },
+  'tabs.current':             { en: 'current',              ja: '表示中' },
 });
