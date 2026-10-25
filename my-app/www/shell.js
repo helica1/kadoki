@@ -852,12 +852,20 @@
           });
           window._reentryDismissedByTab = false;
         } else if (mode === 'read' && typeof window.openReadingMode === 'function') {
-          // Continuous mode: center the reader on the live audio cue so it
-          // opens already aligned with the playhead (the position listener
-          // keeps it synced from there).
-          if (continuous && prevMode === 'audio' &&
-              Number.isFinite(window._lastAudioCueIdx) && window._lastAudioCueIdx >= 0) {
-            window._reentryAudioJumpCueIdx = window._lastAudioCueIdx;
+          // Continuous mode: open the reader on the LIVE native playhead so it
+          // is already aligned with the narration (the position listener keeps
+          // it synced from there). The time, not _lastAudioCueIdx: that shared
+          // cursor is overwritten by card renders and reader scrolling without
+          // moving the audio, and once sent an audio→read switch to a stale
+          // mid-book card while the book was playing near its end. The reader
+          // turns the time into a cue against its own cue list.
+          if (continuous && prevMode === 'audio' && !window._positionSaveBlocked?.()) {
+            try {
+              const bg = window.Capacitor?.Plugins?.BackgroundAudio;
+              const s = bg?.getState ? await bg.getState() : null;
+              const ms = Number(s?.positionMs);
+              if (s && (s.playing || s.ready) && Number.isFinite(ms) && ms > 0) window._reentryAudioJumpMs = ms;
+            } catch (_) {}
           }
           // CARD → READ: signal the reader to land the green EXACTLY on the card's
           // line. centerOnActiveCard resolves the card's chunk for BOTH SRT-cards
@@ -1865,6 +1873,10 @@
       // to the global LAST_MODE_V1, then the title's natural first-enabled mode.
       // Force the switch — without {force} the tab gate (data-empty still
       // reflecting the just-loaded title) would refuse and we'd stay in card.
+      // Only among the title's SHOWN tabs (titleStore.shownModes), as a title
+      // open does: a hidden last mode (an old CARD session on a book that now
+      // shows READ / AUDIO) must not come back at launch — its stale card
+      // cursor fed a mode switch a mid-book cue.
       let targetMode = null, enabled = null;
       try {
         if (window.titleStore?.list) {
@@ -1872,6 +1884,10 @@
           const t = titles.find(x => x.id === window._activeTitleId);
           enabled = (t && window.titleStore.enabledModes)
             ? window.titleStore.enabledModes(t) : null;
+          if (t && enabled && window.titleStore.shownModes) {
+            const shown = window.titleStore.shownModes(t);
+            enabled = { card: shown.includes('card'), read: shown.includes('read'), audio: shown.includes('audio') };
+          }
           if (t?.lastMode && (!enabled || enabled[t.lastMode])) targetMode = t.lastMode;
         }
       } catch (e) {}
@@ -1880,7 +1896,7 @@
         if (g && enabled && enabled[g]) targetMode = g;
       }
       if (!targetMode && enabled) {
-        targetMode = enabled.card ? 'card' : enabled.read ? 'read' : enabled.audio ? 'audio' : null;
+        targetMode = enabled.read ? 'read' : enabled.card ? 'card' : enabled.audio ? 'audio' : null;
       }
       if (targetMode && targetMode !== currentMode &&
           typeof window.setShellMode === 'function') {

@@ -2459,6 +2459,9 @@
   // and scroll it near-right-with-context. Falls back to a book-wide text
   // resolve if the alignment map is empty (legacy matcher), so SOMETHING
   // always shows. Returns true if a highlight was painted.
+  // Set while an audio → read entry is placing the reader (see
+  // _revealReaderSettledStill).
+  let _entryFromAudio = false;
   function ensureGreenOnEnter(preferredCueIdx) {
     try {
       // Only act while the paged reader is actually the visible view. openView
@@ -7391,6 +7394,22 @@
     if (dots) dots.style.opacity = '0';
   };
   // Fade the cover out AFTER the entry scroll has actually painted (2 rAF).
+  // audio → read with the narration running: the entry placement and the live
+  // follow's first paint can each move the page; keep the cover up until the
+  // page has stopped moving, so the reader appears already on the playing
+  // line instead of turning a page right after it shows. Bounded.
+  function _revealReaderSettledStill() {
+    const t0 = performance.now();
+    let last = scrollEl ? scrollEl.scrollLeft : 0, stillSince = t0;
+    const tick = () => {
+      const now = performance.now();
+      const x = scrollEl ? scrollEl.scrollLeft : 0;
+      if (Math.abs(x - last) > 0.5) { last = x; stillSince = now; }
+      if (_readerHidden() || now - t0 > 1500 || (now - t0 > 400 && now - stillSince > 200)) { _revealReaderSettled(); return; }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
   function _revealReaderSettled() {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       try { window.hideReaderCover(); } catch (_) {}
@@ -7454,6 +7473,23 @@
       // loadAudiobookCues wipes lastReadCueIdx — top priority.)
       const jumpCue = window._reentryAudioJumpCueIdx;
       window._reentryAudioJumpCueIdx = null;
+      // audio → read: the live playhead time (shell.js), resolved against the
+      // reader's own cue list each time it is asked — the list can be replaced
+      // by loadAudiobookCues below.
+      const jumpMs = window._reentryAudioJumpMs;
+      window._reentryAudioJumpMs = null;
+      _entryFromAudio = Number.isFinite(jumpMs);
+      const cueAtMs = (ms) => {
+        const cl = (pagedCues?.length ? pagedCues : (window.__abCues || []));
+        if (!cl.length || !Number.isFinite(ms)) return -1;
+        let lo = 0, hi = cl.length - 1;
+        if ((cl[0].startMs ?? 0) > ms) return 0;
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1;
+          if ((cl[mid].startMs ?? 0) <= ms) lo = mid; else hi = mid - 1;
+        }
+        return lo;
+      };
       const stayCue = window._reentryStayCueIdx;
       window._reentryStayCueIdx = null;
       lastHighlightedCue = -1;
@@ -7471,7 +7507,9 @@
             if (c < 0 || _bookmarkChunkIdx < 0 || Math.abs(c - _bookmarkChunkIdx) <= 2) exact = _bookmarkCueIdx;
           }
         } catch (_) {}
+        const liveCue = Number.isFinite(jumpMs) ? cueAtMs(jumpMs) : -1;
         return (Number.isFinite(stayCue) && stayCue >= 0) ? stayCue
+          : (liveCue >= 0) ? liveCue
           : (Number.isFinite(jumpCue) && jumpCue >= 0) ? jumpCue
           : (exact >= 0) ? exact
           : bm;
@@ -7527,7 +7565,8 @@
       // the range resolved. Re-check once the layout has settled and pull it
       // back in. Three passes: late images and font loading can move it again.
       for (const d of [320, 900, 1800]) setTimeout(_ensureHighlightOnScreen, d);
-      _revealReaderSettled();
+      if (_entryFromAudio) { _entryFromAudio = false; _revealReaderSettledStill(); }
+      else _revealReaderSettled();
     };
     // First attempt on the next FRAME (the old flat 80ms was pure added
     // latency — the chunk poll inside already handles a not-yet-rendered book).
