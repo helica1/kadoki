@@ -26,7 +26,13 @@
     try { localStorage.setItem(k, String(v)); } catch (_) {}
     try { window.Capacitor?.Plugins?.Preferences?.set({ key: k, value: String(v) }); } catch (_) {}
   }
-  function enabled() { return lsGet(PREF, '0') === '1'; }   // default OFF — user-picked timeline scenes are the model now (no per-6k auto-spend)
+  // RETIRED (2026-10-25). The "Auto-illustrate scenes" switch left Preferences
+  // on 2026-08-01, but a stored '1' kept this engine generating a picture (and
+  // a 「シーン解放」 toast) at every chapter boundary with no switch left to turn
+  // it off. Scene pictures come from "Auto-generate scene pictures"
+  // (AISCENE_AUTO_IMG, ai-processor.js) and the timeline now.
+  function enabled() { return false; }
+  try { localStorage.removeItem(PREF); window.Capacitor?.Plugins?.Preferences?.remove?.({ key: PREF }); } catch (_) {}
   function setEnabled(on) { lsSet(PREF, on ? '1' : '0'); }
   function dbg() { try { return localStorage.getItem('KADOKI_DEBUG') === '1'; } catch (_) { return false; } }
   function slog() { if (!dbg()) return; try { console.log.apply(console, ['[aiScenes]'].concat([].slice.call(arguments))); } catch (_) {} }

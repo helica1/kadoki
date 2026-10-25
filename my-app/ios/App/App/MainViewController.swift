@@ -702,6 +702,10 @@ class MainViewController: CAPBridgeViewController {
             // Native UIMenu over the toolbar's hamburger (NativeChrome.swift).
             wv.configuration.userContentController.addUserScript(KadokiNativeMenu.userScript())
             nativeMenu.install(in: self.view, webView: wv)
+            // Native action sheets for the web choosers (NativeChrome.swift).
+            wv.configuration.userContentController.addUserScript(KadokiActionSheet.userScript())
+            actionSheet.install(in: self, webView: wv)
+            nativeToast.install(in: self.view, webView: wv)
             // Native Preferences generated from the web panel (NativePrefs.swift)
             // and the native Library; iOS 16+, older systems keep the web ones.
             if #available(iOS 16.0, *) {
@@ -722,6 +726,8 @@ class MainViewController: CAPBridgeViewController {
 
     #if os(iOS)
     private let nativeMenu = KadokiNativeMenu()
+    private let actionSheet = KadokiActionSheet()
+    private let nativeToast = KadokiToast()
     private var nativePrefs: AnyObject?
     private var nativeLibrary: AnyObject?
 

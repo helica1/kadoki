@@ -323,6 +323,8 @@
     setHidden(readTab, shown && !shown.includes('read'));
     setHidden(audioTab, shown && !shown.includes('audio'));
     setHidden(document.getElementById('kvVideoTab'), shown && !shown.includes('audio'));
+    // Remembered for the next launch (applied before the title has loaded).
+    try { if (shown) localStorage.setItem('SHOWN_TABS_V1', JSON.stringify(shown)); } catch (_) {}
 
     // Play/pause button only makes sense when there's something to play — an
     // audiobook (read-along / audio mode) or cards (card audio). An EPUB-only
@@ -331,6 +333,17 @@
     const playBtn = document.getElementById('shellPlayBtn');
     if (playBtn) playBtn.style.display = (hasAudio || hasCards) ? '' : 'none';
   }
+
+  // Launch: show the last title's tabs straight away, instead of all three
+  // until the title has loaded (refreshTabAvailability then confirms them).
+  try {
+    const last = JSON.parse(localStorage.getItem('SHOWN_TABS_V1') || 'null');
+    if (Array.isArray(last) && last.length) {
+      for (const tab of document.querySelectorAll('#shellModeTabs .mode-tab[data-mode]')) {
+        if (!last.includes(tab.dataset.mode)) tab.dataset.hidden = '1';
+      }
+    }
+  } catch (_) {}
 
   // Long-press the mode tabs → choose which tabs this title shows (saved on
   // the title as `modes`; "Default" clears it back to titleStore.defaultModes).

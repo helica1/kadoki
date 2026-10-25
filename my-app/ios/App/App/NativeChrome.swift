@@ -115,6 +115,114 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// Native iOS action sheets for the web choosers (ios-feel.js routes a
+/// libSheet that holds only plain choices here). Message: {id, title,
+/// options: [{label, sub, destructive}], cancel}; the pick goes back as
+/// window.__kadokiSheetDone(id, index), -1 for Cancel.
+final class KadokiActionSheet: NSObject, WKScriptMessageHandler {
+    private weak var webView: WKWebView?
+    private weak var hostVC: UIViewController?
+
+    static func userScript() -> WKUserScript {
+        WKUserScript(source: "window.KADOKI_NATIVE_SHEETS=true;", injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
+    func install(in vc: UIViewController, webView: WKWebView) {
+        self.webView = webView
+        hostVC = vc
+        webView.configuration.userContentController.add(WeakMessageHandler(self), name: "kadokiActionSheet")
+    }
+
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let d = message.body as? [String: Any], let id = d["id"] as? Int,
+              let opts = d["options"] as? [[String: Any]], var vc = hostVC else { return }
+        while let p = vc.presentedViewController, !p.isBeingDismissed { vc = p }
+        let title = (d["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let sheet = UIAlertController(title: title, message: nil, preferredStyle: .actionSheet)
+        for (i, o) in opts.enumerated() {
+            var label = (o["label"] as? String) ?? ""
+            if let sub = o["sub"] as? String, !sub.isEmpty { label += " — " + sub }
+            let style: UIAlertAction.Style = ((o["destructive"] as? Bool) == true) ? .destructive : .default
+            sheet.addAction(UIAlertAction(title: label, style: style) { [weak self] _ in self?.done(id, i) })
+        }
+        sheet.addAction(UIAlertAction(title: (d["cancel"] as? String) ?? "Cancel", style: .cancel) { [weak self] _ in self?.done(id, -1) })
+        if let pop = sheet.popoverPresentationController {   // iPad: anchored popover
+            pop.sourceView = vc.view
+            pop.sourceRect = CGRect(x: vc.view.bounds.midX, y: vc.view.bounds.maxY - 40, width: 1, height: 1)
+            pop.permittedArrowDirections = []
+        }
+        vc.present(sheet, animated: true)
+    }
+
+    private func done(_ id: Int, _ index: Int) {
+        webView?.evaluateJavaScript("window.__kadokiSheetDone && window.__kadokiSheetDone(\(id), \(index))", completionHandler: nil)
+    }
+}
+
+/// Native toasts: a capsule just below the toolbar, above the web view AND
+/// the native Preferences / Library layers (web toasts were hidden under
+/// them). ios-feel.js sends showToast() here: {text, ms}.
+final class KadokiToast: NSObject, WKScriptMessageHandler {
+    private weak var hostView: UIView?
+    private var current: UIView?
+    private var hideWork: DispatchWorkItem?
+
+    func install(in view: UIView, webView: WKWebView) {
+        hostView = view
+        webView.configuration.userContentController.add(WeakMessageHandler(self), name: "kadokiToast")
+    }
+
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let d = message.body as? [String: Any], let text = d["text"] as? String, !text.isEmpty,
+              let host = hostView else { return }
+        let ms = (d["ms"] as? Double) ?? 2500
+        hideWork?.cancel()
+        current?.removeFromSuperview()
+
+        let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemThickMaterialDark))
+        blur.clipsToBounds = true
+        let label = UILabel()
+        label.text = text
+        label.textColor = .white
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.numberOfLines = 3
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        blur.contentView.addSubview(label)
+        blur.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(blur)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: blur.contentView.leadingAnchor, constant: 18),
+            label.trailingAnchor.constraint(equalTo: blur.contentView.trailingAnchor, constant: -18),
+            label.topAnchor.constraint(equalTo: blur.contentView.topAnchor, constant: 11),
+            label.bottomAnchor.constraint(equalTo: blur.contentView.bottomAnchor, constant: -11),
+            blur.centerXAnchor.constraint(equalTo: host.centerXAnchor),
+            blur.topAnchor.constraint(equalTo: host.safeAreaLayoutGuide.topAnchor, constant: 56),   // below the toolbar
+            blur.widthAnchor.constraint(lessThanOrEqualTo: host.widthAnchor, constant: -40),
+        ])
+        host.layoutIfNeeded()
+        blur.layer.cornerRadius = min(blur.bounds.height / 2, 22)
+        blur.alpha = 0
+        blur.transform = CGAffineTransform(translationX: 0, y: -12).scaledBy(x: 0.96, y: 0.96)
+        current = blur
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
+            blur.alpha = 1
+            blur.transform = .identity
+        }
+        let work = DispatchWorkItem { [weak self, weak blur] in
+            UIView.animate(withDuration: 0.25, animations: {
+                blur?.alpha = 0
+                blur?.transform = CGAffineTransform(translationX: 0, y: -8)
+            }, completion: { _ in
+                blur?.removeFromSuperview()
+                if self?.current === blur { self?.current = nil }
+            })
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(1.2, ms / 1000), execute: work)
+    }
+}
+
 /// A full-screen SwiftUI layer over the web view (native Preferences and
 /// Library). A child view, not a presented sheet: web alert()/confirm() and
 /// file pickers present from the main view controller, which must not already

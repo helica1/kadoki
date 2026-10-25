@@ -1,0 +1,103 @@
+/* iOS feel for the web interface: iPhone / iPad only (html.kadoki-ios, set by
+   ios-feel.js; Vision and the Mac keep their own look). Touch behavior and
+   chrome only: the reading text, card text and their fonts are untouched. */
+
+/* ── touch: no web tap flash, no double-tap-zoom delay, no long-press
+   selection or callout on controls ─────────────────────────────────────── */
+html.kadoki-ios { -webkit-tap-highlight-color: transparent; }
+html.kadoki-ios button,
+html.kadoki-ios .mode-tab,
+html.kadoki-ios [role="button"],
+html.kadoki-ios .lib-sheet-opt,
+html.kadoki-ios .menu-item {
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* ── pressed state: a quick dim while the finger is down, an eased return
+   (iOS buttons), instead of a background flash ───────────────────────────── */
+html.kadoki-ios button:not(:disabled),
+html.kadoki-ios .mode-tab,
+html.kadoki-ios [role="button"] {
+  transition: opacity .22s ease;
+}
+html.kadoki-ios button:not(:disabled):active,
+html.kadoki-ios .mode-tab:active,
+html.kadoki-ios [role="button"]:active {
+  opacity: .45;
+  transition: opacity 0s;
+}
+
+/* ── toolbar: 44 pt tap targets without changing the look (an invisible
+   hit area above and below each control; never sideways onto a neighbor) ── */
+html.kadoki-ios #appHeader button,
+html.kadoki-ios #shellModeTabs .mode-tab { position: relative; }
+html.kadoki-ios #appHeader button::after,
+html.kadoki-ios #shellModeTabs .mode-tab::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  top: -8px; bottom: -8px;
+}
+html.kadoki-ios #shellMoreBtn::after { left: -6px; right: -10px; }
+
+/* ── action sheets (Move, tab chooser, Print / Sync choices): iOS grouped
+   rows on a frosted material, a separate Cancel, a spring slide-up ─────── */
+@keyframes kIosSheetUp { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes kIosFade { from { opacity: 0; } to { opacity: 1; } }
+html.kadoki-ios .lib-sheet {
+  background: rgba(0, 0, 0, .42);
+  animation: kIosFade .22s ease;
+}
+html.kadoki-ios .lib-sheet-box {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+  animation: kIosSheetUp .38s cubic-bezier(.32, .72, 0, 1);
+}
+html.kadoki-ios .lib-sheet-h {
+  margin: 0 !important;
+  padding: 14px 16px 12px;
+  text-align: center;
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: rgba(235, 235, 245, .6) !important;
+  background: rgba(44, 44, 46, .82);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  backdrop-filter: blur(24px) saturate(1.6);
+  border-radius: 14px 14px 0 0;
+}
+html.kadoki-ios .lib-sheet-opt {
+  margin: 0 !important;
+  border: 0 !important;
+  border-top: .5px solid rgba(84, 84, 88, .65) !important;
+  border-radius: 0 !important;
+  background: rgba(44, 44, 46, .82) !important;
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  backdrop-filter: blur(24px) saturate(1.6);
+  min-height: 52px;
+  padding: 14px 18px !important;
+  font-size: 17px !important;
+  color: #fff !important;
+}
+html.kadoki-ios .lib-sheet-opt.danger { color: #ff453a !important; }
+html.kadoki-ios .lib-sheet-opt b { font-size: 15px !important; color: rgba(235, 235, 245, .6) !important; font-weight: 400 !important; }
+html.kadoki-ios .lib-sheet-opt:active { background: rgba(72, 72, 74, .9) !important; opacity: 1; }
+html.kadoki-ios .lib-sheet-opt:has(+ .lib-sheet-cancel),
+html.kadoki-ios .lib-sheet-opt:last-child { border-radius: 0 0 14px 14px !important; }
+html.kadoki-ios .lib-sheet-cancel {
+  margin-top: 8px !important;
+  min-height: 56px;
+  border: 0 !important;
+  border-radius: 14px !important;
+  background: rgb(44, 44, 46) !important;
+  color: #fff !important;
+  font-size: 17px !important;
+  font-weight: 600 !important;
+}
+html.kadoki-ios .lib-sheet-cancel:active { background: rgb(72, 72, 74) !important; opacity: 1; }
