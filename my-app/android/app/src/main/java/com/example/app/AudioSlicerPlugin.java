@@ -122,6 +122,10 @@ public class AudioSlicerPlugin extends Plugin {
             ex = new MediaExtractorCompat(ctx);
             ex.setDataSource(Uri.fromFile(new File(srcPath)), 0L);
         }
+        Media3Demuxer(MediaExtractorCompat ex, String srcPath) throws Exception {
+            this.ex = ex;
+            ex.setDataSource(Uri.fromFile(new File(srcPath)), 0L);
+        }
         public int getTrackCount() { return ex.getTrackCount(); }
         public MediaFormat getTrackFormat(int i) { return ex.getTrackFormat(i); }
         public void selectTrack(int i) { ex.selectTrack(i); }
@@ -139,6 +143,20 @@ public class AudioSlicerPlugin extends Plugin {
      * selected. The returned demuxer's findAudioTrack() is guaranteed >= 0.
      */
     private Demuxer openDemuxer(String srcPath) throws Exception {
+        // MP3: Media3 with the exact frame index — the platform extractor seeks
+        // VBR files by the Xing table and lands tens of seconds off.
+        if (ExactExtractors.isMp3(srcPath)) {
+            Media3Demuxer d = null;
+            try {
+                d = new Media3Demuxer(ExactExtractors.extractor(getContext(), srcPath), srcPath);
+                if (findAudioTrack(d) < 0) throw new Exception("no audio track (exact mp3)");
+                Demuxer ok = d; d = null; return ok;
+            } catch (Throwable e) {
+                Log.w(TAG, "exact mp3 open failed (" + e.getMessage() + "); platform extractor for " + srcPath);
+            } finally {
+                if (d != null) d.release();
+            }
+        }
         // Try the platform extractor first (proven path). Release it on ANY
         // failure — including findAudioTrack() THROWING mid-introspection on a
         // half-parsed container, not just returning -1 — before falling back, so

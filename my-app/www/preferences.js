@@ -1794,14 +1794,15 @@
       input = document.createElement('input');
       input.type = 'file';
       input.accept = '.zip,application/zip';
+      input.multiple = true;   // several dictionaries in one go (Yomitan / Hoshi style)
       input.id = 'dictImportInput';
       input.style.display = 'none';
       document.body.appendChild(input);
     }
     input.value = '';
     input.onchange = async () => {
-      const f = input.files?.[0];
-      if (!f) return;
+      const files = Array.from(input.files || []);
+      if (!files.length) return;
       const status  = document.getElementById('dictImportStatus');
       const barWrap = document.getElementById('dictImportBarWrap');
       const bar     = document.getElementById('dictImportBar');
@@ -1832,28 +1833,41 @@
           default:      return x * 100;
         }
       };
-      setStatus(window.i18n.fmt('pj.reading_file', { name: f.name }));
-      setBar(1);
-      try {
-        const buf = await f.arrayBuffer();
-        const name = await window.importYomitanDictionaryFromBuffer(buf, {
-          fallbackName: f.name,
-          onProgress: (p) => {
-            const within = Math.floor((p.pct || 0) * 100);
-            const label = phaseLabel[p.phase] || p.phase;
-            // Show the within-phase % on the long phases so motion is visible.
-            setStatus((p.phase === 'parse' || p.phase === 'index') ? `${label} ${within}%` : label);
-            setBar(overall(p));
-          }
-        });
-        setStatus(window.i18n.fmt('pj.import_done', { name }));
-        setBar(100);
-        buildDictionarySection();
-        setTimeout(hideBar, 1500);
-      } catch (e) {
-        console.error('Dict import failed:', e);
-        setStatus(window.i18n.fmt('pj.import_failed', { err: (e?.message || e) }));
+      // One after another (each import is memory-heavy); a failure is noted
+      // and the rest continue. "(2/5)" prefixes the status for a batch.
+      const done = [], failed = [];
+      for (let k = 0; k < files.length; k++) {
+        const f = files[k];
+        const pre = files.length > 1 ? `(${k + 1}/${files.length}) ` : '';
+        setStatus(pre + window.i18n.fmt('pj.reading_file', { name: f.name }));
+        setBar(1);
+        try {
+          const buf = await f.arrayBuffer();
+          const name = await window.importYomitanDictionaryFromBuffer(buf, {
+            fallbackName: f.name,
+            onProgress: (p) => {
+              const within = Math.floor((p.pct || 0) * 100);
+              const label = phaseLabel[p.phase] || p.phase;
+              // Show the within-phase % on the long phases so motion is visible.
+              setStatus(pre + ((p.phase === 'parse' || p.phase === 'index') ? `${label} ${within}%` : label));
+              setBar(overall(p));
+            }
+          });
+          done.push(name);
+          buildDictionarySection();
+        } catch (e) {
+          console.error('Dict import failed:', f.name, e);
+          failed.push(f.name + ': ' + (e?.message || e));
+        }
+      }
+      if (failed.length) {
+        setStatus((done.length ? window.i18n.fmt('pj.import_done', { name: done.join(', ') }) + ' · ' : '') +
+                  window.i18n.fmt('pj.import_failed', { err: failed.join('; ') }));
         hideBar();
+      } else {
+        setStatus(window.i18n.fmt('pj.import_done', { name: done.join(', ') }));
+        setBar(100);
+        setTimeout(hideBar, 1500);
       }
     };
     input.click();

@@ -120,7 +120,7 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'pj.preferences_saved': { en: 'Preferences saved', ja: '設定を保存しました' },
 
   // ---- dictionary manager ----
-  'pj.import_yomitan_zip': { en: '＋ Import Yomitan zip…', ja: '＋ Yomitan辞書(zip)をインポート…' },
+  'pj.import_yomitan_zip': { en: '＋ Import Yomitan zips…', ja: '＋ Yomitan辞書(zip)をインポート（複数可）…' },
   'pj.no_dicts_loaded': { en: 'No dictionaries loaded yet. Open Preferences again once startup loading completes.', ja: 'まだ辞書が読み込まれていません。起動時の読み込みが完了したら、設定を再度開いてください。' },
   'pj.orphaned_relic': { en: '(orphaned relic)', ja: '（孤立した残存データ）' },
   'pj.imported_tag': { en: '(imported)', ja: '（インポート済み）' },

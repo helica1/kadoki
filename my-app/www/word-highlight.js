@@ -46,8 +46,12 @@
       const v = parseInt(localStorage.getItem('KADOKI_KW_LEAD'), 10);
       if (Number.isFinite(v) && v > -1000 && v < 1500) return v;
     } catch (_) {}
-    return 100;
+    // Android: the clock was measured ~250 ms behind the player (event
+    // delivery + ExoPlayer/Speedy reporting), so the karaoke trailed the
+    // voice; a larger lead puts it on the voice as on iOS.
+    return _isAndroid ? 250 : 100;
   }
+  const _isAndroid = (() => { try { return window.Capacitor?.getPlatform?.() === 'android'; } catch (_) { return false; } })();
 
   // ── styles ────────────────────────────────────────────────────────────────
 
@@ -269,6 +273,13 @@
         if (q[i].e < q[i].s) q[i].e = q[i].s;
       }
       const MIN_PER_CHAR = 30, GAP_RUN = 40;
+      // Runs holding a broken token (zero-length / < 30 ms per char) are
+      // re-laid. Android whisper DTW stamps are rough (~20 % zero-length), so
+      // there the re-lay leans on character count; Android's newer
+      // transcriptions are timed from the voice (AutoTranscribePlugin
+      // layoutWordsByVoice) and have no broken tokens, so they pass through
+      // untouched — as do iOS stamps.
+      const UNI = _isAndroid ? 0.85 : 0.5;
       let i = 0, changed = false;
       while (i < n) {
         let j = i;
@@ -283,7 +294,7 @@
             for (let k = i; k <= j; k++) {
               const uni = span * q[k].len / chars;
               const dtw = sumD > 0 ? span * (q[k].e - q[k].s) / sumD : uni;
-              const d = 0.5 * uni + 0.5 * dtw;
+              const d = UNI * uni + (1 - UNI) * dtw;
               q[k].s = Math.round(t); t += d; q[k].e = Math.round(t);
             }
             q[j].e = q[i].s + span;

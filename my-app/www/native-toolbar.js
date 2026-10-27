@@ -18,11 +18,22 @@
     const v = { card: '--accent-card', read: '--accent-read', audio: '--accent-audio', video: '--accent-audio' }[mode] || '--accent-read';
     return root().getPropertyValue(v).trim() || '#4caf50';
   };
-  const onTop = (el) => {
+  // The native control may be larger than the web one (the play capsule
+  // grows leftward), so `area` (offsets from the web rect) is checked too:
+  // only the control itself or the toolbar may be under it, never a popup.
+  const onTop = (el, area) => {
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4) return null;
-    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-    if (!(hit && (hit === el || el.contains(hit)))) return null;
+    const head = document.getElementById('appHeader');
+    const ok = (x, y) => {
+      const hit = document.elementFromPoint(x, y);
+      return !!hit && (hit === el || el.contains(hit) || (!!area && !!head && head.contains(hit)));
+    };
+    if (!ok(r.left + r.width / 2, r.top + r.height / 2)) return null;
+    if (area) {
+      const y0 = r.top + r.height / 2;
+      for (const [x, dy] of area(r)) if (!ok(x, y0 + dy)) return null;
+    }
     return { x: r.left, y: r.top, w: r.width, h: r.height };
   };
   const covered = () => {
@@ -61,7 +72,8 @@
     }
     const play = document.getElementById('shellPlayBtn');
     if (play && getComputedStyle(play).display !== 'none') {
-      const rect = onTop(play);
+      // Native capsule: x from right−76 to right−14, ±17 tall (NativeChrome.swift).
+      const rect = onTop(play, (r) => [[r.right - 72, -13], [r.right - 72, 13], [r.right - 18, -13], [r.right - 18, 13]]);
       if (rect) {
         const pause = play.querySelector('[data-role="pause"]');
         const active = document.querySelector('#shellModeTabs .mode-tab[data-active="1"]');
@@ -93,7 +105,15 @@
     try {
       const head = document.getElementById('appHeader');
       if (head) new MutationObserver(schedule).observe(head, { subtree: true, attributes: true, childList: true, characterData: true });
-      new MutationObserver(schedule).observe(document.body, { childList: true, attributes: true, attributeFilter: ['class', 'style'] });
+      // The dictionary popup shows / hides through its own style.
+      const popObs = new MutationObserver(schedule);
+      let popWatched = null;
+      const watchPopup = () => {
+        const p = document.getElementById('dictPopup');
+        if (p && p !== popWatched) { popWatched = p; popObs.observe(p, { attributes: true, attributeFilter: ['class', 'style'] }); }
+      };
+      new MutationObserver(() => { watchPopup(); schedule(); }).observe(document.body, { childList: true, attributes: true, attributeFilter: ['class', 'style'] });
+      watchPopup();
     } catch (_) {}
     window.addEventListener('resize', schedule);
     window.addEventListener('shell:mode-change', schedule);

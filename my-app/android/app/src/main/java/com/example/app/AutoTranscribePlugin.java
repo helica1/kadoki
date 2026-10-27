@@ -76,16 +76,54 @@ public class AutoTranscribePlugin extends Plugin {
     // Plugin methods
     // ------------------------------------------------------------------
 
+    // Engine: Android's own on-device recognizer (SystemSpeechEngine) when
+    // Android 14+ can time words and Google's Japanese pack is (or can be)
+    // installed — real word timestamps at 10× real time; whisper otherwise.
     @PluginMethod
     public void checkAvailability(PluginCall call) {
-        JSObject ret = new JSObject();
-        ret.put("supported", WhisperEngine.isLibAvailable());
-        ret.put("installed", findModel() != null);
-        call.resolve(ret);
+        new Thread(() -> {
+            JSObject ret = new JSObject();
+            String sys = SystemSpeechEngine.languageStatus(getContext());
+            if (!"none".equals(sys)) {
+                ret.put("supported", true);
+                ret.put("installed", "installed".equals(sys));
+                ret.put("engine", "android");
+                ret.put("sizeMB", 52);
+            } else {
+                ret.put("supported", WhisperEngine.isLibAvailable());
+                ret.put("installed", findModel() != null);
+                ret.put("engine", "whisper");
+                ret.put("sizeMB", 190);
+            }
+            call.resolve(ret);
+        }, "speech-avail").start();
     }
 
     @PluginMethod
     public void ensureAssets(PluginCall call) {
+        if (SystemSpeechEngine.usable(getContext())) {
+            new Thread(() -> {
+                String st = SystemSpeechEngine.languageStatus(getContext());
+                if ("installed".equals(st)) { resolveInstalled(call); return; }
+                if ("supported".equals(st)) {
+                    // The system shows its own download consent; wait for it.
+                    SystemSpeechEngine.requestDownload(getContext());
+                    long until = System.currentTimeMillis() + 10 * 60_000;
+                    while (System.currentTimeMillis() < until) {
+                        try { Thread.sleep(3000); } catch (InterruptedException ignored) {}
+                        if ("installed".equals(SystemSpeechEngine.languageStatus(getContext()))) { resolveInstalled(call); return; }
+                    }
+                    call.reject("Japanese speech pack was not installed");
+                    return;
+                }
+                startWhisperDownload(call);   // recognizer can't do Japanese: whisper
+            }, "speech-assets").start();
+            return;
+        }
+        startWhisperDownload(call);
+    }
+
+    private void startWhisperDownload(PluginCall call) {
         if (!WhisperEngine.isLibAvailable()) {
             call.reject("Transcription not supported on this device");
             return;
@@ -133,7 +171,8 @@ public class AutoTranscribePlugin extends Plugin {
             return;
         }
         File model = findModel();
-        if (model == null) {
+        boolean system = SystemSpeechEngine.usable(getContext());
+        if (model == null && !system) {
             call.reject("Speech model not installed");
             return;
         }
@@ -196,6 +235,8 @@ public class AutoTranscribePlugin extends Plugin {
         j.cancelled = true;
         WhisperEngine e = engine;
         if (e != null) e.abort();
+        SystemSpeechEngine se = j.system;
+        if (se != null) se.abort();
     }
 
     /** Clear the job slot if it still holds this job (mirrors iOS clearJob). */
@@ -215,6 +256,7 @@ public class AutoTranscribePlugin extends Plugin {
         final long durationMs;
         volatile boolean cancelled = false;
         volatile long fedThroughMs;
+        volatile SystemSpeechEngine system;   // set when this job runs on Android's recognizer
         final Thread thread;
 
         Job(String id, String srcPath, File model, long startMs, long targetMs,
@@ -233,8 +275,17 @@ public class AutoTranscribePlugin extends Plugin {
         void run() {
             String error = null;
             try {
-                WhisperEngine eng = obtainEngine(model);
-                if (eng == null) { error = "Speech model failed to load"; return; }
+                WhisperEngine eng = null;
+                if ("installed".equals(SystemSpeechEngine.languageStatus(getContext()))) {
+                    system = new SystemSpeechEngine();
+                    Log.i(TAG, "engine: Android on-device recognizer");
+                } else {
+                    if (model == null) { error = "Speech model not installed"; return; }
+                    eng = obtainEngine(model);
+                    if (eng == null) { error = "Speech model failed to load"; return; }
+                    Log.i(TAG, "engine: whisper");
+                }
+                final long windowMs = system != null ? 60_000 : WINDOW_MS;
 
                 int nThreads = Math.max(2, Math.min(6,
                         Runtime.getRuntime().availableProcessors() - 2));
@@ -250,8 +301,11 @@ public class AutoTranscribePlugin extends Plugin {
                         continue;
                     }
 
+                    // Built-in engine: a short first window so the first
+                    // subtitles land ~1.5 s after the job starts.
+                    long thisWindow = (system != null && windowStart == startMs) ? 15_000 : windowMs;
                     PcmWindowReader.Window win =
-                            PcmWindowReader.readWindow(getContext(), srcPath, windowStart, WINDOW_MS);
+                            PcmWindowReader.readWindow(getContext(), srcPath, windowStart, thisWindow);
                     if (cancelled) return;
                     long decodedMs = win.pcm.length * 1000L / PcmWindowReader.WHISPER_RATE;
                     if (win.pcm.length < PcmWindowReader.WHISPER_RATE) {
@@ -267,15 +321,24 @@ public class AutoTranscribePlugin extends Plugin {
                             error = "Audio undecodable at " + windowStart + "ms";
                             return;
                         }
-                        windowStart += WINDOW_MS;
+                        windowStart += windowMs;
                         fedThroughMs = windowStart;
                         continue;
                     }
                     emptyWindows = 0;
 
                     long t0 = System.currentTimeMillis();
-                    List<WhisperEngine.Segment> segs = eng.transcribe(win.pcm, nThreads);
-                    if (segs == null || cancelled) return; // aborted
+                    List<WhisperEngine.Segment> segs = system != null
+                            ? system.transcribe(getContext(), win.pcm)
+                            : eng.transcribe(win.pcm, nThreads);
+                    if (cancelled) return; // aborted
+                    if (segs == null) {
+                        if (system == null) return;   // whisper abort
+                        // A recognizer hiccup on one window: retry it once, then skip ahead.
+                        segs = system.transcribe(getContext(), win.pcm);
+                        if (cancelled) return;
+                        if (segs == null) { error = "Speech recognizer failed at " + windowStart + "ms"; return; }
+                    }
                     Log.i(TAG, "window " + windowStart + "ms (" + decodedMs + "ms audio) → "
                             + segs.size() + " segs in " + (System.currentTimeMillis() - t0) + "ms");
 
@@ -287,6 +350,11 @@ public class AutoTranscribePlugin extends Plugin {
                         WhisperEngine.Segment last = segs.get(segs.size() - 1);
                         keep = segs.subList(0, segs.size() - 1);
                         nextStart = windowStart + last.t0Cs * 10;
+                        // Restart where that phrase's VOICE begins: a word time
+                        // that lands after the true onset clips the opening
+                        // syllables and garbles the phrase (郵便局 → 複合).
+                        WhisperEngine.Segment prev = keep.get(keep.size() - 1);
+                        nextStart = voiceOnsetBefore(win.pcm, windowStart, nextStart, windowStart + prev.t1Cs * 10);
                     } else {
                         nextStart = windowStart + decodedMs;
                     }
@@ -295,6 +363,7 @@ public class AutoTranscribePlugin extends Plugin {
 
                     List<Cue> cueList = segmentToCues(keep, windowStart);
                     refineCueBounds(cueList, win.pcm, windowStart);
+                    layoutWordsByVoice(cueList, win.pcm, windowStart);
                     JSONArray cues = serializeCues(cueList);
                     fedThroughMs = nextStart;
                     if (cues.length() > 0) emitCues(id, cues, fedThroughMs);
@@ -461,6 +530,130 @@ public class AutoTranscribePlugin extends Plugin {
             if (c.e <= c.s) c.e = Math.min(c.s + MIN_CUE_DUR_MS, wendMs);
             prevEnd = c.e;
         }
+    }
+
+    /**
+     * Word timing from the audio itself (measured 2026-10-26: both whisper's
+     * DTW stamps and the on-device recognizer's word times sit ±0.3-0.4 s off
+     * the voice, so the karaoke lurched). Within each (energy-refined) cue,
+     * the spoken characters are spread across the frames where the narrator
+     * is actually voicing, skipping the silences; each word's start/end is
+     * where its characters fall. The recognizer still decides which
+     * characters form a word — just not when they are spoken. Punctuation
+     * and spaces take no time.
+     */
+    private static void layoutWordsByVoice(List<Cue> cues, float[] pcm, long baseMs) {
+        final int HOP = PcmWindowReader.WHISPER_RATE / 100;   // 10 ms
+        int m = pcm.length / HOP;
+        if (m < 10 || cues.isEmpty()) return;
+        float[] env = new float[m];
+        for (int i = 0; i < m; i++) {
+            double acc = 0;
+            int off = i * HOP;
+            for (int k = 0; k < HOP; k++) { float v = pcm[off + k]; acc += v * v; }
+            env[i] = (float) Math.sqrt(acc / HOP);
+        }
+        float[] sorted = env.clone();
+        java.util.Arrays.sort(sorted);
+        float thr = Math.max(sorted[(int) (m * 0.95)] * 0.10f, 0.002f);
+        for (Cue c : cues) {
+            if (c.w.isEmpty() || c.text == null) continue;
+            int i0 = clampIdx((c.s - baseMs) / 10, m), i1 = clampIdx((c.e - baseMs) / 10, m);
+            if (i1 - i0 < 5) continue;
+            // cumulative voiced frames across the cue
+            int[] cum = new int[i1 - i0 + 1];
+            for (int i = i0; i < i1; i++) cum[i - i0 + 1] = cum[i - i0] + (env[i] > thr ? 1 : 0);
+            int voiced = cum[cum.length - 1];
+            if (voiced < 5) continue;
+            // cumulative spoken characters across the text
+            String t = c.text;
+            int n = t.length();
+            int[] cw = new int[n + 1];
+            for (int k = 0; k < n; k++) cw[k + 1] = cw[k] + (isSpoken(t.charAt(k)) ? 1 : 0);
+            int spoken = cw[n];
+            if (spoken == 0) continue;
+            // Anchors (spoken-char index → voiced-frame count): the cue's ends,
+            // plus every word whose recognizer time falls within 450 ms of a
+            // real speech onset — that word starts where its voice starts.
+            // Characters between anchors spread over the voiced frames there.
+            java.util.List<int[]> anchors = new java.util.ArrayList<>();
+            anchors.add(new int[]{ 0, 0 });
+            int lastFrame = 0;
+            for (long[] q : c.w) {
+                int off = (int) Math.max(0, Math.min(n, q[0]));
+                int ch = cw[off];
+                if (ch <= anchors.get(anchors.size() - 1)[0] || ch >= spoken) continue;
+                int fr = (int) ((q[2] - baseMs) / 10) - i0;   // recognizer time, frame in cue
+                int best = -1;
+                for (int f = Math.max(lastFrame + 1, fr - 45); f <= Math.min(i1 - i0 - 1, fr + 45); f++) {
+                    boolean onset = env[i0 + f] > thr && (f == 0 || env[i0 + f - 1] <= thr);
+                    if (onset && (best < 0 || Math.abs(f - fr) < Math.abs(best - fr))) best = f;
+                }
+                if (best > 0) { anchors.add(new int[]{ ch, cum[best] }); lastFrame = best; }
+            }
+            anchors.add(new int[]{ spoken, voiced });
+            for (long[] q : c.w) {
+                int off = (int) Math.max(0, Math.min(n, q[0]));
+                int end = (int) Math.max(off, Math.min(n, q[0] + q[1]));
+                q[2] = frameMs(cum, voicedAt(anchors, cw[off]), i0, baseMs, true);
+                q[3] = Math.max(q[2], frameMs(cum, voicedAt(anchors, cw[end]), i0, baseMs, false));
+            }
+        }
+    }
+
+    /** Voiced-frame position of spoken char `ch`, linear between the anchors around it. */
+    private static double voicedAt(java.util.List<int[]> anchors, int ch) {
+        for (int k = 1; k < anchors.size(); k++) {
+            int[] a = anchors.get(k - 1), b = anchors.get(k);
+            if (ch <= b[0]) {
+                if (b[0] == a[0]) return b[1];
+                return a[1] + (double) (ch - a[0]) / (b[0] - a[0]) * (b[1] - a[1]);
+            }
+        }
+        return anchors.get(anchors.size() - 1)[1];
+    }
+
+    /**
+     * Time (ms) where the cumulative voiced-frame count reaches `target`. A
+     * word START lands on the next voiced frame (after any silence, where the
+     * voice resumes); an END lands right after the last voiced frame.
+     */
+    private static long frameMs(int[] cum, double target, int i0, long baseMs, boolean start) {
+        int lo = 0, hi = cum.length - 1;
+        while (lo < hi) {
+            int mid = (lo + hi) >>> 1;
+            if (start ? cum[mid] <= target : cum[mid] < target) lo = mid + 1; else hi = mid;
+        }
+        int idx = start ? Math.max(0, lo - 1) : lo;
+        return baseMs + (long) (i0 + idx) * 10;
+    }
+
+    private static boolean isSpoken(char ch) {
+        if (Character.isWhitespace(ch)) return false;
+        return "。、，．,.!?！？「」『』（）()…―・ー〜~\"'“”‘’:;：；".indexOf(ch) < 0 || ch == 'ー';
+    }
+
+    /** Walk back from `ms` to the start of the speech run it sits in (≤ 1.5 s, never before `floorMs`). */
+    private static long voiceOnsetBefore(float[] pcm, long baseMs, long ms, long floorMs) {
+        final int HOP = PcmWindowReader.WHISPER_RATE / 100;
+        int m = pcm.length / HOP;
+        if (m < 10) return ms;
+        float[] env = new float[m];
+        for (int i = 0; i < m; i++) {
+            double acc = 0;
+            int off = i * HOP;
+            for (int k = 0; k < HOP; k++) { float v = pcm[off + k]; acc += v * v; }
+            env[i] = (float) Math.sqrt(acc / HOP);
+        }
+        float[] sorted = env.clone();
+        java.util.Arrays.sort(sorted);
+        float thr = Math.max(sorted[(int) (m * 0.95)] * 0.10f, 0.002f);
+        int i = clampIdx((ms - baseMs) / 10, m);
+        int lo = (int) Math.max(Math.max(0, i - 150), (floorMs - baseMs) / 10);
+        // Step back over any silence just before the stamp, then to the run's start.
+        while (i > lo && env[i] <= thr && env[i - 1] <= thr) i--;
+        while (i > lo && env[i - 1] > thr) i--;
+        return Math.max(floorMs, baseMs + i * 10L - 120);
     }
 
     private static int clampIdx(long v, int m) {

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kadoki Wi-Fi Transfer</title>
+<style>
+  :root { color-scheme: dark; --bg:#141218; --card:#211f26; --line:#49454f; --text:#e6e0e9; --muted:#cac4d0; --accent:#b794f6; --ok:#7bd88f; --err:#f2b8b5; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 20px 60px; }
+  h1 { font-size: 26px; font-weight: 600; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 28px; }
+  #drop { display: block; border: 2px dashed var(--line); border-radius: 20px; padding: 48px 20px; text-align: center; background: var(--card); cursor: pointer; transition: border-color .15s, background .15s; }
+  #drop.over { border-color: var(--accent); background: #2b2930; }
+  #drop strong { display:block; font-size: 18px; margin-bottom: 6px; }
+  #drop span { color: var(--muted); font-size: 14px; }
+  input[type=file] { display: none; }
+  ul { list-style: none; padding: 0; margin: 24px 0 0; }
+  li { background: var(--card); border-radius: 14px; padding: 12px 16px; margin-bottom: 10px; }
+  .row { display:flex; justify-content:space-between; gap: 12px; }
+  .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .st { color: var(--muted); font-size: 13px; flex: 0 0 auto; }
+  .st.ok { color: var(--ok); } .st.err { color: var(--err); }
+  .bar { height: 4px; background: #36343b; border-radius: 2px; margin-top: 8px; overflow: hidden; }
+  .bar i { display:block; height:100%; width:0; background: var(--accent); transition: width .2s; }
+  .hint { color: var(--muted); font-size: 13px; margin-top: 28px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kadoki Wi-Fi Transfer</h1>
+  <p class="sub">Send books, audiobooks, videos, subtitles and dictionaries to your phone.</p>
+  <label id="drop" for="pick">
+    <strong>Drop files here</strong>
+    <span>or click to choose<br>Books: EPUB, TXT · Audio: MP3, M4A, M4B, FLAC, OGG · Video: MP4, MOV, M4V, MKV<br>Subtitles: SRT, VTT, ASS · Yomitan dictionary or ッツ backup: .zip</span>
+  </label>
+  <input id="pick" type="file" multiple>
+  <ul id="list"></ul>
+  <p class="hint">Keep Kadoki open on the phone while files transfer. When the last file arrives, Kadoki pairs each book with its audiobook, and each video with its subtitles (by name), and asks you to confirm. Several videos sent together become one series.</p>
+</main>
+<script>
+(function () {
+  const drop = document.getElementById('drop'), pick = document.getElementById('pick'), list = document.getElementById('list');
+  const queue = []; let busy = false;
+  const fmt = (n) => n > 1e9 ? (n / 1e9).toFixed(2) + ' GB' : n > 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB';
+  function add(files) {
+    for (const f of files) {
+      const li = document.createElement('li');
+      li.innerHTML = '<div class="row"><span class="name"></span><span class="st">Waiting</span></div><div class="bar"><i></i></div>';
+      li.querySelector('.name').textContent = f.name + ' · ' + fmt(f.size);
+      list.appendChild(li);
+      queue.push({ f, li });
+    }
+    next();
+  }
+  function next() {
+    if (busy || !queue.length) return;
+    busy = true;
+    const { f, li } = queue.shift();
+    const st = li.querySelector('.st'), bar = li.querySelector('.bar i');
+    const x = new XMLHttpRequest();
+    x.open('POST', '/upload?name=' + encodeURIComponent(f.name));
+    x.setRequestHeader('Content-Type', 'application/octet-stream');
+    x.upload.onprogress = (e) => { if (e.lengthComputable) { const p = Math.round(100 * e.loaded / e.total); bar.style.width = p + '%'; st.textContent = p + '%'; } };
+    x.onload = () => {
+      if (x.status === 200) { bar.style.width = '100%'; st.textContent = 'Sent'; st.className = 'st ok'; }
+      else { st.textContent = 'Failed (' + x.status + ')'; st.className = 'st err'; }
+      busy = false; next();
+    };
+    x.onerror = () => { st.textContent = 'Failed — is Kadoki still open?'; st.className = 'st err'; busy = false; next(); };
+    st.textContent = 'Sending…';
+    x.send(f);
+  }
+  pick.onchange = () => { add(pick.files); pick.value = ''; };
+  ['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => add(e.dataTransfer.files));
+  document.addEventListener('dragover', (e) => e.preventDefault());
+  document.addEventListener('drop', (e) => { e.preventDefault(); if (!drop.contains(e.target)) add(e.dataTransfer.files); });
+})();
+</script>
+</body>
+</html>

@@ -2740,6 +2740,20 @@
                 // fetched HERE, async — the transcription cache's copy can be
                 // gone (the store-loss incident) but the audio engine knows it
                 // the moment the file is loaded.
+                // Untranscribed region: sync the audio to this sentence first
+                // ("Syncing…", ≤20 s) instead of playing a book-fraction guess
+                // that the reader then snaps away from.
+                const _sync = async (estMs) => {
+                    try {
+                        const at = window.autoTranscribe;
+                        if (!at?.syncTo) return null;
+                        let raw = ctx.syncHint?.raw;
+                        if (!Number.isFinite(raw) && Number.isFinite(ctx.bookFrac)) raw = ctx.bookFrac * (window.autoAlign?.textLen?.() || 0);
+                        try { window.hideDictPopup?.(); } catch (_) {}
+                        const r = await at.syncTo({ estMs: Number.isFinite(ctx.syncHint?.est) ? ctx.syncHint.est : estMs, raw });
+                        return Number.isFinite(r) ? r : null;
+                    } catch (_) { return null; }
+                };
                 if (!ok && !Number.isFinite(ctx.cueStartMs) && Number.isFinite(ctx.bookFrac) && ctx.cueAudioPath) {
                     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
                     let durMs = 0;
@@ -2752,17 +2766,19 @@
                     if (durMs > 0 && bg) {
                         const audioPath = ctx.cueAudioPath;
                         const url = audioPath.startsWith('file://') ? audioPath : 'file://' + audioPath;
-                        const startMs = Math.max(0, Math.round(ctx.bookFrac * durMs) - 4000);
+                        let startMs = Math.max(0, Math.round(ctx.bookFrac * durMs) - 4000);
+                        const synced = await _sync(startMs + 4000);
+                        if (synced != null) startMs = synced;
                         await bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
                         ok = true;
-                        ctx.cueEstimated = true;
+                        ctx.cueEstimated = synced == null;
                     } else {
                         try { window.showToast?.(window.i18n?.t?.('dc.playhead_nodur', 'Audio length unknown yet — play any audio once, then retry.') || 'Audio length unknown yet', 3000); } catch (_) {}
                     }
                 }
                 // Uncovered region: the seek time is a book-position estimate;
                 // say so instead of letting it read as a mis-seek.
-                if (ctx.cueEstimated) {
+                if (ctx.cueEstimated && !ctx.syncHint) {
                   try { window.showToast?.(window.i18n?.t?.('dc.playhead_estimated', 'Subtitles not generated here yet — playing from the approximate position.') || 'Playing from approximate position', 3200); } catch (_) {}
                 }
                 // Fallback: direct bg.play if the helper isn't loaded
@@ -2772,8 +2788,13 @@
                     if (bg) {
                         const audioPath = ctx.cueAudioPath;
                         const url = audioPath.startsWith('file://') ? audioPath : 'file://' + audioPath;
-                        const startMs = Math.max(0, Math.round(ctx.cueStartMs) -
+                        let startMs = Math.max(0, Math.round(ctx.cueStartMs) -
                                                     (window.AUDIO_START_OFFSET_MS || 0));
+                        if (ctx.cueEstimated && ctx.syncHint) {
+                            const synced = await _sync(ctx.syncHint.est);
+                            if (synced != null) startMs = synced;
+                            else { try { window.showToast?.(window.i18n?.t?.('dc.playhead_estimated', 'Subtitles not generated here yet — playing from the approximate position.') || 'Playing from approximate position', 3200); } catch (_) {} }
+                        }
                         await bg.play({ url, startMs, rate: window.audioPlaybackRate || 1 });
                     }
                 }

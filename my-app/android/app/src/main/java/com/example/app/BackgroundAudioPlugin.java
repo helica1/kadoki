@@ -423,8 +423,11 @@ public class BackgroundAudioPlugin extends Plugin {
                 lowPower = pm.isPowerSaveMode();
                 if (android.os.Build.VERSION.SDK_INT >= 29) {
                     int s = pm.getCurrentThermalStatus();
-                    if (s >= android.os.PowerManager.THERMAL_STATUS_SEVERE) thermal = "critical";
-                    else if (s >= android.os.PowerManager.THERMAL_STATUS_MODERATE) thermal = "serious";
+                    // Android's MODERATE is routine on a warm phone that is
+                    // charging (Samsung) — it is "fair", not "serious" (which
+                    // parked transcription with no subtitles at all).
+                    if (s >= android.os.PowerManager.THERMAL_STATUS_CRITICAL) thermal = "critical";
+                    else if (s >= android.os.PowerManager.THERMAL_STATUS_SEVERE) thermal = "serious";
                     else if (s >= android.os.PowerManager.THERMAL_STATUS_LIGHT) thermal = "fair";
                 }
             }

@@ -26,6 +26,8 @@
   const FMAP_PREFIX = 'BATCHQ_FMAP_';
   const FURI_CHUNK = 6000;          // chars per furigana request (output is short)
   const FURI_REPEAT_GAP = 30000;    // re-ruby a word only after this many chars without it
+  const RETRY_PIECES = 4;           // a failed chunk is retried split this many ways
+  const RETRY_MIN_CUES = 10;
 
   const log = (m) => { try { window.debugLog?.('[ai-batch] ' + m); } catch (_) {} };
   const bs = () => window.blobStore;
@@ -225,15 +227,22 @@
     } catch (_) {}
     return null;
   }
+  const inRanges = (ranges, ms) => ranges.some(([a, b]) => ms >= a && ms <= b);
   async function startFurigana(it) {
-    if (it.furiganaDone) { await finishItem(it); return; }
+    // A re-proofread of a few stretches in a book that already has furigana:
+    // gloss just those stretches (their text changed, so their furigana went).
+    const only = (it.furiganaDone && it.reproofRanges) ? it.reproofRanges : null;
+    if (it.furiganaDone && !only) { await finishItem(it); return; }
     const src = await window.autoTranscribe.cuesFor(it.titleId);
     if (!src || !src.cues.length) { await finishItem(it); return; }
+    const cues = only ? src.cues.filter(c => inRanges(only, c.startMs)) : src.cues;
+    if (!cues.length) { delete it.reproofRanges; await finishItem(it); return; }
+    it.furiOnly = only;
     const system = furiSystem(await difficultyFor(it.titleId));
     const model = window.ai.MODELS.high;
     const map = {};
-    const requests = furiChunks(src.cues).map(({ i, j }, k) => {
-      const seg = src.cues.slice(i, j);
+    const requests = furiChunks(cues).map(({ i, j }, k) => {
+      const seg = cues.slice(i, j);
       const id = 'f' + k;
       map[id] = seg.map(c => ({ startMs: c.startMs, text: c.text || '' }));
       return { customId: id, opts: { model, system, maxTokens: 6000, effort: 'medium',
@@ -294,7 +303,15 @@
     const lastAt = new Map();
     let pos = 0;
     const items = [];
+    const only = it.furiOnly || null;
     for (const c of src.cues) {
+      if (only && !inRanges(only, c.startMs)) {
+        // Outside the re-glossed stretches: leave the furigana as it is, but
+        // count it so the repeat gap still spans the whole book.
+        for (const r of c.ruby || []) lastAt.set((c.text || '').substr(r[0], r[1]), pos + r[0]);
+        pos += (c.text || '').length;
+        continue;
+      }
       const e = perCue.get(c.startMs);
       if (e && e.text === c.text) {
         const keep = [];
@@ -310,8 +327,10 @@
       pos += (c.text || '').length;
     }
     const n = await window.autoTranscribe.applyRuby(it.titleId, items);
-    it.furigana = items.reduce((a, x) => a + x.ruby.length, 0);
+    const added = items.reduce((a, x) => a + x.ruby.length, 0);
+    it.furigana = only ? (it.furigana || 0) + added : added;
     it.furiganaDone = true;
+    delete it.furiOnly; delete it.reproofRanges;
     log(it.name + ': furigana on ' + n + ' cues, ' + it.furigana + ' words');
     try { await bs()?.remove?.(FMAP_PREFIX + it.titleId); } catch (_) {}
     await finishItem(it);
@@ -339,7 +358,12 @@
         it.error = null;
         if (b.processing_status === 'ended') {
           try { if (furi) await applyFurigana(it); else await applyResults(it); }
-          catch (e) { it.error = e?.message || String(e); log(it.name + ': apply failed: ' + it.error); }
+          catch (e) {
+            // Never park a book in 'applying': show it as an error so 再試行
+            // can pick it up (a retry starts from what is still unproofread).
+            it.error = e?.message || String(e); it.stage = 'error';
+            log(it.name + ': apply failed: ' + it.error);
+          }
         }
         await save();
       }
@@ -357,12 +381,21 @@
     if (!stored || !stored.map) throw new Error('chunk map missing');
     const results = await window.ai.batchResults(it.batchId);
     const edits = [], failed = [];
+    it.failInfo = it.failInfo || [];
     for (const r of results) {
       const segs = stored.map[r.customId];
       if (!segs) continue;
       if (r.usage) it.costUsd = (it.costUsd || 0) + window.ai.recordBatchUsage(r.model || stored.model, 'ai-cleanup-batch', r.usage, it.titleId);
       const parsed = r.ok ? cl.parseOutput(r.text, segs.map(s => s.orig)) : null;
-      if (!parsed) { failed.push(r.customId); continue; }
+      if (!parsed) {
+        failed.push(r.customId);
+        // Why, for the next diagnosis: a request error / refusal, or output
+        // that failed the marker check (and whether it was cut off).
+        const why = !r.ok ? (r.error || 'error') : (r.stopReason === 'max_tokens' ? 'cut off (max_tokens)' : 'format');
+        it.failInfo.push({ id: r.customId, cues: segs.length, why, at: Date.now() });
+        log(it.name + ': chunk ' + r.customId + ' failed: ' + why);
+        continue;
+      }
       segs.forEach((s, k) => edits.push({ startMs: s.startMs, orig: s.orig, text: parsed[k].text, pb: parsed[k].pb }));
     }
     // Requests the results file didn't mention (shouldn't happen) count as failed.
@@ -378,7 +411,11 @@
         const segs = stored.map[id];
         const i = src.cues.findIndex(c => c.startMs === segs[0].startMs);
         if (i < 0 || src.cues[i].ai) continue;
-        list.push({ ch: { i, j: Math.min(src.cues.length, i + segs.length) }, id });
+        // Retry as smaller pieces: a long chunk that broke the marker check
+        // once tends to break it again the same way.
+        const j = Math.min(src.cues.length, i + segs.length);
+        const step = Math.max(RETRY_MIN_CUES, Math.ceil((j - i) / RETRY_PIECES));
+        for (let a = i, p = 0; a < j; a += step, p++) list.push({ ch: { i: a, j: Math.min(j, a + step) }, id: id + '_' + p });   // custom_id allows [A-Za-z0-9_-] only
       }
       it.retried = true;
       if (list.length) { await submit(it, src.cues, list, stored.glossary); return; }
@@ -386,7 +423,12 @@
     if (failed.length) {
       // Second failure: keep the original text, mark handled.
       const keep = [];
-      for (const id of failed) for (const s of stored.map[id] || []) keep.push({ startMs: s.startMs, orig: s.orig, text: s.orig, pb: false });
+      it.keptRanges = [];
+      for (const id of failed) {
+        const segs = stored.map[id] || [];
+        for (const s of segs) keep.push({ startMs: s.startMs, orig: s.orig, text: s.orig, pb: false });
+        if (segs.length) it.keptRanges.push([segs[0].startMs, segs[segs.length - 1].startMs]);
+      }
       await at.applyCleanEdits(it.titleId, keep);
       it.failedChunks = failed.length;
     }
@@ -420,6 +462,28 @@
     Q.running = true;
     await save();
     drive();
+  }
+  // Proofread again the stretches a finished book kept as transcribed (its
+  // chunk failed twice). Books from before keptRanges was recorded find them
+  // by comparing with the pre-proofread backup.
+  async function reproof(titleId) {
+    await load();
+    const it = Q.items.find(x => x.titleId === titleId);
+    if (!it || it.stage !== 'done' || !it.failedChunks) return 0;
+    const at = window.autoTranscribe;
+    let ranges = Array.isArray(it.keptRanges) && it.keptRanges.length ? it.keptRanges : null;
+    if (!ranges) ranges = (await at.keptStretches(titleId)).slice(0, it.failedChunks);
+    if (!ranges.length) return 0;
+    const n = await at.unmarkClean(titleId, ranges);
+    log(it.name + ': re-proofreading ' + ranges.length + ' stretch(es), ' + n + ' cues');
+    if (!n) return 0;
+    it.reproofRanges = ranges;
+    it.stage = 'queued'; it.error = null; it.progress = 0; it.retried = false;
+    it.failedChunks = 0; it.keptRanges = null;
+    Q.running = true;
+    await save();
+    drive();
+    return n;
   }
   // Books proofread before the furigana pass existed: run only that pass.
   async function addFurigana(titleId) {
@@ -569,6 +633,14 @@
         rb.addEventListener('click', () => retry(it.titleId));
         row.appendChild(name); row.appendChild(rb);
       }
+      if (it.stage === 'done' && it.failedChunks) {
+        const pb = document.createElement('button'); pb.type = 'button'; pb.textContent = '再校正';
+        pb.title = '原文のまま残った箇所をもう一度校正します';
+        pb.style.cssText = 'background:#303d44;color:#d4dbde;border:1px solid #3d4c53;border-radius:5px;padding:4px 10px;cursor:pointer;font-family:inherit;font-size:.75rem;';
+        pb.addEventListener('click', () => { pb.disabled = true; reproof(it.titleId); });
+        if (!name.parentNode) row.appendChild(name);
+        row.appendChild(pb);
+      }
       if (it.stage === 'done' && !it.furiganaDone) {
         const fb = document.createElement('button'); fb.type = 'button'; fb.textContent = 'ふりがな';
         fb.style.cssText = 'background:#303d44;color:#d4dbde;border:1px solid #3d4c53;border-radius:5px;padding:4px 10px;cursor:pointer;font-family:inherit;font-size:.75rem;';
@@ -628,6 +700,13 @@
   // Resume after a relaunch.
   setTimeout(async () => {
     await load();
+    // A book whose apply step failed (e.g. its retry batch was rejected) is
+    // proofread again from what is still unproofread.
+    for (const it of Q.items) {
+      if ((it.stage === 'applying' || it.stage === 'error') && it.error && it.reproofRanges) {
+        it.stage = 'queued'; it.error = null; it.retried = false; it.progress = 0;
+      }
+    }
     render();
     if (Q.running && Q.items.some(x => ['queued', 'transcribing', 'glossary', 'submitting'].includes(x.stage))) {
       // A crash mid-'applying' just re-polls: results stay available for 29 days.
@@ -640,5 +719,5 @@
     schedulePoll(5000);
   }, 6000);
 
-  window.aiBatch = { available, enqueue, confirmAndEnqueue, stop, resume, openSheet, estimateUsd };
+  window.aiBatch = { available, enqueue, confirmAndEnqueue, stop, resume, openSheet, estimateUsd, reproof };
 })();

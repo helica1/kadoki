@@ -63,10 +63,14 @@ final class PcmWindowReader {
         public void release() { try { ex.release(); } catch (Exception ignored) {} }
     }
 
-    private static final class Media3Demuxer implements Demuxer {
+    static final class Media3Demuxer implements Demuxer {
         private final MediaExtractorCompat ex;
         Media3Demuxer(Context ctx, String srcPath) throws Exception {
             ex = new MediaExtractorCompat(ctx);
+            ex.setDataSource(Uri.fromFile(new File(srcPath)), 0L);
+        }
+        Media3Demuxer(MediaExtractorCompat ex, String srcPath) throws Exception {
+            this.ex = ex;
             ex.setDataSource(Uri.fromFile(new File(srcPath)), 0L);
         }
         public int getTrackCount() { return ex.getTrackCount(); }
@@ -90,6 +94,20 @@ final class PcmWindowReader {
     }
 
     static Demuxer openDemuxer(Context appCtx, String srcPath) throws Exception {
+        // MP3: Media3 with the exact frame index — the platform extractor seeks
+        // VBR files by the Xing table and lands tens of seconds off.
+        if (ExactExtractors.isMp3(srcPath)) {
+            Media3Demuxer d = null;
+            try {
+                d = new Media3Demuxer(ExactExtractors.extractor(appCtx, srcPath), srcPath);
+                if (findAudioTrack(d) < 0) throw new Exception("no audio track (exact mp3)");
+                Demuxer ok = d; d = null; return ok;
+            } catch (Throwable e) {
+                Log.w(TAG, "exact mp3 open failed (" + e.getMessage() + "); platform extractor for " + srcPath);
+            } finally {
+                if (d != null) d.release();
+            }
+        }
         try {
             NativeDemuxer d = null;
             try {
@@ -150,9 +168,12 @@ final class PcmWindowReader {
      * eof=true when the stream ended before the window filled.
      */
     static Window readWindow(Context appCtx, String srcPath, long fromMs, long windowMs) throws Exception {
+        return readWindow(openDemuxer(appCtx, srcPath), srcPath, fromMs, windowMs);
+    }
+
+    static Window readWindow(Demuxer extractor, String srcPath, long fromMs, long windowMs) throws Exception {
         long startUs = fromMs * 1000;
         long endUs = (fromMs + windowMs) * 1000;
-        Demuxer extractor = openDemuxer(appCtx, srcPath);
         MediaCodec codec = null;
         try {
             int track = findAudioTrack(extractor);

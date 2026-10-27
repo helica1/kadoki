@@ -245,7 +245,7 @@ public class FileAccessPlugin extends Plugin {
         }
 
         try {
-            Uri uri = Uri.parse(uriString);
+            Uri uri = healTreeChild(Uri.parse(uriString));
 
             File cacheDir = new File(getContext().getCacheDir(), "decks");
             if (!cacheDir.exists()) cacheDir.mkdirs();
@@ -320,6 +320,64 @@ public class FileAccessPlugin extends Plugin {
         } catch (Exception e) {
             call.reject("Failed to materialize: " + e.getMessage());
         }
+    }
+
+    /**
+     * A folder-imported file the provider reports as missing ("Failed to
+     * determine if … is child of …: Missing file") although it is still there.
+     * Seen with a Japanese name whose kana sit in decomposed Unicode (こ + ゛):
+     * the stored document id stops resolving. Re-list the parent folder and
+     * match names with both sides NFC-normalised; the id the provider gives
+     * now is the one to open. Any other failure returns the original URI, so
+     * the caller's normal error still surfaces.
+     */
+    private Uri healTreeChild(Uri uri) {
+        try {
+            if (!DocumentsContract.isDocumentUri(getContext(), uri)) return uri;
+            String treeId;
+            try { treeId = DocumentsContract.getTreeDocumentId(uri); } catch (Exception e) { return uri; }
+            Cursor probe = null;
+            try {
+                probe = getContext().getContentResolver().query(uri,
+                    new String[]{ DocumentsContract.Document.COLUMN_DISPLAY_NAME }, null, null, null);
+                if (probe != null && probe.moveToFirst()) return uri;      // resolves fine
+            } catch (Exception missing) {
+                // fall through to the re-match
+            } finally {
+                if (probe != null) { try { probe.close(); } catch (Exception ignored) {} }
+            }
+            String docId = DocumentsContract.getDocumentId(uri);
+            int slash = docId.lastIndexOf('/');
+            if (slash < 0) return uri;
+            String parentId = docId.substring(0, slash);
+            String want = java.text.Normalizer.normalize(docId.substring(slash + 1), java.text.Normalizer.Form.NFC);
+            Uri tree = DocumentsContract.buildTreeDocumentUri(uri.getAuthority(), treeId);
+            Uri kids = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentId);
+            Cursor c = null;
+            try {
+                c = getContext().getContentResolver().query(kids, new String[]{
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME }, null, null, null);
+                if (c == null) return uri;
+                int idIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID);
+                int nameIdx = c.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME);
+                if (idIdx < 0 || nameIdx < 0) return uri;
+                while (c.moveToNext()) {
+                    String name = c.getString(nameIdx);
+                    if (name == null) continue;
+                    if (java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFC).equals(want)) {
+                        String id = c.getString(idIdx);
+                        android.util.Log.w("FileAccess", "re-matched missing folder file by normalised name: " + name);
+                        return DocumentsContract.buildDocumentUriUsingTree(tree, id);
+                    }
+                }
+            } finally {
+                if (c != null) { try { c.close(); } catch (Exception ignored) {} }
+            }
+        } catch (Exception e) {
+            android.util.Log.w("FileAccess", "healTreeChild: " + e.getMessage());
+        }
+        return uri;
     }
 
     // Media extensions we surface from a folder scan. Lowercase, no dot.

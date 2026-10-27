@@ -6,9 +6,60 @@ All notable changes to Kadoki are documented here. Newest first.
      heading to the version number and start a fresh empty Unreleased section. -->
 ## Unreleased
 
+## v1.9.1 — 2026-10-26
+
+Everything since v1.8.0. Version 1.9.0 went to the App Store only (iPhone, iPad and Mac), so its changes are listed here too.
+
+### Added
+- **Android: built-in speech recognition for subtitles.** On Android 14+, subtitles are generated with the phone's own on-device Japanese recognizer (a one-time ~52 MB download): about 8× real time, with real per-word timing. The first subtitles appear within about 2 seconds. Whisper stays as the fallback.
+- **Syncing when you jump ahead.** Playing a page that hasn't been transcribed yet shows a short "Syncing…" bar (usually about 5 seconds, 20 at most) while Kadoki finds that sentence in the audio, then plays from it with the highlight in place. The page stays where you put it.
+- **Android: Wi-Fi Transfer.** Menu › Wi-Fi Transfer shows an address to open on a computer on the same network. Drop books, audiobooks, videos, subtitles, Yomitan dictionaries or a ッツ backup, and Kadoki pairs and imports them.
+- **ッツ (ttu) backup import.** Import a ttu reader backup zip; books arrive with their reading position.
+- **Several dictionaries at once.** Select multiple Yomitan dictionary zips in one import.
+- **Android: Material look.** Ripple touches, segmented READ / AUDIO tabs, a tonal play button, Material sheets and dialogs, a snackbar for notices, and a proper drop-down menu with your pinned titles.
+- **iPhone: native iOS interface.** Native menu, Preferences and Library: cover grid or list, search, filter and sort, folders and series. Swipe a title left for Stats / Edit / Delete, or right to pin it. Coloured EPUB / AUDIO / SRT pills.
+- **iPhone: native toolbar.** An iOS segmented control for the tabs, and a play button that shows a live spectrum while audio plays. The timer is centred.
+- **Pinned titles in the menu** for one-tap switching (iPhone and Android).
+- **Native Edit Title (iPhone).** File pills, and the cover can come from the EPUB, the audio file or the clipboard.
+- **Send to Anki as a full dialog (iPhone).** Send and Cancel at the bottom; Explain highlights snap to whole words using the dictionary.
+- **Two tabs per title.** READ / AUDIO for a book with its audiobook, VIDEO / CARD for a video, CARD for an Anki deck. Long-press the tabs to choose.
+- **Instant card audio.** Anki card clips start immediately and crossfade when you swipe before a clip ends.
+- **Proofreading for generated books (校正).** Proofread an audio-only book's transcript, with names checked against the web, and export it as an EPUB with its cover.
+- **Mac: batch queue.** Transcribe and proofread many books overnight at batch rates, with progress, retry (including 再校正 and retrying failed chunks) and publisher-style furigana.
+- **Library browser and folder import.** Gallery and list views with length, summary and a difficulty rating. Series are grouped. Import a whole folder of paired EPUB / audiobook titles and pick which to add. Titles can be put into folders.
+- **CARD tab views.** Long-press CARD to switch between Cards, Vocabulary, Timeline and Library.
+- **Send to Anki translation.** Apple on-device or OpenRouter, plus an Explain panel for highlighted text.
+- **Speed gestures.** A slow vertical drag sets the speed between 1.00× and 2.00×. An optional speed drift raises it gradually while you read undisturbed.
+- **iPhone Duo.** Flag a reading book. Opening the phone a few degrees stops the audio and switches to it, and lines respect the fold.
+- **Audio output.** An Audio output button in audio mode, and Kadoki registers as a long-form audio player so AirPods switch over on play.
+- **Mac App Store version** (1.9.0), sharing the iPhone app's listing.
+- New dark app icon.
+
+### Changed
+- Every play, pause, stop and title switch fades in and out, so audio never clicks (iPhone, Android, Mac, Apple Watch).
+- Titles always open in their last-used mode, and switching from AUDIO to READ opens on the narrated line without a visible scroll.
+- Chapter titles the narrator reads aloud become chapter breaks in generated books.
+- AI models follow the newest Claude release automatically; chapter summaries work with an Anthropic key.
+- The read timer follows the audiobook playhead.
+- Read mode runs cooler: subtitle generation keeps a bounded buffer, backfills only while charging, and respects heat and battery saver. The reading follow reuses its measurements while the page is still.
+- The library opens instantly.
+
 ### Fixed
-- **Read mode runs cooler.** Subtitle generation no longer works further ahead than it needs to on battery, stops properly when you ask it to, and now respects heat and Low Power Mode even while playback is paused. Word timings finishing at that moment are still kept.
-- **Smoother, lighter reading follow.** The highlight reuses its measurements while the page is still and re-measures while you scroll, scrub, turn pages or change fonts. Appearance and audio quality are unchanged.
+- **Android: VBR MP3 timing.** Jumping within a long variable-bitrate MP3 could land up to ~40 seconds from the reported time. Playback, subtitle generation, Anki clips and the waveform now seek exactly. Subtitles already generated on Android for such books may need regenerating.
+- **Android: follow highlight.** The highlight no longer lags or runs a phrase ahead, no longer skips phrases, and stays put instead of snapping back to an old page after a jump.
+- Subtitle generation no longer stalls at 0% on a warm phone, and no longer re-transcribes the same audio after a seek.
+- Matching subtitles to the book no longer switches itself off for a session.
+- Scrubbing back in read mode no longer throws the page far back.
+- iPhone: deleting a title no longer crashes the app.
+- Apple Watch: subtitles sync reliably ("nothing playing" and stuck transfers fixed).
+- The menu no longer covers the dictionary popup.
+- No more stray "new chapter ready" toasts or scene pictures when those features are off.
+- On launch the toolbar shows the title's own tabs right away.
+- Book stats no longer show another book's position after switching titles.
+- Files whose names use decomposed (NFD) Japanese characters are found again.
+- Wi-Fi imports are named after the book, not "Wi-Fi".
+- A synced .txt book can no longer be emptied by a failed download; long audiobooks no longer stop transcribing partway through.
+- Dictionary taps in empty space no longer look up a distant word.
 
 ## v1.8.0 — 2026-09-09
 

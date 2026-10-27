@@ -202,19 +202,23 @@
   // audio → metaTitle/metaAuthor/durationMs. `onProgress(done, total)`.
   async function readMeta(files, onProgress) {
     const fa = window.Capacitor?.Plugins?.FileAccess;
-    const list = files.filter((f) => f && f.uri);
+    // Picked files carry a uri; Wi-Fi inbox files are local (cachePath only).
+    const list = files.filter((f) => f && (f.uri || f.cachePath));
     let done = 0;
     const step = () => { done++; try { onProgress && onProgress(done, list.length); } catch (_) {} };
     const worker = async (f) => {
       try {
-        if (f.kind === 'epub') {
+        if (f.kind === 'epub' && !f.uri && f.cachePath) {
+          const meta = await readEpubMeta(f.cachePath);
+          if (meta) { f.metaTitle = meta.title || ''; f.metaAuthor = meta.author || ''; f.metaLang = meta.language || ''; }
+        } else if (f.kind === 'epub') {
           if (fa?.materializeToCache) {
             const m = await fa.materializeToCache({ uri: f.uri });
             if (m?.path) { f.cachePath = m.path; const meta = await readEpubMeta(m.path); if (meta) { f.metaTitle = meta.title || ''; f.metaAuthor = meta.author || ''; f.metaLang = meta.language || ''; } }
           }
         } else if (f.kind === 'audio') {
           if (fa && typeof fa.mediaTags === 'function') {
-            const t = await fa.mediaTags({ uri: f.uri });
+            const t = await fa.mediaTags({ uri: f.uri || ('file://' + f.cachePath) });
             if (t) { f.metaTitle = t.title || ''; f.metaAuthor = t.artist || t.album || ''; if (Number(t.durationMs) > 0) f.durationMs = Math.round(Number(t.durationMs)); }
           }
         }

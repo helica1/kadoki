@@ -852,6 +852,7 @@ body.dimmed .card-image {
 <link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="ui-refresh.css">
 <link rel="stylesheet" href="ios-feel.css">
+<link rel="stylesheet" href="android-feel.css">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css"><!-- place-name map popup (ai-places-ui.js); vendored, no CDN dependency -->
 <script src="ai-perf.js"></script><!-- must load FIRST: wraps setInterval/setTimeout for the perf probe -->
 <script src="i18n-strings.js"></script><!-- UI-chrome string table (before i18n.js) -->
@@ -949,6 +950,7 @@ body.dimmed .card-image {
     <div class="library-header">
       <h2 data-i18n="lib.library">Library</h2>
       <div style="display:flex;gap:8px;">
+        <button onclick="window.ttuImport && window.ttuImport.pickAndImport()" data-i18n="lib.import_ttu" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">Import ッツ backup</button>
         <button onclick="importFolder()" data-i18n="lib.import_folder" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">Import folder</button>
         <button onclick="createNewTitle()" data-i18n="lib.new_title" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">+ New title</button>
         <button class="close-library" onclick="closeLibrary()" style="font-size:1.3rem;letter-spacing:0;padding:4px 14px;color:#ccc;">✕</button>
@@ -2143,9 +2145,13 @@ body.dimmed .card-image {
   <script src="shell.js"></script>
   <script src="place-diag.js"></script>
   <script src="ios-feel.js"></script>
+  <script src="android-feel.js"></script>
   <script src="native-menu.js"></script>
   <script src="native-toolbar.js"></script>
   <script src="native-library.js"></script>
+  <script src="native-title-edit.js"></script>
+  <script src="ttu-import.js"></script>
+  <script src="wifi-transfer.js"></script>
   <script src="print-reading.js"></script>
   <!-- visionOS spatial card pictures — console-driven layering prototype
        (window.kvSpatial). Inert everywhere else; see spatial-cards.js. -->

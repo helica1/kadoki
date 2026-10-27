@@ -19,6 +19,8 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(ArchiveExtractorPlugin.class);
         registerPlugin(PdfExportPlugin.class);
         registerPlugin(AutoTranscribePlugin.class);
+        registerPlugin(KadokiChromePlugin.class);
+        registerPlugin(WifiTransferPlugin.class);
         super.onCreate(savedInstanceState);
         enableImmersiveMode();
     }

@@ -7,8 +7,8 @@ android {
         applicationId "com.helica1.yama"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 24
-        versionName "1.8.0"
+        versionCode 25
+        versionName "1.9.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -58,6 +58,8 @@ dependencies {
     implementation project(':capacitor-cordova-android-plugins')
     // Background audio MediaSession + MediaStyle notification
     implementation "androidx.media:media:1.7.0"
+    // Material 3 components: native menu / bottom sheets / dialogs (KadokiChromePlugin).
+    implementation "com.google.android.material:material:1.12.0"
     // Media3 ExoPlayer — replaces android.media.MediaPlayer for audiobook
     // playback. ExoPlayer's own MP4 extractor parses Audible-style .m4b files
     // (embedded cover art + chapter track) that Android's native Stagefright

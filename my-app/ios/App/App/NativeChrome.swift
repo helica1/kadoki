@@ -5,20 +5,23 @@ import WebKit
 #if os(iOS)
 /// Native iOS menu for the web toolbar's hamburger (#shellMoreBtn).
 ///
-/// iOS only presents a UIMenu from a control the user taps, so a native
-/// button (glass on iOS 26, a gray circle before) sits over the web button,
-/// which stays in place invisible (native-menu.js reports where it is and
-/// whether it is the top-most element there). A red dot on it mirrors the
+/// A native button (glass on iOS 26, a gray circle before) sits over the web
+/// button, which stays in place invisible (native-menu.js reports where it is
+/// and whether it is the top-most element there). A red dot on it mirrors the
 /// web button's "new AI data" dot.
 ///
-/// The menu is built fresh on every open from window.__kadokiMenuModel() — the
-/// same rows the web menu draws (shell.js shellMenuEntries) — and a pick runs
-/// window.__kadokiMenuSelect(id).
+/// The menu is a native panel rather than a system UIMenu (iOS fixes a menu's
+/// size; this one runs the full height under the button and is wider). It is
+/// built fresh on every open from window.__kadokiMenuModel() — the same rows
+/// the web menu draws (shell.js shellMenuEntries) plus pinned titles — and a
+/// pick runs window.__kadokiMenuSelect(id).
 final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
     private weak var webView: WKWebView?
     private let button = UIButton(type: .system)
     private let dot = UIView()
     private var chromeHidden = false
+    private var panel: UIView?
+    private var panelCard: UIView?
     private static let size: CGFloat = 40
 
     /// Flag the page before any script runs so native-menu.js arms itself.
@@ -38,10 +41,7 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
         cfg.contentInsets = .zero
         button.configuration = cfg
         button.accessibilityLabel = NSLocalizedString("Menu", comment: "hamburger menu")
-        button.showsMenuAsPrimaryAction = true
-        button.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] completion in
-            self?.loadMenu(completion) ?? completion([])
-        }])
+        button.addTarget(self, action: #selector(toggle), for: .touchUpInside)
         dot.backgroundColor = .systemRed
         dot.layer.cornerRadius = 4.5
         dot.isUserInteractionEnabled = false
@@ -63,7 +63,9 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
         let visible = (d["visible"] as? Bool) ?? false
         guard visible, let x = d["x"] as? Double, let y = d["y"] as? Double,
               let w = d["w"] as? Double, let h = d["h"] as? Double else {
-            button.isHidden = true
+            // Covered while open = its own pick opened a web dialog; leave the
+            // panel to its dismissal, just hide the button.
+            if panel == nil { button.isHidden = true }
             return
         }
         let r = wv.convert(CGRect(x: x, y: y, width: w, height: h), to: host)
@@ -72,72 +74,228 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
         let cx = min(r.midX, host.bounds.width - host.safeAreaInsets.right - 8 - s / 2)
         KadokiChromeSlide.place(button, CGRect(x: cx - s / 2, y: r.midY - s / 2, width: s, height: s))
         dot.isHidden = !((d["dot"] as? Bool) ?? false)
-        host.bringSubviewToFront(button)
+        if panel == nil { host.bringSubviewToFront(button) }
         button.isHidden = false
     }
 
-    private func loadMenu(_ completion: @escaping ([UIMenuElement]) -> Void) {
-        guard let wv = webView else { completion([]); return }
+    // MARK: panel
+
+    @objc private func toggle() {
+        if panel != nil { dismiss(); return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        guard let wv = webView else { return }
         wv.callAsyncJavaScript("return await window.__kadokiMenuModel()", arguments: [:], in: nil, in: .page) { [weak self] result in
-            guard let self = self, case .success(let v) = result, let json = v as? String,
+            guard let self, case .success(let v) = result, let json = v as? String,
                   let data = json.data(using: .utf8),
-                  let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-                completion([]); return
-            }
-            completion(self.elements(rows))
+                  let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else { return }
+            self.present(rows)
         }
     }
 
-    /// Rows flagged top go in the compact icon row at the head of the menu (a
-    /// full list is taller than iOS lets a menu grow from the toolbar). The
-    /// rest: dividers split them into inline sections (iOS draws separators).
-    private func elements(_ rows: [[String: Any]]) -> [UIMenuElement] {
-        var head: [UIMenuElement] = []
-        var sections: [[UIMenuElement]] = [[]]
-        for r in rows {
-            if #available(iOS 16.0, *), (r["top"] as? Bool) == true {
-                head.append(element(r, short: true))
-                continue
-            }
+    private func present(_ raw: [[String: Any]]) {
+        guard panel == nil, let host = button.superview else { return }
+        var top: [KMenuRow] = []
+        var sections: [[KMenuRow]] = [[]]
+        for r in raw {
             if (r["divider"] as? Bool) == true {
                 if !(sections.last?.isEmpty ?? true) { sections.append([]) }
                 continue
             }
-            sections[sections.count - 1].append(element(r))
+            let row = Self.row(r)
+            if (r["top"] as? Bool) == true { top.append(row) } else { sections[sections.count - 1].append(row) }
         }
-        var out: [UIMenuElement] = []
-        if #available(iOS 16.0, *), !head.isEmpty {
-            let row = UIMenu(options: .displayInline, children: head)
-            row.preferredElementSize = .medium
-            out.append(row)
+        sections = sections.filter { !$0.isEmpty }
+
+        // A full-screen catcher: a tap outside the card closes the menu.
+        let shade = UIView(frame: host.bounds)
+        shade.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        shade.backgroundColor = UIColor.black.withAlphaComponent(0.18)
+        shade.alpha = 0
+        shade.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(shadeTapped(_:))))
+
+        let width = min(330, host.bounds.width - 24)
+        let y0 = button.frame.maxY + 8
+        let bottom = host.bounds.height - max(host.safeAreaInsets.bottom, 8) - 8
+        let right = host.bounds.width - max(host.safeAreaInsets.right, 0) - 10
+        let frame = CGRect(x: right - width, y: y0, width: width, height: max(240, bottom - y0))
+        let view = KMenuPanel(top: top, sections: sections) { [weak self] id in self?.dismiss(then: id) }
+        let hosting = UIHostingController(rootView: view)
+        hosting.view.backgroundColor = .clear
+        hosting.overrideUserInterfaceStyle = .dark
+        let card = hosting.view!
+        // Grow out of the button's corner, like a system menu.
+        card.layer.anchorPoint = CGPoint(x: 1, y: 0)
+        card.frame = frame
+        card.transform = CGAffineTransform(scaleX: 0.35, y: 0.2)
+        card.alpha = 0
+        shade.addSubview(card)
+        host.addSubview(shade)
+        host.bringSubviewToFront(button)
+        panel = shade
+        panelCard = card
+        objc_setAssociatedObject(shade, &Self.hostingKey, hosting, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0) {
+            card.transform = .identity
+            card.alpha = 1
+            shade.alpha = 1
         }
-        return out + sections.filter { !$0.isEmpty }.map { UIMenu(options: .displayInline, children: $0) }
+    }
+    private static var hostingKey = 0
+
+    @objc private func shadeTapped(_ g: UITapGestureRecognizer) {
+        guard let card = panelCard else { dismiss(); return }
+        if !card.frame.contains(g.location(in: g.view)) { dismiss() }
     }
 
-    /// short: the compact row's labels drop the trailing "…" (no room).
-    private func element(_ r: [String: Any], short: Bool = false) -> UIMenuElement {
-        let id = (r["id"] as? String) ?? ""
+    private func dismiss(then id: String? = nil) {
+        guard let shade = panel, let card = panelCard else { return }
+        panel = nil; panelCard = nil
+        shade.isUserInteractionEnabled = false
+        UIView.animate(withDuration: 0.2, animations: {
+            card.transform = CGAffineTransform(scaleX: 0.6, y: 0.5)
+            card.alpha = 0
+            shade.alpha = 0
+        }, completion: { _ in shade.removeFromSuperview() })
+        if let id { select(id) }
+    }
+
+    private static func row(_ r: [String: Any]) -> KMenuRow {
         var label = (r["label"] as? String) ?? ""
-        if short, label.hasSuffix("…") { label.removeLast() }
-        let icon = (r["icon"] as? String).flatMap { $0.isEmpty ? nil : UIImage(systemName: $0) }
-        if let kids = r["children"] as? [[String: Any]] {
-            return UIMenu(title: label, image: icon, children: kids.map { element($0) })
-        }
-        let action = UIAction(title: label, image: icon) { [weak self] _ in self?.select(id) }
-        var sub: [String] = []
-        if let s = r["subtitle"] as? String, !s.isEmpty { sub.append(s) }
-        if let b = r["badge"] as? String, !b.isEmpty { sub.append("(\(b))") }
-        if !sub.isEmpty {
-            if #available(iOS 16.0, *) { action.subtitle = sub.joined(separator: " ") }
-            else { action.title = label + "  " + sub.joined(separator: " ") }
-        }
-        return action
+        if (r["top"] as? Bool) == true, label.hasSuffix("…") { label.removeLast() }
+        return KMenuRow(id: (r["id"] as? String) ?? UUID().uuidString, label: label,
+                        symbol: (r["icon"] as? String) ?? "", image: thumb(r["image"] as? String),
+                        subtitle: (r["subtitle"] as? String) ?? "", badge: (r["badge"] as? String) ?? "",
+                        checked: (r["checked"] as? Bool) ?? false,
+                        children: ((r["children"] as? [[String: Any]]) ?? []).map { row($0) })
+    }
+
+    /// A cover thumbnail (data URI) for a pinned title's row.
+    private static func thumb(_ uri: String?) -> UIImage? {
+        guard let uri, let comma = uri.firstIndex(of: ","),
+              let data = Data(base64Encoded: String(uri[uri.index(after: comma)...])) else { return nil }
+        return UIImage(data: data)
     }
 
     private func select(_ id: String) {
         guard let data = try? JSONSerialization.data(withJSONObject: [id]),
               let arg = String(data: data, encoding: .utf8) else { return }
         webView?.evaluateJavaScript("window.__kadokiMenuSelect(...\(arg))", completionHandler: nil)
+    }
+}
+
+struct KMenuRow: Identifiable {
+    let id: String
+    let label: String
+    let symbol: String
+    let image: UIImage?
+    let subtitle: String
+    let badge: String
+    let checked: Bool
+    let children: [KMenuRow]
+}
+
+/// The menu card: a compact icon row (Library / Stats / Preferences), then
+/// the sections — pinned titles with their covers first — in a frosted,
+/// rounded panel that scrolls when it needs to.
+struct KMenuPanel: View {
+    let top: [KMenuRow]
+    let sections: [[KMenuRow]]
+    let pick: (String) -> Void
+    @State private var open: Set<String> = []
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if !top.isEmpty {
+                HStack(spacing: 0) {
+                    ForEach(top) { r in
+                        Button { pick(r.id) } label: {
+                            VStack(spacing: 6) {
+                                Image(systemName: r.symbol.isEmpty ? "circle" : r.symbol).font(.system(size: 21))
+                                Text(r.label).font(.footnote).lineLimit(1).minimumScaleFactor(0.8)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 64)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(KMenuPress())
+                    }
+                }
+                .padding(.horizontal, 6).padding(.top, 6)
+                Divider().opacity(0.6)
+            }
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(Array(sections.enumerated()), id: \.offset) { i, sec in
+                        if i > 0 { Rectangle().fill(Color.black.opacity(0.35)).frame(height: 8) }
+                        ForEach(sec) { r in item(r, indent: false) }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+        }
+        .foregroundStyle(.primary)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous).stroke(Color.white.opacity(0.08), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.35), radius: 24, y: 10)
+    }
+
+    private func item(_ r: KMenuRow, indent: Bool) -> AnyView {   // AnyView: rows nest (submenus)
+        AnyView(itemBody(r, indent: indent))
+    }
+    @ViewBuilder private func itemBody(_ r: KMenuRow, indent: Bool) -> some View {
+        if r.children.isEmpty {
+            Button { pick(r.id) } label: { line(r, indent: indent, expandable: false) }
+                .buttonStyle(KMenuPress())
+        } else {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if open.contains(r.id) { open.remove(r.id) } else { open.insert(r.id) }
+                }
+            } label: { line(r, indent: indent, expandable: true) }
+                .buttonStyle(KMenuPress())
+            if open.contains(r.id) {
+                ForEach(r.children) { c in item(c, indent: true) }
+            }
+        }
+    }
+
+    private func line(_ r: KMenuRow, indent: Bool, expandable: Bool) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "checkmark").font(.system(size: 14, weight: .semibold))
+                .opacity(r.checked ? 1 : 0).frame(width: 14)
+            if let img = r.image {
+                Image(uiImage: img).resizable().scaledToFill()
+                    .frame(width: 30, height: 42)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            } else if !r.symbol.isEmpty {
+                Image(systemName: r.symbol).font(.system(size: 18)).frame(width: 30)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(r.label).font(.body).lineLimit(2)
+                if !r.subtitle.isEmpty { Text(r.subtitle).font(.footnote).foregroundStyle(.secondary).lineLimit(1) }
+            }
+            Spacer(minLength: 6)
+            if !r.badge.isEmpty {
+                Text(r.badge).font(.caption.weight(.semibold)).foregroundStyle(.white)
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(Color.red, in: Capsule())
+            }
+            if expandable {
+                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(open.contains(r.id) ? 90 : 0))
+            }
+        }
+        .padding(.leading, indent ? 30 : 12).padding(.trailing, 16)
+        .padding(.vertical, r.image == nil ? 12 : 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Row highlight while pressed, like a menu.
+struct KMenuPress: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.background(Color.white.opacity(configuration.isPressed ? 0.12 : 0))
     }
 }
 

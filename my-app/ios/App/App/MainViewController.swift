@@ -726,6 +726,11 @@ class MainViewController: CAPBridgeViewController {
                 wv.configuration.userContentController.addUserScript(KadokiNativeLibrary.userScript())
                 lib.install(in: self, webView: wv)
                 nativeLibrary = lib
+                // Native Edit Title (NativeTitleEdit.swift).
+                let te = KadokiNativeTitleEdit()
+                wv.configuration.userContentController.addUserScript(KadokiNativeTitleEdit.userScript())
+                te.install(in: self, webView: wv)
+                nativeTitleEdit = te
             }
         }
         installHingeObserver()
@@ -739,6 +744,7 @@ class MainViewController: CAPBridgeViewController {
     private let nativeToolbar = KadokiNativeToolbar()
     private var nativePrefs: AnyObject?
     private var nativeLibrary: AnyObject?
+    private var nativeTitleEdit: AnyObject?
 
     // iPhone Duo. A hinge marks the device as a foldable for the web layer
     // (window.KADOKI_DUO — every Duo-only behavior keys off it, so a phone

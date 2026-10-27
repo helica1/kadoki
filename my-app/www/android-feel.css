@@ -1,0 +1,242 @@
+/* Android feel for the web interface: Material 3 (dark), Android only
+   (html.kadoki-android, set by android-feel.js). Chrome and dialogs only: the
+   reading text, card text and their fonts are untouched. */
+
+html.kadoki-android {
+  --m3-surface: #141218;
+  --m3-surface-low: #1d1b20;
+  --m3-surface-cont: #211f26;
+  --m3-surface-high: #2b2930;
+  --m3-surface-highest: #36343b;
+  --m3-on-surface: #e6e0e9;
+  --m3-on-surface-var: #cac4d0;
+  --m3-outline: #938f99;
+  --m3-outline-var: #49454f;
+  --m3-inverse: #e6e0e9;
+  --m3-on-inverse: #322f35;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* ── touch ──────────────────────────────────────────────────────────────── */
+html.kadoki-android button,
+html.kadoki-android .mode-tab,
+html.kadoki-android [role="button"],
+html.kadoki-android .lib-sheet-opt,
+html.kadoki-android .menu-item {
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* Ripple (android-feel.js): grows from the touch point, fades on release. */
+html.kadoki-android .k-ripple {
+  position: absolute;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: .14;
+  transform: scale(0);
+  pointer-events: none;
+  animation: kRippleIn .42s cubic-bezier(.2, 0, 0, 1) forwards;
+}
+html.kadoki-android .k-ripple.out { opacity: 0; transition: opacity .35s ease; }
+@keyframes kRippleIn { to { transform: scale(1); } }
+
+/* ── top app bar ────────────────────────────────────────────────────────── */
+html.kadoki-android #appHeader {
+  background: var(--m3-surface) !important;
+  border-bottom: 0 !important;
+  height: 56px;
+  font-family: system-ui, Roboto, sans-serif;
+}
+/* mode tabs: an outlined segmented button */
+html.kadoki-android #appHeader .mode-tabs {
+  background: transparent !important;
+  border: 1px solid var(--m3-outline) !important;
+  border-radius: 20px !important;
+  padding: 0 !important;
+  gap: 0 !important;
+  overflow: hidden;
+  height: 40px;
+  box-sizing: border-box;
+  align-items: stretch !important;
+}
+html.kadoki-android #appHeader .mode-tab {
+  height: 100%; padding: 0 18px !important;
+  display: inline-flex; align-items: center; justify-content: center;
+  box-sizing: border-box;
+  border-radius: 0 !important;
+  border-left: 1px solid var(--m3-outline) !important;
+  font: 500 14px/1 system-ui, Roboto, sans-serif !important;
+  letter-spacing: .1px !important;
+  text-transform: none !important;
+  color: var(--m3-on-surface) !important;
+}
+html.kadoki-android #appHeader .mode-tab:first-child { border-left: 0 !important; }
+html.kadoki-android #appHeader .mode-tab[data-active="1"] { color: #1d1b20 !important; }
+/* play: a filled tonal icon button; menu: a standard round icon button */
+html.kadoki-android #appHeader #shellPlayBtn {
+  min-width: 0 !important; width: 48px; height: 40px; padding: 0 !important;
+  border: 0 !important; border-radius: 20px !important;
+  background: rgba(208, 188, 255, .16) !important;
+}
+html.kadoki-android #appHeader #shellMoreBtn {
+  min-width: 0 !important; width: 44px; height: 44px; padding: 0 !important;
+  border-radius: 50% !important; border: 0 !important;
+}
+html.kadoki-android #appHeader #shellMoreBtn svg { width: 24px; height: 24px; }
+html.kadoki-android #appHeader #shellTimerLabel {
+  border-radius: 8px !important;
+  font-family: system-ui, Roboto, sans-serif;
+}
+
+/* ── menu (shell.js #shellFloatingMenu) ─────────────────────────────────── */
+html.kadoki-android .shell-menu {
+  background: var(--m3-surface-cont) !important;
+  border: 0 !important;
+  border-radius: 12px !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .3), 0 8px 24px rgba(0, 0, 0, .35) !important;
+  padding: 8px 0 !important;
+  min-width: 260px;
+  animation: kMatMenu .2s cubic-bezier(.2, 0, 0, 1);
+  transform-origin: top right;
+}
+@keyframes kMatMenu { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: none; } }
+html.kadoki-android .shell-menu .menu-item {
+  min-height: 48px; padding: 0 16px !important;
+  border: 0 !important; border-radius: 0 !important; background: transparent !important;
+  font: 400 15px/1.3 system-ui, Roboto, sans-serif !important;
+  letter-spacing: .25px !important; text-transform: none !important;
+  color: var(--m3-on-surface) !important;
+}
+html.kadoki-android .shell-menu .menu-divider { background: var(--m3-outline-var) !important; margin: 8px 0 !important; }
+
+/* ── bottom sheets (.lib-sheet: Move, tab chooser, Print / Sync choices) ── */
+@keyframes kMatSheetUp { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes kMatFade { from { opacity: 0; } to { opacity: 1; } }
+html.kadoki-android .lib-sheet { background: rgba(0, 0, 0, .32); animation: kMatFade .2s ease; }
+html.kadoki-android .lib-sheet-box {
+  background: var(--m3-surface-low) !important;
+  border: 0 !important;
+  border-radius: 28px 28px 0 0 !important;
+  padding: 22px 0 calc(16px + env(safe-area-inset-bottom, 0px)) !important;
+  position: relative;
+  animation: kMatSheetUp .35s cubic-bezier(.2, 0, 0, 1);
+}
+html.kadoki-android .lib-sheet-box::before {   /* drag handle */
+  content: ''; position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  width: 32px; height: 4px; border-radius: 2px; background: var(--m3-on-surface-var); opacity: .4;
+}
+html.kadoki-android .lib-sheet-h {
+  margin: 4px 24px 8px !important;
+  font: 500 14px/1.4 system-ui, Roboto, sans-serif !important;
+  letter-spacing: .1px !important; text-transform: none !important;
+  color: var(--m3-on-surface-var) !important;
+}
+html.kadoki-android .lib-sheet-opt {
+  margin: 0 !important; border: 0 !important; border-radius: 0 !important;
+  background: transparent !important;
+  min-height: 56px; padding: 0 24px !important;
+  font: 400 16px/1.4 system-ui, Roboto, sans-serif !important;
+  color: var(--m3-on-surface) !important; text-align: left;
+}
+html.kadoki-android .lib-sheet-opt.danger { color: #f2b8b5 !important; }
+html.kadoki-android .lib-sheet-cancel {
+  margin: 8px 24px 0 !important; min-height: 40px; border: 0 !important; border-radius: 20px !important;
+  background: var(--m3-surface-highest) !important; color: var(--m3-on-surface) !important;
+  font: 500 14px/1 system-ui, Roboto, sans-serif !important;
+}
+
+/* ── dialogs: Preferences, Edit Title, Stats ─────────────────────────────── */
+html.kadoki-android #preferencesModal .prefs-panel,
+html.kadoki-android #titleEditModal > div,
+html.kadoki-android #readingStatsModal .stats-panel {
+  background: var(--m3-surface-high) !important;
+  border: 0 !important;
+  border-radius: 28px !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, .45);
+  animation: kMatDialog .25s cubic-bezier(.2, 0, 0, 1);
+  font-family: system-ui, Roboto, sans-serif;
+}
+@keyframes kMatDialog { from { opacity: 0; transform: scale(.9); } to { opacity: 1; transform: none; } }
+html.kadoki-android #preferencesModal h3,
+html.kadoki-android #titleEditModal h3 {
+  font: 400 24px/1.3 system-ui, Roboto, sans-serif !important;
+  letter-spacing: 0 !important; text-transform: none !important;
+  color: var(--m3-on-surface) !important;
+}
+html.kadoki-android #preferencesModal .prefs-panel button,
+html.kadoki-android #titleEditModal button {
+  border-radius: 20px !important;
+  font-family: system-ui, Roboto, sans-serif !important;
+  letter-spacing: .1px !important;
+}
+html.kadoki-android #titleEditModal input,
+html.kadoki-android #titleEditModal textarea,
+html.kadoki-android #preferencesModal input[type="text"],
+html.kadoki-android #preferencesModal select {
+  background: transparent !important;
+  border: 1px solid var(--m3-outline) !important;
+  border-radius: 4px !important;
+  color: var(--m3-on-surface) !important;
+}
+
+/* ── Library ────────────────────────────────────────────────────────────── */
+html.kadoki-android #libraryPage { background: var(--m3-surface) !important; font-family: system-ui, Roboto, sans-serif; }
+html.kadoki-android #libraryPage .deck-item {
+  background: var(--m3-surface-cont) !important;
+  border: 0 !important;
+  border-radius: 16px !important;
+}
+html.kadoki-android #libraryPage .library-header button {
+  border-radius: 20px !important;
+  border-color: var(--m3-outline) !important;
+  font: 500 14px/1 system-ui, Roboto, sans-serif !important;
+}
+
+/* ── snackbar (toasts) ──────────────────────────────────────────────────── */
+html.kadoki-android #toast.k-snackbar {
+  top: auto !important;
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px)) !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  max-width: min(560px, calc(100vw - 32px));
+  background: var(--m3-inverse) !important;
+  color: var(--m3-on-inverse) !important;
+  border: 0 !important;
+  border-radius: 4px !important;
+  padding: 14px 16px !important;
+  font: 400 14px/1.4 system-ui, Roboto, sans-serif !important;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, .35) !important;
+  -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
+  text-align: left !important;
+}
+
+/* ── Send to Anki (waveform.js edit): a Material dialog ──────────────────── */
+html.kadoki-android #waveformEditorOverlay.kmat { background: rgba(0, 0, 0, .5) !important; font-family: system-ui, Roboto, sans-serif; }
+html.kadoki-android #waveformEditorOverlay.kmat > div {
+  background: var(--m3-surface-high) !important;
+  border: 0 !important;
+  border-radius: 28px !important;
+  padding: 20px 18px 18px !important;
+  animation: kMatDialog .25s cubic-bezier(.2, 0, 0, 1);
+}
+html.kadoki-android #waveformEditorOverlay.kmat .tr-card { background: var(--m3-surface-cont); border: 0; border-radius: 16px; }
+html.kadoki-android #waveformEditorOverlay.kmat .tr-btn {
+  border: 0 !important; border-radius: 20px !important;
+  background: var(--m3-surface-highest) !important;
+  font-family: system-ui, Roboto, sans-serif; font-weight: 500;
+}
+html.kadoki-android #waveformEditorOverlay.kmat [data-role="text-row"] .tr-btn {
+  flex: 0 0 auto !important; width: 40px; height: 40px !important; min-height: 0 !important; border-radius: 50% !important;
+}
+html.kadoki-android #waveformEditorOverlay.kmat [data-role="text-row"] > div:first-child,
+html.kadoki-android #waveformEditorOverlay.kmat [data-role="text-row"] > div:last-child {
+  flex: 0 0 40px !important; justify-content: center !important; gap: 12px !important;
+}
+html.kadoki-android #waveformEditorOverlay.kmat .cue-chip { border-radius: 12px; }
+html.kadoki-android #waveformEditorOverlay.kmat .cue-chip.selected { border: 0; box-shadow: none; background: var(--m3-surface-highest); }
+html.kadoki-android #waveformEditorOverlay.kmat .cue-chip.context { border: 0; background: transparent; }
+html.kadoki-android #waveformEditorOverlay.kmat .btn {
+  min-height: 40px; padding: 0 24px !important; border: 0 !important; border-radius: 20px !important;
+  font: 500 14px/1 system-ui, Roboto, sans-serif !important; letter-spacing: .1px !important; text-transform: none !important;
+}
+html.kadoki-android #waveformEditorOverlay.kmat [data-role="cancel"] { background: transparent !important; color: var(--m3-on-surface) !important; }

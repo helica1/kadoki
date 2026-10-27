@@ -530,7 +530,7 @@
       if (r.type === 'succeeded' && r.message) {
         const m = r.message;
         const text = (m.content || []).filter(x => x && x.type === 'text').map(x => x.text).join('');
-        out.push({ customId: o.custom_id, ok: m.stop_reason !== 'refusal', text, usage: m.usage || {}, model: m.model,
+        out.push({ customId: o.custom_id, ok: m.stop_reason !== 'refusal', text, usage: m.usage || {}, model: m.model, stopReason: m.stop_reason,
                    error: m.stop_reason === 'refusal' ? 'declined' : null });
       } else {
         out.push({ customId: o.custom_id, ok: false, error: r.type + (r.error && r.error.error ? ': ' + r.error.error.message : '') });

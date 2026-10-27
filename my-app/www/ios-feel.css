@@ -117,3 +117,91 @@ html.kadoki-native-toolbar #appHeader #shellTimerLabel {
   top: 50%;
   transform: translate(-50%, -50%);
 }
+
+/* ── Send to Anki (waveform.js edit): an iOS dialog — a tall rounded card on
+   the system dark background, the subtitle list taking the extra room,
+   Cancel and a filled Send to Anki bottom right. The waveform and subtitle
+   text keep their own look. ───────────────────────────────────────────── */
+@keyframes kIosDialogIn { from { transform: scale(1.08); opacity: 0; } to { transform: none; opacity: 1; } }
+html.kadoki-ios #waveformEditorOverlay.kios {
+  background: rgba(0, 0, 0, .5) !important;
+  animation: kIosFade .2s ease;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+}
+html.kadoki-ios #waveformEditorOverlay.kios > div {
+  width: min(720px, calc(100vw - 20px)) !important;
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 40px) !important;
+  display: flex; flex-direction: column;
+  background: #1c1c1e !important;
+  border: 0 !important;
+  border-radius: 24px !important;
+  padding: 18px 16px 16px !important;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, .6);
+  animation: kIosDialogIn .3s cubic-bezier(.32, .72, 0, 1);
+}
+html.kadoki-ios #waveformEditorOverlay.kios.kios-out { opacity: 0; transition: opacity .18s ease; }
+html.kadoki-ios #waveformEditorOverlay.kios.kios-out > div { transform: scale(.96); transition: transform .18s ease; }
+/* the subtitle list grows with the selection (up to about half the screen);
+   the dialog fits its content */
+html.kadoki-ios #waveformEditorOverlay.kios [data-role="text-row"] { flex: 0 1 auto; min-height: 0; }
+html.kadoki-ios #waveformEditorOverlay.kios [data-role="cues-row"] { max-height: 46dvh !important; }
+/* ± : round buttons, one pair per side, centred — never stretched */
+html.kadoki-ios #waveformEditorOverlay.kios [data-role="text-row"] > div:first-child,
+html.kadoki-ios #waveformEditorOverlay.kios [data-role="text-row"] > div:last-child {
+  flex: 0 0 40px !important; justify-content: center !important; gap: 12px !important;
+}
+html.kadoki-ios #waveformEditorOverlay.kios [data-role="text-row"] .tr-btn {
+  flex: 0 0 auto !important; width: 40px; height: 40px !important; min-height: 0 !important;
+  padding: 0 !important; border-radius: 50% !important; font-size: 22px; font-weight: 500;
+}
+html.kadoki-ios #waveformEditorOverlay.kios [data-role="wf-host"],
+html.kadoki-ios #waveformEditorOverlay.kios .tr-card,
+html.kadoki-ios #waveformEditorOverlay.kios .kios-actions { flex: 0 0 auto; }
+
+/* Cancel … Send to Anki, bottom right */
+html.kadoki-ios #waveformEditorOverlay .kios-actions { margin-top: 16px !important; gap: 10px !important; }
+html.kadoki-ios #waveformEditorOverlay .kios-actions .btn {
+  min-height: 50px; padding: 0 22px !important; border: 0 !important; border-radius: 14px !important;
+  font: 600 17px/1 -apple-system, BlinkMacSystemFont, system-ui, sans-serif !important;
+  letter-spacing: 0 !important; text-transform: none !important; box-shadow: none !important;
+  background: rgba(120, 120, 128, .24) !important; color: #fff !important;
+}
+html.kadoki-ios #waveformEditorOverlay .kios-actions .btn-send-mode {
+  background: var(--kios-accent) !important; color: #000 !important;
+}
+html.kadoki-ios #waveformEditorOverlay .kios-actions .btn:disabled { opacity: .5; }
+/* subtitle chips */
+html.kadoki-ios #waveformEditorOverlay.kios .cue-chip { border-radius: 12px; }
+html.kadoki-ios #waveformEditorOverlay.kios .cue-chip.selected { border: 0; box-shadow: none; background: #2c2c2e; }
+html.kadoki-ios #waveformEditorOverlay.kios .cue-chip.selected { box-shadow: inset 3px 0 0 var(--kios-accent); }
+html.kadoki-ios #waveformEditorOverlay.kios .cue-chip.context { border: 0; background: transparent; color: rgba(235, 235, 245, .35); }
+
+/* buttons: iOS gray fill, accent label */
+html.kadoki-ios #waveformEditorOverlay.kios .tr-btn {
+  background: rgba(120, 120, 128, .24) !important;
+  border: 0 !important;
+  border-radius: 12px !important;
+  color: var(--kios-accent) !important;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 17px; font-weight: 600;
+}
+html.kadoki-ios #waveformEditorOverlay.kios .tr-btn.on { background: rgba(120, 120, 128, .36) !important; }
+html.kadoki-ios #waveformEditorOverlay.kios .tr-btn:disabled { color: rgba(235, 235, 245, .3) !important; background: rgba(120, 120, 128, .16) !important; opacity: 1; }
+
+/* translation: an inset grouped section */
+html.kadoki-ios #waveformEditorOverlay.kios .tr-card {
+  background: #2c2c2e; border: 0; border-radius: 14px;
+}
+html.kadoki-ios #waveformEditorOverlay.kios .tr-title {
+  font-size: 13px; font-weight: 400; letter-spacing: 0; text-transform: uppercase; color: rgba(235, 235, 245, .6);
+}
+html.kadoki-ios #waveformEditorOverlay.kios .tr-engine {
+  background: rgba(120, 120, 128, .24); border: 0; color: #fff; font-size: 15px; height: 30px;
+}
+html.kadoki-ios #waveformEditorOverlay.kios .tr-engine-dot { box-shadow: none; }
+html.kadoki-ios #waveformEditorOverlay.kios .tr-status,
+html.kadoki-ios #waveformEditorOverlay.kios .mk-hint { color: rgba(235, 235, 245, .6); font-size: 13px; }
+html.kadoki-ios #waveformEditorOverlay.kios .mk-text,
+html.kadoki-ios #waveformEditorOverlay.kios .tr-out { background: #1c1c1e; border: 0; border-radius: 10px; }
+html.kadoki-ios #waveformEditorOverlay.kios .tr-link { color: var(--kios-accent); font-size: 15px; }
+html.kadoki-ios #waveformEditorOverlay.kios [data-role="tr-result"] { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-size: 16px; }

@@ -3683,7 +3683,11 @@
         const nx = idx >= 0 ? abCues[idx + 1] : abCues[0];
         const pastCur = !cur || positionMs > (cur.endMs || cur.startMs) + 800;
         const noNext = !nx || nx.startMs - positionMs > 4000;
-        if (pastCur && noNext) { _abSyncShown = true; return; }
+        // A cue that ended long before the playhead is never "current" — after
+        // a jump into untranscribed audio it is the old frontier, and painting
+        // it yanked the reader back there (40 % → 18.7 %, 60 % → 51 %).
+        const stale = !!cur && positionMs - (cur.endMs || cur.startMs) > 15000;
+        if (pastCur && (noNext || stale)) { _abSyncShown = true; return; }
       }
     }
     if (idx === abCurrentCueIdx && !_abSyncShown) return;

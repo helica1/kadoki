@@ -344,13 +344,26 @@
     const minFuzzy = strict ? 10 : 6;
     const maxRatio = strict ? LOOSE_DIST_RATIO : TIGHT_DIST_RATIO;
     if (needle.length < minExact) return null;
-    if (!retry) st.tried++;
+    // Only a miss near known anchors says the text doesn't track the audio;
+    // one far from any (just after a big seek) is the estimate's fault.
+    if (!retry && ctx.tight) st.tried++;
 
     let hit = null;
+    // The seek sync already placed this very cue (same start time): use its
+    // range. Left in the lattice it would be this cue's own "previous"
+    // neighbour and bound the search to AFTER itself — every probe cue missed.
+    {
+      const nb0 = anchorNeighbors(st.anchors, startMs);
+      const self = nb0.prev && nb0.prev.ms === startMs && nb0.prev.sync ? nb0.prev : null;
+      if (self) {
+        st.anchors.splice(nb0.at - 1, 1);
+        hit = { ns: self.ns, ne: self.ne };
+      }
+    }
     // No anchors yet (fresh book, or restart where seeding found nothing):
     // a long cue that exactly matches a UNIQUE passage anywhere in the book
     // is a safe first anchor even when the ratio estimate is far off.
-    if (ctx.first && needle.length >= 12) {
+    if (!hit && ctx.first && needle.length >= 12) {
       const i1 = st.normFlat.indexOf(needle);
       if (i1 >= 0 && st.normFlat.indexOf(needle, i1 + 1) < 0) {
         hit = { ns: i1, ne: i1 + needle.length };
@@ -499,7 +512,11 @@
       const moved = att.exp < 0 || Math.abs(ctx.exp - att.exp) > 400 || (att.bw - bw) > 400;
       if (att.n >= 1 && !moved) continue;
       att.n++; att.exp = ctx.exp; att.bw = bw;
-      const m = matchCue(c.text, c.startMs, { retry: att.n > 1, wantMap: !!c.w });
+      // Sweep attempts never count toward the edition-mismatch disable: a
+      // book carries known-unmatched cues (title/author readings, audio
+      // transcribed while the anchors were far away), and re-trying them at
+      // every launch used to switch the aligner off for the session.
+      const m = matchCue(c.text, c.startMs, { retry: true, wantMap: !!c.w });
       if (m) {
         if (c.w) {
           const nw = remapW(c.w, m.wmap, m.text.length);
@@ -685,6 +702,64 @@
     return Math.max(0, Math.min(1, raw / st.flat.length));
   }
 
+  // ── seek sync (jump into untranscribed audio) ────────────────────────────
+
+  // Norm index of a raw book offset (first norm char at/after it).
+  function normAt(raw) {
+    const st = state;
+    if (!st || !st.normToRaw) return -1;
+    const m = st.normToRaw;
+    let lo = 0, hi = m.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (m[mid] < raw) lo = mid + 1; else hi = mid; }
+    return lo;
+  }
+
+  // Where in the book is this transcribed phrase? Searched in a wide window
+  // around norm position `center` (the seek's guess can be minutes off), the
+  // hit nearest the centre wins. Exact first, then fuzzy for longer phrases.
+  // { ns, ne } in norm space, or null.
+  function locateNear(text, center, span) {
+    const st = state;
+    if (!st || !st.normFlat) return null;
+    let needle = normalizeStr(text);
+    if (needle.length > MAX_NEEDLE) needle = needle.slice(0, MAX_NEEDLE);
+    if (needle.length < 6) return null;
+    const N = st.normFlat.length;
+    const lo = Math.max(0, Math.round(center - span)), hi = Math.min(N, Math.round(center + span) + needle.length);
+    let best = null, i = st.normFlat.indexOf(needle, lo);
+    while (i >= 0 && i + needle.length <= hi) {
+      if (!best || Math.abs(i - center) < Math.abs(best.ns - center)) best = { ns: i, ne: i + needle.length };
+      i = st.normFlat.indexOf(needle, i + 1);
+    }
+    if (best) return best;
+    if (needle.length < 10) return null;
+    // Fuzzy in slices so the DP stays small; keep the best-scoring hit.
+    const STEP = 6000;
+    let fb = null;
+    for (let a = lo; a < hi; a += STEP) {
+      const r = fuzzyFind(st.normFlat, a, Math.min(hi, a + STEP + needle.length), needle);
+      if (r && r.dist <= Math.floor(needle.length * LOOSE_DIST_RATIO) &&
+          (!fb || r.dist < fb.dist || (r.dist === fb.dist && Math.abs(r.ns - center) < Math.abs(fb.ns - center)))) fb = r;
+    }
+    return fb ? { ns: snapBoundary(st, fb.ns), ne: snapBoundary(st, fb.ne) } : null;
+  }
+
+  // Record a confirmed (time, book range) pair found by the seek sync, so
+  // the regular matcher works in that region straight away.
+  function addAnchor(ms, ns, ne) {
+    const st = state;
+    if (!st || !(ne > ns)) return;
+    const { prev, next } = anchorNeighbors(st.anchors, ms);
+    // Keep the lattice monotonic: drop a pair that contradicts its neighbours.
+    if ((prev && prev.ns > ns) || (next && next.ns < ns)) return;
+    if (prev && prev.ms === ms) return;
+    insertAnchor(st, ms, ns, ne);
+    const nb = anchorNeighbors(st.anchors, ms);
+    if (nb.prev && nb.prev.ms === ms) nb.prev.sync = 1;
+    // A confirmed pair proves the text tracks this audio: undo a disable.
+    if (st.disabled) { st.disabled = false; st.tried = 0; st.matched = 0; log('re-enabled by seek sync'); }
+  }
+
   window.autoAlign = {
     prepare,      // async (titleId, {getDurMs}) → bool (book text indexed)
     release,
@@ -695,6 +770,11 @@
     seedFromCues, // rebuild anchors from persisted b:1 cues after a restart
     progressAt,   // (ms) → anchor-interpolated book fraction 0..1, or null
     msForProgress,// (ratio 0..1) → anchor-interpolated audio ms, or null
+    normAt,       // (raw book offset) → norm index
+    hasTextFor: (titleId) => !!(state && state.titleId === titleId && state.normFlat),
+    normLen: () => (state && state.normFlat) ? state.normFlat.length : 0,
+    locateNear,   // (text, centerNorm, spanNorm) → {ns, ne} | null — seek sync
+    addAnchor,    // (ms, ns, ne) — seek sync confirmed pair
     textLen: () => (state && state.flat) ? state.flat.length : 0,  // full raw book chars (render-independent)
     stats,
     _internals: { normalizeStr, fuzzyFind, _adoptText, expectedPos: (ms) => state && expectedPos(state, ms) }

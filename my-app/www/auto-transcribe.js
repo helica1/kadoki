@@ -76,11 +76,16 @@
       .finally(() => { _powerBusy = false; });
   }
   // kind: 'ahead' (keep up with the playhead) | 'backfill' (the rest of the book)
+  const THERMAL_MIN_AHEAD_MS = 3 * 60000;
   function powerAllows(kind) {
     if (unlimited()) return true;
     if (_nativePowerHold) return false;
-    if (_power.thermal === 'serious' || _power.thermal === 'critical') return false;
-    if (_power.lowPower && !_power.charging) return false;
+    if (_power.thermal === 'critical') return false;
+    // Hot or saving battery: still keep the next few minutes ahead of the
+    // listener supplied (no subtitles at all is worse than a little heat);
+    // only far-ahead and fill-in work waits.
+    const pinched = _power.thermal === 'serious' || (_power.lowPower && !_power.charging);
+    if (pinched) return kind === 'ahead' && aheadCoveredMs(_powerAnchorMs || 0) < THERMAL_MIN_AHEAD_MS;
     return kind === 'backfill' ? (!!_power.charging || smallRemainder()) : true;
   }
   // Under two minutes of audio left untranscribed (the few-second hole a
@@ -169,6 +174,7 @@
         const r = await p.checkAvailability();
         avail.supported = !!r?.supported;
         avail.installed = !!r?.installed;
+        avail.engine = r?.engine || '';   // Android: 'android' (built-in recognizer) | 'whisper'
         log('availability supported=' + avail.supported + ' installed=' + avail.installed);
       } catch (e) {
         log('checkAvailability failed: ' + (e?.message || e));
@@ -340,9 +346,26 @@
     } catch (_) { return null; }
   }
   function normalizeCues(arr) {
-    const cues = (arr || [])
+    const sorted = (arr || [])
       .filter(c => Number.isFinite(c.startMs) && Number.isFinite(c.endMs) && c.text)
       .sort((x, y) => x.startMs - y.startMs);
+    // Drop duplicate hearings of the same phrase (overlapping re-feeds from a
+    // restarting job). Two cues sharing most of their span are one phrase:
+    // the one matched to the book wins, then the longer. An unmatched twin
+    // left in place pulls the highlight off the book text — a skipped phrase.
+    const cues = [];
+    for (const c of sorted) {
+      let drop = false;
+      for (let k = cues.length - 1; k >= 0 && k >= cues.length - 6; k--) {
+        const x = cues[k];
+        if (x.endMs <= c.startMs) continue;
+        const ov = Math.min(c.endMs, x.endMs) - Math.max(c.startMs, x.startMs);
+        if (!(ov > 0.6 * Math.min(c.endMs - c.startMs, x.endMs - x.startMs))) continue;
+        const better = (c.b ? 1 : 0) - (x.b ? 1 : 0) || (c.endMs - c.startMs) - (x.endMs - x.startMs);
+        if (better > 0) cues.splice(k, 1); else { drop = true; break; }
+      }
+      if (!drop) cues.push(c);
+    }
     cues.forEach((c, i) => { c.index = i; });
     return cues;
   }
@@ -680,6 +703,16 @@
       }
       const near = (i) => i >= 0 && i < a.cues.length && Math.abs(a.cues[i].startMs - s) < DEDUPE_MS;
       if (near(lo) || near(lo - 1)) continue;   // duplicate from an overlapping re-feed
+      // Same speech heard by two jobs (one started mid-phrase at a boundary,
+      // so the starts differ): mostly-overlapping spans are one phrase — keep
+      // the existing cue, or the highlight would play that sentence twice.
+      const sameSpeech = (i) => {
+        if (i < 0 || i >= a.cues.length) return false;
+        const x = a.cues[i];
+        const ov = Math.min(e, x.endMs) - Math.max(s, x.startMs);
+        return ov > 0.6 * Math.min(e - s, x.endMs - x.startMs);
+      };
+      if (sameSpeech(lo) || sameSpeech(lo - 1)) continue;
       let matched = 0;
       let w = normW(c.w, s);
       if (align) {
@@ -714,6 +747,9 @@
     const a = active;
     const p = plugin();
     if (!a || a.done || !p || job) return;
+    // Never re-feed audio that already has cues: a restart aimed at the
+    // playhead (seek, stop-in-flight tracking) lands on the next gap instead.
+    startMs = nextUncovered(a.cov, startMs);
     const dur = a.durationMs || 0;
     if (dur > 0 && startMs >= dur - 500) {
       // Nothing ahead — try the earliest gap (behind), or finish.
@@ -783,7 +819,9 @@
     if (!job || unlimited()) return false;
     if (job.stopping) return true;
     const ahead = aheadCoveredMs(pos);
-    const thermal = _power.thermal === 'serious' || _power.thermal === 'critical' || (_power.lowPower && !_power.charging);
+    // Hot / battery saver parks only once a few minutes are buffered (critical: always).
+    const thermal = _power.thermal === 'critical' ||
+      ((_power.thermal === 'serious' || (_power.lowPower && !_power.charging)) && ahead >= THERMAL_MIN_AHEAD_MS);
     if (!thermal && (_power.charging || ahead < AHEAD_HIGH_MS)) return false;
     diag('parking transcriber: ' + Math.round(ahead / 1000) + 's buffered, thermal=' + _power.thermal + ' charging=' + _power.charging);
     pendingRestartMs = null; _parked = true;
@@ -841,6 +879,187 @@
 
   // ── native events ─────────────────────────────────────────────────────────
 
+  // ── seek sync: jumping into untranscribed audio ───────────────────────────
+  //
+  // A play from a page past the transcribed audio used to start at a book-
+  // fraction estimate (minutes off) and the reader then snapped back to the
+  // last transcribed cue. Instead: transcribe a short probe at the estimate,
+  // find those phrases in the book, correct the estimate from where they
+  // land, and repeat until the target sentence is heard — then play exactly
+  // there. Each probe is the job's 15 s first window (~2 s); capped at 20 s.
+  const SYNC_MAX_MS = 20000;
+  const SYNC_RATE = 0.0075;   // norm chars per audio ms (fallback)
+  let _sync = null;
+
+  // true/false for the active auto-transcribed title on screen; null when
+  // the transcriber isn't the cue source (SRT titles, timing-only, inactive).
+  function isCoveredMs(ms) {
+    const a = active;
+    if (!a || a.timingOnly || a.titleId !== window._activeTitleId || !Number.isFinite(ms)) return null;
+    return !!coveringRange(a.cov || [], ms);
+  }
+
+  function syncObserve(cues) {
+    const sy = _sync, al = window.autoAlign;
+    if (!sy || !al || !Array.isArray(cues)) return;
+    const found = [];
+    for (const c of cues) {
+      if (!c || !c.text || !Number.isFinite(c.startMs)) continue;
+      const loc = al.locateNear(c.text, sy.P, sy.span);
+      if (loc) found.push({ ms: Math.floor(c.startMs), endMs: Math.floor(c.endMs || c.startMs), ns: loc.ns, ne: loc.ne });
+    }
+    // Phrases of one stretch of audio sit in one stretch of the book: drop
+    // hits whose book position disagrees with the rest (a repeated phrase
+    // found elsewhere).
+    if (found.length >= 2) {
+      const rt = sy.rate || SYNC_RATE;
+      const d = found.map(f => f.ns - f.ms * rt).sort((x, y) => x - y);
+      const med = d[d.length >> 1];
+      for (let i = found.length - 1; i >= 0; i--) {
+        if (Math.abs(found[i].ns - found[i].ms * rt - med) > 2500) found.splice(i, 1);
+      }
+    } else if (found.length === 1 && found[0].ne - found[0].ns < 10) {
+      found.length = 0;   // one short hit alone is too weak to steer by
+    }
+    for (const f of found) { sy.pairs.push(f); try { al.addAnchor(f.ms, f.ns, f.ne); } catch (_) {} }
+    sy.events++;
+    const w = sy.wake; sy.wake = null; if (w) w();
+  }
+
+  function syncUi() {
+    let el = document.getElementById('kadokiSyncPill');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'kadokiSyncPill';
+      el.style.cssText = 'position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 72px);transform:translateX(-50%);' +
+        'z-index:9600;pointer-events:none;background:rgba(32,30,36,.94);color:#eee;border-radius:16px;padding:10px 16px 12px;' +
+        'min-width:200px;font:500 14px system-ui,-apple-system,Roboto,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.35);text-align:center;';
+      el.innerHTML = '<div class="t"></div><div style="height:4px;border-radius:2px;background:rgba(255,255,255,.15);margin-top:8px;overflow:hidden">' +
+        '<i style="display:block;height:100%;width:0;background:#7bd88f;transition:width .3s linear"></i></div>';
+      document.body.appendChild(el);
+    }
+    el.querySelector('.t').textContent = t('at.syncing', 'Syncing audio to this page…');
+    const bar = el.querySelector('i');
+    const t0 = Date.now();
+    const tick = setInterval(() => {
+      // Eases toward 90 % over the 20 s cap; completion fills it.
+      const f = Math.min(0.9, 1 - Math.exp(-(Date.now() - t0) / 6000));
+      bar.style.width = Math.round(f * 100) + '%';
+    }, 250);
+    return {
+      done() {
+        clearInterval(tick);
+        bar.style.width = '100%';
+        setTimeout(() => { try { el.remove(); } catch (_) {} }, 350);
+      }
+    };
+  }
+
+  // opts: { estMs, raw } — the estimated audio time and the target's raw
+  // book offset. Resolves the exact audio ms of the target sentence, or null
+  // (not a transcribed-on-device title, or no lock within the cap).
+  async function syncTo(opts) {
+    const a = active, al = window.autoAlign;
+    if (!a || a.done || a.timingOnly || !plugin() || _sync) return null;
+    if (!al?.hasTextFor?.(a.titleId) || !al.locateNear) return null;
+    const raw = Number(opts && opts.raw), est0 = Number(opts && opts.estMs);
+    if (!Number.isFinite(raw) || !Number.isFinite(est0)) return null;
+    const N = al.normLen(), P = al.normAt(raw);
+    if (!(N > 0) || P < 0) return null;
+    const sy = _sync = { P, span: Math.max(25000, Math.round(N * 0.15)), pairs: [], events: 0, wake: null };
+    const ui = syncUi();
+    const t0 = Date.now();
+    const dur = a.durationMs || 0;
+    let result = null, probe = -1, jumps = 0;
+    // This narration's own pace (book chars per audio ms) — narrators differ
+    // ~2× (measured 4.0 vs the 7.5 chars/s default), and a wrong rate makes
+    // every correction land short.
+    let RATE = dur > 60000 ? N / dur : SYNC_RATE;
+    if (!(RATE > 0.002 && RATE < 0.015)) RATE = SYNC_RATE;
+    sy.rate = RATE;
+    const wait = (ms) => new Promise((res) => {
+      const fn = () => { clearTimeout(timer); res(); };
+      const timer = setTimeout(() => { if (sy.wake === fn) sy.wake = null; res(); }, ms);
+      sy.wake = fn;
+    });
+    const startProbe = (ms) => {
+      const at = Math.max(0, Math.min(dur > 0 ? dur - 15000 : ms, Math.round(ms)));
+      if (probe >= 0 && Math.abs(at - probe) < 3000) return;   // already listening there
+      probe = at;
+      lastPosMs = probe;
+      // Already-transcribed audio near the probe answers without a job.
+      if (isCoveredMs(probe) === true) {
+        const near = a.cues.filter(c => c.b && Math.abs(c.startMs - probe) < 90000);
+        if (near.length) { syncObserve(near); return; }
+      }
+      diag('sync: probe at ' + Math.round(probe / 1000) + 's');
+      restartAt(probe);
+    };
+    try {
+      probe = -1;
+      startProbe(est0 - 4000);
+      let seen = 0;
+      while (Date.now() - t0 < SYNC_MAX_MS && active === a) {
+        if (sy.events === seen) await wait(Math.min(9000, SYNC_MAX_MS - (Date.now() - t0)));
+        seen = sy.events;
+        // Every pair is a fact (this audio time = that book position), from
+        // whichever probe it came — decide from all of them.
+        const pr = sy.pairs;
+        if (!pr.length) continue;
+        const hit = pr.find(f => f.ns <= P && P < f.ne);
+        if (hit) { result = hit.ms; break; }
+        let bf = null, af = null;
+        for (const f of pr) {
+          if (f.ne <= P) { if (!bf || f.ne > bf.ne) bf = f; }
+          else if (!af || f.ns < af.ns) af = f;
+        }
+        if (++jumps > 8) break;
+        if (bf && af) {
+          // Target between two placed phrases: adjacent audio → it starts
+          // where the earlier one ends; else probe the stretch between.
+          if (af.ms - bf.endMs < 15000) { result = bf.endMs; break; }
+          let r = (af.ns - bf.ne) / Math.max(1, af.ms - bf.endMs);
+          if (!(r > 0.002 && r < 0.015)) r = RATE;
+          startProbe(bf.endMs + (P - bf.ne) / r - 3000);
+        } else if (af) {
+          // Everything heard is past the target. The estimate can land right
+          // where we already listened (the target phrase began just before
+          // the probe) — then step back further instead of re-probing.
+          let np = af.ms - (af.ns - P) / RATE - 3000;
+          if (np > probe - 3000) np = probe - 10000;
+          startProbe(np);
+        } else {
+          const gap = (P - bf.ne) / RATE;
+          // Just ahead: the running job reaches it. Further: a fresh probe
+          // (first window ~2 s) beats waiting on 60 s windows (~6 s each).
+          if (gap > 20000) startProbe(bf.endMs + gap - 3000);
+        }
+      }
+    } catch (e) {
+      log('sync failed: ' + (e && e.message));
+    } finally {
+      _sync = null;
+      ui.done();
+    }
+    diag('sync: ' + (result != null ? 'locked ' + Math.round(result / 1000) + 's' : 'no lock') + ' in ' + (Date.now() - t0) + 'ms (est ' + Math.round(est0 / 1000) + 's)');
+    if (result != null) lastPosMs = result;
+    return result;
+  }
+
+  // Read-path hook: a start time that came from an UNCOVERED-region estimate
+  // (window._syncHint, set by the paged reader) is refined by syncTo; any
+  // other start passes through untouched.
+  async function refineStart(ms) {
+    try {
+      const h = window._syncHint;
+      if (!h || Date.now() - h.at > 8000 || !Number.isFinite(ms)) return ms;
+      if (Math.abs(ms - h.startMs) > 6000) return ms;
+      window._syncHint = null;
+      const r = await syncTo({ estMs: h.est, raw: h.raw });
+      return Number.isFinite(r) ? r : ms;
+    } catch (_) { return ms; }
+  }
+
   function onCuesEvent(ev) {
     const a = active;
     if (!a || !job || ev?.jobId !== job.id) return;
@@ -856,6 +1075,7 @@
       job.lastCuesAt = nowW;
       job.fedThroughMs = ev.fedThroughMs;
     }
+    if (_sync) syncObserve(ev.cues || []);
     const added = mergeCues(ev.cues || []);
     let maxEnd = job.startMs;
     for (const c of (ev.cues || [])) if (c.endMs > maxEnd) maxEnd = c.endMs;
@@ -936,11 +1156,16 @@
     if (window._activeTitleId && window._activeTitleId !== a.titleId) { deactivate(); return; }
     const pos = ev?.positionMs;
     if (!Number.isFinite(pos)) return;
+    if (_sync) return;   // the seek sync steers the job until it locks
     lastPosMs = pos;
     if (a.done) return;
     refreshPower();
     if (job?.stopping) {
-      if (pendingRestartMs != null) pendingRestartMs = pos;
+      // A seek while the old job winds down retargets the restart — but only
+      // to uncovered audio outside where it was already aimed, so normal play
+      // during the stop can't drag the target forward past untranscribed audio.
+      if (pendingRestartMs != null && !coveringRange(a.cov, pos) &&
+          (pos < pendingRestartMs || pos > pendingRestartMs + 30000)) pendingRestartMs = Math.max(0, pos - 2000);
       return;
     }
     if (maybeParkForPower(pos)) return;
@@ -952,7 +1177,9 @@
       }
       // Seeked outside the job's reach into uncovered audio → move the job.
       const outsideAhead = pos > job.fedThroughMs + 15000;
-      const outsideBehind = pos < job.startMs - 10000;
+      // Behind the job by any margin: the playhead would play uncovered audio
+      // (no highlight) until the job wrapped round, so move it back.
+      const outsideBehind = pos < job.startMs - 1000;
       if ((outsideAhead || outsideBehind) && !coveringRange(a.cov, pos)) {
         restartAt(Math.max(0, pos - 2000));
       }
@@ -1563,6 +1790,43 @@
 
   // Undo backup: the cue cache as it was before the first clean-up.
   const PRECLEAN = '_PRECLEAN';
+  // Reopen proofread stretches: cues starting inside any [fromMs, toMs] range
+  // lose their "proofread" mark, so the next 校正 pass picks them up again.
+  async function unmarkClean(titleId, ranges) {
+    const src = await cuesFor(titleId);
+    if (!src || !Array.isArray(ranges) || !ranges.length) return 0;
+    let n = 0;
+    for (const c of src.cues) {
+      if (!c.ai) continue;
+      if (ranges.some(([a, b]) => c.startMs >= a && c.startMs <= b)) { delete c.ai; n++; }
+    }
+    if (!n) return 0;
+    if (src.live && active && active.titleId === titleId) schedulePersist(true);
+    else {
+      src.obj.cues = src.cues.map(serializeCue);
+      await window.blobStore?.set(CACHE_PREFIX + titleId, JSON.stringify(src.obj));
+    }
+    return n;
+  }
+  // Stretches a proofread left exactly as transcribed (a chunk whose output
+  // failed twice): runs of >= minRun consecutive cues whose text still equals
+  // the pre-proofread backup, longest first. Ordinary untouched runs are short.
+  async function keptStretches(titleId, minRun = 40) {
+    const raw = await window.blobStore?.get(CACHE_PREFIX + titleId + PRECLEAN);
+    const src = await cuesFor(titleId);
+    if (!raw || !src) return [];
+    const before = new Map();
+    try { for (const c of JSON.parse(raw).cues || []) before.set(c.startMs, c.text); } catch (_) { return []; }
+    const out = [];
+    let s = -1;
+    const close = (e) => { if (s >= 0 && e - s + 1 >= minRun) out.push([src.cues[s].startMs, src.cues[e].startMs, e - s + 1]); s = -1; };
+    src.cues.forEach((c, i) => {
+      if (before.get(c.startMs) === c.text) { if (s < 0) s = i; }
+      else close(i - 1);
+    });
+    close(src.cues.length - 1);
+    return out.sort((a, b) => b[2] - a[2]).map(([a, b]) => [a, b]);
+  }
   async function backupBeforeClean(titleId) {
     const bs = window.blobStore;
     if (!bs || await bs.get(CACHE_PREFIX + titleId + PRECLEAN)) return;
@@ -1678,7 +1942,11 @@
     // One-time speech-model download. On Android this is a ~190 MB whisper
     // model fetched from the network — never start that silently.
     if (!a.installed) {
-      if (isAndroid) {
+      // Android's built-in recognizer: the system shows its own download
+      // consent for Google's Japanese pack (~52 MB) — no second prompt here.
+      if (isAndroid && a.engine === 'android') {
+        try { window.showToast?.(t('at.dl_system', 'Approve the Japanese speech pack download (about 52 MB) to generate subtitles'), 4500); } catch (_) {}
+      } else if (isAndroid) {
         const ok = confirm(t('at.dl_confirm',
           'Generating subtitles needs a one-time speech model download (about 190 MB, Wi-Fi recommended). Download now?'));
         if (!ok) {
@@ -1987,12 +2255,18 @@
       for (const r of (a.cov || [])) coveredMs += Math.max(0, r[1] - r[0]);
       const dur = a.durationMs || 0;
       return { covered: false, progress: 0, jobRunning: true, frontierMs: j.fedThroughMs,
-               coveragePct: dur > 0 ? Math.max(0, Math.min(100, Math.round(100 * coveredMs / dur))) : -1 };
+               coveragePct: dur > 0 ? Math.max(0, Math.min(100, Math.round(100 * coveredMs / dur))) : -1,
+               aheadMs: aheadCoveredMs(_powerAnchorMs || 0) };
     }
-    return syncState(lastPosMs);
+    const st = syncState(lastPosMs);
+    if (st) st.aheadMs = aheadCoveredMs(lastPosMs);   // subtitles ready past the listener
+    return st;
   }
 
   window.autoTranscribe = {
+    isCoveredMs,        // (ms) → transcribed there (active title)
+    syncTo,             // ({estMs, raw}) → exact ms of the target sentence | null
+    refineStart,        // (ms) → refined start when ms came from an uncovered estimate
     _spokenHeadings: spokenHeadings,
     progressState,      // () → null when nothing to wait on, else {progress, coveragePct, jobRunning}
     powerInfo,          // () → {charging, thermal, lowPower, parked, unlimited, aheadMs}
@@ -2018,6 +2292,8 @@
     isHeadlessBusy: () => !!headless,
     applyCleanEdits,    // (titleId, [{startMs, orig, text, pb}]) → cues changed
     applyRuby,          // (titleId, [{startMs, text, ruby}]) → cues given furigana
+    unmarkClean,        // (titleId, [[fromMs, toMs]]) → cues reopened for 校正
+    keptStretches,      // (titleId) → [[fromMs, toMs]] left untouched by a failed chunk
     rewriteAutoSrt,     // (titleId) → regenerate a finished title's auto SRT from its cues
     backupBeforeClean,  // (titleId) → keep the pre-clean-up transcript for undo
     restoreBeforeClean, // (titleId) → undo the clean-up; cues restored

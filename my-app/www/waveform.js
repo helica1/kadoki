@@ -1214,6 +1214,8 @@
               touch-action:none; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none;
             }
             #waveformEditorOverlay .mk-ch { padding:4px 0; transition:background-color .12s ease; }
+            #waveformEditorOverlay .mk-ch.wd { box-shadow:inset 0 -1px 0 rgba(255,255,255,0.16); }
+            #waveformEditorOverlay .mk-ch.we { padding-right:3px; }
             #waveformEditorOverlay .mk-ch.on {
               background:${rgba(modeColor, 0.3)}; color:#fff; box-shadow:inset 0 -2px 0 ${rgba(modeColor, 0.95)};
             }
@@ -1277,7 +1279,7 @@
               <button data-role="tr-explain" class="tr-btn" aria-expanded="false">Explain<span class="tr-chev"></span></button>
             </div>
             <div data-role="mk-panel" class="mk-panel" hidden>
-              <div class="mk-hint">Drag or tap to highlight what’s confusing. Leave it blank to explain only the advanced grammar.</div>
+              <div class="mk-hint">Tap words to highlight what’s confusing (words side by side make one phrase), or drag across a phrase. Leave it blank to explain only the advanced grammar.</div>
               <div data-role="mk-text" class="mk-text"></div>
               <div class="mk-foot">
                 <button data-role="mk-go" class="tr-btn">Explain advanced grammar</button>
@@ -1302,6 +1304,14 @@
           </div>
         `;
         overlay.appendChild(panel);
+        // iPhone / iPad: an iOS-style dialog (ios-feel.css) — a tall rounded
+        // card, the subtitles get the extra room, Cancel / Send bottom right.
+        const _ios = document.documentElement.classList.contains('kadoki-ios');
+        if (_ios) {
+          overlay.classList.add('kios');
+          overlay.style.setProperty('--kios-accent', modeColor);
+          panel.querySelector('[data-role="send"]')?.parentElement?.classList.add('kios-actions');
+        }
         document.body.appendChild(overlay);
         document.body.classList.add('prefs-open');
 
@@ -1511,6 +1521,41 @@
         const mkGo    = panel.querySelector('[data-role="mk-go"]');
         const mkClear = panel.querySelector('[data-role="mk-clear"]');
         let _mkChars = [], _mkOn = [], _mkFor = null, _mkAnchor = -1;
+        // Word units from the dictionary's own longest-match (deinflection-
+        // aware): _mkWord[i] = [start, end] of the word holding character i.
+        // Until segmentation finishes (or without a dictionary) each character
+        // is its own unit.
+        let _mkWord = [], _mkSegGen = 0;
+        const wordOf = (i) => _mkWord[i] || [i, i];
+        const PUNCT_RE = /[\s、。，．,.!?！？「」『』（）()…―・〜~"'“”‘’:;：；]/;
+        async function segmentMarkText(text) {
+          const gen = ++_mkSegGen;
+          const chars = Array.from(text);
+          const seg = window.dictSegmentWord;
+          if (typeof seg !== 'function') return;
+          const out = new Array(chars.length);
+          // dictSegmentWord indexes UTF-16 code units; map char → offset.
+          const off = []; let o = 0; for (const c of chars) { off.push(o); o += c.length; }
+          let i = 0;
+          while (i < chars.length) {
+            if (PUNCT_RE.test(chars[i])) { out[i] = [i, i]; i++; continue; }
+            let len = 1;
+            try {
+              const r = await seg(text, off[i]);
+              const units = Math.max(1, Number(r && r.length) || 1);
+              // code units → characters
+              let n = 0, u = 0;
+              while (i + n < chars.length && u < units) { u += chars[i + n].length; n++; }
+              len = Math.max(1, n);
+            } catch (_) {}
+            if (gen !== _mkSegGen) return;          // passage changed meanwhile
+            for (let k = i; k < i + len; k++) out[k] = [i, i + len - 1];
+            i += len;
+          }
+          if (gen !== _mkSegGen) return;
+          _mkWord = out;
+          paintMarks();
+        }
         function markPhrases() {
           const out = [];
           let cur = '';
@@ -1530,6 +1575,9 @@
             spans[i].classList.toggle('s', on && !_mkOn[i - 1]);   // rounded ends of each highlight
             spans[i].classList.toggle('e', on && !_mkOn[i + 1]);
             spans[i].classList.toggle('anchor', i === _mkAnchor);
+            const w = _mkWord[i];
+            spans[i].classList.toggle('wd', !!w && !PUNCT_RE.test(_mkChars[i]));
+            spans[i].classList.toggle('we', !!w && w[1] === i && i < spans.length - 1);
           }
           const n = markPhrases().length;
           if (mkGo) mkGo.textContent = n ? ('Explain ' + n + ' highlight' + (n > 1 ? 's' : '')) : 'Explain advanced grammar';
@@ -1543,6 +1591,8 @@
           _mkChars = Array.from(text);
           _mkOn = _mkChars.map(() => false);
           _mkAnchor = -1;
+          _mkWord = [];
+          segmentMarkText(text);
           mkText.textContent = '';
           _mkChars.forEach((ch, i) => {
             const s = document.createElement('span');
@@ -1573,7 +1623,7 @@
             if (j < 0 || j === drag.last) return;
             drag.last = j;
             drag.moved = true;
-            const lo = Math.min(drag.anchor, j), hi = Math.max(drag.anchor, j);
+            const lo = Math.min(wordOf(drag.anchor)[0], wordOf(j)[0]), hi = Math.max(wordOf(drag.anchor)[1], wordOf(j)[1]);
             for (let k = 0; k < _mkOn.length; k++) _mkOn[k] = (k >= lo && k <= hi) ? drag.value : drag.before[k];
             _mkAnchor = -1;
             paintMarks();
@@ -1584,21 +1634,13 @@
             drag = null;
             if (d.moved) return;
             const i = d.anchor;
-            if (_mkOn[i]) {
-              // Tap on a highlight clears that whole phrase.
-              let lo = i, hi = i;
-              while (lo > 0 && _mkOn[lo - 1]) lo--;
-              while (hi < _mkOn.length - 1 && _mkOn[hi + 1]) hi++;
-              for (let k = lo; k <= hi; k++) _mkOn[k] = false;
-              _mkAnchor = -1;
-            } else if (_mkAnchor >= 0) {
-              // Second tap: highlight from the first tapped character through this one.
-              const lo = Math.min(_mkAnchor, i), hi = Math.max(_mkAnchor, i);
-              for (let k = lo; k <= hi; k++) _mkOn[k] = true;
-              _mkAnchor = -1;
-            } else {
-              _mkAnchor = i;                    // first tap marks the start
-            }
+            // A tap toggles the whole word (dictionary segmentation);
+            // neighbouring highlighted words read as one phrase.
+            const [lo, hi] = wordOf(i);
+            const on = !_mkOn[i];
+            for (let k = lo; k <= hi; k++) _mkOn[k] = on;
+            _mkAnchor = -1;
+            try { window.kHaptic?.('LIGHT'); } catch (_) {}
             paintMarks();
           });
           mkText.addEventListener('pointercancel', () => { drag = null; });
@@ -1752,7 +1794,14 @@
         const close = (result) => {
           _closed = true;
           try { this.hide(); } catch (e) {}
-          overlay.remove();
+          if (_ios) {
+            // Fade the dialog away, then remove it.
+            overlay.classList.add('kios-out');
+            overlay.style.pointerEvents = 'none';
+            setTimeout(() => overlay.remove(), 200);
+          } else {
+            overlay.remove();
+          }
           document.body.classList.remove('prefs-open');
           // Resume the audiobook if we paused it on open.
           if (_editWasPlaying) { try { _bgEdit?.resume?.({ fadeMs: 120 }); } catch (_) {} }

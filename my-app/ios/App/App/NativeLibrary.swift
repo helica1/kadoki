@@ -31,6 +31,8 @@ final class KadokiNativeLibrary: NSObject, WKScriptMessageHandler {
         case "open":
             if let json = d["model"] as? String { store.load(json) }
             if let vc = hostVC { overlay.show(LibraryRootView(store: store), in: vc) }
+        case "model":
+            if let json = d["model"] as? String { store.load(json) }
         case "closed":
             overlay.hide()
         case "cover":
@@ -70,7 +72,7 @@ struct LibTitle: Identifiable, Hashable {
 }
 
 struct LibGroup: Identifiable {
-    let id: Int
+    let id: String
     let series: String
     let titles: [LibTitle]
 }
@@ -127,7 +129,7 @@ final class LibraryStore: ObservableObject {
         folders = ((d["folders"] as? [[String: Any]]) ?? []).map { LibFolder(name: $0["name"] as? String ?? "", count: $0["count"] as? Int ?? 0) }
         pinned = ((d["pinned"] as? [[String: Any]]) ?? []).map(title)
         groups = ((d["groups"] as? [[String: Any]]) ?? []).enumerated().map { i, g in
-            LibGroup(id: i, series: g["series"] as? String ?? "", titles: ((g["titles"] as? [[String: Any]]) ?? []).map(title))
+            LibGroup(id: "g\(i)", series: g["series"] as? String ?? "", titles: ((g["titles"] as? [[String: Any]]) ?? []).map(title))
         }
         empty = d["empty"] as? String ?? ""
         view = d["view"] as? String ?? "list"
@@ -147,11 +149,22 @@ final class LibraryStore: ObservableObject {
     }
 
     func act(_ action: String, _ id: String = "", _ arg: String = "") {
+        // Delete asks here, natively: the web confirm() was an alert from
+        // another view controller landing while the swiped row animated shut.
+        if action == "delete" {
+            // Let the swipe / context menu finish closing first.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.confirmDelete = self?.allTitles.first { $0.id == id } ?? self?.pinned.first { $0.id == id }
+            }
+            return
+        }
         webView?.callAsyncJavaScript("return await window.__kadokiLibAction(a, id, arg)",
                                      arguments: ["a": action, "id": id, "arg": arg], in: nil, in: .page) { [weak self] r in
             if case .success(let v) = r, let json = v as? String, !json.isEmpty { self?.load(json) }
         }
     }
+    @Published var confirmDelete: LibTitle?
+    func deleteConfirmed(_ id: String) { act("deleteNow", id) }
 
     func close() { webView?.evaluateJavaScript("window.__kadokiLibClose()", completionHandler: nil) }
 
@@ -160,14 +173,18 @@ final class LibraryStore: ObservableObject {
     /// What to draw: runs of standalone titles share one grid / list; each
     /// series is its own block under its name.
     func blocks(_ keep: (LibTitle) -> Bool) -> [LibGroup] {
+        // Section ids must not be positions: removing one block would shift
+        // every later block's identity, and UIKit's list aborts on that kind
+        // of mismatched update (it crashed deleting a title).
         var out: [LibGroup] = []
         var run: [LibTitle] = []
-        func flush() { if !run.isEmpty { out.append(LibGroup(id: out.count, series: "", titles: run)); run = [] } }
+        var runs = 0
+        func flush() { if !run.isEmpty { out.append(LibGroup(id: "run:\(runs)", series: "", titles: run)); runs += 1; run = [] } }
         for g in groups {
             let t = g.titles.filter(keep)
             if g.series.isEmpty { run += t; continue }
             flush()
-            if !t.isEmpty { out.append(LibGroup(id: out.count, series: g.series, titles: t)) }
+            if !t.isEmpty { out.append(LibGroup(id: "series:" + g.series, series: g.series, titles: t)) }
         }
         flush()
         return out
@@ -196,6 +213,14 @@ struct LibraryRootView: View {
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: LibTitle.self) { t in TitleDetail(store: store, id: t.id) }
             .toolbar { toolbar }
+            .confirmationDialog(store.str("delConfirm", "Remove this title from your library?"),
+                                isPresented: Binding(get: { store.confirmDelete != nil }, set: { if !$0 { store.confirmDelete = nil } }),
+                                titleVisibility: .visible, presenting: store.confirmDelete) { t in
+                Button(store.str("del", "Delete"), role: .destructive) {
+                    path.removeAll { $0.id == t.id }
+                    store.deleteConfirmed(t.id)
+                }
+            } message: { t in Text(t.name) }
         }
         .preferredColorScheme(.dark)
     }
@@ -287,6 +312,7 @@ struct LibraryRootView: View {
             Menu {
                 Button { store.act("newTitle") } label: { Label(store.str("newTitle", "New title"), systemImage: "plus.rectangle.on.rectangle") }
                 Button { store.act("importFolder") } label: { Label(store.str("importFolder", "Import folder"), systemImage: "folder.badge.plus") }
+                Button { store.act("importTtu") } label: { Label(store.str("importTtu", "Import ッツ backup"), systemImage: "arrow.down.doc") }
                 Button { store.act("newFolder") } label: { Label(store.str("newFolder", "New folder"), systemImage: "folder") }
             } label: {
                 Image(systemName: "plus")

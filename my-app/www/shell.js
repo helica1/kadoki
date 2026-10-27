@@ -1300,6 +1300,10 @@
     out.push({ id: 'stats', label: t('menu.stats', 'Stats…'), icon: 'chart.bar', top: true,
       fn: () => { if (typeof window.openReadingStats === 'function') window.openReadingStats(); } });
     div();
+    if (window.wifiTransferAvailable && window.wifiTransferAvailable()) {
+      out.push({ id: 'wifi_transfer', label: t('menu.wifi_transfer', 'Wi-Fi Transfer…'), icon: 'wifi',
+        fn: () => { try { window.wifiTransfer.open(); } catch (_) {} } });
+    }
     out.push({ id: 'speed', label: t('menu.playback_speed', 'Playback Speed…'), icon: 'gauge.with.dots.needle.67percent',
       fn: () => { if (typeof window.openPlaybackSpeedDialog === 'function') window.openPlaybackSpeedDialog(); } });
     // Audio output (iOS): the system AirPods / speaker sheet, for when the

@@ -143,10 +143,11 @@
     const tab = ensureVideoTab();
     const audioTab = document.querySelector('#shellModeTabs .mode-tab[data-mode="audio"]');
     if (!tab) return;
-    // Always visible on Vision/iPad; faded (data-empty) when the active title
-    // has no video. iPhone: no header room — the pill only exists while a
-    // video Title is active (it replaces the hidden AUDIO tab).
-    tab.style.display = (_isPhone && !_isVideoTitle) ? 'none' : '';
+    // Titles show only their own modes (titleStore.shownModes), so the pill
+    // exists only while a video Title is active (it replaces the hidden AUDIO
+    // tab) — on phones, tablets and the unfolded Fold alike. Vision keeps it
+    // always visible (faded via data-empty) as the entry point for video.
+    tab.style.display = (_isVideoTitle || window.KADOKI_VISION) ? '' : 'none';
     if (_isVideoTitle) {
       delete tab.dataset.empty;
       if (audioTab) audioTab.style.display = 'none';

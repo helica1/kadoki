@@ -199,7 +199,19 @@
       try { WB()?.setLiveContext?.({ titleId: null }); } catch (_) {}
     },
   };
-  window.addEventListener('shell:title-change', () => { window.watchLive.setActive(window._activeTitleId); });
+  // Keep the live stream tagged with the open title. Only a title CHANGE used
+  // to set it, so after a relaunch that restored the last title the frames
+  // went out untagged and the watch showed "nothing playing".
+  let _liveTid;
+  const syncLive = () => {
+    const tid = window._activeTitleId || null;
+    if (tid === _liveTid || !WB()) return;
+    _liveTid = tid;
+    window.watchLive.setActive(tid);
+  };
+  window.addEventListener('shell:title-change', () => { _liveTid = undefined; syncLive(); });
+  setTimeout(syncLive, 2000);
+  setInterval(syncLive, 5000);
 
   // ---- watch listening → chars heard, Timeline coverage, furthest-reached ---
   // The watch reports listen-time deltas with a position checkpoint, but the
@@ -269,9 +281,15 @@
         try {
           const el = document.getElementById('watchSendStatus');
           if (!el || !d?.transfers?.length) return;
-          const parts = d.transfers.map((t) =>
-            (t.role === 'audio' ? 'audio ' : 'cues ') + Math.round((t.fraction || 0) * 100) + '%');
-          el.textContent = 'Transferring: ' + parts.join(' · ');
+          // One entry per kind (subtitles / cover / audio): the queue can
+          // hold several, and listing each read as "cues 0% · cues 0% · …".
+          const label = { audio: 'audio', cover: 'cover', cues: 'subtitles' };
+          const by = new Map();
+          for (const t of d.transfers) {
+            const k = label[t.role] || 'subtitles';
+            by.set(k, Math.max(by.get(k) || 0, t.fraction || 0));
+          }
+          el.textContent = 'Transferring: ' + [...by].map(([k, f]) => k + ' ' + Math.round(f * 100) + '%').join(' · ');
         } catch (_) {}
       });
       plugin.addListener('watchTransferDone', (d) => {

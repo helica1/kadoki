@@ -200,7 +200,7 @@
           (a.name || '').localeCompare(b.name || '', undefined, { numeric: true, sensitivity: 'base' }));
         const series = eps.map(v => {
           const m = matchByStem(v, srts, false);
-          return { video: { uri: v.uri, name: v.name }, srt: m ? { uri: m.uri, name: m.name } : null };
+          return { video: part(v), srt: m ? part(m) : null };
         });
         books.push({
           name: folderName || stripExt(eps[0].name) || 'Untitled',
@@ -239,15 +239,22 @@
     return (clean || stem) || 'Untitled';
   }
 
+  // A file the app already holds (Wi-Fi Transfer inbox: `local` set, no uri)
+  // is attached by its path — opened in place, never copied to the cache.
+  function part(f) {
+    const a = { name: f.name };
+    if (f.uri) a.uri = f.uri;
+    if (f.cachePath) a.cachePath = f.cachePath;
+    return a;
+  }
   function attachmentsFor(book) {
     const att = {};
-    if (book.epub)  att.epub      = { uri: book.epub.uri,  name: book.epub.name };
-    if (book.epub && book.epub.cachePath) att.epub.cachePath = book.epub.cachePath;   // materialized for the metadata read
+    if (book.epub)  att.epub      = part(book.epub);   // cachePath: materialized for the metadata read, or local
     if (book.audio) {
-      att.audiobook = { uri: book.audio.uri, name: book.audio.name };
+      att.audiobook = part(book.audio);
       if (VIDEO_EXTS.has(book.audio.ext)) att.audiobook.isVideo = true;
     }
-    if (book.srt)   att.srt       = { uri: book.srt.uri,   name: book.srt.name };
+    if (book.srt)   att.srt       = part(book.srt);
     if (book.series) att.series   = book.series;
     return att;
   }
@@ -425,10 +432,14 @@
 
   // ---------- orchestration ----------
 
-  async function importFolder() {
+  // preset: a scan result supplied by the caller instead of the folder
+  // picker — {rootName, files:[{name, dir, relPath, ext, cachePath}]} (Wi-Fi
+  // Transfer). Same pairing, dedupe and review sheet.
+  async function importFolder(preset) {
     if (importing) return;
+    if (!(preset && Array.isArray(preset.files))) preset = null;
     const fa = window.Capacitor?.Plugins?.FileAccess;
-    if (!fa || typeof fa.pickFolderTree !== 'function') {
+    if (!preset && (!fa || typeof fa.pickFolderTree !== 'function')) {
       alert('Folder import requires the installed app (the native folder picker is unavailable here).');
       return;
     }
@@ -450,7 +461,7 @@
 
       let res;
       try {
-        res = await fa.pickFolderTree();
+        res = preset || await fa.pickFolderTree();
       } catch (e) {
         if (String(e?.message || e).toLowerCase().includes('cancel')) { hideModal(); return; }
         throw e;
@@ -485,7 +496,9 @@
 
       const groups = groupByDir(playable);
       let books = [];
-      for (const [dir, gf] of groups) books = books.concat(classifyFolder(dir, gf, res.rootName));
+      // noFolderNames (Wi-Fi Transfer): the batch "folder" is not a book's
+      // name — every title takes its book / file name instead.
+      for (const [dir, gf] of groups) books = books.concat(classifyFolder(dir, gf, res.noFolderNames ? '' : res.rootName));
       // Cross-folder pass: an EPUB left alone in one folder and an audiobook
       // left alone in another (e.g. "epubs/" + "audio/" subfolders) pair up
       // here — with a STRICTER bar than within a folder, since a shared folder
@@ -609,7 +622,14 @@
   // for very large libraries the audio fallback copies whole files.
   async function extractCoversForImport(titles) {
     const fa = window.Capacitor?.Plugins?.FileAccess;
-    if (!fa?.materializeToCache || !window.coverExtract || !window.titleStore) return;
+    if (!window.coverExtract || !window.titleStore) return;
+    // A local file (Wi-Fi inbox) is read where it is; a picked one is
+    // materialized first.
+    const pathOf = async (att) => {
+      if (att?.cachePath && !att.uri) return att.cachePath;
+      if (att?.uri && fa?.materializeToCache) { const m = await fa.materializeToCache({ uri: att.uri }); return m?.path || null; }
+      return null;
+    };
     let attached = 0;
     const rerender = async () => {
       if (typeof window.populateLibrary === 'function') { try { await window.populateLibrary(); } catch (_) {} }
@@ -622,16 +642,16 @@
       // re-extraction or the cover would never self-heal.
       if (!t?.id || !a || a.cover?.dataUri) continue;
       let cover = null;
-      if (a.epub?.uri && window.coverExtract.fromEpub) {
+      if (a.epub && window.coverExtract.fromEpub) {
         try {
-          const m = await fa.materializeToCache({ uri: a.epub.uri });
-          if (m?.path) { cover = await window.coverExtract.fromEpub(m.path); if (cover) cover.source = 'epub'; }
+          const p = await pathOf(a.epub);
+          if (p) { cover = await window.coverExtract.fromEpub(p); if (cover) cover.source = 'epub'; }
         } catch (_) {}
       }
-      if (!cover && a.audiobook?.uri && window.coverExtract.fromAudio) {
+      if (!cover && a.audiobook && window.coverExtract.fromAudio) {
         try {
-          const m = await fa.materializeToCache({ uri: a.audiobook.uri });
-          if (m?.path) { cover = await window.coverExtract.fromAudio(m.path); if (cover) cover.source = 'id3'; }
+          const p = await pathOf(a.audiobook);
+          if (p) { cover = await window.coverExtract.fromAudio(p); if (cover) cover.source = 'id3'; }
         } catch (_) {}
       }
       if (cover?.dataUri) {

@@ -221,10 +221,17 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
 
         var meta: [String: Any] = ["titleId": titleId, "name": name, "durMs": durMs]
 
+        // Newest wins: an older subtitles / cover transfer for this title still
+        // waiting in the queue is superseded by this one (auto-sync used to
+        // stack them up by the dozen).
+        cancelQueued(titleId: titleId, roles: ["cues", "cover"])
+
         // cues.json — tiny, send first so the watch shows the title promptly.
+        // A unique file per send, so a queued transfer's file is never
+        // rewritten underneath it.
         do {
             let tmp = FileManager.default.temporaryDirectory
-                .appendingPathComponent("watch_cues_\(titleId).json")
+                .appendingPathComponent("watch_cues_\(titleId)_\(Int(Date().timeIntervalSince1970 * 1000)).json")
             let data = try JSONSerialization.data(withJSONObject: cues)
             try data.write(to: tmp)
             meta["role"] = "cues"
@@ -291,6 +298,34 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         guard activationState == .activated else { return }
         let ctx = session.receivedApplicationContext
         if !ctx.isEmpty { deliverPositions(from: ctx) }
+        pruneQueue(session)
+    }
+
+    /// Cancel queued subtitle / cover transfers for a title (a newer one replaces them).
+    private func cancelQueued(titleId: String, roles: Set<String>) {
+        for t in WCSession.default.outstandingFileTransfers {
+            let m = t.file.metadata ?? [:]
+            if (m["titleId"] as? String) == titleId, roles.contains((m["role"] as? String) ?? "") { t.cancel() }
+        }
+    }
+
+    /// Transfers survive app reinstalls, but a development install moves the
+    /// app's container, so a queued transfer whose file no longer exists can
+    /// never finish (they sat at 0 % forever). Drop those, and keep only the
+    /// newest subtitles / cover transfer per title.
+    private func pruneQueue(_ session: WCSession) {
+        var newest: [String: WCSessionFileTransfer] = [:]
+        var dropped = 0
+        for t in session.outstandingFileTransfers {
+            let m = t.file.metadata ?? [:]
+            if !FileManager.default.fileExists(atPath: t.file.fileURL.path) { t.cancel(); dropped += 1; continue }
+            let role = (m["role"] as? String) ?? ""
+            guard role == "cues" || role == "cover" else { continue }
+            let key = ((m["titleId"] as? String) ?? "") + "|" + role
+            if let prev = newest[key] { prev.cancel(); dropped += 1 }
+            newest[key] = t
+        }
+        if dropped > 0 { NSLog("[WatchBridge] pruned %d stale/duplicate queued transfers", dropped) }
     }
 
     public func sessionDidBecomeInactive(_ session: WCSession) {}

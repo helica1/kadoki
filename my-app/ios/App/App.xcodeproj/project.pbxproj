@@ -35,6 +35,7 @@
 		73B4DEED4977D9AC3D3484BF /* TranslatorPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4328E110C4956F780BB66F5 /* TranslatorPlugin.swift */; };
 		763A6A097EB909AC131545C6 /* AudioSlicerPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */; };
 		77A1B2C3D4E5F60718293A4B /* AutoTranscribePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */; };
+		89C7346B5581C7036D85A644 /* NativeTitleEdit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05D58513B49F85FC7E39D5EC /* NativeTitleEdit.swift */; };
 		89FA94E6170CADEA9D06609A /* KadokiLockWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10CF8B633B1A1CE39687EF4 /* KadokiLockWidget.swift */; };
 		8E60C14E1A34E9B535E2E79B /* KadokiReadEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D3FA1B1B9EBF0D83BD4DE0 /* KadokiReadEngine.swift */; };
 		93632E963BCBAEBF6763FC59 /* NativePrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F16D4D7731BB0F6448A171 /* NativePrefs.swift */; };
@@ -129,6 +130,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		05D58513B49F85FC7E39D5EC /* NativeTitleEdit.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativeTitleEdit.swift; sourceTree = "<group>"; };
 		117998D12F0CF62C2821B4A5 /* libkadokiremux-xros.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; path = "libkadokiremux-xros.a"; sourceTree = "<group>"; };
 		11DC002FECA73D02592DD93A /* KadokiVideoIOS.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoIOS.swift; sourceTree = "<group>"; };
 		15D3FA1B1B9EBF0D83BD4DE0 /* KadokiReadEngine.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiReadEngine.swift; sourceTree = "<group>"; };
@@ -330,6 +332,7 @@
 				4167E3396F070B02ACF5DDA8 /* NativeChrome.swift */,
 				B6F16D4D7731BB0F6448A171 /* NativePrefs.swift */,
 				8D86C671BE9F38D4F6B24A2D /* NativeLibrary.swift */,
+				05D58513B49F85FC7E39D5EC /* NativeTitleEdit.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -676,6 +679,7 @@
 				FF5C208F8B794C6B89A32DAE /* NativeChrome.swift in Sources */,
 				93632E963BCBAEBF6763FC59 /* NativePrefs.swift in Sources */,
 				0B0DC6DB9A8A0823ED499CB5 /* NativeLibrary.swift in Sources */,
+				89C7346B5581C7036D85A644 /* NativeTitleEdit.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -755,14 +759,14 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = KadokiLockWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -779,14 +783,14 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = KadokiLockWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.widget;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -912,7 +916,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]" = (
 					"[\"[\\\"DepthAnythingV2SmallF16.mlpackage\\\",\",",
@@ -947,7 +951,7 @@
 				"INFOPLIST_KEY_UIApplicationSupportsMultipleScenes[sdk=xros*]" = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.9.1;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"-lbz2",
@@ -1031,7 +1035,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]" = (
 					"[\"[\\\"DepthAnythingV2SmallF16.mlpackage\\\",\",",
@@ -1066,7 +1070,7 @@
 				"INFOPLIST_KEY_UIApplicationSupportsMultipleScenes[sdk=xros*]" = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.9.1;
 				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
 					"$(inherited)",
 					"-lbz2",
@@ -1150,7 +1154,7 @@
 				CODE_SIGN_ENTITLEMENTS = KadokiWatch/KadokiWatch.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1159,7 +1163,7 @@
 				INFOPLIST_KEY_WKApplication = YES;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.helica1.yama;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
@@ -1178,7 +1182,7 @@
 				CODE_SIGN_ENTITLEMENTS = KadokiWatch/KadokiWatch.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1187,7 +1191,7 @@
 				INFOPLIST_KEY_WKApplication = YES;
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.helica1.yama;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.watchkitapp;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
@@ -1205,13 +1209,13 @@
 				CODE_SIGN_ENTITLEMENTS = KadokiWatchWidgets/KadokiWatchWidgets.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = KadokiWatchWidgets/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.watchkitapp.widgets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;
@@ -1229,13 +1233,13 @@
 				CODE_SIGN_ENTITLEMENTS = KadokiWatchWidgets/KadokiWatchWidgets.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 32;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = KadokiWatchWidgets/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
-				MARKETING_VERSION = 1.9.0;
+				MARKETING_VERSION = 1.9.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.watchkitapp.widgets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = watchos;

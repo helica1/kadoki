@@ -5802,7 +5802,12 @@ window.toggleReadingPlayback = function () {
           // Restart from the visible line instead.
           const ms = Math.max(0, Math.round(visMs) - (window.AUDIO_START_OFFSET_MS || 0));
           try { window.debugLog?.('[reader-play] ready@' + s.positionMs + ' far from visible ' + Math.round(visMs) + ' → play from visible'); } catch (_) {}
-          bg.play({ url, startMs: ms, rate: window.audioPlaybackRate || 1 }).catch(() => {});
+          (async () => {
+            // Untranscribed page: sync to it first (≤20 s) — see autoTranscribe.refineStart.
+            let m = ms;
+            try { m = await (window.autoTranscribe?.refineStart?.(ms) ?? ms); } catch (_) {}
+            bg.play({ url, startMs: m, rate: window.audioPlaybackRate || 1 }).catch(() => {});
+          })();
         } else {
           // Pause any deck-mode card audio first so we don't get a
           // cacophony of two sources.
@@ -5836,6 +5841,8 @@ window.toggleReadingPlayback = function () {
                 }
               }
             } catch (_) {}
+            // Untranscribed page: sync to it first (≤20 s) — see autoTranscribe.refineStart.
+            try { ms = await (window.autoTranscribe?.refineStart?.(ms) ?? ms); } catch (_) {}
             bg.play({ url, startMs: ms, rate: window.audioPlaybackRate || 1 })
               .then(() => console.log('[reader-play] bg.play resolved @' + ms))
               .catch(err => console.warn('[reader-play] bg.play err: ' + err?.message));

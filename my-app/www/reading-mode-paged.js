@@ -672,7 +672,11 @@
       const t = (k, d) => (window.i18n?.t?.(k, d) || d);
       let label = t('at.generating', 'Generating subtitles on device…');
       if (pct > 0) label += ' ' + pct + '%';
-      if (st.coveragePct >= 0) label += ' · ' + t('at.overall', 'overall') + ' ' + st.coveragePct + '%';
+      // A long book sits at "0%" overall for a while: show what is ready
+      // ahead of the listener instead, once there is some.
+      const aheadMin = Math.floor((st.aheadMs || 0) / 60000);
+      if (aheadMin >= 1) label += ' · ' + window.i18n.fmt('at.ready_ahead', { n: aheadMin });
+      else if (st.coveragePct >= 0) label += ' · ' + t('at.overall', 'overall') + ' ' + st.coveragePct + '%';
       _syncPillEl.querySelector('.psy-label').textContent = label;
       const fill = _syncPillEl.querySelector('.psy-fill');
       if (pct > 0) { fill.classList.remove('idle'); fill.style.width = pct + '%'; }
@@ -1572,9 +1576,13 @@
       if (durMs > 60000) est = Math.min(est, durMs);
       const lastEnd = (cues && cues.length) ? (cues[cues.length - 1].endMs || cues[cues.length - 1].startMs || 0) : 0;
       const fullyCovered = durMs > 60000 && lastEnd >= durMs * 0.92;
+      // Auto-transcribed title: its real coverage map knows the holes (a jump
+      // ahead leaves untranscribed audio BEHIND the newest cues too).
+      let cov = null;
+      try { cov = window.autoTranscribe?.isCoveredMs?.(est); } catch (_) {}
       return {
-        est, durMs, lastEnd,
-        uncovered: !fullyCovered && est > lastEnd + 45000,
+        est, durMs, lastEnd, off,
+        uncovered: cov === false ? true : (!fullyCovered && est > lastEnd + 45000),
       };
     } catch (_) { return null; }
   }
@@ -1770,6 +1778,8 @@
           cueStartMs:   nearest?.startMs ?? null,
           cueEndMs:     nearest?.endMs   ?? null,
           cueEstimated: !!nearest?.est,
+          // Uncovered-region estimate → "Set playhead" syncs before playing.
+          syncHint: nearest?.est ? (window._syncHint || null) : null,
           bookFrac
         };
         log(`bindCueLookupContext: no cue — sentence-fallback "${sentence.slice(0,30)}…"` +
@@ -1872,7 +1882,11 @@
       const e0 = _estAudioMsFor(chunk, cues);
       if (e0 && e0.uncovered) {
         log('findNearestChunkCue: UNCOVERED — estimate ' + Math.round(e0.est / 1000) + 's (coverage ends ' + Math.round(e0.lastEnd / 1000) + 's)');
-        return { idx: -1, startMs: Math.max(0, Math.round(e0.est) - 4000), endMs: null, est: true };
+        const startMs = Math.max(0, Math.round(e0.est) - 4000);
+        // Lets the player refine this estimate by a seek sync
+        // (autoTranscribe.refineStart) before it starts playing.
+        window._syncHint = { est: e0.est, startMs, raw: e0.off + Math.max(0, charIndex | 0), at: Date.now() };
+        return { idx: -1, startMs, endMs: null, est: true };
       }
     }
 
@@ -6617,6 +6631,26 @@
       const _bmRaw = await getPref(KEY_BOOKMARK_PREFIX + name);
       const _bmIdx = (_bmRaw != null && _bmRaw !== '') ? parseInt(_bmRaw) : -1;
       _bookmarkChunkIdx = (Number.isFinite(_bmIdx) && _bmIdx >= 0) ? _bmIdx : -1;
+      // A book imported from ッツ (ttu-import.js) carries ttu's reading place
+      // as a character count — counted exactly as jpOff is. Used ONLY when
+      // this book has no Kadoki bookmark yet, then consumed.
+      if (_bookmarkChunkIdx < 0 && chunks.length) {
+        try {
+          const _tid = currentTitleId || window._activeTitleId;
+          const _t = _tid ? await window.titleStore?.get?.(_tid) : null;
+          const _pos = Number(_t && _t.ttuPos) || 0;
+          if (_pos > 0) {
+            let _ix = 0;
+            for (let i = 0; i < chunks.length; i++) {
+              if ((parseInt(chunks[i].dataset.jpOff) || 0) <= _pos) _ix = i; else break;
+            }
+            _bookmarkChunkIdx = _ix;
+            await setPref(KEY_BOOKMARK_PREFIX + name, String(_ix));
+            await window.titleStore.update(_t.id, { ttuPos: 0 });
+            log('ttu place → chunk ' + _ix + ' (' + _pos + ' chars)');
+          }
+        } catch (_) {}
+      }
       _bookmarkCueIdx = -1;
       try {
         const rc = JSON.parse(await getPref(KEY_READ_CUE_PREFIX + name) || 'null');

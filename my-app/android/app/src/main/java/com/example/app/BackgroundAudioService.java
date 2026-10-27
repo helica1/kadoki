@@ -557,7 +557,12 @@ public class BackgroundAudioService extends Service {
                         .build();
                 }
             };
-            ExoPlayer p = new ExoPlayer.Builder(getApplicationContext(), rf).build();
+            // MP3 seeks by an exact frame index (ExactExtractors): the stock Xing
+            // seeker lands VBR audiobooks tens of seconds from the reported time.
+            ExoPlayer p = new ExoPlayer.Builder(getApplicationContext(), rf)
+                .setMediaSourceFactory(new androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+                    getApplicationContext(), new ExactExtractors(getApplicationContext())))
+                .build();
             exo = p;
             AudioAttributes attrs = new AudioAttributes.Builder()
                 .setUsage(C.USAGE_MEDIA)

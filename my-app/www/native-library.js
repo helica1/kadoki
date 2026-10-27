@@ -17,6 +17,15 @@
   let nativeOpen = false;
   const titleById = new Map();
 
+  // Decode every cover once, quietly, a little after launch, so the first
+  // Library open doesn't wait on it.
+  setTimeout(async () => {
+    try {
+      const all = (await window.titleStore?.list?.()) || [];
+      for (const t of all) { await thumb(t); await new Promise(r => setTimeout(r, 30)); }
+    } catch (_) {}
+  }, 8000);
+
   // ---- cover thumbnails (cached per title + source) ----
   const thumbs = new Map();
   function thumb(t) {
@@ -106,14 +115,11 @@
       }
     } catch (_) {}
     const shown = libSortTitles(here.filter(t => libFilterPass(t, blurbs[t.id])), blurbs);
-    const groups = [];
-    for (const g of groupSeries(shown)) {
-      if (g.type === 'series') {
-        groups.push({ series: seriesDisplayName(g.titles[0]?.name), titles: await Promise.all(g.titles.map(t => describeTitle(t, blurbs[t.id]))) });
-      } else {
-        groups.push({ series: '', titles: [await describeTitle(g.t, blurbs[g.t.id])] });
-      }
-    }
+    // All titles at once: each cover decodes on its own (one after another,
+    // a big library took a second or two to open).
+    const groups = await Promise.all(groupSeries(shown).map(async (g) => g.type === 'series'
+      ? { series: seriesDisplayName(g.titles[0]?.name), titles: await Promise.all(g.titles.map(t => describeTitle(t, blurbs[t.id]))) }
+      : { series: '', titles: [await describeTitle(g.t, blurbs[g.t.id])] }));
     const pinned = cur ? [] : await Promise.all(all.filter(t => t.pinnedAt && !t.cloudOnly).slice(0, PIN_MAX).map(t => describeTitle(t, null)));
     return {
       title: T('lib.library', 'Library'),
@@ -135,8 +141,8 @@
         open: T('lib.open', 'Open'), pin: T('lib.pin', 'Pin'), unpin: T('lib.unpin', 'Unpin'),
         want: T('lib.want', 'Want to read'), readingBook: T('lib.reading_book', 'Reading book'),
         move: T('lib.move', 'Move'), stats: T('lib.stats', 'Stats'), edit: T('lib.edit', 'Edit'),
-        del: T('lib.delete', 'Delete'), summarize: T('lib.summarize', 'Summarize'), newSummary: T('lib.new_summary', 'New summary'),
-        newTitle: T('lib.new_title', 'New title').replace(/^[+＋]\s*/, ''), importFolder: T('lib.import_folder', 'Import folder'),
+        del: T('lib.delete', 'Delete'), delConfirm: T('lib.delete_confirm', 'Remove this title from your library?'), summarize: T('lib.summarize', 'Summarize'), newSummary: T('lib.new_summary', 'New summary'),
+        newTitle: T('lib.new_title', 'New title').replace(/^[+＋]\s*/, ''), importFolder: T('lib.import_folder', 'Import folder'), importTtu: T('lib.import_ttu', 'Import ッツ backup'),
         newFolder: T('lib.new_folder', 'New folder'), list: T('lib.view_list', 'List'), gallery: T('lib.view_gallery', 'Gallery'),
         show: T('lib.show', 'Show'), sort: T('lib.sort', 'Sort'), library: T('lib.library', 'Library'),
         noSummary: window.ai?.isEnabled?.() ? T('lib.summary_none', 'No summary yet.') : T('lib.summary_ai_off', 'Enable the AI assistant in Preferences to get summaries.'),
@@ -164,7 +170,10 @@
       case 'edit': openTitleEdit(id); break;
       case 'summarize': try { await window.libraryBlurb.regenerate(id); } catch (_) {} break;
       case 'delete':
-        if (!(window.titleStore && confirm('Remove this title from your library?'))) break;
+        if (!(window.titleStore && confirm(T('lib.delete_confirm', 'Remove this title from your library?')))) break;
+        // falls through
+      case 'deleteNow':   // native already asked (its own confirmation dialog)
+        if (!window.titleStore) break;
         // Deletes are local-only: dismiss the syncId FIRST so an immediate Sync
         // can't resurrect it from the cloud index (as the web library does).
         try { if (t && t.syncId && window.driveIndex) await window.driveIndex.dismiss(t.syncId); } catch (_) {}
@@ -175,6 +184,7 @@
       case 'newFolder': openNewFolderSheet(); break;
       case 'newTitle': window.createNewTitle?.(); break;
       case 'importFolder': window.importFolder?.(); break;
+      case 'importTtu': window.ttuImport?.pickAndImport(); break;
       case 'view': libSet('LIB_VIEW_V1', arg); break;
       case 'filter': libSet('LIB_FILTER_V1', arg); break;
       case 'sort': libSet('LIB_SORT_V1', arg); break;
@@ -204,7 +214,14 @@
     document.body.classList.add('native-library-open');   // native-menu.js: hamburger off
     baseline = new Set(overlays());
     watch.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
-    post({ type: 'open', model: await model() });
+    const t0 = performance.now();
+    const m = await model();
+    // How long the list took to build (last 8 opens), for diagnosis.
+    try {
+      const k = 'LIB_OPEN_MS', a = JSON.parse(localStorage.getItem(k) || '[]');
+      a.push(Math.round(performance.now() - t0)); localStorage.setItem(k, JSON.stringify(a.slice(-8)));
+    } catch (_) {}
+    post({ type: 'open', model: m });
     try { Promise.resolve(window.libraryBlurb?.runQueue?.()).catch(() => {}).finally(() => { try { window.libraryMeta?.ensureAll?.(); } catch (_) {} }); } catch (_) {}
   }
   function close(notify) {
@@ -216,6 +233,8 @@
     post({ type: 'closed' });
   }
   window.__kadokiLibClose = () => close(true);
+  // Re-send the list (a title edited or deleted from the native Edit Title).
+  window.__kadokiLibRefreshNative = async () => { if (nativeOpen) post({ type: 'model', model: await model() }); };
   // The web closeLibrary() (a title open from anywhere) closes the native one too.
   function closeBoth() {
     if (nativeOpen) close(true);
