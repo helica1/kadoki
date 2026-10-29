@@ -81,6 +81,11 @@
   // chooser's own logic runs unchanged. A sheet holding anything but plain
   // choices (a name field) stays the web sheet (styled in android-feel.css).
   const chrome = () => window.Capacitor?.Plugins?.KadokiChrome;
+  // The tap that dismisses a native sheet must not also start a dictionary
+  // lookup on the text below (see enhanced-dictionary.js).
+  let sheetOpen = 0, sheetOpenTs = 0, sheetClosedTs = 0;
+  window.kSheetSwallowsTap = () => (sheetOpen > 0 && Date.now() - sheetOpenTs < 60000) || Date.now() - sheetClosedTs < 500;
+  const sheetClosed = () => { sheetOpen = Math.max(0, sheetOpen - 1); sheetClosedTs = Date.now(); };
   const wrapSheets = () => {
     const orig = window.libSheet;
     if (typeof orig !== 'function' || orig._kMat || !chrome()) return;
@@ -93,6 +98,7 @@
         const kids = [...sh.box.children].filter(el => !el.classList.contains('lib-sheet-h') && !el.classList.contains('lib-sheet-cancel'));
         const plain = kids.length && kids.every(el => el.classList.contains('lib-sheet-opt') && !el.disabled);
         if (!plain) { sh.ov.style.display = ''; return; }
+        sheetOpen++; sheetOpenTs = Date.now();
         chrome().showSheet({
           title: heading || '',
           options: kids.map(el => ({
@@ -101,10 +107,11 @@
             destructive: el.classList.contains('danger'),
           })),
         }).then((r) => {
+          sheetClosed();
           const i = r && Number.isFinite(r.index) ? r.index : -1;
           if (i >= 0 && kids[i]) { try { kids[i].click(); } catch (_) {} }
           setTimeout(() => { try { sh.ov.remove(); } catch (_) {} }, 0);
-        }).catch(() => { sh.ov.style.display = ''; });
+        }).catch(() => { sheetClosed(); sh.ov.style.display = ''; });
       };
       return sh;
     };

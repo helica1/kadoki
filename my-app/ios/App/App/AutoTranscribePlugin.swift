@@ -3,6 +3,7 @@ import Capacitor
 import AVFoundation
 import Speech
 import UIKit
+import os
 
 /**
  * AutoTranscribePlugin — on-device subtitle generation for audio-only titles.
@@ -63,13 +64,12 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func checkAvailability(_ call: CAPPluginCall) {
         if #available(iOS 26.0, *) {
             Task {
-                let supported = await Self.findSupportedLocale() != nil
+                let locale = await Self.findSupportedLocale()
                 var installed = false
-                if supported {
-                    let inst = await SpeechTranscriber.installedLocales
-                    installed = inst.contains { Self.isJa($0) }
+                if let locale {
+                    installed = await AssetInventory.status(forModules: [Self.makeTranscriber(locale)]) == .installed
                 }
-                call.resolve(["supported": supported, "installed": installed])
+                call.resolve(["supported": locale != nil, "installed": installed])
             }
         } else {
             call.resolve(["supported": false, "installed": false])
@@ -99,31 +99,59 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
                 call.reject("Japanese transcription is not supported on this device")
                 return
             }
-            let transcriber = SpeechTranscriber(
-                locale: locale,
-                transcriptionOptions: [],
-                reportingOptions: [],
-                attributeOptions: [.audioTimeRange]
-            )
             do {
-                if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
-                    let progress = request.progress
-                    let poller = Task { [weak self] in
-                        while !Task.isCancelled {
-                            self?.notifyListeners("assetProgress", data: ["fraction": progress.fractionCompleted])
-                            try? await Task.sleep(nanoseconds: 500_000_000)
-                        }
-                    }
-                    defer { poller.cancel() }
-                    try await request.downloadAndInstall()
+                try await Self.installAssets(locale: locale) { [weak self] f in
+                    self?.notifyListeners("assetProgress", data: ["fraction": f])
                 }
                 self.notifyListeners("assetProgress", data: ["fraction": 1.0])
                 call.resolve(["installed": true])
             } catch {
-                NSLog("[AutoTranscribe] asset install failed: \(error.localizedDescription)")
+                atLog("asset install failed: \(error.localizedDescription)")
                 call.reject("Speech model download failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    @available(iOS 26.0, *)
+    static func makeTranscriber(_ locale: Locale) -> SpeechTranscriber {
+        SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [],
+                          attributeOptions: [.audioTimeRange])
+    }
+
+    /// Reserve the locale, download its model if needed, and wait until the
+    /// system reports it installed (a fresh device can lag the download's
+    /// completion by a few seconds). Throws if it never becomes usable.
+    @available(iOS 26.0, *)
+    static func installAssets(locale: Locale, progress: ((Double) -> Void)? = nil) async throws {
+        let modules: [any SpeechModule] = [makeTranscriber(locale)]
+        let st0 = await AssetInventory.status(forModules: modules)
+        atLog("model status: \(st0)")
+        if st0 == .installed { return }
+        if !(await AssetInventory.reservedLocales).contains(where: { isJa($0) }) {
+            do { _ = try await AssetInventory.reserve(locale: locale) }
+            catch { atLog("reserve failed: \(error.localizedDescription)") }
+        }
+        if let request = try await AssetInventory.assetInstallationRequest(supporting: modules) {
+            let p = request.progress
+            let poller = Task {
+                while !Task.isCancelled {
+                    progress?(p.fractionCompleted)
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+            defer { poller.cancel() }
+            atLog("downloading speech model")
+            try await request.downloadAndInstall()
+            atLog("download finished")
+        }
+        for _ in 0..<40 {
+            let st = await AssetInventory.status(forModules: modules)
+            if st == .installed { return }
+            atLog("waiting for speech model: \(st)")
+            try await Task.sleep(nanoseconds: 500_000_000)
+        }
+        throw NSError(domain: "AutoTranscribe", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "Japanese speech model is not installed"])
     }
 
     // MARK: - job control
@@ -265,7 +293,7 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
                     chapters.append(["startMs": Int(startMs.rounded()), "title": title])
                 }
             } catch {
-                NSLog("[AutoTranscribe] getChapters failed: \(error.localizedDescription)")
+                atLog("getChapters failed: \(error.localizedDescription)")
             }
             call.resolve(["chapters": chapters])
         }
@@ -273,6 +301,37 @@ public class AutoTranscribePlugin: CAPPlugin, CAPBridgedPlugin {
 }
 
 // MARK: - TranscribeJob
+
+private let atLogger = Logger(subsystem: "com.helica1.yama", category: "AutoTranscribe")
+func atLog(_ msg: String) { atLogger.notice("\(msg, privacy: .public)") }
+
+/// Runs `op`, but stops waiting after `seconds` (throws). The operation itself
+/// may not honour cancellation (asset downloads, a wedged predecessor), so the
+/// wait is abandoned rather than joined — a hang can never stall the caller.
+func atWithTimeout(_ seconds: Double, _ what: String,
+                   _ op: @escaping @Sendable () async throws -> Void) async throws {
+    final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var settled = false
+        func claim() -> Bool { lock.lock(); defer { lock.unlock() }; if settled { return false }; settled = true; return true }
+    }
+    let once = Once()
+    let claim: @Sendable () -> Bool = { once.claim() }
+    try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        let work = Task {
+            do { try await op(); if claim() { cont.resume() } }
+            catch { if claim() { cont.resume(throwing: error) } }
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if claim() {
+                work.cancel()
+                cont.resume(throwing: NSError(domain: "AutoTranscribe", code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "\(what) timed out"]))
+            }
+        }
+    }
+}
 
 @available(iOS 26.0, *)
 final class TranscribeJob: @unchecked Sendable {
@@ -389,9 +448,17 @@ final class TranscribeJob: @unchecked Sendable {
 
     func begin(after predecessor: Task<Void, Never>?) -> Task<Void, Never> {
         Task.detached(priority: .utility) { [self] in
-            await predecessor?.value
+            // An earlier job must finish its teardown first — but never wait
+            // forever: one wedged job used to block every later title's
+            // subtitles until the app was restarted.
+            if let predecessor {
+                do { try await atWithTimeout(15, "previous job") { await predecessor.value } }
+                catch { atLog("job \(id): previous job still busy after 15 s — starting anyway") }
+            }
+            atLog("job \(id) begins, cancelled=\(cancelled)")
             if cancelled { onDone(stopReason, nil, baseMs); return }
             await run()
+            atLog("job \(id) finished")
         }
     }
 
@@ -403,13 +470,18 @@ final class TranscribeJob: @unchecked Sendable {
             onDone("error", "Japanese locale unavailable", fedThroughMs)
             return
         }
-        let transcriber = SpeechTranscriber(
-            locale: locale,
-            transcriptionOptions: [],
-            reportingOptions: [],          // finalized results only — no volatile churn
-            attributeOptions: [.audioTimeRange]
-        )
+        // The model must be installed before the analyzer starts; fetch it
+        // here too, so a job never fails just because JS thought it was there.
+        do { try await atWithTimeout(120, "Speech model setup") { try await AutoTranscribePlugin.installAssets(locale: locale) } }
+        catch {
+            onDone("error", "Speech model unavailable: \(error.localizedDescription)", fedThroughMs)
+            return
+        }
+        if cancelled { onDone(stopReason, nil, fedThroughMs); return }
+        // Finalized results only — no volatile churn.
+        let transcriber = AutoTranscribePlugin.makeTranscriber(locale)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
+        atLog("job \(id) model ready, analyzer created")
 
         let audioFile: AVAudioFile
         do {
@@ -486,6 +558,7 @@ final class TranscribeJob: @unchecked Sendable {
             if !cancelled { setFeedError("Speech analysis failed: \(error.localizedDescription)") }
             await analyzer.cancelAndFinishNow()
         }
+        atLog("job \(id) analysis ended, cancelled=\(cancelled) err=\(feedError ?? "-")")
         powerTask.cancel()
         await powerTask.value
         await cancellationTask()?.value

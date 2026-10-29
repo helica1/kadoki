@@ -272,7 +272,8 @@
         ctxRow.appendChild(ctx);
         const pb = document.createElement('button');
         pb.textContent = '▶';
-        pb.style.cssText = 'flex:none;background:#1d1830;border:1px solid #463a6b;border-radius:8px;color:#cbbfee;font-size:.78rem;padding:4px 13px;cursor:pointer;';
+        // Fixed width: ▶ and ❚❚ differ, and the sentence beside it must not re-wrap.
+        pb.style.cssText = 'flex:none;box-sizing:border-box;width:46px;text-align:center;background:#1d1830;border:1px solid #463a6b;border-radius:8px;color:#cbbfee;font-size:.78rem;padding:4px 0;cursor:pointer;';
         pb.addEventListener('click', async (e) => {
           e.stopPropagation();
           try {
@@ -301,6 +302,22 @@
         });
         ctxRow.appendChild(pb);
         content.appendChild(ctxRow);
+        // A word looked up here carries this sentence and its stored clip, so
+        // Add to Anki opens the send dialog instead of adding a bare card
+        // (noSeek: no Set-playhead from a review card).
+        ctx.dataset.dictKeepCtx = '1';
+        let ctxSrc = null;
+        titleFor(c.titleId).then((tt) => { ctxSrc = (tt && tt.attachments && tt.attachments.audiobook && tt.attachments.audiobook.cachePath) || null; }).catch(() => {});
+        const bindLookupCtx = () => {
+          const ok = Number.isFinite(c.startMs) && Number.isFinite(c.endMs) && c.endMs > c.startMs && ctxSrc;
+          window.lookupContext = {
+            source: 'vocab', noSeek: true, sentence: c.context, card: null,
+            cueStartMs: ok ? c.startMs : undefined, cueEndMs: ok ? c.endMs : undefined,
+            cueAudioPath: ok ? ctxSrc : null,
+          };
+        };
+        ctx.addEventListener('touchstart', bindLookupCtx, { capture: true, passive: true });
+        ctx.addEventListener('mousedown', bindLookupCtx, true);
         try { if (typeof window.dictEnableLookupIn === 'function') window.dictEnableLookupIn(ctx); } catch (_) {}
 
         // BACK: definition inset (hidden until reveal)

@@ -240,3 +240,64 @@ html.kadoki-android #waveformEditorOverlay.kmat .btn {
   font: 500 14px/1 system-ui, Roboto, sans-serif !important; letter-spacing: .1px !important; text-transform: none !important;
 }
 html.kadoki-android #waveformEditorOverlay.kmat [data-role="cancel"] { background: transparent !important; color: var(--m3-on-surface) !important; }
+
+/* ── Timeline & Scenes (ai-timeline.js: .ktl-*): a Material 3 surface —
+   28dp container, filled cards, tonal buttons, a standard close icon button.
+   Summary text, pictures and the coverage axis keep their own look. ─────── */
+html.kadoki-android .ktl-sheet {
+  background: var(--m3-surface-cont) !important;
+  border: 0 !important;
+  border-radius: 28px !important;
+  font-family: system-ui, Roboto, sans-serif;
+}
+html.kadoki-android .ktl-head {
+  border-bottom: 0 !important;
+  padding: 14px 12px 10px 20px !important;
+  gap: 8px !important;
+}
+html.kadoki-android .ktl-head .ktl-title { font-size: 22px !important; font-weight: 400 !important; color: var(--m3-on-surface) !important; }
+html.kadoki-android .ktl-sheet button:not(.ktl-plain) {
+  position: relative; overflow: hidden;
+  background: #4a4458 !important;      /* secondary container */
+  border: 0 !important;
+  border-radius: 20px !important;
+  color: #e8def8 !important;
+  font-family: system-ui, Roboto, sans-serif !important;
+  font-weight: 500 !important;
+  letter-spacing: .1px;
+  text-decoration: none !important;
+}
+html.kadoki-android .ktl-head button:not(.ktl-plain) {
+  min-height: 40px; padding: 0 16px !important; font-size: 14px !important; line-height: 1 !important;
+}
+html.kadoki-android .ktl-sheet button.ktl-close {
+  flex: none; width: 40px; height: 40px; min-height: 0; padding: 0 !important;
+  background: transparent !important; color: var(--m3-on-surface-var) !important;
+  font-size: 18px !important; line-height: 40px !important;
+}
+html.kadoki-android .ktl-sheet button:disabled { opacity: .38; }
+/* chapter cards: filled */
+html.kadoki-android .ktl-card {
+  background: var(--m3-surface-highest) !important;
+  border: 0 !important;
+  border-radius: 12px !important;
+}
+html.kadoki-android .ktl-card.ktl-cur { box-shadow: inset 0 0 0 1px #d0bcff; }
+html.kadoki-android .ktl-meta button:not(.ktl-plain) {
+  min-height: 32px; padding: 0 12px !important; border-radius: 8px !important; line-height: 1 !important;
+  background: transparent !important; box-shadow: inset 0 0 0 1px var(--m3-outline-var); color: var(--m3-on-surface-var) !important;
+}
+html.kadoki-android .ktl-meta .ktl-plain { color: var(--m3-on-surface-var) !important; }
+html.kadoki-android .ktl-now {
+  background: rgba(208, 188, 255, .16) !important; border: 0 !important; color: #d0bcff !important;
+  border-radius: 8px !important; padding: 2px 8px !important;
+}
+html.kadoki-android .ktl-axis { background: var(--m3-surface-high) !important; }
+/* Short | Long summary switch: an M3 segmented button */
+html.kadoki-android .ktl-sheet .ktl-seg { background: transparent !important; border: 1px solid var(--m3-outline) !important; border-radius: 20px !important; padding: 0 !important; gap: 0 !important; overflow: hidden; }
+html.kadoki-android .ktl-sheet .ktl-seg button {
+  min-height: 38px; padding: 0 14px !important; border-radius: 0 !important;
+  background: transparent !important; box-shadow: none !important; color: var(--m3-on-surface) !important; font-size: 14px !important; line-height: 1 !important;
+}
+html.kadoki-android .ktl-sheet .ktl-seg button + button { border-left: 1px solid var(--m3-outline) !important; }
+html.kadoki-android .ktl-sheet .ktl-seg button.on { background: #4a4458 !important; color: #e8def8 !important; }

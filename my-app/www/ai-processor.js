@@ -103,6 +103,9 @@
       label: { type: 'string' },
       shortSummary: { type: 'string' },
       longSummary: { type: 'string' },
+      // Condensed recap (~1/3 of the summaryBlocks narrative) for the
+      // Timeline's Short view. Paragraphs separated by blank lines.
+      briefSummary: { type: 'string' },
       places: { type: 'array', items: PLACE_ITEM },
       // Narrative block flow (para / quote / subhead) — the new-format chapter
       // recap. REQUIRED: with schema-enforcing backends this makes the model
@@ -167,7 +170,7 @@
       },
       unresolved: { type: 'array', items: { type: 'string' } },
     },
-    required: ['label', 'shortSummary', 'longSummary', 'summaryBlocks', 'vocab',
+    required: ['label', 'shortSummary', 'longSummary', 'briefSummary', 'summaryBlocks', 'vocab',
                'events', 'keyPassages', 'characters', 'unresolved'],
     additionalProperties: false,
   };
@@ -220,6 +223,9 @@
     '  ・subhead: para 部分で場面・時間が大きく転換する箇所にのみ、6〜12字の小見出しを' +
     '0〜2件まで置いてよい(無くてもよい。見出しだらけの箇条書きにしない)。\n' +
     '- longSummary: summaryBlocks に本文を書くので、空文字列でよい。\n' +
+    '- briefSummary(必須): summaryBlocks の para 部分を約3分の1に縮めた短縮版のあらすじ。' +
+    'para と同じ書き方(冒頭から出来事の順に・因果と動機が分かるように・平易な標準的な日本語)で、' +
+    '章の結末まで含める。合計150〜220字程度、2〜3段落(段落の間は空行)。引用・小見出しは入れない。\n' +
     '- vocab: 上級学習者(JLPT N1程度以上)に価値のある語・表現を0〜8件。ありふれた語は入れない。' +
     'word は本文に現れた表記そのまま、reading はその読み(ひらがな)、note は簡潔な語釈・' +
     'ニュアンス(20字以内・任意)。context はその語を含む本文からの一字一句正確な抜粋1文' +
@@ -1542,6 +1548,7 @@
 
     const label = s(parsed.label, 24).trim();
     const shortSummary = s(parsed.shortSummary, 400);
+    const briefSummary = s(parsed.briefSummary, 900).trim();
     const summaryBlocks = await locateBlocks(titleId, map, chunk, text, sanitizeBlocks(parsed.summaryBlocks));
     const vocabOut = await locateVocab(titleId, map, chunk, text, sanitizeVocab(parsed.vocab));
     // The prompt now asks for an empty longSummary (the narrative lives in
@@ -1597,6 +1604,7 @@
     art[idx] = {
       label, shortSummary, longSummary, events, keyPassages, relatedCharIds,
       ...(summaryBlocks ? { summaryBlocks } : {}),
+      ...(briefSummary ? { briefSummary } : {}),
       ...(vocabOut ? { vocab: vocabOut } : {}),
       ...(placesOut.length ? { places: placesOut } : {}),   // chapter-local list for the view's 場所 chips (the aiPlaces DB merge below stays the roster of record)
       // Block-format version stamp: 2 = plain-narrative-then-quotes layout

@@ -146,6 +146,26 @@
     return;
   }
 
+  // A tap that reaches the (invisible) web hamburger — the native button had
+  // stepped aside because something seemed to cover it — still opens the
+  // native menu, never the old web one. The button fires twice per tap
+  // (inline onclick + shell.js listener).
+  let lastOpen = 0;
+  const wrapOpen = () => {
+    const orig = window.openShellMoreMenu;
+    if (typeof orig !== 'function' || orig._kNat) return;
+    const nat = function () {
+      if (Date.now() - lastOpen < 600) return;
+      lastOpen = Date.now();
+      post({ open: true });
+    };
+    nat._kNat = true;
+    window.openShellMoreMenu = nat;
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wrapOpen);
+  else wrapOpen();
+  setTimeout(wrapOpen, 1500);
+
   // ---- anchor tracking ----
   let last = '';
   let queued = false;

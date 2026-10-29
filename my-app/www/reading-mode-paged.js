@@ -6778,6 +6778,16 @@
         log('auto-transcribe context adopted for paged reader (no SRT)');
         return true;
       }
+      // Audio + no SRT and no transcriber (unsupported device / simulator):
+      // still adopt the audio so PLAY works — the book just can't follow it.
+      if (audio && !srt) {
+        pagedAudioPath = audio.path;
+        window._pagedAudioPath = audio.path;
+        _probeDurLater(audio.path);
+        try { window.abAdoptAutoAudio?.(audio.path, audio.name); } catch (_) {}
+        log('audio context adopted for paged reader (no SRT, no transcriber)');
+        return true;
+      }
       log('No audio/srt context for paged reader');
       // Wipe the stale LEGACY audiobook context ONLY for a GENUINELY EPUB-only
       // title (epub + NO audiobook/audio/srt/deck attachment). `!audio||!srt`

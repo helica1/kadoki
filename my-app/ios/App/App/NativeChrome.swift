@@ -54,6 +54,12 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
     // Anchor report: {visible, x, y, w, h, dot, chrome} in web CSS px (= points in the web view).
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let d = message.body as? [String: Any], let wv = webView, let host = button.superview else { return }
+        // The web hamburger was tapped (this button had stepped aside): open
+        // the native menu from here.
+        if (d["open"] as? Bool) == true {
+            if panel == nil { toggle() }
+            return
+        }
         defer {
             if let c = d["chrome"] as? Bool, c == chromeHidden {
                 chromeHidden = !c

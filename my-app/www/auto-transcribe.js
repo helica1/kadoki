@@ -36,7 +36,8 @@
   const DEDUPE_MS = 300;                 // incoming cue within this of an existing start = duplicate
   const GAP_OK_MS = 2000;                // residual uncovered gap still counting as "complete"
   const SKIP_AHEAD_MIN_MS = 60 * 1000;   // re-entering covered audio ≥ this long → jump the job past it
-  const MAX_JOB_RETRIES = 2;
+  const MAX_JOB_RETRIES = 4;
+  const RETRY_DELAYS_MS = [3000, 10000, 30000, 60000];
   // ---- power policy (2026-09-12) ----
   //
   // On-device speech recognition is by far the heaviest thing the app runs.
@@ -146,6 +147,14 @@
   const t = (k, fb, v) => (window.i18n?.t ? window.i18n.t(k, fb, v) : fb);
   const log = (m) => { try { console.log('[autoTrans] ' + m); } catch (_) {} };
   const diag = (m) => { try { window._diag?.('[paged-diag][autoTrans] ' + m); } catch (_) {} };
+  // The failure line names the cause, so a report from the field says why.
+  const failedText = (why) => isModelError(why) ? unavailText() :
+    t('at.failed', 'Subtitles couldn\'t be generated. The audio plays normally; reopen the title to try again.') +
+    (why ? ' (' + String(why).slice(0, 120) + ')' : '');
+  // No Japanese speech model on this device (unsupported, not downloaded yet,
+  // or the download failed): say so plainly; the audio plays as normal.
+  const unavailText = () => t('at.unavailable', 'Subtitles are unavailable until the Japanese speech model is installed. The audio plays normally; reopen the title while online to install it.');
+  const isModelError = (why) => /speech model|not installed|not supported|requires ios|locale/i.test(String(why || ''));
 
   const avail = { supported: false, installed: false };
   let availPromise = null;
@@ -782,11 +791,15 @@
       if (active !== a || job?.id !== id) return;
       log('job start failed: ' + (e?.message || e));
       diag('job start FAILED: ' + (e?.message || e) + ' retries=' + ((a.retries || 0) + 1));
+      if (isModelError(e?.message || e)) setStatus(unavailText());
       job = null;
       a.retries = (a.retries || 0) + 1;
       if (a.retries > MAX_JOB_RETRIES) {
-        setStatus(t('at.failed', 'Subtitle generation failed. Reopen the title to retry.'));
+        setStatus(failedText(e?.message || e));
         a.done = true;   // stop trying this session; cache keeps partial progress
+      } else {
+        const wait = RETRY_DELAYS_MS[Math.min(a.retries, RETRY_DELAYS_MS.length) - 1];
+        setTimeout(() => { if (active === a && !job && !a.done) ensureJob(lastPosMs >= 0 ? lastPosMs : startMs); }, wait);
       }
     }
   }
@@ -1132,9 +1145,12 @@
     } else { // error
       a.retries = (a.retries || 0) + 1;
       if (a.retries <= MAX_JOB_RETRIES) {
-        setTimeout(() => { if (active === a && !job && !a.done) ensureJob(lastPosMs >= 0 ? lastPosMs : j.startMs); }, 3000);
+        const wait = RETRY_DELAYS_MS[Math.min(a.retries, RETRY_DELAYS_MS.length) - 1];
+        diag('job error: ' + (ev.error || '?') + ' — retry ' + a.retries + ' in ' + wait / 1000 + 's');
+        if (isModelError(ev.error)) setStatus(unavailText());   // keep retrying quietly; the model may finish installing
+        setTimeout(() => { if (active === a && !job && !a.done) ensureJob(lastPosMs >= 0 ? lastPosMs : j.startMs); }, wait);
       } else {
-        setStatus(t('at.failed', 'Subtitle generation failed. Reopen the title to retry.'));
+        setStatus(failedText(ev.error));
         a.done = true;
         schedulePersist(true);
       }
@@ -1872,7 +1888,7 @@
     diag('activate tid=' + window._activeTitleId + ' path=…' + String(audioPath || '').slice(-24) + ' active=' + (active ? (active.titleId + ' done=' + active.done + ' cues=' + active.cues.length + ' job=' + !!job) : 'none'));
     if (!hasNativeTranscribe() || !plugin()) { diag('activate: no native plugin'); return false; }
     const a = await checkAvail();
-    if (!a.supported) { diag('activate: unsupported'); return false; }
+    if (!a.supported) { diag('activate: unsupported'); if (!timingOnly) setStatus(unavailText()); return false; }
     const titleId = window._activeTitleId;
     if (!titleId || !audioPath) { log('activate skipped: no titleId/audioPath'); diag('activate: no titleId/audioPath'); return false; }
     if (active && active.titleId === titleId && active.audioPath === audioPath && !active.done) {
@@ -1969,7 +1985,9 @@
           try { window.showToast?.(t('at.dl_done', 'Speech model ready — generating subtitles'), 3000); } catch (_) {}
         }
       } catch (e) {
-        setStatus(t('at.download_failed', 'Speech model download failed. Check your connection and reopen the title.'));
+        setStatus(isAndroid && a.engine !== 'android'
+          ? t('at.download_failed', 'Speech model download failed. Check your connection and reopen the title.')
+          : unavailText());
         log('ensureAssets failed: ' + (e?.message || e));
         if (active === me) active = null;
         return false;

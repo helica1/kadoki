@@ -70,16 +70,6 @@
   }
 
   // Pulsing glow for the LIVE current-place marker on the timeline axis.
-  // Panel-level CSS for the pictures show/hide toggle: frames vanish, captions
-  // and quotes stay (the "captions only" mode).
-  function ensureTlPicsStyle() {
-    if (document.getElementById('kaiTlPicsStyle')) return;
-    const st = document.createElement('style');
-    st.id = 'kaiTlPicsStyle';
-    st.textContent = '#bookmarksOverlay.tl-nopics .tl-imgframe{display:none !important;}' +
-      '#bookmarksOverlay.tl-nopics .tl-legacyfig{display:none !important;}';   // legacy figs have no standalone caption
-    document.head.appendChild(st);
-  }
   function ensureAxisMarkerStyle() {
     if (document.getElementById('kaiAxisMarkStyle')) return;
     try {
@@ -123,6 +113,21 @@
   }
 
   // ---- axis ---------------------------------------------------------------
+  // The cue list the time axis maps against. window._srtCues is filled only by
+  // card mode / an SRT; an auto-transcribed title listened to in audio mode has
+  // its cues solely in the audio engine (__abCues). Without this fallback the
+  // axis dropped to a char scale spanning only the transcribed part, so 31 min
+  // of a 15 h book drew at ~40%.
+  function axisCues() {
+    const s = window._srtCues;
+    if (Array.isArray(s) && s.length) return s;
+    try {
+      const a = window.__abCues;
+      if (Array.isArray(a) && a.length && window.abEngineOwnsActiveDeck?.()) return a;
+    } catch (_) {}
+    return s;
+  }
+
   // ms → axis-chars via the raw cue-text cumulative scale, binary-searched
   // over cues[].startMs (cues are chronological) then linearly interpolated
   // — the ms equivalent of the idx-indexed cueCum lookup below. Shared by
@@ -152,12 +157,16 @@
     // audiobooks; chunks carry msStart). Their jp totals only cover what has
     // been transcribed so far, so a char scale reads near-complete minutes
     // into the book and every future chapter shows the same start offset.
-    const tCues = window._srtCues;
+    const tCues = axisCues();
     if (map.space === 'cue' && map.chunks.length && Number.isFinite(map.chunks[0].msStart) &&
         Array.isArray(tCues) && tCues.length && Number.isFinite(tCues[0].startMs)) {
       const lastCh = map.chunks[map.chunks.length - 1];
       const lastCueEnd = tCues[tCues.length - 1].endMs || 0;
       let durMs = (Number.isFinite(map.durMs) && map.durMs > 0) ? map.durMs : 0;
+      if (!durMs) {
+        const kd = window._abKnownDur;   // the audio's real length, not just the transcribed part
+        if (kd && kd.tid === window._activeTitleId && kd.ms > 0) durMs = kd.ms;
+      }
       if (!durMs) durMs = Math.max(lastCueEnd, (lastCh.msStart || 0) + 60000);
       const chunks = map.chunks;
       return {
@@ -169,7 +178,7 @@
           return (nx && Number.isFinite(nx.msStart)) ? nx.msStart : durMs;
         },
         cueToChars(idx) {   // axis units are MILLISECONDS on this axis
-          const cues = window._srtCues;
+          const cues = axisCues();
           if (!Number.isFinite(idx) || !Array.isArray(cues) || !cues.length) return null;
           if (idx >= cues.length) return cues[cues.length - 1].endMs || durMs;
           return cues[Math.max(0, idx)].startMs;
@@ -274,6 +283,17 @@
       },
       msToChars(ms) {
         if (!Number.isFinite(ms)) return null;
+        // Book + audiobook: the aligner knows where each audio moment sits in
+        // the book (its anchors). The cue-text scale below assumes the cues
+        // span the whole book — mid-transcription they span only the done part,
+        // which stretched minute 31 of 15 h to ~40% of the axis.
+        try {
+          const AA = window.autoAlign;
+          if (AA && AA.hasTextFor(window._activeTitleId)) {
+            const f = AA.progressAt(ms);
+            if (Number.isFinite(f)) return Math.max(0, Math.min(1, f)) * total;
+          }
+        } catch (_) {}
         if (anchorsMs.length >= 2) {
           const A = anchorsMs;
           if (ms <= A[0][0]) return A[0][0] > 0 ? (ms / A[0][0]) * A[0][1] : A[0][1];
@@ -287,6 +307,13 @@
             }
           }
           return last[1];
+        }
+        // Cues that stop well short of the audio's end can't scale the whole
+        // book: fall back to the playhead's share of the audio.
+        const kd = window._abKnownDur;
+        const cuesEnd = (Array.isArray(cues) && cues.length) ? (cues[cues.length - 1].endMs || 0) : 0;
+        if (kd && kd.tid === window._activeTitleId && kd.ms > 0 && cuesEnd < kd.ms * 0.9) {
+          return Math.max(0, Math.min(1, ms / kd.ms)) * total;
         }
         return msCumLookup(cues, cueCum, cueScale, ms);
       },
@@ -595,7 +622,7 @@
     let cue = Number.isFinite(f.cue) ? f.cue : -1;
     if (map && map.space === 'cue' && Number.isFinite(f.ms)) {
       try {
-        const cues = window._srtCues;
+        const cues = axisCues();
         if (Array.isArray(cues) && cues.length) {
           let lo = 0, hi = cues.length;
           while (lo < hi) { const mid = (lo + hi) >> 1; if (cues[mid].startMs <= f.ms) lo = mid + 1; else hi = mid; }
@@ -885,11 +912,55 @@
     } catch (_) {}
   }
 
+  // Timeline summary length (persisted, global): 'short' shows a chapter's
+  // briefSummary in place of the narrative paragraphs (quotes and vocab stay);
+  // chapters summarized before briefSummary existed always show the long one.
+  const SUMMARY_LEN_KEY = 'TL_SUMMARY_LEN_V1';
+  function tlSummaryShort() { try { return localStorage.getItem(SUMMARY_LEN_KEY) === 'short'; } catch (_) { return false; } }
+  // 短く | 詳しく switch for a chapter title bar (only on chapters that have a
+  // briefSummary). The choice applies to every chapter; onChange re-renders.
+  function mkSummaryLenSwitch(onChange) {
+    const seg = document.createElement('div');
+    seg.className = 'ktl-seg';
+    seg.style.cssText = 'flex:none;display:flex;gap:2px;padding:2px;border-radius:9px;background:#1c1c24;border:1px solid #333;';
+    const opts = [['short', window.i18n.t('tl.len_short', '短く')], ['long', window.i18n.t('tl.len_long', '詳しく')]];
+    const btns = opts.map(([mode, txt]) => {
+      const b = document.createElement('button');
+      b.textContent = txt;
+      b.style.cssText = 'background:none;border:0;border-radius:7px;color:#ccc;font-size:.78rem;padding:6px 9px;cursor:pointer;line-height:1.1;';
+      seg.appendChild(b);
+      return [mode, b];
+    });
+    const paint = () => {
+      const short = tlSummaryShort();
+      for (const [mode, b] of btns) {
+        const on = (mode === 'short') === short;
+        b.classList.toggle('on', on);
+        b.style.background = on ? '#2e2a40' : 'none';
+        b.style.color = on ? '#fff' : '#999';
+      }
+    };
+    for (const [mode, b] of btns) {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if ((mode === 'short') === tlSummaryShort()) return;
+        try { localStorage.setItem(SUMMARY_LEN_KEY, mode); } catch (_) {}
+        paint();
+        try { onChange(); } catch (_) {}
+      });
+    }
+    paint();
+    return seg;
+  }
+
   function buildSummaryBlocks(art, prose, titleId, chIdx, chObj) {
     const blocks = (art && Array.isArray(art.summaryBlocks)) ? art.summaryBlocks : null;
     if (!blocks || !blocks.some(b => b && b.type === 'para' && b.text)) return null;
     const wrap = document.createElement('div');
     wrap.style.cssText = 'display:flex;flex-direction:column;gap:13px;';
+    const brief = (tlSummaryShort() && art.briefSummary)
+      ? String(art.briefSummary).split(/\n\s*\n/).map(t => t.trim()).filter(Boolean) : null;
+    if (brief) for (const t of brief) wrap.appendChild(prose(t));
 
     const sectionHead = (txt) => {
       const h = document.createElement('div');
@@ -1014,7 +1085,8 @@
       const pb = document.createElement('button');
       pb.textContent = '▶';
       pb.title = window.i18n.t('tl.listen_scene', '▶ この場面を聴く');
-      pb.style.cssText = 'flex:none;background:#1d1830;border:1px solid #463a6b;border-radius:8px;color:#cbbfee;font-size:.78rem;padding:4px 13px;cursor:pointer;';
+      // Fixed width: ▶ and ❚❚ differ, and the caption beside it must not re-wrap.
+      pb.style.cssText = 'flex:none;box-sizing:border-box;width:46px;text-align:center;background:#1d1830;border:1px solid #463a6b;border-radius:8px;color:#cbbfee;font-size:.78rem;padding:4px 0;cursor:pointer;';
       // Long-press: resolution diagnostic toast (path / bounds / failure
       // stage) — tells us in one tap which resolver tier produced a clip
       // instead of inferring it from symptoms. "r4" doubles as a build stamp.
@@ -1097,9 +1169,9 @@
     for (const b of blocks) {
       if (!b) continue;
       if (b.type === 'para' && b.text) {
-        wrap.appendChild(prose(b.text));
+        if (!brief) wrap.appendChild(prose(b.text));
       } else if (b.type === 'subhead' && b.text) {
-        wrap.appendChild(sectionHead(b.text));
+        if (!brief) wrap.appendChild(sectionHead(b.text));
       } else if (b.type === 'quote' && b.quote) {
         if (sectioned && !quoteHeadDone) {
           quoteHeadDone = true;
@@ -1260,6 +1332,30 @@
         ctxRow.appendChild(ctx);
         if (!v._chip) v._chip = { quote: v.context, anchorOff: v.anchorOff, startMs: v.startMs, endMs: v.endMs };
         ctxRow.appendChild(clipChip(v._chip));
+        // A word looked up in this sentence carries the sentence and its audio
+        // clip, so Add to Anki opens the send dialog (trim, context,
+        // explanation) instead of adding a bare card. dictKeepCtx: the lazy tap
+        // handler keeps this context; noSeek: the popup offers no Set-playhead
+        // (a feed lookup must never move the place).
+        ctx.dataset.dictKeepCtx = '1';
+        const bindLookupCtx = () => {
+          const chip = v._chip;
+          const set = (b, src) => {
+            window.lookupContext = {
+              source: 'timeline', noSeek: true, sentence: v.context, card: null,
+              cueStartMs: b ? b.startMs : undefined, cueEndMs: b ? b.endMs : undefined,
+              cueAudioPath: src || null,
+            };
+          };
+          set(chip._resolvedBounds, wave.srcPath);
+          if (chip._resolvedBounds && wave.srcPath) return;
+          const mine = window.lookupContext;
+          Promise.all([resolveBounds(chip), resolveSrc()]).then(([b, src]) => {
+            if (window.lookupContext === mine) set(b, src);
+          }).catch(() => {});
+        };
+        ctx.addEventListener('touchstart', bindLookupCtx, { capture: true, passive: true });
+        ctx.addEventListener('mousedown', bindLookupCtx, true);
         row.appendChild(ctxRow);
         attachWave(v._chip, row);
         wrap.appendChild(row);
@@ -1635,6 +1731,7 @@
       // Fill the overlay's whole content box (its padding already carries the
       // safe-area insets) instead of 86vh — the leftover 14 % was showing up as
       // dead black bands above and below the card on a phone.
+      card.className = 'ktl-sheet';   // platform look: ios-feel.css / android-feel.css
       card.style.cssText =
         'background:#141414;border:1px solid #2a2a2a;border-radius:14px;' +
         'width:min(96vw,720px);height:100%;max-height:100%;display:flex;flex-direction:column;overflow:hidden;';
@@ -1649,6 +1746,7 @@
 
       const head = document.createElement('div');
       head.id = 'kchapterViewHead';   // dict popup positions itself below this
+      head.className = 'ktl-head';
       head.style.cssText =
         'display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #242424;';
       const ht = document.createElement('div');
@@ -1703,6 +1801,7 @@
       }
       const xb = document.createElement('button');
       xb.textContent = '✕';
+      xb.className = 'ktl-close';
       xb.style.cssText =
         'background:none;border:1px solid #333;border-radius:8px;color:#ccc;' +
         'font-size:1.25rem;padding:8px 15px;cursor:pointer;line-height:1.1;';
@@ -1716,6 +1815,9 @@
           ? window.kadokiPanel.makeButton('summary', () => close()) : null;
         if (po) head.appendChild(po);
       } catch (_) {}
+      if (art && art.briefSummary) {
+        head.appendChild(mkSummaryLenSwitch(async () => { await close(); await openChapter(titleId, ch.idx); }));
+      }
       if (art) head.appendChild(cp);   // nothing to copy on a blank (unsummarized) page
       if (rb) head.appendChild(rb);
       head.appendChild(xb);
@@ -2253,6 +2355,7 @@
       overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
 
       const card = document.createElement('div');
+      card.className = 'ktl-sheet';
       card.style.cssText =
         'background:#141414;border:1px solid #2a2a2a;border-radius:14px;' +
         'width:min(94vw,640px);height:86vh;max-height:100%;display:flex;flex-direction:column;overflow:hidden;';
@@ -2260,6 +2363,7 @@
       // header
       const head = document.createElement('div');
       head.id = 'kchapterViewHead';
+      head.className = 'ktl-head';
       head.style.cssText = 'display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #242424;';
       const ht = document.createElement('div');
       ht.style.cssText = 'flex:1;min-width:0;';
@@ -2270,6 +2374,7 @@
         '<div style="color:#888;font-size:.72rem;margin-top:2px;">' + esc(chLabel) + '</div>';
       const xb = document.createElement('button');
       xb.textContent = '✕';
+      xb.className = 'ktl-close';
       xb.style.cssText = 'background:none;border:1px solid #333;border-radius:8px;color:#ccc;font-size:1.4rem;padding:6px 14px;cursor:pointer;';
       xb.addEventListener('click', (e) => { e.stopPropagation(); close(); });
       head.appendChild(ht);
@@ -2772,6 +2877,7 @@
         'display:flex;align-items:center;justify-content:center;box-sizing:border-box;' +
         'padding:calc(8px + env(safe-area-inset-top, 0px)) 0 calc(8px + env(safe-area-inset-bottom, 0px));';
       const panel = document.createElement('div');
+      panel.className = 'ktl-sheet ktl-feed';   // platform look: ios-feel.css / android-feel.css
       panel.style.cssText =
         'background:#0d0d12;border:1px solid #2a2a2a;border-radius:14px;' +
         'width:min(96vw,860px);height:96vh;max-height:100%;display:flex;flex-direction:column;overflow:hidden;';
@@ -2813,20 +2919,16 @@
       // size. Default slightly smaller than card mode; − / + in the header.
       let _fontScale = parseFloat(localStorage.getItem('TL_FONT_SCALE_V1'));
       if (!Number.isFinite(_fontScale) || _fontScale <= 0) _fontScale = 0.85;
-      // Pictures show/hide (persisted, global). Hidden = frames display:none via
-      // CSS (captions/quotes stay) AND image bytes aren't fetched — pending
-      // loads run when toggled back on.
-      let _picsHidden = false;
-      try { _picsHidden = localStorage.getItem('TL_PICS_HIDDEN_V1') === '1'; } catch (_) {}
-      ensureTlPicsStyle();
 
       // header
       const head = document.createElement('div');
+      head.className = 'ktl-head';
       head.style.cssText =
         'display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid #222;';   // card is already inset below the safe area
       const title = document.createElement('div');
       title.style.cssText = 'flex:1;min-width:0;font-weight:600;color:#eee;font-size:1rem;' +
         'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      title.className = 'ktl-title';
       title.textContent = window.i18n.t('tl.title', 'Timeline & Scenes');
       const mkBtn = (txt, fn, dim) => {
         const b = document.createElement('button');
@@ -2837,50 +2939,6 @@
         return b;
       };
       head.appendChild(title);
-      // pictures on/off (dimmed label = hidden)
-      const picsBtn = document.createElement('button');
-      const paintPicsBtn = () => {
-        picsBtn.textContent = window.i18n.t('tl.pics', '画像');
-        picsBtn.style.cssText = 'background:#1c1c24;border:1px solid #333;border-radius:8px;' +
-          'color:' + (_picsHidden ? '#666' : '#ccc') + ';font-size:.9rem;padding:11px 12px;cursor:pointer;line-height:1.2;' +
-          (_picsHidden ? 'text-decoration:line-through;' : '');
-      };
-      paintPicsBtn();
-      picsBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        _picsHidden = !_picsHidden;
-        try { localStorage.setItem('TL_PICS_HIDDEN_V1', _picsHidden ? '1' : '0'); } catch (_) {}
-        overlay.classList.toggle('tl-nopics', _picsHidden);
-        paintPicsBtn();
-        if (!_picsHidden) {
-          // frames are visible again — fetch the bytes deferred while hidden
-          try {
-            for (const f of inner.querySelectorAll('.kai-img-lazy')) {
-              if (f._kaiImgPending) { const fn = f._kaiImgPending; f._kaiImgPending = null; try { fn(); } catch (_) {} }
-            }
-          } catch (_) {}
-        }
-      });
-      head.appendChild(picsBtn);
-      // Vocab review (in-app SRS) — label carries the due count when > 0.
-      const srsHdrBtn = document.createElement('button');
-      srsHdrBtn.style.cssText = 'background:#1c1c24;border:1px solid #333;border-radius:8px;' +
-        'color:#cbbfee;font-size:.9rem;padding:11px 12px;cursor:pointer;line-height:1.2;';
-      srsHdrBtn.textContent = window.i18n.t('vs.review_btn', '語彙');
-      srsHdrBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        try { window.vocabSrs && window.vocabSrs.openHub(); } catch (_) {}
-      });
-      (async () => {
-        try {
-          const c = await window.vocabSrs?.counts?.();
-          if (c && c.due > 0) {
-            srsHdrBtn.textContent = window.i18n.t('vs.review_btn', '語彙') + ' ' + c.due;
-            srsHdrBtn.style.borderColor = '#463a6b';
-          }
-        } catch (_) {}
-      })();
-      head.appendChild(srsHdrBtn);
       // − / + adjust the summary text size (anchor-preserving re-render)
       const setScale = (d) => {
         _fontScale = Math.max(0.6, Math.min(1.3, Math.round((_fontScale + d) * 100) / 100));
@@ -2898,7 +2956,9 @@
           ? window.kadokiPanel.makeButton('timeline', () => destroy()) : null;
         if (po) head.appendChild(po);
       } catch (_) {}
-      head.appendChild(mkBtn('✕', () => destroy()));
+      const closeBtn = mkBtn('✕', () => destroy());
+      closeBtn.className = 'ktl-close';
+      head.appendChild(closeBtn);
       panel.appendChild(head);
 
       // body: a thin DECORATIVE coverage axis (whole-book progress, colored by
@@ -2910,6 +2970,7 @@
       const axisWrap = document.createElement('div');
       axisWrap.style.cssText = 'flex:none;width:6px;margin:12px 4px 10px 10px;position:relative;';
       const axisCol = document.createElement('div');
+      axisCol.className = 'ktl-axis';
       axisCol.style.cssText = 'position:absolute;inset:0;border-radius:3px;background:#23232a;overflow:hidden;';
       axisWrap.appendChild(axisCol);
       bodyRow.appendChild(axisWrap);
@@ -2947,7 +3008,6 @@
       overlay.appendChild(panel);
       overlay.addEventListener('click', (e) => { if (e.target === overlay) destroy(); });   // tap outside the card closes (like Characters)
       overlay._kaiDestroy = destroy;   // replace-path teardown (openPanel over an open panel)
-      overlay.classList.toggle('tl-nopics', _picsHidden);
       document.body.appendChild(overlay);
 
       // Backgrounded mid-clip (feed ▶): dispose at once so the durable position
@@ -2989,50 +3049,27 @@
       // or a stale-fp entry) must NOT count, or the card would say "tap to
       // generate" while the tap merely opened an empty view (the skipped-chapter bug).
       function hasSummary(a) { return !!(a && a.shortSummary); }
-      // Lowest chapter idx whose summary exists but hasn't been opened — the
-      // "continue reading here" marker. O(chapters) scan, trivial at list size.
-      function aiFirstUnreadIdx() {
-        try {
-          const idxs = Object.keys(arts || {}).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
-          for (const i of idxs) {
-            const a = arts[i];
-            if (!hasSummary(a)) continue;
-            if (a.ahead) {   // generated ahead — hidden until reached, never "unread"
-              const ch = (map && Array.isArray(map.chunks)) ? map.chunks.find(c => c && c.idx === i) : null;
-              if (ch && !chapterReached(map, ch)) continue;
-            }
-            if (!_aiRead.ch[i]) return i;
-          }
-        } catch (_) {}
-        return -1;
-      }
-      // 'read' | 'next' (continue here) | 'unread' | null (no summary yet).
+      // 'read' | 'unread' | null (no summary yet).
       function aiReadMarkFor(idx, art) {
         if (!hasSummary(art)) return null;
-        if (_aiRead.ch[idx]) return 'read';
-        return idx === aiFirstUnreadIdx() ? 'next' : 'unread';
+        return _aiRead.ch[idx] ? 'read' : 'unread';
       }
       // Small marker element for a chapter row/card meta line. Email-style:
-      // unread = conspicuous BLUE dot (+ blue "continue" pill on the first
-      // unread); read = quiet green check. Titles bold/dim to match (the
-      // builders read the mark via aiReadMarkFor).
+      // unread = conspicuous BLUE dot; read = quiet green check. Titles
+      // bold/dim to match (the builders read the mark via aiReadMarkFor).
       function aiReadMarkEl(mark) {
         if (!mark) return null;
         const el = document.createElement('span');
         if (mark === 'read') {
           el.textContent = '✓';
           el.style.cssText = 'flex:none;color:#5f8f6a;font-size:.8rem;font-weight:700;line-height:1;';
-        } else if (mark === 'next') {
-          el.textContent = '● ' + window.i18n.t('tl.continue', '続きから');
-          el.style.cssText = 'flex:none;color:#cfe4ff;font-size:.68rem;font-weight:800;' +
-            'background:rgba(61,132,255,.24);border:1px solid #3d84ff;border-radius:999px;padding:1px 9px;';
         } else {
           el.textContent = '●';
           el.style.cssText = 'flex:none;color:#3d9bff;font-size:.9rem;line-height:1;';
         }
         return el;
       }
-      const aiUnreadMark = (mark) => mark === 'next' || mark === 'unread';
+      const aiUnreadMark = (mark) => mark === 'unread';
 
       // Targeted regenerate of one chapter's summary. Routes through the new
       // chapter-targeted processor that bypasses the strict in-order pump (so a
@@ -3237,7 +3274,7 @@
         const label = (art && art.label) || ch.label || window.i18n.fmt('tl.chapter_n', { n: idx + 1 }, '第' + (idx + 1) + '章');
         const stat = _sceneStat[idx] || null;
         const row = document.createElement('div');
-        row.className = 'menu-item';
+        row.className = 'menu-item ktl-card' + (isCur ? ' ktl-cur' : '');
         row.dataset.chIdx = String(idx);   // scroll-anchor + read-sentinel key
         row.style.cssText =
           'position:relative;margin:0 0 ' + (hasSum ? '18px' : '8px') + ';padding:11px 13px;border-radius:10px;box-sizing:border-box;' +
@@ -3258,6 +3295,7 @@
         let toggleColl = () => {};
         // meta line (wraps so the current-chapter summary button never overflows)
         const meta = document.createElement('div');
+        meta.className = 'ktl-meta';
         meta.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:3px;';
         let tri = null;
         if (hasSum) {
@@ -3265,6 +3303,7 @@
           // are exempt from scroll-to-read marking
           tri = document.createElement('button');
           tri.textContent = isColl ? '▸' : '▾';
+          tri.className = 'ktl-plain';
           tri.style.cssText = 'flex:none;background:none;border:none;color:#b0aacb;font-size:1.9rem;padding:8px 18px 8px 4px;cursor:pointer;line-height:1;';
           tri.addEventListener('click', (e) => { e.stopPropagation(); toggleColl(); });
           meta.appendChild(tri);
@@ -3285,6 +3324,7 @@
         meta.appendChild(cc);
         if (isCur) {
           const now = document.createElement('span');
+          now.className = 'ktl-now';
           now.style.cssText = 'flex:none;background:#2a2440;border:1px solid #5a4f8c;color:#cbbfee;font-size:.62rem;padding:1px 7px;border-radius:8px;';
           now.textContent = window.i18n.t('tl.now', 'いま');
           meta.appendChild(now);
@@ -3295,33 +3335,24 @@
           b.textContent = '✦';
           meta.appendChild(b);
         }
+        // Chapter actions live behind one ⋯ (a labelled sheet) instead of a
+        // row of bare symbols.
+        const acts = [];
         if (hasSum && window.aiExport && window.aiExport.chapterText) {
-          const cp = document.createElement('button');
-          cp.textContent = '⧉';
-          cp.title = window.i18n.t('tl.copy_chapter_summary', 'Copy chapter summary');
-          cp.style.cssText = 'flex:none;background:none;border:1px solid #3a3450;border-radius:8px;color:#aab4dd;font-size:1.05rem;padding:6px 13px;cursor:pointer;line-height:1.2;';
-          cp.addEventListener('click', async (e) => {
-            e.stopPropagation();
+          acts.push([window.i18n.t('tl.copy_chapter_summary', 'Copy chapter summary'), async () => {
             try {
               const ok = await window.aiExport.copyText(window.aiExport.chapterText(art, ch, idx + 1));
               window.aiExport.toast(ok ? window.i18n.t('tl.copied', 'Copied') : window.i18n.t('tl.copy_failed', 'Copy failed'));
             } catch (_) {}
-          });
-          meta.appendChild(cp);
+          }]);
         }
         // Rebuild: regenerate an EXISTING summary (e.g. into the new narrative-
         // blocks format). Explicit confirm — it re-bills the chapter. discard
         // strips the old summary so the billing backstop can't re-adopt it;
         // scenes + their images are preserved (processChunk regen guard).
         if (hasSum && window.aiProcessor && typeof window.aiProcessor.processChapter === 'function') {
-          const rb = document.createElement('button');
-          rb.textContent = '⟲';
-          rb.title = window.i18n.t('tl.regen_summary', 'Rebuild this chapter summary');
-          rb.style.cssText = 'flex:none;background:none;border:1px solid #3a3450;border-radius:8px;color:#aab4dd;font-size:1.05rem;padding:6px 13px;cursor:pointer;line-height:1.2;';
-          rb.addEventListener('click', async (e) => {
-            e.stopPropagation();
+          acts.push([window.i18n.t('tl.regen_summary', 'Rebuild this chapter summary'), async () => {
             if (!window.confirm(window.i18n.t('tl.regen_summary_confirm', 'この章の要約をAIで作り直しますか？（API利用料がかかります）'))) return;
-            rb.disabled = true;
             try {
               // forceUnread: the spoiler was accepted when this summary was first
               // generated; without it a previously force-generated chapter would
@@ -3330,10 +3361,9 @@
               if (r && r.ok !== false) {
                 try { window.showToast && window.showToast(window.i18n.t('tl.generating_summary', '要約を生成中…'), 2500); } catch (_) {}
                 scheduleRefresh(600);
-              } else rb.disabled = false;
-            } catch (_) { rb.disabled = false; }
-          });
-          meta.appendChild(rb);
+              }
+            } catch (_) {}
+          }]);
         }
         // Force-generate: summarize this chapter NOW even if it doesn't register
         // as read (watch listening advances the book without painting coverage).
@@ -3362,12 +3392,20 @@
           });
           meta.appendChild(gb);
         }
-        const jb = document.createElement('button');
-        jb.textContent = '➤';
-        jb.title = window.i18n.t('tl.go_to_chapter', 'Go to this chapter in the book');
-        jb.style.cssText = 'flex:none;background:none;border:1px solid #3a3450;border-radius:7px;color:#aab4dd;font-size:.78rem;padding:2px 9px;cursor:pointer;line-height:1.2;';
-        jb.addEventListener('click', (e) => { e.stopPropagation(); jumpToChapter(ch); });
-        meta.appendChild(jb);
+        acts.unshift([window.i18n.t('tl.go_to_chapter', 'Go to this chapter in the book'), () => jumpToChapter(ch)]);
+        const more = document.createElement('button');
+        more.textContent = '⋯';
+        more.title = window.i18n.t('tl.chapter_actions', 'Chapter actions');
+        more.style.cssText = 'flex:none;background:none;border:1px solid #3a3450;border-radius:8px;color:#aab4dd;font-size:1.05rem;padding:6px 13px;cursor:pointer;line-height:1.2;';
+        more.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (typeof window.libSheet !== 'function') { acts[0][1](); return; }
+          const sh = window.libSheet(label);
+          for (const [txt, fn] of acts) sh.box.appendChild(window.libOpt(txt, '', () => { sh.close(); fn(); }));
+          sh.finish();
+        });
+        if (hasSum && art.briefSummary) meta.appendChild(mkSummaryLenSwitch(() => render()));
+        meta.appendChild(more);
         // CURRENT (partially-read) chapter: summarize from its start to the reading
         // position — sends just the read portion to Claude (spoiler-safe).
         if (isCur && Number.isFinite(pos) && window.aiSummary && window.aiSummary.summarizeRange) {
@@ -3808,7 +3846,7 @@
               fig.classList.add('kai-img-lazy');
               fig._kaiLoad = async () => {
                 const loadImg = async () => { try { const r = await window.aiImages.getLatestImage(titleId, sCharId); if (r) im.src = r.dataUri; } catch (_) {} };
-                if (_picsHidden) fig._kaiImgPending = loadImg; else loadImg();
+                loadImg();
               };
               sceneBox.appendChild(fig);
             } else {
@@ -3886,7 +3924,7 @@
                   if (r) { im.src = r.dataUri; lcap.textContent = r.caption || ''; }
                 } catch (_) {}
               };
-              if (_picsHidden) lfig._kaiImgPending = loadImg; else loadImg();
+              loadImg();
             };
             lfig.appendChild(frame);
             lfig.appendChild(lcap);
@@ -4039,7 +4077,7 @@
           const sig = [
             ch.state || 'none', complete ? 1 : 0, reached ? 1 : 0, (art && art.ts) || 0, (art && art.fp) || '',
             (art && art.label) || ch.label || '', idx === curIdx ? 1 : 0, aiReadMarkFor(idx, art) || '',
-            _collapsed.has(idx) ? 1 : 0, _fontScale, scSig,
+            _collapsed.has(idx) ? 1 : 0, _fontScale, tlSummaryShort() ? 1 : 0, scSig,
             (_sceneSlotStat['scene_' + idx] && _sceneSlotStat['scene_' + idx].images) || 0,
             hasSummary(art) ? -1 : Math.round(((prog && prog.pct) || 0) * 100),
             (ch.error || ''), (ch.attempts | 0),
@@ -4131,8 +4169,7 @@
                       if (!_aiRead.sc[idx + '_' + s]) _aiRead.sc[idx + '_' + s] = Date.now();
                     }
                   } catch (_) {}
-                  // quiet in-place ● → ✓ swap; the 続きから pill migrates on the
-                  // next natural re-render (no full rebuild for a read mark)
+                  // quiet in-place ● → ✓ swap (no full rebuild for a read mark)
                   try {
                     const row = t._kaiRow;
                     if (row && row._kaiMarkEl) {

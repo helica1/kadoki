@@ -26,6 +26,9 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
 
   // ---- chapter list / states ----
   'tl.go_to_chapter': { en: 'Go to this chapter in the book', ja: '本のこの章へ移動' },
+  'tl.len_short': { en: 'Short', ja: '短く' },
+  'tl.len_long': { en: 'Long', ja: '詳しく' },
+  'tl.chapter_actions': { en: 'Chapter actions', ja: '章のメニュー' },
   'tl.summarize_to_here': { en: 'Summarize to here', ja: 'ここまで要約' },
   'tl.summarize_to_here_title': { en: 'Summarize this chapter up to your current position', ja: '現在位置までこの章を要約します' },
   'tl.processing': { en: 'Processing…', ja: '処理中…' },

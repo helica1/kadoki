@@ -33,12 +33,19 @@
   // unchanged. A sheet holding anything but plain choices (a name field) stays
   // the web sheet (styled in ios-feel.css).
   if (!window.KADOKI_NATIVE_SHEETS) return;
+  // Tapping outside a native action sheet to dismiss it also reaches the page
+  // below — on dictionary text that started a lookup. Taps are swallowed while
+  // a sheet is up and briefly after it closes.
+  let sheetOpen = 0, sheetOpenTs = 0, sheetClosedTs = 0;
+  window.kSheetSwallowsTap = () => (sheetOpen > 0 && Date.now() - sheetOpenTs < 60000) || Date.now() - sheetClosedTs < 500;
   const pending = new Map();
   let seq = 0;
   window.__kadokiSheetDone = (id, index) => {
     const p = pending.get(id);
     pending.delete(id);
     if (!p) return;
+    sheetOpen = Math.max(0, sheetOpen - 1);
+    sheetClosedTs = Date.now();
     if (index >= 0 && p.opts[index]) { try { p.opts[index].click(); } catch (_) {} }
     // A pick usually closes the sheet itself; Cancel (or a pick that keeps
     // it open, like the tab chooser) closes it here.
@@ -58,6 +65,7 @@
         if (!plain) { sh.ov.style.display = ''; return; }
         const id = ++seq;
         pending.set(id, { ov: sh.ov, opts: kids });
+        sheetOpen++; sheetOpenTs = Date.now();
         try {
           window.webkit.messageHandlers.kadokiActionSheet.postMessage({
             id,
@@ -69,7 +77,7 @@
             })),
             cancel: (sh.box.querySelector('.lib-sheet-cancel')?.textContent || '').trim() || undefined,
           });
-        } catch (_) { pending.delete(id); sh.ov.style.display = ''; }
+        } catch (_) { pending.delete(id); sheetOpen = Math.max(0, sheetOpen - 1); sh.ov.style.display = ''; }
       };
       return sh;
     };

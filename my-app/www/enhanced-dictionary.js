@@ -2705,7 +2705,7 @@
         const ctx = window.lookupContext || {};
         // History review must NEVER move the place — hide the seek action
         // entirely for lookups re-opened from the lookup-history viewer.
-        if (ctx.source === 'history') { btn.style.display = 'none'; return; }
+        if (ctx.source === 'history' || ctx.noSeek) { btn.style.display = 'none'; return; }
         if (!Number.isFinite(ctx.cueIndex) && !Number.isFinite(ctx.cueStartMs) &&
             !(Number.isFinite(ctx.bookFrac) && ctx.cueAudioPath)) {
             btn.disabled = true;
@@ -4179,6 +4179,7 @@
         container.addEventListener('touchend', (e) => {
             try {
                 if (moved) return;   // scrolled, not a tap
+                if (window.kSheetSwallowsTap?.()) return;   // the tap that dismissed a native sheet
                 const _pop = document.getElementById('dictPopup');
                 if (_pop && _pop.style.display !== 'none') {
                     e.preventDefault();
