@@ -4285,6 +4285,26 @@
     } catch (_) {}
   }
 
+  // Audio follow turns pages without a user scroll, so the settle timer never
+  // fires: a process kill (Android low-memory, reinstall) then reopened at the
+  // last MANUAL page, tens of minutes behind. While playing, bookmark the line
+  // being read, at most every 5 s.
+  let _followBmTimer = null;
+  function _noteFollowBookmark() {
+    if (_followBmTimer || !window._bgPlaying) return;
+    _followBmTimer = setTimeout(() => {
+      _followBmTimer = null;
+      try {
+        if (suppressScrollSave || _scrubS || _readerHidden() || !window._bgPlaying) return;
+        if (!document.body.classList.contains('mode-read')) return;
+        if (!(lastHighlightedChunkIdx >= 0 && lastHighlightedChunkIdx < (chunks?.length || 0))) return;
+        if (lastHighlightedChunkIdx === _bookmarkChunkIdx) return;
+        _bookmarkChunkIdx = lastHighlightedChunkIdx;
+        _persistBookmark();
+      } catch (_) {}
+    }, 5000);
+  }
+
   // Capture the current line silently (on close / background) so reopen is exact
   // even if the user left before 5 s, and credit the final reading so a session
   // that ends in a close isn't lost. Never overwrites a good bookmark with junk.
@@ -7166,6 +7186,7 @@
       // from the returned range; any stale registration is cleared here.
       clearCueHighlight();
       lastHighlightedChunkIdx = chunks.indexOf(chunk);
+      _noteFollowBookmark();
       return r;
     } catch (e) { return null; }
   }

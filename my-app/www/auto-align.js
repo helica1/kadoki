@@ -260,6 +260,16 @@
     return { exp, lo, hi, tight, first: !st.anchors.length };
   }
 
+  // Text distance to the time-adjacent anchors within 3x narration speed.
+  function plausibleHit(st, ms, hit) {
+    const { prev, next } = anchorNeighbors(st.anchors, ms);
+    const rate = charRate(st);
+    const fits = (chars, dt) => chars <= Math.max(0, dt) * rate * 3 + 80;
+    if (prev && ms - prev.ms < 120000 && !fits(hit.ns - prev.ne, ms - prev.ms)) return false;
+    if (next && next.ms - ms < 120000 && !fits(next.ns - hit.ne, next.ms - ms)) return false;
+    return true;
+  }
+
   function insertAnchor(st, ms, ns, ne) {
     const { at } = anchorNeighbors(st.anchors, ms);
     st.anchors.splice(at, 0, { ms, ns, ne });
@@ -348,7 +358,7 @@
     // one far from any (just after a big seek) is the estimate's fault.
     if (!retry && ctx.tight) st.tried++;
 
-    let hit = null;
+    let hit = null, trusted = false;
     // The seek sync already placed this very cue (same start time): use its
     // range. Left in the lattice it would be this cue's own "previous"
     // neighbour and bound the search to AFTER itself — every probe cue missed.
@@ -358,6 +368,7 @@
       if (self) {
         st.anchors.splice(nb0.at - 1, 1);
         hit = { ns: self.ns, ne: self.ne };
+        trusted = true;
       }
     }
     // No anchors yet (fresh book, or restart where seeding found nothing):
@@ -367,6 +378,7 @@
       const i1 = st.normFlat.indexOf(needle);
       if (i1 >= 0 && st.normFlat.indexOf(needle, i1 + 1) < 0) {
         hit = { ns: i1, ne: i1 + needle.length };
+        trusted = true;
       }
     }
     for (const half of hit ? [] : [PASS1_HALF, PASS2_HALF]) {
@@ -377,6 +389,7 @@
       if (idx >= 0 && idx + needle.length <= hi) {
         // Exact hit: boundaries are authoritative, no snapping.
         hit = { ns: idx, ne: idx + needle.length };
+        trusted = needle.length >= 16;
         break;
       }
       if (needle.length >= minFuzzy) {
@@ -388,6 +401,11 @@
       }
     }
 
+    // A short or fuzzy hit must fit the time elapsed since the neighbouring
+    // anchors. A misheard phrase that happens to occur a few hundred chars
+    // away (お盆を持った, 400 chars ahead after 7 s) otherwise becomes an
+    // anchor that drags every later cue's window past its real text.
+    if (hit && !trusted && !plausibleHit(st, startMs, hit)) hit = null;
     if (!hit) {
       _maybeDisable(st);
       return null;
