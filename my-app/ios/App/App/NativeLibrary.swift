@@ -62,6 +62,8 @@ struct LibTitle: Identifiable, Hashable {
     let want: Bool
     let readingBook: Bool
     let canReadingBook: Bool
+    var listeningBook: Bool = false
+    var canListeningBook: Bool = false
     let cloud: Bool
     let summary: [String]
     let tags: [String]
@@ -111,7 +113,13 @@ final class LibraryStore: ObservableObject {
     }
 
     private func title(_ d: [String: Any]) -> LibTitle {
-        LibTitle(id: d["id"] as? String ?? "", name: d["name"] as? String ?? "", author: d["author"] as? String ?? "",
+        var t = baseTitle(d)
+        t.listeningBook = d["listeningBook"] as? Bool ?? false
+        t.canListeningBook = d["canListeningBook"] as? Bool ?? false
+        return t
+    }
+    private func baseTitle(_ d: [String: Any]) -> LibTitle {
+        LibTitle(id:d["id"] as? String ?? "", name: d["name"] as? String ?? "", author: d["author"] as? String ?? "",
                  cover: image(d["cover"] as? String ?? ""),
                  kinds: ((d["kinds"] as? [[String: Any]]) ?? []).map { LibKind(label: $0["l"] as? String ?? "", color: $0["c"] as? String ?? "") },
                  progress: d["progress"] as? Int ?? -1, opened: d["opened"] as? String ?? "",
@@ -484,6 +492,11 @@ struct TitleMenu: View {
         if t.canReadingBook {
             Button { store.act("reading", t.id) } label: {
                 Label(store.str("readingBook", "Reading book"), systemImage: t.readingBook ? "star.fill" : "star")
+            }
+        }
+        if t.canListeningBook {
+            Button { store.act("listening", t.id) } label: {
+                Label(store.str("listeningBook", "Listening book"), systemImage: t.listeningBook ? "headphones.circle.fill" : "headphones")
             }
         }
         Button { store.act("move", t.id) } label: { Label(store.str("move", "Move") + "…", systemImage: "folder") }

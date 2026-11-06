@@ -109,6 +109,24 @@
     return JSON.stringify(pins.length ? [...pins, { divider: true }, ...rows] : rows);
   };
 
+  // Swipe actions on a pinned title's row (iOS menu): the Library's own
+  // Edit / Stats / Delete for that title.
+  window.__kadokiMenuTitleAction = async function (action, id) {
+    try {
+      if (action === 'edit') {
+        if (typeof openTitleEdit === 'function') openTitleEdit(id);
+      } else if (action === 'stats') {
+        window.openTitleStats?.(id);
+      } else if (action === 'delete') {
+        const T = (k, d) => { try { return window.i18n.t(k, d); } catch (_) { return d; } };
+        if (!window.titleStore || !confirm(T('lib.delete_confirm', 'Remove this title from your library?'))) return;
+        const t = await window.titleStore.get(id);
+        try { if (t && t.syncId && window.driveIndex) await window.driveIndex.dismiss(t.syncId); } catch (_) {}
+        await window.titleStore.remove(id);
+      }
+    } catch (e) { console.warn('pinned title action:', e); }
+  };
+
   window.__kadokiMenuSelect = function (id) {
     const fn = actions.get(id);
     if (!fn) return;

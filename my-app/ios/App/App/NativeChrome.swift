@@ -22,7 +22,15 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
     private var chromeHidden = false
     private var panel: UIView?
     private var panelCard: UIView?
-    private static let size: CGFloat = 40
+    static let size: CGFloat = 40
+    /// Set once a hinge is seen (MainViewController). The Duo reports a wide
+    /// right safe-area inset; the button may sit a little into it.
+    static var duo = false
+    /// Right-most center x for the button: inside the safe area, never past the edge.
+    static func maxCenterX(in host: UIView) -> CGFloat {
+        let inset = duo ? max(0, host.safeAreaInsets.right - 14) : host.safeAreaInsets.right
+        return host.bounds.width - inset - 8 - size / 2
+    }
 
     /// Flag the page before any script runs so native-menu.js arms itself.
     static func userScript() -> WKUserScript {
@@ -77,7 +85,7 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
         let r = wv.convert(CGRect(x: x, y: y, width: w, height: h), to: host)
         let s = Self.size
         // Centered on the web button, but never past the screen's right edge.
-        let cx = min(r.midX, host.bounds.width - host.safeAreaInsets.right - 8 - s / 2)
+        let cx = min(r.midX, Self.maxCenterX(in: host))
         KadokiChromeSlide.place(button, CGRect(x: cx - s / 2, y: r.midY - s / 2, width: s, height: s))
         dot.isHidden = !((d["dot"] as? Bool) ?? false)
         if panel == nil { host.bringSubviewToFront(button) }
@@ -124,7 +132,8 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
         let bottom = host.bounds.height - max(host.safeAreaInsets.bottom, 8) - 8
         let right = host.bounds.width - max(host.safeAreaInsets.right, 0) - 10
         let frame = CGRect(x: right - width, y: y0, width: width, height: max(240, bottom - y0))
-        let view = KMenuPanel(top: top, sections: sections) { [weak self] id in self?.dismiss(then: id) }
+        let view = KMenuPanel(top: top, sections: sections, pick: { [weak self] id in self?.dismiss(then: id) },
+                              titleAction: { [weak self] action, tid in self?.dismiss(titleAction: (action, tid)) })
         let hosting = UIHostingController(rootView: view)
         hosting.view.backgroundColor = .clear
         hosting.overrideUserInterfaceStyle = .dark
@@ -153,7 +162,7 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
         if !card.frame.contains(g.location(in: g.view)) { dismiss() }
     }
 
-    private func dismiss(then id: String? = nil) {
+    private func dismiss(then id: String? = nil, titleAction: (String, String)? = nil) {
         guard let shade = panel, let card = panelCard else { return }
         panel = nil; panelCard = nil
         shade.isUserInteractionEnabled = false
@@ -163,6 +172,11 @@ final class KadokiNativeMenu: NSObject, WKScriptMessageHandler {
             shade.alpha = 0
         }, completion: { _ in shade.removeFromSuperview() })
         if let id { select(id) }
+        if let (action, tid) = titleAction,
+           let data = try? JSONSerialization.data(withJSONObject: [action, tid]),
+           let arg = String(data: data, encoding: .utf8) {
+            webView?.evaluateJavaScript("window.__kadokiMenuTitleAction&&window.__kadokiMenuTitleAction(...\(arg))", completionHandler: nil)
+        }
     }
 
     private static func row(_ r: [String: Any]) -> KMenuRow {
@@ -207,7 +221,12 @@ struct KMenuPanel: View {
     let top: [KMenuRow]
     let sections: [[KMenuRow]]
     let pick: (String) -> Void
+    /// (action, titleId) from a pinned row's swipe: "edit" / "stats" / "delete".
+    var titleAction: (String, String) -> Void = { _, _ in }
     @State private var open: Set<String> = []
+    @State private var swiped: String?          // the row whose actions are showing
+    @State private var drag: CGFloat = 0
+    private static let actionW: CGFloat = 62
 
     var body: some View {
         VStack(spacing: 0) {
@@ -249,7 +268,9 @@ struct KMenuPanel: View {
         AnyView(itemBody(r, indent: indent))
     }
     @ViewBuilder private func itemBody(_ r: KMenuRow, indent: Bool) -> some View {
-        if r.children.isEmpty {
+        if r.id.hasPrefix("pin:") {
+            pinnedRow(r, titleId: String(r.id.dropFirst(4)))
+        } else if r.children.isEmpty {
             Button { pick(r.id) } label: { line(r, indent: indent, expandable: false) }
                 .buttonStyle(KMenuPress())
         } else {
@@ -263,6 +284,71 @@ struct KMenuPanel: View {
                 ForEach(r.children) { c in item(c, indent: true) }
             }
         }
+    }
+
+    /// A pinned title: swipe left for Delete / Edit / Stats, as in the Library.
+    private func pinnedRow(_ r: KMenuRow, titleId: String) -> some View {
+        let full = Self.actionW * 3
+        let isOpen = swiped == r.id
+        let base: CGFloat = isOpen ? -full : 0
+        let x = min(0, max(-full - 24, base + (dragging == r.id ? drag : 0)))
+        return Button {
+            // A Button still fires when a swipe lifts inside it: that "tap" is
+            // the end of the swipe, not a tap (it used to close the actions).
+            if dragging != nil || Date() < tapBlockedUntil { return }
+            if swiped != nil { withAnimation(.easeOut(duration: 0.2)) { swiped = nil } }
+            else { pick(r.id) }
+        } label: { line(r, indent: false, expandable: false) }
+            .buttonStyle(KMenuPress())
+            .background(Color(uiColor: .secondarySystemBackground).opacity(x < 0 ? 1 : 0))
+            .offset(x: x)
+            .frame(maxWidth: .infinity)
+            .background(alignment: .trailing) {
+                HStack(spacing: 0) {
+                    actionButton("stats", titleId, "chart.bar", .indigo)
+                    actionButton("edit", titleId, "pencil", .blue)
+                    actionButton("delete", titleId, "trash", .red)
+                }
+                .frame(width: full)
+                .opacity(x < -4 ? 1 : 0)
+            }
+        .clipped()
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 14)
+                .onChanged { v in
+                    guard abs(v.translation.width) > abs(v.translation.height) else { return }
+                    if dragging != r.id { dragging = r.id; if swiped != r.id { swiped = nil } }
+                    drag = v.translation.width
+                    tapBlockedUntil = Date().addingTimeInterval(0.5)
+                }
+                .onEnded { v in
+                    guard dragging == r.id else { return }
+                    tapBlockedUntil = Date().addingTimeInterval(0.4)
+                    // Like system swipe actions: a short drag or a flick opens
+                    // (or, when open, a short drag right closes) — not half the width.
+                    let dx = v.translation.width
+                    let flick = v.predictedEndTranslation.width
+                    let open = isOpen ? !(dx > 40 || flick > full / 2) : (dx < -40 || flick < -full / 2)
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                        swiped = open ? r.id : nil
+                        drag = 0
+                        dragging = nil
+                    }
+                }
+        )
+    }
+    @State private var dragging: String?
+    @State private var tapBlockedUntil = Date.distantPast
+    private func actionButton(_ action: String, _ titleId: String, _ symbol: String, _ color: Color) -> some View {
+        Button {
+            swiped = nil
+            titleAction(action, titleId)
+        } label: {
+            Image(systemName: symbol).font(.system(size: 17, weight: .semibold)).foregroundStyle(.white)
+                .frame(width: Self.actionW).frame(maxHeight: .infinity)
+                .background(color)
+        }
+        .buttonStyle(.plain)
     }
 
     private func line(_ r: KMenuRow, indent: Bool, expandable: Bool) -> some View {
@@ -501,6 +587,7 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
     private var playAccent = ""
     private var shownPlaying: Bool?
     private var chromeHidden = false
+    private var timerX: CGFloat = -1
     // A tap is shown at once; reports that still carry the old state (the web
     // side hasn't switched yet) don't undo it until they catch up or time out.
     private var pendingMode: String?
@@ -535,6 +622,7 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
             return wv.convert(CGRect(x: x, y: y, width: w, height: h), to: host)
         }
         // Tabs
+        var tabsRect: CGRect?
         let t = d["tabs"] as? [String: Any] ?? [:]
         if (t["visible"] as? Bool) == true, let r = rect(t), let items = t["items"] as? [[String: Any]], !items.isEmpty {
             let m = items.map { $0["mode"] as? String ?? "" }
@@ -560,7 +648,8 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
             let a = pendingMode == nil ? ((t["accent"] as? String) ?? "") : accent
             if a != accent { accent = a; tabs.selectedSegmentTintColor = KadokiChromeSlide.color(a) }
             let h = max(r.height, 32)
-            KadokiChromeSlide.place(tabs, CGRect(x: r.minX, y: r.midY - h / 2, width: r.width, height: h))
+            tabsRect = CGRect(x: r.minX, y: r.midY - h / 2, width: r.width, height: h)
+            KadokiChromeSlide.place(tabs, tabsRect!)
             host.bringSubviewToFront(tabs)
             tabs.isHidden = false
         } else {
@@ -575,7 +664,21 @@ final class KadokiNativeToolbar: NSObject, WKScriptMessageHandler {
                 if playing == pp || Date() > pendingPlayUntil { pendingPlaying = nil } else { playing = pp }
             }
             setPlay(playing: playing, accent: (p["accent"] as? String) ?? playAccent)
-            KadokiChromeSlide.place(play, CGRect(x: r.maxX - 76, y: r.midY - 17, width: 62, height: 34))
+            // The native menu button is clamped inside the safe area (same rule
+            // as KadokiNativeMenu); where the right inset is large (iPhone Duo)
+            // that pulls it left over this capsule, so keep clear of it.
+            let menuLeft = KadokiNativeMenu.maxCenterX(in: host) - KadokiNativeMenu.size / 2
+            let right = min(r.maxX - 14, menuLeft - 6)
+            KadokiChromeSlide.place(play, CGRect(x: right - 62, y: r.midY - 17, width: 62, height: 34))
+            // Duo: center the web timer between the tabs and this button
+            // (ios-feel.css reads --k-timer-x; other phones keep 50%).
+            if KadokiNativeMenu.duo, let tr = tabsRect {
+                let mid = host.convert(CGPoint(x: (tr.maxX + right - 62) / 2, y: 0), to: wv).x
+                if abs(mid - timerX) > 0.5 {
+                    timerX = mid
+                    js("window.__kadokiTimerX&&window.__kadokiTimerX(\(mid))")
+                }
+            }
             host.bringSubviewToFront(play)
             play.isHidden = false
         } else {

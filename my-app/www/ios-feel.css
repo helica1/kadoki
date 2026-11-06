@@ -117,6 +117,10 @@ html.kadoki-native-toolbar #appHeader #shellTimerLabel {
   top: 50%;
   transform: translate(-50%, -50%);
 }
+/* Duo: between the tabs and the play button (x from NativeChrome.swift). */
+html.kadoki-duo.kadoki-native-toolbar #appHeader #shellTimerLabel {
+  left: var(--k-timer-x, 50%);
+}
 
 /* ── Send to Anki (waveform.js edit): an iOS dialog — a tall rounded card on
    the system dark background, the subtitle list taking the extra room,

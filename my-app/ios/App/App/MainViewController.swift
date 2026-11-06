@@ -756,6 +756,7 @@ class MainViewController: CAPBridgeViewController {
             guard let self = self, let wv = self.bridge?.webView else { return }
             if status >= 1 && !self.hingeFlagInstalled {   // closed / partly / fully open — a real hinge
                 self.hingeFlagInstalled = true
+                KadokiNativeMenu.duo = true
                 NSLog("[Hinge] foldable detected (status \(status))")
                 // Page loads (and reloads) from here on see the flag from the
                 // very first script; the evaluate below covers the loaded page.

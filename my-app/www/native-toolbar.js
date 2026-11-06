@@ -123,6 +123,13 @@
     setInterval(() => { if (!document.hidden) schedule(); }, 1500);
     schedule();
   };
+  // Duo: native passes the midpoint between the tabs and the play button (web
+  // px, viewport); the timer centers there (ios-feel.css, html.kadoki-duo).
+  window.__kadokiTimerX = (x) => {
+    const h = document.getElementById('appHeader');
+    if (!h || !isFinite(x)) return;
+    h.style.setProperty('--k-timer-x', (x - h.getBoundingClientRect().left).toFixed(1) + 'px');
+  };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
 })();

@@ -2950,6 +2950,16 @@ body.dimmed .card-image {
         await populateLibrary();
       } catch (_) {}
     }
+    async function toggleListeningBook(title) {
+      try {
+        const cur = await window.titleStore.get(title.id);
+        const on = !(cur && cur.listeningBook);
+        await window.duoReading.setListeningBook(title.id, on);
+        window.showToast?.(on ? LT('lib.listening_set', 'Folding while reading opens this title in Audio') : LT('lib.listening_cleared', 'No longer the listening book'), 1800);
+        await populateLibrary();
+      } catch (_) {}
+    }
+    window.toggleListeningBook = toggleListeningBook;
     function actionsRow(title, blurb, refresh, withMove) {
       const wrap = document.createElement('div');
       const row1 = document.createElement('div'); row1.className = 'lib-actions';
@@ -2967,6 +2977,9 @@ body.dimmed .card-image {
       row2.appendChild(mk((title.wantToRead ? '♥ ' : '♡ ') + LT('lib.want', 'Want to read'), () => toggleWantToRead(title), !!title.wantToRead));
       if (window.KADOKI_DUO && window.duoReading && title.attachments?.epub) {
         row2.appendChild(mk((title.readingBook ? '★ ' : '☆ ') + LT('lib.reading_book', 'Reading book'), () => toggleReadingBook(title), !!title.readingBook));
+      }
+      if (window.KADOKI_DUO && window.duoReading?.setListeningBook && title.attachments?.audiobook) {
+        row2.appendChild(mk((title.listeningBook ? '🎧 ' : '○ ') + LT('lib.listening_book', 'Listening book'), () => toggleListeningBook(title), !!title.listeningBook));
       }
       if (withMove) row2.appendChild(mk(LT('lib.move', 'Move'), () => openMoveSheet([title.id])));
       if (title.attachments?.epub && window.libraryBlurb && window.ai?.isEnabled?.()) {

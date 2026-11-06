@@ -417,6 +417,8 @@ final class TranscribeJob: @unchecked Sendable {
     private func setCharging(_ charging: Bool) {
         stateLock.lock(); _charging = charging; stateLock.unlock()
     }
+    /// Lead (ms of subtitles past the playhead) required before .serious heat parks a job.
+    static let seriousParkLeadMs: Double = 60_000
     private var inputAheadMs: Double {
         stateLock.lock(); defer { stateLock.unlock() }
         if powerUnlimited || _charging { return aheadMs }
@@ -431,7 +433,13 @@ final class TranscribeJob: @unchecked Sendable {
         }
         setCharging(charging)
         let thermal = ProcessInfo.processInfo.thermalState
-        if thermal == .serious || thermal == .critical ||
+        // .serious parks only once the listener has some lead. Parking with no
+        // subtitles ahead of the playhead leaves the reader stuck at 0%: JS
+        // restarts the job at the playhead every few seconds and each one
+        // parked at once (seen on a fresh, warm phone on its charger).
+        let lead = fedThroughMs - targetMs
+        if thermal == .critical ||
+            (thermal == .serious && lead >= TranscribeJob.seriousParkLeadMs) ||
             (ProcessInfo.processInfo.isLowPowerModeEnabled && !charging) {
             cancel(forPower: true)
         }

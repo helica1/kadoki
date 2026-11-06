@@ -226,12 +226,23 @@
   window.openPreferences = async function () {
     const m = modal();
     if (m) { m.style.visibility = 'hidden'; m.style.pointerEvents = 'none'; }
-    await origOpen.apply(this, arguments);
-    nativeOpen = true;
-    covered = false;
-    baseline = new Set(overlays());
-    watch.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
-    post({ type: 'open', model: JSON.stringify(describe()) });
+    try {
+      await origOpen.apply(this, arguments);
+      const model = JSON.stringify(describe());
+      nativeOpen = true;
+      covered = false;
+      baseline = new Set(overlays());
+      watch.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+      lastModel = model;
+      post({ type: 'open', model });
+    } catch (e) {
+      // Never leave the hidden web panel up with no native screen over it
+      // (a blank screen until restart): fall back to the web Preferences.
+      console.error('[native-prefs] open failed, showing web Preferences:', e && (e.stack || e.message || e));
+      nativeOpen = false;
+      try { watch.disconnect(); } catch (_) {}
+      restore();
+    }
   };
   function restore() {
     const m = modal();
@@ -240,14 +251,35 @@
   // Closed by Save / Cancel, or by web code (some buttons close Preferences).
   // Watches only while native Preferences is up (the reader restyles itself
   // constantly; no page-wide observer while reading).
-  const watch = new MutationObserver(() => {
+  const watch = new MutationObserver((records) => {
     const m = modal();
     if (nativeOpen && m && m.style.display === 'none') {
       nativeOpen = false; covered = false; restore();
+      clearTimeout(liveTimer); liveTimer = 0;
       watch.disconnect();
       post({ type: 'closed' });
       return;
     }
     checkCover();
+    if (nativeOpen && m && records.some(r => m.contains(r.target))) scheduleLive();
   });
+
+  // ---- live updates ----
+  // Web code keeps changing the hidden panel while native Preferences is up
+  // (archive-import progress, status lines, dictionary import bars). Re-read
+  // it and push the new model so the native screen isn't a stale snapshot.
+  // Only mutations INSIDE the panel count; throttled; sent only on change.
+  let liveTimer = 0;
+  let lastModel = '';
+  function scheduleLive() {
+    if (liveTimer) return;
+    liveTimer = setTimeout(() => {
+      liveTimer = 0;
+      if (!nativeOpen) return;
+      try {
+        const model = JSON.stringify(describe());
+        if (model !== lastModel) { lastModel = model; post({ type: 'update', model }); }
+      } catch (e) { console.warn('[native-prefs] live update failed:', e && e.message); }
+    }, 250);
+  }
 })();

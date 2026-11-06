@@ -91,6 +91,8 @@
       want: !!t.wantToRead,
       readingBook: !!t.readingBook,
       canReadingBook: !!(window.KADOKI_DUO && window.duoReading && a.epub),
+      listeningBook: !!t.listeningBook,
+      canListeningBook: !!(window.KADOKI_DUO && window.duoReading?.setListeningBook && a.audiobook),
       cloud: !!t.cloudOnly,
       summary: blurb ? ((lang === 'ja' ? blurb.ja : blurb.en) || []) : [],
       tags: blurb ? (((lang === 'ja' ? blurb.tags_ja : blurb.tags_en) || []).slice(0, 4)) : [],
@@ -139,7 +141,7 @@
       blurbLang: libPref('LIB_BLURB_LANG', 'ja'),
       strings: {
         open: T('lib.open', 'Open'), pin: T('lib.pin', 'Pin'), unpin: T('lib.unpin', 'Unpin'),
-        want: T('lib.want', 'Want to read'), readingBook: T('lib.reading_book', 'Reading book'),
+        want: T('lib.want', 'Want to read'), readingBook: T('lib.reading_book', 'Reading book'), listeningBook: T('lib.listening_book', 'Listening book'),
         move: T('lib.move', 'Move'), stats: T('lib.stats', 'Stats'), edit: T('lib.edit', 'Edit'),
         del: T('lib.delete', 'Delete'), delConfirm: T('lib.delete_confirm', 'Remove this title from your library?'), summarize: T('lib.summarize', 'Summarize'), newSummary: T('lib.new_summary', 'New summary'),
         newTitle: T('lib.new_title', 'New title').replace(/^[+＋]\s*/, ''), importFolder: T('lib.import_folder', 'Import folder'), importTtu: T('lib.import_ttu', 'Import ッツ backup'),
@@ -165,6 +167,7 @@
       case 'pin': await togglePinTitle(t); break;
       case 'want': await toggleWantToRead(t); break;
       case 'reading': await toggleReadingBook(t); break;
+      case 'listening': await window.toggleListeningBook(t); break;
       case 'move': openMoveSheet([id]); break;
       case 'stats': window.openTitleStats(id); break;
       case 'edit': openTitleEdit(id); break;

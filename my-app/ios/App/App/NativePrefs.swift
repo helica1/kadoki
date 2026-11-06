@@ -36,6 +36,9 @@ final class KadokiNativePrefs: NSObject, WKScriptMessageHandler {
         case "open":
             if let json = d["model"] as? String { store.load(json) }
             if let vc = hostVC { overlay.show(PrefsRootView(store: store), in: vc) }
+        case "update":
+            // Live refresh while open (progress bars, status lines).
+            if let json = d["model"] as? String { store.load(json) }
         case "closed":
             overlay.hide()
         case "cover":
