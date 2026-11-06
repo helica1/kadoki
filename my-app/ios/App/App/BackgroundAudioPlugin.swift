@@ -70,6 +70,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "scrubEnd",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setEngine",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setRate",     returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setListenRate", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getState",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getLastSavedPosition", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setMetadata", returnType: CAPPluginReturnPromise),
@@ -599,6 +600,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var currentUrlStr: String = ""
     private var positionTimer: Timer?
     private var currentRate: Float = 1.0
+    // REMOTE LISTEN: playback started from the lock screen / Control Center /
+    // AirPods / watch is listening, not reading — it runs at the Audio-mode
+    // speed (listenRate, pushed by JS) and stats count it as audio, whatever
+    // mode the screen shows. Ends when JS starts playback (the user is looking
+    // at the screen), which restores the rate JS last set for the screen.
+    private var listenRate: Float = 0       // 0 = JS hasn't told us yet
+    private var remoteListen = false
+    private var screenRate: Float = 1.0
     private var nowPlayingTitle: String = "Audiobook"
     private var nowPlayingSubtitle: String = ""
     private var nowPlayingArtwork: MPMediaItemArtwork?
@@ -806,6 +815,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             guard let p = self?.player else { return .commandFailed }
             self?.noteUserTransport()
             self?.ensureSessionActive()
+            self?.beginRemoteListen(p)
             self?.startFaded(p)
             self?.startPositionTimer()
             self?.emitState(playing: true)
@@ -988,6 +998,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         } else {
             ensureSessionActive()
+            beginRemoteListen(p)
             startFaded(p)
             startPositionTimer()
             emitState(playing: true)
@@ -995,6 +1006,31 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             notifyListeners("remoteCommand", data: ["action": "play", "ts": Int(Date().timeIntervalSince1970 * 1000)])
         }
         updateNowPlaying()
+    }
+
+    private func beginRemoteListen(_ p: KadokiPlayback) {
+        if !remoteListen { screenRate = currentRate }
+        remoteListen = true
+        guard listenRate > 0, abs(currentRate - listenRate) > 0.001 else { return }
+        stopRateRamp()
+        currentRate = listenRate
+        p.rate = listenRate
+    }
+
+    /// JS started playback: the user is at the screen again. Returns the rate
+    /// to use instead of JS's (which was still the listen rate), or nil.
+    @discardableResult
+    private func endRemoteListen() -> Float? {
+        guard remoteListen else { return nil }
+        remoteListen = false
+        return screenRate
+    }
+
+    /// JS → the Audio-mode speed a remote play should use.
+    @objc func setListenRate(_ call: CAPPluginCall) {
+        let r = Float(call.getDouble("rate") ?? 0)
+        if r > 0 { listenRate = r }
+        call.resolve()
     }
 
     // MARK: - JS methods
@@ -1011,7 +1047,8 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         ensureSessionActive()    // lazy activation (session is deactivated on stop)
         // call.getInt/getDouble — getDouble is reliable for fractional JSON Numbers.
         let startMs = call.getDouble("startMs") ?? 0
-        let rate = Float(call.getDouble("rate") ?? 1.0)
+        let rate = endRemoteListen() ?? Float(call.getDouble("rate") ?? 1.0)
+        screenRate = rate
 
         // Accept both bare paths and file:// URIs.
         let url: URL
@@ -1160,6 +1197,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         guard let p = player else { call.resolve(); return }
         noteUserTransport()
         ensureSessionActive()   // re-activate if a prior stop() deactivated it
+        if let r = endRemoteListen(), abs(r - currentRate) > 0.001 {
+            stopRateRamp(); currentRate = r; p.rate = r
+        }
         // Supersedes any pending faded-pause so it doesn't stop us; mid-fade it
         // ramps back up from the current level (no snap to 0).
         startFaded(p, fadeMs: call.getDouble("fadeMs") ?? Self.defaultFadeMs)
@@ -1601,6 +1641,10 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     @objc func setRate(_ call: CAPPluginCall) {
         let rate = Float(call.getDouble("rate") ?? 1.0)
         guard rate > 0 else { call.reject("rate must be > 0"); return }
+        // During a remote listen only a rate JS computed FOR listening applies;
+        // a screen-mode rate is kept for when the user comes back.
+        if remoteListen && call.getBool("listen") != true { screenRate = rate; call.resolve(); return }
+        if !remoteListen { screenRate = rate }
         stopRateRamp()
         currentRate = rate
         player?.rate = rate
@@ -2051,6 +2095,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private func emitState(playing: Bool) {
         self.notifyListeners("state", data: [
             "playing": playing,
+            "remote":  remoteListen,
             "ts":      Int(Date().timeIntervalSince1970 * 1000)
         ])
         // Native transport surfaces (the visionOS ornament) mirror play state

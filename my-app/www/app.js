@@ -1888,6 +1888,9 @@ window._playbackRates = window._playbackRates || {
 window._playbackPerMode = !!window._playbackPerMode;
 
 function _currentModeForSpeed() {
+  // Remote listen (play from the lock screen / AirPods / watch — native tags
+  // it): the user isn't looking at the screen, so it's audio whatever the mode.
+  if (window._remoteListen) return 'audio';
   const b = document.body;
   if (b.classList.contains('mode-audio')) return 'audio';
   if (b.classList.contains('mode-read'))  return 'read';
@@ -1932,7 +1935,12 @@ window.applyActivePlaybackRate = async function () {
   window.audioPlaybackRate = r;
   try {
     const bg = window.Capacitor?.Plugins?.BackgroundAudio;
-    if (bg?.setRate) await bg.setRate({ rate: r });
+    // The Audio-mode speed native applies itself on a remote play (JS may be
+    // frozen behind the lock screen when it happens).
+    const R = window._playbackRates;
+    const listen = window._playbackPerMode ? R.audio : R.global;
+    if (bg?.setListenRate && listen > 0) bg.setListenRate({ rate: listen }).catch?.(() => {});
+    if (bg?.setRate) await bg.setRate({ rate: r, listen: !!window._remoteListen });
   } catch (_) {}
   try { if (currentAudio) currentAudio.playbackRate = r; } catch (_) {}
   // Let any live speed readout (the reader's top-right +/- control, the
@@ -4849,6 +4857,12 @@ function _ensureBgListenersForSrtCards() {
   bg.addListener('state', (d) => {
     const _wasPlaying = !!window._bgPlaying;
     window._bgPlaying = !!d.playing;
+    // Native tags playback started remotely (lock screen / AirPods / watch);
+    // it clears when playback is started from the app. Speed follows it.
+    if (typeof d.remote === 'boolean' && d.remote !== !!window._remoteListen) {
+      window._remoteListen = d.remote;
+      try { window.applyActivePlaybackRate(); } catch (_) {}
+    }
     // DELIBERATE-PAUSE MARK (never-lose-place). Read-mode PLAY re-resolves a
     // start position and distrusts a playhead more than VIS_TOL_MS from the
     // top of the page on screen — but a full page of vertical text is often

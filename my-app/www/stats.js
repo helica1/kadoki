@@ -47,7 +47,7 @@
   const READ_PH_GAP_MS = 2000;
   let _readPhLastPos = -1, _readPhLastAdvTs = 0;
   function readTiedToPlayhead() {
-    return !!window._activeTitleHasAudio && currentMode() === 'read';
+    return !!window._activeTitleHasAudio && currentMode() === 'read' && !window._remoteListen;
   }
   function readPlayheadSample(posMs, tsIn) {
     if (!Number.isFinite(posMs) || posMs < 0) return;
@@ -630,9 +630,13 @@
     handleModeChange(newMode);
     // Hidden listening in Read or Card (pocketed, or resumed from the lock
     // screen — the app never switches mode for it) counts as audio.
-    const hiddenListen = document.visibilityState === 'hidden' && !!window._bgPlaying && (newMode === 'read' || newMode === 'card') && !_ankiRoundtripActive;
+    // A remote listen (play from the lock screen / AirPods / watch) is audio
+    // even with the screen on — reading is only when the user started it there.
+    const hiddenListen = (document.visibilityState === 'hidden' || !!window._remoteListen) && !!window._bgPlaying && (newMode === 'read' || newMode === 'card') && !_ankiRoundtripActive;
     const audBucket = (newMode === 'audio' || newMode === 'video') ? newMode : (hiddenListen ? audFamilyBucket() : null);
     const inAudio = !!audBucket;
+    // A remote listen in Read is listening, not reading: no read time alongside.
+    if (hiddenListen && window._remoteListen && timers.read.runningSince) stopMode('read');
     if (window._bgPlaying && inAudio && !timers[audBucket].runningSince) startMode(audBucket);
     // Stop whichever audio-family timer is running when we leave that state —
     // covers "wrong bucket still running" too (a title switch mid-session).
@@ -796,7 +800,8 @@
         const inAudioMode = document.body.classList.contains('mode-audio');
         const inReadMode  = document.body.classList.contains('mode-read');
         const inCardMode  = document.body.classList.contains('mode-card');
-        const hiddenListen = d.playing && _liveEvent && (inReadMode || inCardMode) && document.visibilityState === 'hidden' && !_ankiRoundtripActive;
+        const remote = d.remote === true || (d.remote === undefined && !!window._remoteListen);
+        const hiddenListen = d.playing && _liveEvent && (inReadMode || inCardMode) && (document.visibilityState === 'hidden' || remote) && !_ankiRoundtripActive;
         if (d.playing && (inAudioMode || hiddenListen)) startMode(audFamilyBucket());
         else { if (timers.audio.runningSince) stopMode('audio'); if (timers.video.runningSince) stopMode('video'); }
         // Read-mode: audio start kicks the read timer alive (bumpRead).
@@ -806,7 +811,7 @@
         // walked away" via the periodic tick check below. Previously
         // the listener insta-stopped the read timer the instant
         // audio paused, which felt too tight.
-        if (inReadMode && d.playing) bumpRead();
+        if (inReadMode && d.playing && !remote) bumpRead();
       });
       // Playhead heartbeat — the sole source of audio time (see audioSample).
       // Deliberately NOT staleness-gated, unlike app.js's position listener: a
