@@ -125,9 +125,7 @@
   // report has no previous state, so app launch on an open phone never
   // switches.
   const OPEN_ANGLE = 0.14;   // ~8°
-  window.addEventListener('kadoki:hinge', (e) => {
-    const s = e.detail?.status;
-    const angle = +e.detail?.angle || 0;
+  function onHinge(s, angle) {
     if (s !== lastStatus && s === 1) refreshCache();
     // Open (partly or fully) → closed: the phone was folded.
     if (s === 1 && (lastStatus === 2 || lastStatus === 3)) onFold();
@@ -137,16 +135,17 @@
       armed = false;
       onUnfold();
     }
+  }
+  window.addEventListener('kadoki:hinge', (e) => onHinge(e.detail?.status, +e.detail?.angle || 0));
+  // Fold state comes ONLY from the hinge (UIHingeInteraction), never from
+  // screen size — a width test fired on every rotation of the inner screen
+  // (~626×890pt), switching titles. Backstop for a change that landed while
+  // suspended: on return, re-read the last state native reported.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible' || !window.KADOKI_DUO) return;
+    const st = window.__kadokiHingeState;
+    if (st && st.status >= 1 && st.status !== lastStatus) onHinge(st.status, +st.angle || 0);
   });
-  // Backup: the inner screen is ≥800pt wide (same breakpoint as the Duo
-  // layout); catches an unfold whose hinge change arrived while suspended.
-  try {
-    const mq = window.matchMedia('(min-width: 800px)');
-    mq.addEventListener('change', (e) => {
-      if (!window.KADOKI_DUO) return;
-      if (e.matches) onUnfold(); else onFold();
-    });
-  } catch (_) {}
   // Keep the record current (it is also refreshed on every close).
   window.addEventListener('shell:mode-change', () => { if (window.KADOKI_DUO) refreshCache(); });
   setTimeout(refreshCache, 3000);

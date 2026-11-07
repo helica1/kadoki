@@ -4941,6 +4941,34 @@ function _ensureBgListenersForSrtCards() {
       try { window.lockScreenCueJump?.(action === 'nextCue' ? 1 : -1); } catch (_) {}
     }
   });
+  // Lock-screen title + cover follow the audio FILE: native drops them the
+  // moment a different file loads and asks for that file's. Answer with the
+  // title that owns the file (the active one, unless its audiobook clearly
+  // isn't this file), so a title switched in Read / Card mode and then played
+  // — from the app or the lock screen — never shows the previous cover.
+  bg.addListener('metadataNeeded', async (d) => {
+    const url = String(d?.url || '');
+    if (!url) return;
+    const base = (p) => { try { return decodeURIComponent(String(p || '').split('/').pop()); } catch (_) { return String(p || '').split('/').pop(); } };
+    const want = base(url);
+    const owns = (t) => {
+      const a = t?.attachments?.audiobook;
+      if (a && base(a.cachePath) === want) return true;
+      return Array.isArray(t?.attachments?.series) && t.attachments.series.some(e => base(e?.cachePath || e?.path) === want);
+    };
+    try {
+      const ts = window.titleStore;
+      if (!ts) return;
+      let t = window._activeTitleId ? await ts.get(window._activeTitleId) : null;
+      if (!t || (t.attachments?.audiobook && !owns(t))) {
+        const all = (await ts.list?.()) || [];
+        t = all.find(owns) || t;
+      }
+      if (!t) return;
+      const name = t.attachments?.audiobook?.name || t.name || 'Audiobook';
+      await bg.setMetadata({ url, title: name, subtitle: '', artwork: t.attachments?.cover?.dataUri || '' });
+    } catch (_) {}
+  });
   bg.addListener('position', (d) => {
     // Staleness guard (same rationale as remoteCommand above): position events
     // emitted while the WebView is suspended queue in the bridge and REPLAY in

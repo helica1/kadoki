@@ -610,6 +610,10 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     private var screenRate: Float = 1.0
     private var nowPlayingTitle: String = "Audiobook"
     private var nowPlayingSubtitle: String = ""
+    /// The audio file the lock-screen title/cover belong to. A play of any
+    /// other file drops them (never show the previous title's cover) and asks
+    /// JS for the right ones ("metadataNeeded").
+    private var metadataUrl: String = ""
     private var nowPlayingArtwork: MPMediaItemArtwork?
     /// Decoded cover image (from setMetadata's artwork), kept so the subtitle
     /// renderer can composite serif text over a dimmed copy of it.
@@ -1041,6 +1045,14 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         currentUrlStr = urlStr   // remember what JS asked us to play (for getState "same audio" check)
+        if Self.normUrl(urlStr) != metadataUrl {
+            metadataUrl = Self.normUrl(urlStr)
+            nowPlayingTitle = (Self.fileUrl(urlStr).deletingPathExtension().lastPathComponent).removingPercentEncoding ?? "Audiobook"
+            nowPlayingSubtitle = ""
+            nowPlayingArtwork = nil
+            nowPlayingCoverImage = nil
+            notifyListeners("metadataNeeded", data: ["url": urlStr])
+        }
         noteUserTransport()      // a new start supersedes any deferred automatic resume
         seekGeneration += 1      // …and any seek still waiting out its fade
         stopRateRamp()
@@ -1765,7 +1777,21 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         ])
     }
 
+    private static func fileUrl(_ s: String) -> URL {
+        if s.hasPrefix("file://") { return URL(string: s) ?? URL(fileURLWithPath: String(s.dropFirst(7))) }
+        return URL(fileURLWithPath: s)
+    }
+    private static func normUrl(_ s: String) -> String {
+        s.isEmpty ? "" : fileUrl(s).standardizedFileURL.path
+    }
+
     @objc func setMetadata(_ call: CAPPluginCall) {
+        // `url`: the file this metadata is for. Metadata for a file that is no
+        // longer loaded (a title switch raced the async cover lookup) is dropped.
+        if let u = call.getString("url"), !u.isEmpty, !currentUrlStr.isEmpty,
+           Self.normUrl(u) != Self.normUrl(currentUrlStr) {
+            call.resolve(); return
+        }
         if let t = call.getString("title"),    !t.isEmpty { nowPlayingTitle = t }
         if let s = call.getString("subtitle")             { nowPlayingSubtitle = s }
         // Cover art for the lock screen / Control Center. Accepts a data URI
