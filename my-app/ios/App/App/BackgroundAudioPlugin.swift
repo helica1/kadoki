@@ -593,7 +593,13 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     // for video files standing as audiobook attachments. Every consumer below
     // drives it through the KadokiPlayback protocol, so transport / fades /
     // durable floors / remote commands / chapter repeat are engine-agnostic.
-    private var player: KadokiPlayback?
+    private var player: KadokiPlayback? {
+        // The file the CURRENT player actually holds. currentUrlStr moves to the
+        // new file at the top of play(), before the old player is replaced, so
+        // anything that pairs "the player's position" with "a file" must use this.
+        didSet { playerUrlStr = player == nil ? "" : currentUrlStr }
+    }
+    private var playerUrlStr: String = ""
     // The exact `url` string JS last asked us to play. Exposed via getState so JS
     // can confirm "same audio" before adopting the native playhead as truth on a
     // resume (the backwards-place-jump fix). Stored raw so it matches what JS sent.
@@ -756,10 +762,10 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     /// Persist the live playhead now (url + ms) to UserDefaults.
     private func saveLastPositionNow() {
-        guard let p = player, !currentUrlStr.isEmpty else { return }
+        guard let p = player, !playerUrlStr.isEmpty else { return }
         let ms = Int(p.currentTime * 1000)
         let d = UserDefaults.standard
-        d.set(currentUrlStr, forKey: Self.posKeyUrl)
+        d.set(playerUrlStr, forKey: Self.posKeyUrl)   // the file this position belongs to
         d.set(ms, forKey: Self.posKeyMs)
         d.set(Int(Date().timeIntervalSince1970 * 1000), forKey: Self.posKeyTs)
         lastDurableSaveAt = Date().timeIntervalSince1970
@@ -1059,7 +1065,11 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         ensureSessionActive()    // lazy activation (session is deactivated on stop)
         // call.getInt/getDouble — getDouble is reliable for fractional JSON Numbers.
         let startMs = call.getDouble("startMs") ?? 0
-        let rate = endRemoteListen() ?? Float(call.getDouble("rate") ?? 1.0)
+        // JS's rate is authoritative for a fresh play: it's computed for the
+        // mode/title being started. (Substituting the pre-remote screen rate here
+        // played a newly switched-to listening book at the old READ speed.)
+        endRemoteListen()
+        let rate = Float(call.getDouble("rate") ?? 1.0)
         screenRate = rate
 
         // Accept both bare paths and file:// URIs.
@@ -1370,7 +1380,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     // around the live playhead BEFORE the drag commits, so scrubBegin has
     // nothing left to do on the critical path. Idles out if no drag follows.
     @objc func scrubPrime(_ call: CAPPluginCall) {
-        guard let p = player, !scrubActive, let url = Self.fileURL(from: currentUrlStr) else { call.resolve(["ok": false]); return }
+        guard let p = player, !scrubActive, let url = Self.fileURL(from: playerUrlStr) else { call.resolve(["ok": false]); return }
         let ms = call.getDouble("ms") ?? (p.currentTime * 1000)
         if scrubEngine == nil || scrubEngine?.url != url { scrubEngine = KadokiScrubEngine(url: url) }
         guard let e = scrubEngine else { call.resolve(["ok": false]); return }
@@ -1407,7 +1417,13 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         preferredNonlinear = call.getBool("nonlinear") ?? preferredNonlinear
         if let e = player as? KadokiReadEngine, e.nonlinear != preferredNonlinear { e.nonlinear = preferredNonlinear }
         var switched = false
-        if changed, let p = player, let url = Self.fileURL(from: currentUrlStr), !KadokiVideoPlayer.isVideoUrl(url) {
+        // PLACE-LOSS guard (2026-11-07): the hand-off copies the old player's
+        // position AND rate into a new player for `url`. It must be the old
+        // player's own file — pairing another title's file with the outgoing
+        // title's position/rate put a listening book hours off, at read speed.
+        if changed, let p = player, !playerUrlStr.isEmpty,
+           Self.normUrl(playerUrlStr) == Self.normUrl(currentUrlStr),
+           let url = Self.fileURL(from: playerUrlStr), !KadokiVideoPlayer.isVideoUrl(url) {
             let isRead = p is KadokiReadEngine
             if isRead != (want == "speech") { switched = switchEngine(toRead: want == "speech", url: url) }
         }
@@ -1457,7 +1473,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { retiring.stop() }
         if wasPlaying { startPositionTimer() }
         updateNowPlaying()
-        NSLog("[BackgroundAudio] engine → %@ at %.2fs playing=%d", toRead ? "speech" : "default", pos, wasPlaying ? 1 : 0)
+        NSLog("[BackgroundAudio] engine → %@ at %.2fs playing=%d url=%@", toRead ? "speech" : "default", pos, wasPlaying ? 1 : 0, url.lastPathComponent)
+        notifyListeners("engineSwitched", data: ["engine": toRead ? "speech" : "default", "positionMs": Int(pos * 1000),
+                                                 "playing": wasPlaying, "url": playerUrlStr, "ts": Int(Date().timeIntervalSince1970 * 1000)])
         return true
     }
 
@@ -1546,7 +1564,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             }
         }
         var engineOk = false
-        if let url = Self.fileURL(from: currentUrlStr) {
+        if let url = Self.fileURL(from: playerUrlStr) {
             if scrubEngine == nil || scrubEngine?.url != url { scrubEngine = KadokiScrubEngine(url: url) }
             if let e = scrubEngine {
                 ensureSessionActive()
@@ -1772,7 +1790,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
             "ready":      p != nil,
             "positionMs": positionMs,
             "durationMs": durationMs,
-            "url":        (p != nil) ? currentUrlStr : "",
+            "url":        (p != nil) ? playerUrlStr : "",
             "engine":     activeEngineName()
         ])
     }
@@ -2122,6 +2140,7 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         self.notifyListeners("state", data: [
             "playing": playing,
             "remote":  remoteListen,
+            "rate":    currentRate,
             "ts":      Int(Date().timeIntervalSince1970 * 1000)
         ])
         // Native transport surfaces (the visionOS ornament) mirror play state

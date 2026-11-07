@@ -4806,6 +4806,11 @@ function resetCrossTitlePositionState() {
   // bg.play with the new title's path (resolved via _pagedAudioPath).
   try { window.Capacitor?.Plugins?.BackgroundAudio?.stop?.(); } catch (e) {}
   window._pagedAudioPath = null;
+  // The position mirror belongs to the OLD title now. A scrub that started
+  // before the new audio was ready anchored on it and parked the new title at
+  // the old title's playhead (PLACE-LOSS 2026-11-07, Duo fold switch).
+  window._lastBgPosMs = NaN;
+  window._lastBgPosTitle = null;
   window._currentReadingAudiobookPath = null;
   window._audiobookSrcPath = null;
   window._bgPlaying = false;
@@ -4983,6 +4988,7 @@ function _ensureBgListenersForSrtCards() {
     // Live playhead mirror for synchronous consumers (card-mode ENTRY adopts
     // the playing position instead of trusting a stale card index).
     window._lastBgPosMs = d.positionMs || 0;
+    window._lastBgPosTitle = window._activeTitleId;   // whose playhead this is (scrub anchors check it)
     window._lastBgPosAt = Date.now();
     // Same constraint as the state handler — only repaint the strip
     // in audio mode, never while the page is hidden (screen off: the strip

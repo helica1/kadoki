@@ -3461,9 +3461,26 @@
   // Anchor = the live playhead at the moment the drag commits. Native truth
   // fetched at touchstart (touchState) wins; the karaoke clock is the
   // fallback while playing; then the position mirror; then the cue start.
+  // PLACE-LOSS guard (2026-11-07): every source must belong to the ACTIVE
+  // title. Right after a title switch native isn't ready yet and the mirrors
+  // still hold the previous title's playhead — anchoring there and landing the
+  // scrub parked the new title hours off. No trustworthy anchor → no scrub.
+  const _base = (p) => { try { return decodeURIComponent(String(p || '').split('/').pop()); } catch (_) { return String(p || '').split('/').pop(); } };
+  function _activeAudioBase() {
+    let p = window._pagedAudioPath || window._audiobookSrcPath || '';
+    if (!p) { try { const v = window.__abAudioPath; p = (typeof v === 'function' ? v() : v) || ''; } catch (_) {} }
+    return _base(p);
+  }
   function _scrubAnchorMs(touchState) {
     let ms = -1;
+    if (Date.now() < (window._kFoldGuardUntil || 0)) return -1;   // Duo mid-fold: fingers on glass, not a scrub
+    if (touchState && touchState.ready && touchState.url) {
+      const want = _activeAudioBase();
+      if (want && _base(touchState.url) !== want) return -1;      // native holds another title's file
+    }
     if (touchState && touchState.ready && Number.isFinite(touchState.positionMs) && touchState.positionMs >= 0) ms = touchState.positionMs;
+    const mirrorOurs = window._lastBgPosTitle && window._lastBgPosTitle === window._activeTitleId;
+    if (ms < 0 && !mirrorOurs) return -1;                         // only stale mirrors left
     if (ms < 0) { try { const n = window.wordHighlight?.nowMs?.(); if (Number.isFinite(n) && n >= 0) ms = n; } catch (_) {} }
     if (ms < 0 && Number.isFinite(window._lastBgPosMs) && window._lastBgPosMs >= 0) ms = window._lastBgPosMs;
     if (ms < 0) {
@@ -3692,7 +3709,7 @@
             if (_scrubMode() === 'audio' && window._bgPlaying && typeof bgp.scrubPrime === 'function') {
               let guess = -1;
               try { const n = window.wordHighlight?.nowMs?.(); if (Number.isFinite(n) && n >= 0) guess = n; } catch (_) {}
-              if (guess < 0 && Number.isFinite(window._lastBgPosMs)) guess = window._lastBgPosMs;
+              if (guess < 0 && Number.isFinite(window._lastBgPosMs) && window._lastBgPosTitle === window._activeTitleId) guess = window._lastBgPosMs;
               const args = guess >= 0 ? { ms: Math.round(guess) } : {};
               bgp.scrubPrime(args).catch(() => {});
             }
@@ -8213,6 +8230,7 @@
       window._bgPlaying = true;
       if (!window._lastBgPosAt || Date.now() - window._lastBgPosAt > 1500) {
         window._lastBgPosMs = pos;
+        window._lastBgPosTitle = window._activeTitleId;
         window._lastBgPosAt = Date.now();
       }
       try { window.wordHighlight?.feedPosition?.(pos, true); } catch (_) {}

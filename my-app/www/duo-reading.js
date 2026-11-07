@@ -126,6 +126,9 @@
   // switches.
   const OPEN_ANGLE = 0.14;   // ~8°
   function onHinge(s, angle) {
+    // Folding / unfolding puts fingers on the glass: for a moment no touch is
+    // a scrub, swipe or speed drag (a fold once scrubbed the new title).
+    if (s !== lastStatus || (s === 1 && angle >= OPEN_ANGLE)) window._kFoldGuardUntil = Date.now() + 2500;
     if (s !== lastStatus && s === 1) refreshCache();
     // Open (partly or fully) → closed: the phone was folded.
     if (s === 1 && (lastStatus === 2 || lastStatus === 3)) onFold();

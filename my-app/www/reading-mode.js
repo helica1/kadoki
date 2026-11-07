@@ -5254,6 +5254,27 @@
       }
       if (!didResume) {
         await bg.play({ url, startMs: adjStart, rate });
+        // PLACE-LOSS guard (2026-11-07): confirm native really landed where we
+        // asked. A Duo fold switch once left the new title parked at the OLD
+        // title's playhead and speed (a native engine hand-off paired the wrong
+        // file with the outgoing player). If nobody has touched the transport
+        // since, put it back; and re-assert this mode's speed.
+        try { window.applyActivePlaybackRate?.(); } catch (_) {}
+        const _gen = window._kTransportGen || 0, _tid = window._activeTitleId, _want = adjStart;
+        const _landCheck = async (tag) => {
+          try {
+            if ((window._kTransportGen || 0) !== _gen || window._activeTitleId !== _tid) return;
+            const s = await bg.getState();
+            if (!s || !s.ready || !_abSameAudioFile(s.url, url)) return;
+            const off = Number(s.positionMs) - _want;
+            if (!Number.isFinite(off) || Math.abs(off) <= 60000) return;
+            window.placeDiag?.note('landing-fix', { at: Math.round(s.positionMs), to: _want, tag });
+            await bg.seek({ ms: _want });
+            try { window.applyActivePlaybackRate?.(); } catch (_) {}
+          } catch (_) {}
+        };
+        setTimeout(() => _landCheck('1.5s'), 1500);
+        setTimeout(() => _landCheck('5s'), 5000);
       }
       _abSessionHadAudio = true;   // transport issued — later mode switches are in-session, not boot restores
       // Lock-screen / Control Center metadata, now with cover art pulled from
