@@ -2934,9 +2934,29 @@
       document.body.classList.remove('kv-scrubbing');
       try { window.kadokiScrub?.end(!!cancel); } catch (_) {}
     };
+    // SPEED DRAG (same feel as the reader's): a SLOW vertical drag changes
+    // the playback speed live, up = faster, with the big speed HUD showing the
+    // actual rate. A quick downward flick stays the play/pause toggle.
+    const SPD_FLICK_V = 0.55, SPD_DWELL_MS = 200, SPD_MIN_PX = 24, SPD_PX_PER_X = 320, SPD_MIN = 1.0, SPD_MAX = 2.0;
+    let spdOn = false, spdBase = 1, spdTarget = 1, spdAnchorY = 0, spdLastApply = 0, spdIdle = null;
+    const spdCommit = () => { try { window.setActivePlaybackRate?.(spdTarget, false); } catch (_) {} };
+    const spdEnd = () => {
+      if (spdIdle) { clearTimeout(spdIdle); spdIdle = null; }
+      window._kSpeedDragActive = false;
+      if (!spdOn) return;
+      spdOn = false;
+      spdCommit();
+      try { window.kHaptic?.(); } catch (_) {}
+      try { window.kadokiSpeedHud?.hide(900); } catch (_) {}
+    };
+    const contentScrolls = () => {
+      const c = document.getElementById('audiobookContent');
+      return !!c && c.scrollHeight > c.clientHeight + 2;
+    };
     view.addEventListener('touchstart', (e) => {
       if (!e.touches?.[0]) return;
       fired = false;
+      spdEnd();
       clearHold(); scrubOn = false; touchState = null;
       // Bail only on interactive controls that own their own gestures
       // (transport buttons + scrub bar). We DON'T bail on #audiobookCueText
@@ -2974,7 +2994,41 @@
       const dx = t.clientX - startX, dy = t.clientY - startY;
       const ax = Math.abs(dx), ay = Math.abs(dy);
       if (scrubOn) { scrubDx = dx; try { window.kadokiScrub?.move(dx); } catch (_) {} return; }
+      if (spdOn) {
+        try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+        const want = Math.max(SPD_MIN, Math.min(SPD_MAX,
+          Math.round((spdBase + (spdAnchorY - t.clientY) / SPD_PX_PER_X) * 100) / 100));
+        if (want !== spdTarget) {
+          spdTarget = want;
+          try { window.kadokiSpeedHud?.show(want); } catch (_) {}
+          const now = Date.now();
+          if (now - spdLastApply > 90) { spdLastApply = now; try { window.setActivePlaybackRate?.(want, true); } catch (_) {} }
+        }
+        if (spdIdle) clearTimeout(spdIdle);
+        spdIdle = setTimeout(() => { spdIdle = null; spdCommit(); }, 900);
+        return;
+      }
       if (fired) return;
+      const vertical = ay > ax * 1.5 && ax < 50;
+      const hasAudio = !!(abAudioPath || window._bgPlaying);
+      const inShade = !!window._inSystemGestureZone?.(startY);
+      // Claim a vertical drag early (iOS otherwise hands it to native scroll
+      // and stops sending moves) — unless the subtitle text actually scrolls.
+      if (vertical && ay > 8 && hasAudio && !inShade && !contentScrolls()) {
+        try { if (e.cancelable) e.preventDefault(); } catch (_) {}
+      }
+      const elapsed = Date.now() - startT;
+      if (vertical && hasAudio && !inShade && ay > SPD_MIN_PX && elapsed > SPD_DWELL_MS && ay / Math.max(1, elapsed) < SPD_FLICK_V) {
+        spdOn = true;
+        window._kSpeedDragActive = true;
+        fired = true;                 // this gesture is ours: no cue jump, no toggle
+        spdBase = Math.max(SPD_MIN, Math.min(SPD_MAX, Number(window.effectivePlaybackRate?.() || window.audioPlaybackRate || 1)));
+        spdTarget = spdBase;
+        spdAnchorY = t.clientY;
+        try { window.kadokiSpeedHud?.show(spdBase); } catch (_) {}
+        try { window.kHaptic?.(); } catch (_) {}
+        return;
+      }
       const scrubMode = (window.kadokiScrub && window.kadokiScrub.mode) ? window.kadokiScrub.mode() : 'off';
       if (scrubMode !== 'off' && window.kadokiScrub && abCues.length && ax >= SCRUB_START_PX && ax >= ay) {
         scrubOn = true; scrubStartT = Date.now(); scrubDx = dx;
@@ -2987,7 +3041,7 @@
         return;
       }
       if (ax > 30 && ax > ay * 1.5) { fired = true; navByDx(dx); }
-    }, { passive: true });
+    }, { passive: false });
     // iOS WKWebView: when a gesture starts inside a scrollable element
     // (#audiobookContent has overflow:auto), the native scroll engine can
     // claim a horizontal swipe and fire `touchcancel` INSTEAD OF `touchend`
@@ -2997,6 +3051,7 @@
     // `touchcancel` to the same handler is the belt-and-suspenders so a swipe
     // is still acted on even if iOS ends the sequence with cancel.
     const onAudiobookSwipeEnd = (e) => {
+      if (spdOn) { spdEnd(); started = false; return; }
       if (scrubOn) {
         started = false;
         // Quick flick → one-cue step, landing straight there (single transition).

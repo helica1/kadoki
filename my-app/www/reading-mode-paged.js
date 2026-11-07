@@ -942,11 +942,15 @@
         try { window._diag?.('[paged-diag] gesture move#' + moveN + ' dx=' + Math.round(dxRaw) + ' dy=' + Math.round(dyRaw) + ' t=' + elapsed + 'ms v=' + vel.toFixed(2) + ' vert=' + vertical + ' audio=' + !!(window._pagedAudioPath || window._bgPlaying)); } catch (_) {}
       }
       // --- speed drag ---
+      // Once it has started the gesture is ONLY speed: up/down changes the
+      // rate, sideways movement is ignored (no page pull, no cue swipe).
       if (speedMode) {
+        try { if (e.cancelable) e.preventDefault(); } catch (_) {}
         const want = Math.max(SPEED_MIN, Math.min(SPEED_MAX,
           Math.round((speedBase + (speedAnchorY - t.clientY) / SPEED_PX_PER_X) * 100) / 100));
         if (want !== speedTarget) {
           speedTarget = want;
+          try { window.kadokiSpeedHud?.show(want); } catch (_) {}
           const now = Date.now();
           if (now - speedLastApply > 90) {   // live feedback, throttled off the bridge
             speedLastApply = now;
@@ -965,6 +969,7 @@
       if (!speedMode && vertical && ady > SPEED_MIN_PX && elapsed > SPEED_DWELL_MS && vel < SPEED_FLICK_V && !inShade &&
           (window._pagedAudioPath || window._bgPlaying)) {
         speedMode = true;
+        window._kSpeedDragActive = true;  // the physics page drag stands down
         swipeFired = true;              // this gesture is ours; no toggle, no tap
         speedBase = (typeof window.effectivePlaybackRate === 'function')
           ? window.effectivePlaybackRate() : (window.audioPlaybackRate || 1);
@@ -972,6 +977,7 @@
         speedTarget = speedBase;
         speedAnchorY = t.clientY;       // anchor HERE so the rate doesn't jump
         _speedShow(true);
+        try { window.kadokiSpeedHud?.show(speedBase); } catch (_) {}
         try { window.kHaptic?.(); } catch (_) {}
         log('[speed] drag begin at ' + speedBase.toFixed(2) + '×');
         try { window._diag?.('[paged-diag] speed drag begin ' + speedBase.toFixed(2) + '×'); } catch (_) {}
@@ -994,6 +1000,7 @@
     };
     const _endSpeedDrag = () => {
       if (speedIdleTimer) { clearTimeout(speedIdleTimer); speedIdleTimer = null; }
+      window._kSpeedDragActive = false;
       if (!speedMode) return;
       speedMode = false;
       log('[speed] drag end at ' + speedTarget.toFixed(2) + '×');
@@ -1001,6 +1008,7 @@
       _commitSpeed();
       try { window.kHaptic?.(); } catch (_) {}
       setTimeout(() => _speedShow(false), 900);
+      try { window.kadokiSpeedHud?.hide(900); } catch (_) {}
     };
     scrollEl.addEventListener('touchend', _endSpeedDrag, { passive: true });
     scrollEl.addEventListener('touchcancel', _endSpeedDrag, { passive: true });
@@ -3701,6 +3709,7 @@
       const t = e.touches?.[0]; if (!t) return;
       const dx = t.clientX - sx, dy = t.clientY - sy;
       const adx = Math.abs(dx), ady = Math.abs(dy);
+      if (window._kSpeedDragActive && !committed) return;   // a speed drag owns this gesture
       if (!committed) {
         if (adx > PHYS.COMMIT_PX && adx > ady) {
           committed = true; physDragging = true;
