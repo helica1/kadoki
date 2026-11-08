@@ -131,7 +131,7 @@
       groups,
       total: all.length,
       empty: !here.length
-        ? (cur ? T('lib.folder_empty', 'This folder is empty. Tap Select, pick titles, then Move.') : (all.length ? T('lib.all_in_folders', 'Every title is in a folder.') : 'Library is empty.'))
+        ? (cur ? T('lib.folder_empty', 'This folder is empty. Tap Select, pick titles, then Move.') : (all.length ? T('lib.all_in_folders', 'Every title is in a folder.') : T('lib.empty_first', 'Your library is empty. Tap + to add an EPUB, an audiobook, or both.')))
         : (!shown.length ? 'No titles match this filter.' : ''),
       view: libPref('LIB_VIEW_V1', 'list'),
       filter: libPref('LIB_FILTER_V1', 'all'),

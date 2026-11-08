@@ -4495,6 +4495,22 @@ async function init() {
       debugLog(`Legacy deck restore: ${restored}`);
     }
   }
+  // FIRST RUN / EMPTY LIBRARY: with nothing to restore the shell used to sit
+  // on an empty Card view — a black screen with no way forward that App Review
+  // rejected as "loaded to a blank screen". Open the Library instead, where
+  // adding the first title starts. Runs on a safe boot too: a fresh install's
+  // FIRST launch is always a safe boot (crash-guard "installed" check).
+  if (!restored) {
+    setTimeout(async () => {
+      try {
+        if (window.allNotes && window.allNotes.length) return;
+        if (window._activeTitleId) return;
+        const titles = (await window.titleStore?.list?.()) || [];
+        if (titles.length) return;
+        if (typeof window.openLibrary === 'function') window.openLibrary();
+      } catch (e) { debugLog('[firstRun] open library failed: ' + (e?.message || e)); }
+    }, 600);
+  }
   // (Vision boot-trace toast removed after diagnosis: the failure was the
   // FILE_URI store mismatch fixed in tryAutoRestoreFile — kvTrace lines still
   // accumulate silently in window._kvTrace for future debugging.)

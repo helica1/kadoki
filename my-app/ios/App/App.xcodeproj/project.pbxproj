@@ -36,7 +36,6 @@
 		763A6A097EB909AC131545C6 /* AudioSlicerPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */; };
 		77A1B2C3D4E5F60718293A4B /* AutoTranscribePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */; };
 		89C7346B5581C7036D85A644 /* NativeTitleEdit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05D58513B49F85FC7E39D5EC /* NativeTitleEdit.swift */; };
-		89FA94E6170CADEA9D06609A /* KadokiLockWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10CF8B633B1A1CE39687EF4 /* KadokiLockWidget.swift */; };
 		8E60C14E1A34E9B535E2E79B /* KadokiReadEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D3FA1B1B9EBF0D83BD4DE0 /* KadokiReadEngine.swift */; };
 		93632E963BCBAEBF6763FC59 /* NativePrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F16D4D7731BB0F6448A171 /* NativePrefs.swift */; };
 		9C7EF869A099728BD538EBA5 /* kiss_fft.c in Sources */ = {isa = PBXBuildFile; fileRef = F34EE787CCD18F537D8D0E50 /* kiss_fft.c */; settings = {COMPILER_FLAGS = "-Dkiss_fft_scalar=float -w"; }; };
@@ -63,7 +62,6 @@
 		CD875F29B7C77121FF1219A3 /* KadokiHinge.m in Sources */ = {isa = PBXBuildFile; fileRef = 33AD625AEB6775006D341B67 /* KadokiHinge.m */; };
 		D94ADCA0457E5EB7EF492C99 /* CurvedPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C470146FE78048DE547C398C /* CurvedPanel.swift */; };
 		DEAABD03271BEBD43653443C /* KadokiVideoLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */; };
-		DF1B17BAC81C72DEB33B7E91 /* KadokiLockWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */; platformFilters = (ios, ); };
 		E04A373FE0634D55B8A4B4BE /* KadokiVideoIOS.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11DC002FECA73D02592DD93A /* KadokiVideoIOS.swift */; };
 		EF8A04896EEFB1F1528F779D /* FileAccessPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF681F6A191F38499937E7F6 /* FileAccessPlugin.swift */; };
 		FF5C208F8B794C6B89A32DAE /* NativeChrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4167E3396F070B02ACF5DDA8 /* NativeChrome.swift */; };
@@ -84,27 +82,9 @@
 			remoteGlobalIDString = B2C3D4E500000000000000A1;
 			remoteInfo = KadokiWatchWidgets;
 		};
-		EDF49FECF0DFC841456E5E9B /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 504EC2FC1FED79650016851F /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = ACF026BDF38F9A124FAC70AB;
-			remoteInfo = KadokiLockWidget;
-		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		657E27BDEC403FBF5E871EAF /* Embed Foundation Extensions */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
-			files = (
-				DF1B17BAC81C72DEB33B7E91 /* KadokiLockWidget.appex in Embed Foundation Extensions */,
-			);
-			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		A1B2C3D4000000000000000A /* Embed Watch Content */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -157,12 +137,10 @@
 		624F6C94595E034FC5DCBD6E /* KadokiVideoPlayer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoPlayer.swift; sourceTree = "<group>"; };
 		698541F6F81A7831A8ADCFFE /* DepthEstimator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DepthEstimator.swift; sourceTree = "<group>"; };
 		6FFD589652B7837FFFF78DED /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
-		720868DC3F5517482F3DE61C /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiBridgePlugin.swift; sourceTree = "<group>"; };
 		83CFC24BA7A628D2D5E14FEB /* KadokiHinge.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = KadokiHinge.h; sourceTree = "<group>"; };
 		88523D923E294360EF0124E2 /* AudioSlicerPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSlicerPlugin.swift; sourceTree = "<group>"; };
 		88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutoTranscribePlugin.swift; sourceTree = "<group>"; };
-		8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = KadokiLockWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		8C3A78BACB8C1D5C68162BE6 /* sonic.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = sonic.h; sourceTree = "<group>"; };
 		8D86C671BE9F38D4F6B24A2D /* NativeLibrary.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativeLibrary.swift; sourceTree = "<group>"; };
 		8ED7087512EE4319DE456390 /* PdfExportPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PdfExportPlugin.swift; sourceTree = "<group>"; };
@@ -182,7 +160,6 @@
 		A1B2C3D400000000000000F7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_App.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		AF51FD2D460BCFE21FA515B2 /* Pods-App.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.release.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.release.xcconfig"; sourceTree = "<group>"; };
-		B10CF8B633B1A1CE39687EF4 /* KadokiLockWidget.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiLockWidget.swift; sourceTree = "<group>"; };
 		B1983E97FAED0A6E3891D418 /* kadoki_remux.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = kadoki_remux.h; sourceTree = "<group>"; };
 		B2A380C7719E1A050488C62B /* MainViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MainViewController.swift; sourceTree = "<group>"; };
 		B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = KadokiWatchWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -212,14 +189,6 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		0C8898A4EB9DDE54FD8954C2 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				A6DE0AFD65364537B35B6119 /* Foundation.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		504EC3011FED79650016851F /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -275,7 +244,6 @@
 				504EC3051FED79650016851F /* Products */,
 				7F8756D8B27F46E3366F6CEA /* Pods */,
 				27E2DDA53C4D2A4D1A88CE4A /* Frameworks */,
-				5E4DC56B803BAB9C45C339EB /* KadokiLockWidget */,
 			);
 			sourceTree = "<group>";
 		};
@@ -285,7 +253,6 @@
 				504EC3041FED79650016851F /* App.app */,
 				A1B2C3D400000000000000D1 /* Kadoki Watch App.app */,
 				B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */,
-				8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -343,16 +310,6 @@
 				6FFD589652B7837FFFF78DED /* Foundation.framework */,
 			);
 			name = iOS;
-			sourceTree = "<group>";
-		};
-		5E4DC56B803BAB9C45C339EB /* KadokiLockWidget */ = {
-			isa = PBXGroup;
-			children = (
-				B10CF8B633B1A1CE39687EF4 /* KadokiLockWidget.swift */,
-				720868DC3F5517482F3DE61C /* Info.plist */,
-			);
-			name = KadokiLockWidget;
-			path = KadokiLockWidget;
 			sourceTree = "<group>";
 		};
 		7F8756D8B27F46E3366F6CEA /* Pods */ = {
@@ -444,13 +401,11 @@
 				504EC3021FED79650016851F /* Resources */,
 				9592DBEFFC6D2A0C8D5DEB22 /* [CP] Embed Pods Frameworks */,
 				A1B2C3D4000000000000000A /* Embed Watch Content */,
-				657E27BDEC403FBF5E871EAF /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				A1B2C3D400000000000000A9 /* PBXTargetDependency */,
-				B50F80D1171567A4C6576E7D /* PBXTargetDependency */,
 			);
 			name = App;
 			productName = App;
@@ -475,23 +430,6 @@
 			productName = "Kadoki Watch App";
 			productReference = A1B2C3D400000000000000D1 /* Kadoki Watch App.app */;
 			productType = "com.apple.product-type.application";
-		};
-		ACF026BDF38F9A124FAC70AB /* KadokiLockWidget */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 02CC26BAEEF76AFA8CB52805 /* Build configuration list for PBXNativeTarget "KadokiLockWidget" */;
-			buildPhases = (
-				2F53A2F9B64A62D86A09014E /* Sources */,
-				0C8898A4EB9DDE54FD8954C2 /* Frameworks */,
-				C1FCDAC4D63C6EA97C87D66F /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = KadokiLockWidget;
-			productName = KadokiLockWidget;
-			productReference = 8B53DC4D321F63A6542D3016 /* KadokiLockWidget.appex */;
-			productType = "com.apple.product-type.app-extension";
 		};
 		B2C3D4E500000000000000A1 /* KadokiWatchWidgets */ = {
 			isa = PBXNativeTarget;
@@ -551,7 +489,6 @@
 				504EC3031FED79650016851F /* App */,
 				A1B2C3D400000000000000A1 /* Kadoki Watch App */,
 				B2C3D4E500000000000000A1 /* KadokiWatchWidgets */,
-				ACF026BDF38F9A124FAC70AB /* KadokiLockWidget */,
 			);
 		};
 /* End PBXProject section */
@@ -583,13 +520,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		B2C3D4E500000000000000A7 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		C1FCDAC4D63C6EA97C87D66F /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -635,14 +565,6 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		2F53A2F9B64A62D86A09014E /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				89FA94E6170CADEA9D06609A /* KadokiLockWidget.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		504EC3001FED79650016851F /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -723,15 +645,6 @@
 			target = B2C3D4E500000000000000A1 /* KadokiWatchWidgets */;
 			targetProxy = B2C3D4E500000000000000A8 /* PBXContainerItemProxy */;
 		};
-		B50F80D1171567A4C6576E7D /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			name = KadokiLockWidget;
-			platformFilters = (
-				ios,
-			);
-			target = ACF026BDF38F9A124FAC70AB /* KadokiLockWidget */;
-			targetProxy = EDF49FECF0DFC841456E5E9B /* PBXContainerItemProxy */;
-		};
 /* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
@@ -754,55 +667,6 @@
 /* End PBXVariantGroup section */
 
 /* Begin XCBuildConfiguration section */
-		09FB4600C52D2D55558B09D4 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_OBJC_WEAK = NO;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
-				DEVELOPMENT_TEAM = KKG5M9X7V7;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = KadokiLockWidget/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
-				MARKETING_VERSION = 1.9.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.widget;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SKIP_INSTALL = YES;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
-				XROS_DEPLOYMENT_TARGET = 26.0;
-			};
-			name = Debug;
-		};
-		1FC19A12C9EAFEC75E978D0E /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CLANG_ENABLE_OBJC_WEAK = NO;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
-				DEVELOPMENT_TEAM = KKG5M9X7V7;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = KadokiLockWidget/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Kadoki;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks";
-				MARKETING_VERSION = 1.9.1;
-				PRODUCT_BUNDLE_IDENTIFIER = com.helica1.yama.widget;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SKIP_INSTALL = YES;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator xros xrsimulator";
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2,7";
-				VALIDATE_PRODUCT = YES;
-				XROS_DEPLOYMENT_TARGET = 26.0;
-			};
-			name = Release;
-		};
 		504EC3141FED79650016851F /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -916,7 +780,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]" = (
 					"[\"[\\\"DepthAnythingV2SmallF16.mlpackage\\\",\",",
@@ -1035,7 +899,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				"EXCLUDED_SOURCE_FILE_NAMES[sdk=iphoneos*]" = (
 					"[\"[\\\"DepthAnythingV2SmallF16.mlpackage\\\",\",",
@@ -1154,7 +1018,7 @@
 				CODE_SIGN_ENTITLEMENTS = KadokiWatch/KadokiWatch.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1182,7 +1046,7 @@
 				CODE_SIGN_ENTITLEMENTS = KadokiWatch/KadokiWatch.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -1209,7 +1073,7 @@
 				CODE_SIGN_ENTITLEMENTS = KadokiWatchWidgets/KadokiWatchWidgets.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = KadokiWatchWidgets/Info.plist;
@@ -1233,7 +1097,7 @@
 				CODE_SIGN_ENTITLEMENTS = KadokiWatchWidgets/KadokiWatchWidgets.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 32;
+				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = KadokiWatchWidgets/Info.plist;
@@ -1254,15 +1118,6 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		02CC26BAEEF76AFA8CB52805 /* Build configuration list for PBXNativeTarget "KadokiLockWidget" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				1FC19A12C9EAFEC75E978D0E /* Release */,
-				09FB4600C52D2D55558B09D4 /* Debug */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		504EC2FF1FED79650016851F /* Build configuration list for PBXProject "App" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
