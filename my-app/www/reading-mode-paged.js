@@ -2510,7 +2510,7 @@
   // Set while an audio → read entry is placing the reader (see
   // _revealReaderSettledStill).
   let _entryFromAudio = false;
-  function ensureGreenOnEnter(preferredCueIdx) {
+  function ensureGreenOnEnter(preferredCueIdx, opts) {
     try {
       // Only act while the paged reader is actually the visible view. openView
       // schedules this on untracked 60ms/260ms timeouts; a fast READ→AUDIO
@@ -2633,9 +2633,25 @@
       // cursor when paused) and jumps the card far from where the user was —
       // the "switch to card jumped to the middle of the book" place-loss.
       lastReadCueIdx = want;
-      lastProgrammaticScrollTime = Date.now();
-      try { scrollChunkNearRightWithContext(chunk, 3, { allowFarJump: true }); } catch (_) {}
-      log('[scroll-trace] ensureGreenOnEnter want=' + want + ' matchCue=' + matchCue + ' painted=' + !!r);
+      // Subtitle swipe (opts.onlyIfOffscreen): the page moves ONLY when the
+      // swiped-to line isn't fully readable where it is. Re-anchoring the
+      // chunk near the right edge on every swipe scrolled the page back even
+      // when the previous line sat mid-page.
+      let _skipScroll = false;
+      if (opts && opts.onlyIfOffscreen) {
+        try {
+          const rr = r.getBoundingClientRect();
+          const sr = scrollEl.getBoundingClientRect();
+          const visLeft = sr.left + (_maskLW || 0);
+          const visRight = sr.right - (_maskRW || 0);
+          _skipScroll = rr.width > 0 && rr.left >= visLeft && rr.right <= visRight;
+        } catch (_) {}
+      }
+      if (!_skipScroll) {
+        lastProgrammaticScrollTime = Date.now();
+        try { scrollChunkNearRightWithContext(chunk, 3, { allowFarJump: true }); } catch (_) {}
+      }
+      log('[scroll-trace] ensureGreenOnEnter skipScroll=' + _skipScroll + ' want=' + want + ' matchCue=' + matchCue + ' painted=' + !!r);
       return !!r;
     } catch (e) { log('ensureGreenOnEnter err: ' + e.message); return false; }
   }
@@ -3403,7 +3419,7 @@
       // guard). ensureGreenOnEnter below paints the target by INDEX (not guarded).
       window._readerCueHlGuardTarget = target;
       window._readerCueHlGuardUntil  = Date.now() + 1500;
-      try { ensureGreenOnEnter(target); } catch (_) {}       // move the reader to follow (paint + scroll)
+      try { ensureGreenOnEnter(target, { onlyIfOffscreen: true }); } catch (_) {}   // paint; scroll only if the line is off-page
     } catch (e) { log('readerCueSwipe err: ' + (e?.message || e)); }
   }
 

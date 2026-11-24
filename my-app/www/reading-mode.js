@@ -4428,6 +4428,9 @@
           }
         }
       } catch (_) {}
+      // Listening only: reading (read/card mode) resumes exactly where it
+      // paused — the −30s jump threw the highlight back over read text.
+      if (!document.body.classList.contains('mode-audio')) return;
       if (!(_lastListenWallMs > 0)) {
         // Fresh boot: fall back to the durable per-deck last-listened stamp.
         const deck = abOpenedDeckName || currentDeckName();
@@ -5171,6 +5174,7 @@
     // forward-only and would silently cancel a rewind applied before them.
     try {
       if (_fromSavedPos && !_floorRaised && !_nativePlaying && !opts.resumeOnly &&
+          document.body.classList.contains('mode-audio') &&
           Number(startMs) > 0) {
         let _ts = _lastListenWallMs;
         if (!(_ts > 0)) {

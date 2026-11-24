@@ -1947,7 +1947,16 @@
           // back to book-fraction x FULL duration, which on a partly
           // transcribed title seeks hours ahead). Every cue IS book text, so
           // all of them seed; nothing is matched or substituted.
-          try { window.autoAlign.seedFromCues(me.cues, { all: !me.hasBookText }); } catch (_) {}
+          // RACE: prepare() can resolve BEFORE the cue cache below is adopted
+          // (book text already indexed / quick to load) — me.cues is still []
+          // then, nothing seeds, and the aligner runs on the handful of live
+          // matches only: estimates minutes off, the reader's 3-min tap bound
+          // rejects the right cue, Set-playhead falls back to a guess and
+          // nothing highlights. Seed only once cues exist; the cache-adopt
+          // step below seeds if it lands second.
+          if (me.cues.length) {
+            try { window.autoAlign.seedFromCues(me.cues, { all: !me.hasBookText }); me.anchorsSeeded = true; } catch (_) {}
+          }
           if (me.hasBookText) runAlignSweep('ready');
         }
       }).catch((e) => log('autoAlign prepare failed: ' + (e?.message || e)));
@@ -2050,6 +2059,15 @@
       log('cache adopted: ' + me.cues.length + ' cues, ' + me.cov.length + ' ranges');
     }
     if (active !== me) return false;
+    // The book-text index finished first (see the prepare() handler above) —
+    // seed its anchors from the cues adopted just now.
+    if (!me.anchorsSeeded && me.cues.length && window.autoAlign?.readyFor?.(titleId)) {
+      try {
+        const n = window.autoAlign.seedFromCues(me.cues, { all: !me.hasBookText });
+        me.anchorsSeeded = true;
+        diag('activate: seeded ' + n + ' aligner anchors after cache adopt');
+      } catch (_) {}
+    }
 
     if (me.timingOnly) { enrichLiveSrt(); }
     else if (me.cues.length && typeof window.abIngestAutoCues === 'function') {
