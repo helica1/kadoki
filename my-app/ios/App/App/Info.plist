@@ -61,6 +61,18 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Kadoki connects to your own image-generation server on this Wi-Fi network to create character portraits. No data leaves your local network.</string>
+	<key>NSUbiquitousContainers</key>
+	<dict>
+		<key>iCloud.com.helica1.yama</key>
+		<dict>
+			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
+			<true/>
+			<key>NSUbiquitousContainerName</key>
+			<string>Kadoki</string>
+			<key>NSUbiquitousContainerSupportedFolderLevels</key>
+			<string>Any</string>
+		</dict>
+	</dict>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

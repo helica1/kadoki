@@ -105,6 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         // Apple on-device Translation for the send-to-Anki dialog (macOS 15+).
         let translator = TranslatorHandler()
         ucc.addScriptMessageHandler(translator, contentWorld: .page, name: "kadokiTranslate")
+        // iCloud Drive library (KadokiCloud, shared with the iOS plugin).
+        ucc.addScriptMessageHandler(CloudHandler(), contentWorld: .page, name: "kadokiCloud")
         webView = WKWebView(frame: .zero, configuration: config)
         translator.hostView = webView
         webView.uiDelegate = self

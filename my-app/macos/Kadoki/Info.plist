@@ -52,5 +52,17 @@
 	<string>NSApplication</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Kadoki transcribes your audiobooks on this Mac so the text can follow along with the narration.</string>
+	<key>NSUbiquitousContainers</key>
+	<dict>
+		<key>iCloud.com.helica1.yama</key>
+		<dict>
+			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
+			<true/>
+			<key>NSUbiquitousContainerName</key>
+			<string>Kadoki</string>
+			<key>NSUbiquitousContainerSupportedFolderLevels</key>
+			<string>Any</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

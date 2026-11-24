@@ -37,6 +37,7 @@
 		77A1B2C3D4E5F60718293A4B /* AutoTranscribePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88B2C3D4E5F60718293A4B5C /* AutoTranscribePlugin.swift */; };
 		89C7346B5581C7036D85A644 /* NativeTitleEdit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05D58513B49F85FC7E39D5EC /* NativeTitleEdit.swift */; };
 		8E60C14E1A34E9B535E2E79B /* KadokiReadEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 15D3FA1B1B9EBF0D83BD4DE0 /* KadokiReadEngine.swift */; };
+		9167A1BAFBA5FF1AAA9FE620 /* KadokiCloudPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67DCD941F4F6DDDBC52E23DA /* KadokiCloudPlugin.swift */; };
 		93632E963BCBAEBF6763FC59 /* NativePrefs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6F16D4D7731BB0F6448A171 /* NativePrefs.swift */; };
 		9C7EF869A099728BD538EBA5 /* kiss_fft.c in Sources */ = {isa = PBXBuildFile; fileRef = F34EE787CCD18F537D8D0E50 /* kiss_fft.c */; settings = {COMPILER_FLAGS = "-Dkiss_fft_scalar=float -w"; }; };
 		9EEFB05EDE94CC3691A6989B /* soniclib.c in Sources */ = {isa = PBXBuildFile; fileRef = 9CFAA4E29A898E6C6A5FA8A8 /* soniclib.c */; settings = {COMPILER_FLAGS = "-UDEBUG -w"; }; };
@@ -53,12 +54,12 @@
 		A1B2C3D400000000000000E6 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F6 /* PlayerView.swift */; };
 		A1B2C3D400000000000000E7 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000000000000F7 /* Assets.xcassets */; };
 		A65AD9BF618F74F21C3551FA /* SpatialImagePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C96FCF6301A0596AB30AADD /* SpatialImagePlugin.swift */; };
-		A6DE0AFD65364537B35B6119 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 6FFD589652B7837FFFF78DED /* Foundation.framework */; };
 		A8BFD7E4B17BF44E40C7FC5D /* BackgroundAudioPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF81DEBB26FC4E950BBB038 /* BackgroundAudioPlugin.swift */; };
 		B0C132DDF0A24EB0A25A7271 /* demo-video.srt in Resources */ = {isa = PBXBuildFile; fileRef = 2FDDB295D144E056F5A721F4 /* demo-video.srt */; };
 		B2C3D4E500000000000000D2 /* KadokiWatchWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B2C3D4E500000000000000D1 /* KadokiWatchWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		B2C3D4E500000000000000E1 /* KadokiWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E500000000000000F1 /* KadokiWidgets.swift */; };
 		C5C183F988E421195EE65059 /* AnkiBridgePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */; };
+		C9C86A4C4FFCA3B0B8BA139F /* KadokiCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DE2D4C1088B57226C862311 /* KadokiCloud.swift */; };
 		CD875F29B7C77121FF1219A3 /* KadokiHinge.m in Sources */ = {isa = PBXBuildFile; fileRef = 33AD625AEB6775006D341B67 /* KadokiHinge.m */; };
 		D94ADCA0457E5EB7EF492C99 /* CurvedPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C470146FE78048DE547C398C /* CurvedPanel.swift */; };
 		DEAABD03271BEBD43653443C /* KadokiVideoLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */; };
@@ -119,6 +120,7 @@
 		190BF058F2B37BB4482A8FEC /* StereoRenderer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StereoRenderer.swift; sourceTree = "<group>"; };
 		1E0078D68380ADC679D555B7 /* _kiss_fft_guts.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = _kiss_fft_guts.h; sourceTree = "<group>"; };
 		2220E4940FD194E82B8CF771 /* KadokiVideoLayer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoLayer.swift; sourceTree = "<group>"; };
+		2DE2D4C1088B57226C862311 /* KadokiCloud.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiCloud.swift; sourceTree = "<group>"; };
 		2DF5C3F132ED80A31C3CE8D0 /* ArchiveExtractorPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ArchiveExtractorPlugin.swift; sourceTree = "<group>"; };
 		2FAD9762203C412B000D30F8 /* config.xml */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = config.xml; sourceTree = "<group>"; };
 		2FDDB295D144E056F5A721F4 /* demo-video.srt */ = {isa = PBXFileReference; includeInIndex = 1; path = "demo-video.srt"; sourceTree = "<group>"; };
@@ -135,6 +137,7 @@
 		504EC3131FED79650016851F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
 		624F6C94595E034FC5DCBD6E /* KadokiVideoPlayer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiVideoPlayer.swift; sourceTree = "<group>"; };
+		67DCD941F4F6DDDBC52E23DA /* KadokiCloudPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = KadokiCloudPlugin.swift; sourceTree = "<group>"; };
 		698541F6F81A7831A8ADCFFE /* DepthEstimator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DepthEstimator.swift; sourceTree = "<group>"; };
 		6FFD589652B7837FFFF78DED /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		7CB4FD7F4818EDCE6C621E95 /* AnkiBridgePlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AnkiBridgePlugin.swift; sourceTree = "<group>"; };
@@ -300,6 +303,8 @@
 				B6F16D4D7731BB0F6448A171 /* NativePrefs.swift */,
 				8D86C671BE9F38D4F6B24A2D /* NativeLibrary.swift */,
 				05D58513B49F85FC7E39D5EC /* NativeTitleEdit.swift */,
+				2DE2D4C1088B57226C862311 /* KadokiCloud.swift */,
+				67DCD941F4F6DDDBC52E23DA /* KadokiCloudPlugin.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -602,6 +607,8 @@
 				93632E963BCBAEBF6763FC59 /* NativePrefs.swift in Sources */,
 				0B0DC6DB9A8A0823ED499CB5 /* NativeLibrary.swift in Sources */,
 				89C7346B5581C7036D85A644 /* NativeTitleEdit.swift in Sources */,
+				C9C86A4C4FFCA3B0B8BA139F /* KadokiCloud.swift in Sources */,
+				9167A1BAFBA5FF1AAA9FE620 /* KadokiCloudPlugin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -779,6 +786,7 @@
 			baseConfigurationReference = FC68EB0AF532CFC21C3344DD /* Pods-App.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;
@@ -898,6 +906,7 @@
 			baseConfigurationReference = AF51FD2D460BCFE21FA515B2 /* Pods-App.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 33;
 				DEVELOPMENT_TEAM = KKG5M9X7V7;

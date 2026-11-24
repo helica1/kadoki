@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0DF0D99FE6F1DFF311E63F72 /* KadokiCloud.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFC140C778D8004DC038D53B /* KadokiCloud.swift */; };
 		13D1945E91C8872A98265D2D /* AnkiConnectProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 766FCECFE7789564371557A2 /* AnkiConnectProxy.swift */; };
 		1D169AC9A71EFE5B95C66E1C /* mac-shim.js in Resources */ = {isa = PBXBuildFile; fileRef = 64C9F37DE5E21F0D2DAA7C63 /* mac-shim.js */; };
 		2608F780AA96EEF0E3C37199 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = 80BFD81B07CAEBF108DFA35F /* AppIcon.icns */; };
@@ -23,6 +24,7 @@
 		C43343B3C2B463D9CB7197EA /* TranslatorHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = E92D9ED80AA3FD5246D62637 /* TranslatorHandler.swift */; };
 		C48F5777B20C3566B4973FAD /* AudioPlayerHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8260B84CE11207B68AA1DCFB /* AudioPlayerHandler.swift */; };
 		CC328405CB21F9A367F2A7CD /* KadokiEvents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68E6B1781B75631A9DE5D7E5 /* KadokiEvents.swift */; };
+		D0BC26619023ABC4B4125159 /* CloudHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B5D9E1B2BD22C5851434EF8 /* CloudHandler.swift */; };
 		DAACE499A419151E3E3804B2 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 917508630C7EF7B8373C11D5 /* PrivacyInfo.xcprivacy */; };
 		EA56BE233E2305B39EF8AAFA /* AutoTranscribeHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F3A4DAE1DA97BCD581A18 /* AutoTranscribeHandler.swift */; };
 /* End PBXBuildFile section */
@@ -44,8 +46,10 @@
 		886F3A4DAE1DA97BCD581A18 /* AutoTranscribeHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AutoTranscribeHandler.swift; sourceTree = "<group>"; };
 		917508630C7EF7B8373C11D5 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		98A8C8019D3FCB1A89CA1F16 /* SchemeHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SchemeHandler.swift; sourceTree = "<group>"; };
+		9B5D9E1B2BD22C5851434EF8 /* CloudHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CloudHandler.swift; sourceTree = "<group>"; };
 		C12A9D0D55F5B29740554FCA /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		C8A7CD935AEFBFED2AA59D13 /* Kadoki.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Kadoki.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CFC140C778D8004DC038D53B /* KadokiCloud.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = KadokiCloud.swift; path = ../../ios/App/App/KadokiCloud.swift; sourceTree = "<group>"; };
 		E57FF77E4EBFB9C4A9016FFE /* container-migration.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "container-migration.plist"; sourceTree = "<group>"; };
 		E92D9ED80AA3FD5246D62637 /* TranslatorHandler.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TranslatorHandler.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -108,6 +112,8 @@
 				917508630C7EF7B8373C11D5 /* PrivacyInfo.xcprivacy */,
 				159FF96886FCA0973A25A2D8 /* Kadoki.entitlements */,
 				53B952B087819E63AA7F5CAC /* DevHook.swift */,
+				9B5D9E1B2BD22C5851434EF8 /* CloudHandler.swift */,
+				CFC140C778D8004DC038D53B /* KadokiCloud.swift */,
 			);
 			name = Kadoki;
 			path = Kadoki;
@@ -202,6 +208,8 @@
 				58BC21653E8D345568AE6C00 /* AnthropicHttpHandler.swift in Sources */,
 				46FC5202B90DB251E849EEBF /* SandboxSupport.swift in Sources */,
 				B5EC6A8ACEBA724A2C2105A0 /* DevHook.swift in Sources */,
+				D0BC26619023ABC4B4125159 /* CloudHandler.swift in Sources */,
+				0DF0D99FE6F1DFF311E63F72 /* KadokiCloud.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

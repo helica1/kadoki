@@ -676,6 +676,7 @@ class MainViewController: CAPBridgeViewController {
         // SpatialImage: registered everywhere, reports available:false where the
         // framework is missing (visionOS, iOS < 18) so JS falls back to AI.
         bridge.registerPluginInstance(TranslatorPlugin())
+        bridge.registerPluginInstance(KadokiCloudPlugin())
         NSLog("[MainViewController] registered 10 app-target plugins")
 
         // Boot the AnkiMediaServer eagerly while we're guaranteed to be on

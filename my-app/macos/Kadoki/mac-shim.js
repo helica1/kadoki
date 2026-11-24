@@ -400,6 +400,13 @@
     },
   };
 
+  // ------------------------------------------------------------- KadokiCloud
+  // iCloud Drive library — same {op, ...} contract as the iOS plugin.
+  const KadokiCloud = {
+    op: (o) => native('kadokiCloud', o || {}),
+    addListener: makeAddListener('KadokiCloud'),
+  };
+
   // -------------------------------------------------------------- Translator
   // Apple on-device Translation (macOS 15+) for the send-to-Anki dialog.
   const Translator = {
@@ -814,7 +821,7 @@
     convertFileSrc,
     Plugins: {
       FileAccess, BackgroundAudio, AudioSlicer, AutoTranscribe,
-      AnkiBridge, Filesystem, App, Browser, Translator,
+      AnkiBridge, Filesystem, App, Browser, Translator, KadokiCloud,
     },
   };
 })();

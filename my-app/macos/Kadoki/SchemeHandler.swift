@@ -30,7 +30,9 @@ final class KadokiSchemeHandler: NSObject, WKURLSchemeHandler {
             .deletingLastPathComponent()   // macos/
             .deletingLastPathComponent()   // my-app/
             .appendingPathComponent("www", isDirectory: true)
-        if FileManager.default.fileExists(atPath: devRoot.appendingPathComponent("index.html").path) {
+        // READABLE, not just present: the sandbox lets the app see the repo's
+        // index.html exists but refuses to read it ("Not found" page).
+        if (try? Data(contentsOf: devRoot.appendingPathComponent("index.html"))) != nil {
             root = devRoot
         }
         #endif
