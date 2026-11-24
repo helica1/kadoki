@@ -49,7 +49,46 @@
     const a = (title && title.attachments) || {};
     return MEDIA_KINDS.map(k => a[k] && isICloudUri(a[k].uri) ? fromUri(a[k].uri) : null).filter(Boolean);
   }
-  function isPublished(title) { return cloudPaths(title).length > 0; }
+  // Published = has iCloud media, or is a local copy LINKED to an iCloud title
+  // (same book already on this device: it keeps its own files and data).
+  function isPublished(title) { return !!(title && (title.icloudLinked || cloudPaths(title).length > 0)); }
+  // Every media attachment is an iCloud one (a title created from iCloud).
+  function cloudOnlyMedia(title) {
+    const a = (title && title.attachments) || {};
+    const ks = MEDIA_KINDS.filter(k => a[k]);
+    return ks.length > 0 && ks.every(k => isICloudUri(a[k].uri));
+  }
+
+  // Is `t` this device's own copy of the book described by `media`? Same EPUB
+  // or audiobook file name, and the same size whenever both sizes are known.
+  function sameBook(t, media) {
+    const a = (t && t.attachments) || {};
+    let hit = false;
+    for (const k of ['epub', 'audiobook']) {
+      const m = media && media[k], la = a[k];
+      if (!m || !la || !m.name || !la.name) continue;
+      if (String(m.name).trim().toLowerCase() !== String(la.name).trim().toLowerCase()) return false;
+      const ls = Number(la.size) || 0, rs = Number(m.size) || 0;
+      if (ls && rs && ls !== rs) return false;
+      hit = true;
+    }
+    return hit;
+  }
+  async function findLocalTwin(media, exceptId) {
+    const all = (await ts().list()) || [];
+    return all.find(t => t.id !== exceptId && !isPublished(t) && sameBook(t, media)) || null;
+  }
+  // Link a local copy to an iCloud title: it takes the iCloud syncId (so
+  // positions and later AI data sync) and keeps its own files and data.
+  async function linkTwin(twin, sid) {
+    await ts().update(twin.id, { syncId: sid, icloudLinked: true });
+    log('linked local copy ' + twin.name + ' → ' + sid);
+  }
+  function mediaOf(t) {
+    const a = (t && t.attachments) || {}, out = {};
+    for (const k of MEDIA_KINDS) if (a[k]) out[k] = { name: a[k].name, size: a[k].size };
+    return out;
+  }
 
   /** 'local' (all on this device) | 'cloud' (some only in iCloud) | null (not an iCloud title). */
   async function downloadState(title) {
@@ -132,9 +171,10 @@
       v: 1, syncId: sid, name: t.name, author: t.author || '', folder: t.folder || '',
       createdAt: t.createdAt || Date.now(), updatedAt: Date.now(), media, hasCover: !!cover,
     });
-    if (Object.keys(patch).length) t = await ts().update(titleId, { attachments: patch });
+    t = await ts().update(titleId, Object.keys(patch).length ? { attachments: patch, icloudLinked: true } : { icloudLinked: true });
     const seen = jget(SEEN_KEY, {}); seen[sid] = Date.now(); jset(SEEN_KEY, seen);
     log('published ' + t.name + ' → ' + base + ' (' + kinds.join(',') + ')');
+    try { window.iCloudPos?.push(titleId, 'published'); } catch (_) {}
     return t;
   }
 
@@ -176,6 +216,22 @@
       const seen = jget(SEEN_KEY, {});
       const dismissed = new Set(jget(DISMISSED_KEY, []));
       let changed = 0;
+      // Repair duplicates made before twin-linking existed: a title created
+      // from iCloud next to this device's own copy of the same book. Keep the
+      // local copy (its AI data, cover, stats), link it, drop the iCloud one.
+      try {
+        const all = (await ts().list()) || [];
+        for (const dup of all) {
+          if (!dup.syncId || !cloudOnlyMedia(dup) || dup.icloudLinked) continue;
+          if (dup.id === window._activeTitleId || dup.id === window._loadedContentTitleId) continue;
+          const twin = await findLocalTwin(mediaOf(dup), dup.id);
+          if (!twin) continue;
+          await linkTwin(twin, dup.syncId);
+          await _origRemove(dup.id);
+          log('removed duplicate iCloud entry for ' + dup.name);
+          changed++;
+        }
+      } catch (err) { log('duplicate repair failed: ' + (err?.message || err)); }
       for (const e of jsons) {
         const sid = e.path.split('/')[1];
         if (dismissed.has(sid)) continue;
@@ -186,6 +242,10 @@
         if (!info || !info.media) continue;
         const base = `${LIB}/${sid}`;
         if (!local) {
+          // This device may already have the same book (its own import, with a
+          // different syncId): link that copy instead of adding a second one.
+          const twin = await findLocalTwin(info.media, null);
+          if (twin) { await linkTwin(twin, sid); seen[sid] = e.mtime || Date.now(); changed++; continue; }
           const attachments = {};
           for (const k of MEDIA_KINDS) if (info.media[k]) attachments[k] = attFromMedia(base, info.media[k]);
           if (info.hasCover) {
@@ -219,10 +279,12 @@
 
   // Deleting a Title on this device doesn't delete it from iCloud (yet), so
   // remember its syncId — otherwise the next scan would bring it straight back.
+  let _origRemove = (id) => ts().remove(id);   // remove WITHOUT recording a dismissal
   function hookRemove() {
     const store = ts();
     if (!store || store._icloudHooked) return;
     const orig = store.remove;
+    _origRemove = (id) => orig.call(store, id);
     store.remove = async function (id) {
       try {
         const t = await store.get(id);

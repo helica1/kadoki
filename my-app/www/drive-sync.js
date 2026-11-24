@@ -824,6 +824,7 @@
     deviceId,
     rootFolderId,
     flushLivePositions,
+    readPositions,       // also used by icloud-positions.js
     readRemoteManifest,
     // exposed for tests / UI / cross-module logging
     _slog: slog,

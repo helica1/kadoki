@@ -2075,6 +2075,7 @@ body.dimmed .card-image {
   <script src="gdrive-auth.js"></script>
   <script src="icloud.js"></script>
   <script src="icloud-library.js"></script>
+  <script src="icloud-positions.js"></script>
   <script src="drive-api.js"></script>
   <script src="drive-index.js"></script>
   <script src="drive-sync.js"></script>
@@ -3019,9 +3020,11 @@ body.dimmed .card-image {
           const a = title.attachments || {};
           let act = null;
           if (!window.iCloudLib.isPublished(title)) { if (a.epub || a.audiobook || a.srt) act = ['icloudUpload', LT('lib.icloud_upload', 'Upload to iCloud')]; }
-          else act = (await window.iCloudLib.downloadState(title)) === 'cloud'
-            ? ['icloudDownload', LT('lib.icloud_download', 'Download from iCloud')]
-            : ['icloudEvict', LT('lib.icloud_evict', 'Remove download')];
+          else {
+            const st = await window.iCloudLib.downloadState(title);   // null: a linked local copy (its own files)
+            if (st === 'cloud') act = ['icloudDownload', LT('lib.icloud_download', 'Download from iCloud')];
+            else if (st === 'local') act = ['icloudEvict', LT('lib.icloud_evict', 'Remove download')];
+          }
           if (act) slot.appendChild(mk(act[1], () => window.iCloudAction(act[0], title.id)));
         })().catch(() => {});
       }
@@ -4125,6 +4128,11 @@ body.dimmed .card-image {
       // tries to read them. Cheap when cache survives (mtime check returns
       // early); fully rebuilds when files are gone — THE slow step on a
       // first open / evicted cache (native copy of a whole audiobook).
+      // iCloud titles: bring saved positions up to the furthest device first
+      // (forward-only, bounded wait; a title that's already live is skipped).
+      if (window.iCloudPos && title && title.syncId) {
+        try { if (await window.iCloudPos.beforeOpen(title)) title = (await window.titleStore.get(title.id)) || title; } catch (_) {}
+      }
       setTitleOpenStatus('Preparing audio & subtitle files…');
       title = await rehydrateTitleCachePaths(title);
       setTitleOpenStatus('Loading…');
