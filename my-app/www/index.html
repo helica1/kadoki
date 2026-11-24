@@ -2074,6 +2074,7 @@ body.dimmed .card-image {
        Sync button + Browse + cloud library entries. -->
   <script src="gdrive-auth.js"></script>
   <script src="icloud.js"></script>
+  <script src="icloud-library.js"></script>
   <script src="drive-api.js"></script>
   <script src="drive-index.js"></script>
   <script src="drive-sync.js"></script>
@@ -3009,6 +3010,21 @@ body.dimmed .card-image {
       top.appendChild(mk(LT('lib.stats', 'Stats'), () => openTitleStats(title.id)));
       top.appendChild(mk(LT('lib.edit', 'Edit'), () => openTitleEdit(title.id)));
       top.appendChild(mk(LT('lib.move', 'Move'), () => openMoveSheet([title.id])));
+      // iCloud (iPhone / iPad / Mac): Upload, or Download / Remove download.
+      if (window.iCloudLib && !(Array.isArray(title.attachments?.series) && title.attachments.series.length > 1)) {
+        const slot = document.createElement('span'); slot.style.display = 'contents';
+        top.appendChild(slot);
+        (async () => {
+          if (!(await window.iCloudLib.available())) return;
+          const a = title.attachments || {};
+          let act = null;
+          if (!window.iCloudLib.isPublished(title)) { if (a.epub || a.audiobook || a.srt) act = ['icloudUpload', LT('lib.icloud_upload', 'Upload to iCloud')]; }
+          else act = (await window.iCloudLib.downloadState(title)) === 'cloud'
+            ? ['icloudDownload', LT('lib.icloud_download', 'Download from iCloud')]
+            : ['icloudEvict', LT('lib.icloud_evict', 'Remove download')];
+          if (act) slot.appendChild(mk(act[1], () => window.iCloudAction(act[0], title.id)));
+        })().catch(() => {});
+      }
       top.appendChild(mk(LT('lib.delete', 'Delete'), async () => {
         if (!(window.titleStore && confirm('Remove this title from your library?'))) return;
         try { if (title.syncId && window.driveIndex) await window.driveIndex.dismiss(title.syncId); } catch (_) {}
@@ -3992,6 +4008,13 @@ body.dimmed .card-image {
         if (!att) continue;
         if (att.uri) {
           // NATIVE import: materialize from the security-scoped uri.
+          // iCloud media (icloud://…) downloads first if it's only in iCloud.
+          if (window.iCloudLib?.isICloudUri(att.uri)) {
+            try {
+              const st = await window.kCloud.stat(window.iCloudLib._fromUri(att.uri));
+              if (st && st.status && st.status !== 'current') setTitleOpenStatus(LT('lib.icloud_downloading', 'Downloading from iCloud…'));
+            } catch (_) {}
+          }
           try {
             const mat = await fa.materializeToCache({ uri: att.uri });
             if (mat?.path && mat.path !== att.cachePath) { att.cachePath = mat.path; touched = true; }

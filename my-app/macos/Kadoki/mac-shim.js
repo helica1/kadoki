@@ -149,6 +149,15 @@
         if (!st.exists) throw new Error('file missing: ' + path);
         return { path, size: st.size, cached: true };
       }
+      // iCloud library media: download if it's only in iCloud, then use it
+      // where it sits (same contract as the iOS FileAccess plugin).
+      if (uri.startsWith('icloud://')) {
+        const rel = decodeURIComponent(uri.slice('icloud://'.length));
+        await native('kadokiCloud', { op: 'download', path: rel, wait: true });
+        const lp = await native('kadokiCloud', { op: 'localPath', path: rel });
+        const st = await native('kadokiCloud', { op: 'stat', path: rel });
+        return { path: lp.path, size: st.size || 0, cached: true, inPlace: true };
+      }
       if (uri.startsWith(LEGACY_PREFIX)) {
         const m = await migrateLegacy(uri.slice(LEGACY_PREFIX.length));
         return { path: m.path, size: m.size, cached: true };

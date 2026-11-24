@@ -63,6 +63,15 @@
     return bits.join(' · ');
   }
 
+  // '' (no iCloud here) | 'none' (can upload) | 'local' | 'cloud' (files only in iCloud)
+  async function icloudState(t) {
+    const L = window.iCloudLib;
+    if (!L || !(await L.available())) return '';
+    if (Array.isArray(t.attachments?.series) && t.attachments.series.length > 1) return '';
+    if (!L.isPublished(t)) return (t.attachments?.epub || t.attachments?.audiobook || t.attachments?.srt) ? 'none' : '';
+    return (await L.downloadState(t)) || '';
+  }
+
   async function describeTitle(t, blurb) {
     const a = t.attachments || {};
     const video = !!(a.audiobook && (a.audiobook.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(a.audiobook.name || '')));
@@ -97,6 +106,7 @@
       summary: blurb ? ((lang === 'ja' ? blurb.ja : blurb.en) || []) : [],
       tags: blurb ? (((lang === 'ja' ? blurb.tags_ja : blurb.tags_en) || []).slice(0, 4)) : [],
       canSummarize: !!(a.epub && window.libraryBlurb && window.ai?.isEnabled?.()),
+      icloud: await icloudState(t),
     };
   }
 
@@ -149,6 +159,8 @@
         show: T('lib.show', 'Show'), sort: T('lib.sort', 'Sort'), library: T('lib.library', 'Library'),
         noSummary: window.ai?.isEnabled?.() ? T('lib.summary_none', 'No summary yet.') : T('lib.summary_ai_off', 'Enable the AI assistant in Preferences to get summaries.'),
         cloud: '☁ In cloud — tap to download',
+        icloudUpload: T('lib.icloud_upload', 'Upload to iCloud'), icloudDownload: T('lib.icloud_download', 'Download from iCloud'),
+        icloudEvict: T('lib.icloud_evict', 'Remove download'), icloudOnly: T('lib.icloud_only', 'In iCloud'),
       },
     };
   }
@@ -172,6 +184,11 @@
       case 'stats': window.openTitleStats(id); break;
       case 'edit': openTitleEdit(id); break;
       case 'summarize': try { await window.libraryBlurb.regenerate(id); } catch (_) {} break;
+      case 'icloudUpload':
+      case 'icloudDownload':
+      case 'icloudEvict':
+        window.iCloudAction?.(action, id).then(() => window.__kadokiLibRefreshNative?.());
+        break;
       case 'delete':
         if (!(window.titleStore && confirm(T('lib.delete_confirm', 'Remove this title from your library?')))) break;
         // falls through

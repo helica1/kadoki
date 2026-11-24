@@ -23,8 +23,12 @@ final class KadokiCloud: NSObject {
     /// Set by the platform wrapper: delivers events to JS.
     var onEvent: ((String, [String: Any]) -> Void)?
 
-    private let queue = DispatchQueue(label: "kadoki.cloud", qos: .utility)
-    private var docsURL: URL?          // resolved container Documents (queue only)
+    // Concurrent: a read or download that waits on iCloud must not hold up
+    // every other request. Writes go through NSFileCoordinator, and the one
+    // piece of shared state (docsURL) is guarded by docsLock.
+    private let queue = DispatchQueue(label: "kadoki.cloud", qos: .utility, attributes: .concurrent)
+    private let docsLock = NSLock()
+    private var docsURL: URL?          // resolved container Documents (docsLock)
     private var resolved = false
     private var query: NSMetadataQuery?
     private var lastToken: NSObjectProtocol?
@@ -52,6 +56,16 @@ final class KadokiCloud: NSObject {
         }
     }
 
+    /// The on-device file for a library path, downloading it first if it's
+    /// only in iCloud. Blocking: call off the main thread. Used for the
+    /// `icloud://<path>` attachment URIs (FileAccess.materializeToCache), so
+    /// media plays from where it sits, never copied.
+    func localFile(_ relPath: String, waitMs: Double = 600_000) throws -> URL {
+        let u = try url(relPath)
+        try ensureLocal(u, waitMs: waitMs)
+        return u
+    }
+
     private struct CloudError: LocalizedError {
         let errorDescription: String?
         init(_ s: String) { errorDescription = s }
@@ -62,6 +76,7 @@ final class KadokiCloud: NSObject {
     /// Resolves (once) and returns the container's Documents folder. Blocking —
     /// call on `queue` only.
     private func docs() throws -> URL {
+        docsLock.lock(); defer { docsLock.unlock() }
         if let d = docsURL { return d }
         guard let c = FileManager.default.url(forUbiquityContainerIdentifier: Self.containerID) else {
             throw CloudError("iCloud Drive is unavailable. Check that you're signed in to iCloud and iCloud Drive is on.")
@@ -80,7 +95,7 @@ final class KadokiCloud: NSObject {
     }
 
     private func rel(_ u: URL) -> String {
-        guard let base = docsURL?.path else { return u.path }
+        guard let base = (try? docs())?.path else { return u.path }
         let p = u.resolvingSymlinksInPath().path
         if p == base { return "" }
         return p.hasPrefix(base + "/") ? String(p.dropFirst(base.count + 1)) : p
@@ -362,7 +377,7 @@ final class KadokiCloud: NSObject {
         let tok = FileManager.default.ubiquityIdentityToken.map { $0 as NSObjectProtocol }
         let same = (tok == nil && lastToken == nil) || (tok != nil && lastToken != nil && tok!.isEqual(lastToken!))
         lastToken = tok
-        queue.async { self.docsURL = nil }   // re-resolve against the new account
+        docsLock.lock(); docsURL = nil; docsLock.unlock()   // re-resolve against the new account
         DispatchQueue.main.async { self.onEvent?("account", ["signedIn": tok != nil, "changed": !same]) }
     }
 

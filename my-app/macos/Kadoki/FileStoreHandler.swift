@@ -71,6 +71,8 @@ final class FileStoreHandler: NSObject, WKScriptMessageHandlerWithReply {
     func isPathAllowed(_ path: String) -> Bool {
         let p = (KadokiSandbox.local(path) as NSString).standardizingPath
         if p.hasPrefix(mediaRoot.path) || p.hasPrefix(documentsRoot.path + "/") { return true }
+        // The app's own iCloud Drive library (icloud:// attachments resolve here).
+        if p.contains("/Library/Mobile Documents/iCloud~com~helica1~yama/") { return true }
         return grantedPaths.contains { p == $0 || p.hasPrefix($0 + "/") }
     }
 

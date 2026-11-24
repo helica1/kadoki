@@ -68,6 +68,8 @@ struct LibTitle: Identifiable, Hashable {
     let summary: [String]
     let tags: [String]
     let canSummarize: Bool
+    /// "" (no iCloud) | "none" (can upload) | "local" | "cloud" (files only in iCloud)
+    var icloud: String = ""
 
     static func == (a: LibTitle, b: LibTitle) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }
@@ -116,6 +118,7 @@ final class LibraryStore: ObservableObject {
         var t = baseTitle(d)
         t.listeningBook = d["listeningBook"] as? Bool ?? false
         t.canListeningBook = d["canListeningBook"] as? Bool ?? false
+        t.icloud = d["icloud"] as? String ?? ""
         return t
     }
     private func baseTitle(_ d: [String: Any]) -> LibTitle {
@@ -440,6 +443,10 @@ struct TitleRow: View {
                 if !t.author.isEmpty { Text(t.author).font(.subheadline).foregroundStyle(.secondary) }
                 HStack(spacing: 6) {
                     ForEach(t.kinds, id: \.self) { k in KindPill(k: k) }
+                    if t.icloud == "cloud" {
+                        Image(systemName: "icloud").font(.caption).foregroundStyle(.secondary)
+                            .accessibilityLabel(store.str("icloudOnly", "In iCloud"))
+                    }
                 }
                 if t.cloud {
                     Text(store.str("cloud", "In cloud")).font(.caption).foregroundStyle(.cyan)
@@ -506,6 +513,15 @@ struct TitleMenu: View {
             Button { store.act("summarize", t.id) } label: {
                 Label(t.summary.isEmpty ? store.str("summarize", "Summarize") : store.str("newSummary", "New summary"), systemImage: "sparkles")
             }
+        }
+        switch t.icloud {
+        case "none":
+            Button { store.act("icloudUpload", t.id) } label: { Label(store.str("icloudUpload", "Upload to iCloud"), systemImage: "icloud.and.arrow.up") }
+        case "local":
+            Button { store.act("icloudEvict", t.id) } label: { Label(store.str("icloudEvict", "Remove download"), systemImage: "xmark.icloud") }
+        case "cloud":
+            Button { store.act("icloudDownload", t.id) } label: { Label(store.str("icloudDownload", "Download from iCloud"), systemImage: "icloud.and.arrow.down") }
+        default: EmptyView()
         }
         Divider()
         Button(role: .destructive) { store.act("delete", t.id) } label: { Label(store.str("del", "Delete"), systemImage: "trash") }

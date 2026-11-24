@@ -356,6 +356,22 @@ public class FileAccessNativePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("uri required")
             return
         }
+        // iCloud library media ("icloud://Library/<syncId>/media/<file>"):
+        // download it if it's only in iCloud, then use it where it sits —
+        // never a second copy (audiobooks can be gigabytes).
+        if uri.hasPrefix("icloud://") {
+            let rel = String(uri.dropFirst("icloud://".count)).removingPercentEncoding ?? String(uri.dropFirst("icloud://".count))
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let u = try KadokiCloud.shared.localFile(rel)
+                    let size = (try? FileManager.default.attributesOfItem(atPath: u.path))?[.size] as? Int ?? 0
+                    call.resolve(["path": u.path, "size": size, "cached": true, "inPlace": true])
+                } catch {
+                    call.reject("iCloud: \(error.localizedDescription)")
+                }
+            }
+            return
+        }
         if let local = Self.containerLocalSource(uri: uri) {
             resolveInPlace(call, source: local, uri: uri)
             return
