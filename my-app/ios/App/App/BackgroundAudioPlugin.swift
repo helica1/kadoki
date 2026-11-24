@@ -692,6 +692,9 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc private func appDidBackground() {
         uiVisible = false
+        // Still playing as we background: make sure the session is the
+        // background-capable playback category, or iOS mutes us on lock.
+        if let p = player, p.isPlaying { ensureSessionActive() }
         saveLastPositionNow()
         if positionTimer != nil { startPositionTimer() }   // re-arm at the slow cadence
     }
@@ -754,7 +757,16 @@ public class BackgroundAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     /// Activate the audio session right before playback (lazy). Safe to call
     /// repeatedly — AVAudioSession.setActive(true) is idempotent.
     private func ensureSessionActive() {
-        do { try AVAudioSession.sharedInstance().setActive(true) }
+        // The category is set once at load, but the shared session can be
+        // switched under us (seen 2026-11-24 on the Duo: playing as the default
+        // SoloAmbient, which iOS silences the moment the screen locks — audio
+        // stopped on lock, resumed on unlock). Re-assert it on every start.
+        let s = AVAudioSession.sharedInstance()
+        if s.category != .playback || s.mode != .spokenAudio {
+            NSLog("[BackgroundAudio] session was %@/%@ — restoring playback", s.category.rawValue, s.mode.rawValue)
+            configureAudioSession()
+        }
+        do { try s.setActive(true) }
         catch { NSLog("[BackgroundAudio] session activate failed: \(error.localizedDescription)") }
     }
 
