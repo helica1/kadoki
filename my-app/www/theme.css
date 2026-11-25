@@ -1881,3 +1881,21 @@ body.kadoki-video-title.mode-audio:not(.kadoki-vision-native):not(.kv-duo-split)
 body.kadoki-video-title.mode-audio:not(.kadoki-vision-native):not(.kv-duo-split):not(.kv-ios-landscape) #audiobookContent {
   padding-top: max(64px, calc(30px + env(safe-area-inset-top, 0px))) !important;
 }
+/* Round 5 (2026-11-24, user): open Duo upright transcript — no green
+   bracket, no size jump: every line uses the same subtitle size as the other
+   iPhone video layouts and the audio-mode alignment; the current line stands
+   out by its karaoke colors only. */
+body.kv-duo-split.kadoki-video-title.mode-audio #kvDuoPanel #audiobookCueText {
+  font-size: calc(var(--font-size-audio) * 0.72) !important;
+  border-left: none !important;
+  padding: 3px 0 !important;
+  margin: 0 !important;
+  line-height: 1.6 !important;
+  text-align: var(--align-audio, center) !important;
+}
+body.kv-duo-split .kv-duo-row {
+  font-size: calc(var(--font-size-audio) * 0.72);
+  font-family: var(--font-family-audio, var(--reader-font, 'Hiragino Mincho ProN', serif));
+  text-align: var(--align-audio, center);
+  line-height: 1.6;
+}

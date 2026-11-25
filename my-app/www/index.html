@@ -1890,6 +1890,12 @@ body.dimmed .card-image {
             <span id="statsSrsTime" class="stat-value">0:00</span>
           </div>
         </div>
+        <!-- Copy the day's stats as text (summary + CSV per title) for a
+             spreadsheet / agent. title-stats.js dayReport(). -->
+        <div style="display:flex;gap:8px;margin:10px 0 4px;">
+          <button onclick="window.titleStats && window.titleStats.copyDayReport('today')" style="flex:1;background:transparent;border:1px solid var(--border,#2a2a2a);border-radius:8px;color:var(--text,#e8e8e8);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:10px 6px;">Copy today's stats</button>
+          <button onclick="window.titleStats && window.titleStats.copyDayReport('yesterday')" style="flex:1;background:transparent;border:1px solid var(--border,#2a2a2a);border-radius:8px;color:var(--text-muted,#999);font-size:.72rem;letter-spacing:.08em;text-transform:uppercase;font-weight:600;cursor:pointer;padding:10px 6px;">Copy yesterday</button>
+        </div>
         <!-- "Reset All Stats" button removed — too easy to hit by accident.
              Per-section Reset buttons in each block header now handle this
              intentionally. -->
@@ -4023,21 +4029,27 @@ body.dimmed .card-image {
         if (att.uri) {
           // NATIVE import: materialize from the security-scoped uri.
           // iCloud media (icloud://…) downloads first if it's only in iCloud.
-          let stopProgress = null;
+          let prog = null;
           if (window.iCloudLib?.isICloudUri(att.uri)) {
             try {
               const rel = window.iCloudLib._fromUri(att.uri);
               const st = await window.kCloud.stat(rel);
               if (st && st.status && st.status !== 'current') {
-                stopProgress = _icloudOpenProgress(title, rel, st.size || att.size || 0);
+                prog = _icloudOpenProgress(title, rel, st.size || att.size || 0);
               }
             } catch (_) {}
           }
+          let cancelled = false;
           try {
-            const mat = await fa.materializeToCache({ uri: att.uri });
-            if (mat?.path && mat.path !== att.cachePath) { att.cachePath = mat.path; touched = true; }
+            const matP = fa.materializeToCache({ uri: att.uri });
+            const mat = prog ? await Promise.race([matP, prog.cancelled.then(() => { cancelled = true; return null; })]) : await matP;
+            if (!cancelled && mat?.path && mat.path !== att.cachePath) { att.cachePath = mat.path; touched = true; }
           } catch (e) { debugLog(`⚠️ rehydrate ${kind} failed: ${e.message}`); }
-          finally { if (stopProgress) stopProgress(); }
+          finally { if (prog) prog.stop(); }
+          // "Download in background": nothing about the open has changed yet
+          // (rehydrate runs before the title becomes active) — abort it. iCloud
+          // keeps downloading on its own, even with the app closed.
+          if (cancelled) throw Object.assign(new Error('icloud-open-cancelled'), { kadokiCancel: true });
         } else if (att.driveFileId && window.driveSyncMedia?.ensureLocalPath) {
           // SYNCED (no uri): the stored absolute cachePath carries the OLD iOS
           // container UUID after a reinstall, and its file was wiped. Re-resolve to
@@ -4073,6 +4085,24 @@ body.dimmed .card-image {
       if (ownOverlay) showTitleOpenOverlay(title && title.name);
       const t0 = Date.now();
       let pct = null;
+      // Opened from the Library (overlay already up): offer to let the
+      // download finish in the background instead of waiting here. Not on
+      // the launch-restore path, which has nowhere else to go.
+      let cancelResolve = null;
+      const cancelled = new Promise((r) => { cancelResolve = r; });
+      let bgBtn = null;
+      if (!ownOverlay) {
+        const card = document.querySelector('#titleOpenOverlay > div');
+        if (card) {
+          bgBtn = document.createElement('button');
+          bgBtn.type = 'button';
+          bgBtn.textContent = LT('lib.icloud_bg_download', 'Download in background');
+          bgBtn.style.cssText = 'margin-top:14px;width:100%;padding:10px;border-radius:9px;border:1px solid #3a3a3a;' +
+            'background:transparent;color:#ddd;font:600 13px var(--font-sans,system-ui);cursor:pointer;';
+          bgBtn.addEventListener('click', (e) => { e.stopPropagation(); cancelResolve(); });
+          card.appendChild(bgBtn);
+        }
+      }
       const mb = size > 0 ? (size >= 1e9 ? (size / 1e9).toFixed(2) + ' GB' : Math.round(size / 1e6) + ' MB') : '';
       const fmtT = (ms) => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
       const paint = () => {
@@ -4094,13 +4124,15 @@ body.dimmed .card-image {
           }
         });
       } catch (_) {}
-      return () => {
+      const stop = () => {
         clearInterval(tick);
+        try { bgBtn && bgBtn.remove(); } catch (_) {}
         try { sub && sub.remove && sub.remove(); } catch (_) {}
         setTitleOpenProgress(null);
         setTitleOpenStatus('Opening…');
         if (ownOverlay && !window._titleSwitchInFlight) hideTitleOpenOverlay();
       };
+      return { stop, cancelled };
     }
 
     // ── Title-open progress overlay ──
@@ -4200,7 +4232,15 @@ body.dimmed .card-image {
         try { if (await window.iCloudPos.beforeOpen(title)) title = (await window.titleStore.get(title.id)) || title; } catch (_) {}
       }
       setTitleOpenStatus('Preparing audio & subtitle files…');
-      title = await rehydrateTitleCachePaths(title);
+      try { title = await rehydrateTitleCachePaths(title); }
+      catch (e) {
+        if (e && e.kadokiCancel) {
+          try { window.showToast?.(LT('lib.icloud_bg_started', 'Downloading in the background. Open it again when it’s done.'), 3500); } catch (_) {}
+          try { window.populateLibrary?.(); } catch (_) {}
+          return null;
+        }
+        throw e;
+      }
       setTitleOpenStatus('Loading…');
       const a = title.attachments || {};
       if (window.titleStore) await window.titleStore.touchOpened(title.id);

@@ -380,7 +380,12 @@
   // dictionary taps work exactly as everywhere else), then as many upcoming
   // lines as fit. Tap a line to jump there. Open + landscape keeps the
   // regular full-screen cinema layout (video with the subtitle over it).
+  // (Same day, later — user: "just one subtitle at a time please": the
+  // multi-line transcript is OFF; the open Duo upright uses the ordinary
+  // portrait layout — picture on top, the single current subtitle below.
+  // Kept switchable for now: localStorage KADOKI_DUO_TRANSCRIPT = '1'.)
   function duoSplitActive() {
+    try { if (localStorage.getItem('KADOKI_DUO_TRANSCRIPT') !== '1') return false; } catch (_) { return false; }
     return _isVideoTitle && !window.KADOKI_VISION_NATIVE && isPhonePlatform() && !!window.KADOKI_DUO &&
       document.body.classList.contains('mode-audio') && !isLandscapeOrientation() && window.innerWidth >= 560;
   }
@@ -1321,10 +1326,165 @@
     ov.appendChild(list);
     document.body.appendChild(ov);
     document.body.classList.add('kv-browser-open');
-    paintChips();
-    await renderList();
+    // YouTube Collection (one joined file, many parts): a parts index on top
+    // (thumbnail, title, length; tap = go there) with Previous/Next part,
+    // then the subtitles under per-part headings (2026-11-24, user: "a
+    // collection should have an index and ability to go between the
+    // different sub-videos").
+    const parts = !(Array.isArray(series) && series.length > 1) && Array.isArray(t?.collection?.parts) && t.collection.parts.length > 1
+      ? t.collection.parts : null;
+    if (parts) { title.textContent = (t?.name || '') + ' · ' + parts.length + ' parts'; await renderCollection(t, parts, list); }
+    else { paintChips(); await renderList(); }
     sync(true);   // hide the native plane immediately
   }
+
+  // Index of the part containing ms (parts are in play order).
+  function partAt(parts, ms) {
+    let i = 0;
+    for (let k = 0; k < parts.length; k++) if (ms >= (parts[k].startMs || 0)) i = k;
+    return i;
+  }
+  async function seekAndPlay(ms) {
+    try {
+      await bg()?.seek?.({ ms: Math.max(0, Math.round(ms)), fadeMs: 100 });
+      const st = await bg()?.getState?.();
+      if (st && !st.playing) await bg()?.resume?.({ fadeMs: 120 });
+    } catch (_) {}
+  }
+  // Previous / next part from anywhere (also the transport). Previous goes to
+  // the START of the current part first when more than 5 s into it — the
+  // usual player convention.
+  async function stepPart(dir) {
+    const tid = window._activeTitleId;
+    const t = tid && window.titleStore?.get ? await window.titleStore.get(tid) : null;
+    const parts = t?.collection?.parts;
+    if (!Array.isArray(parts) || parts.length < 2) return false;
+    let now = 0;
+    try { now = (await bg()?.getState?.())?.positionMs || 0; } catch (_) {}
+    const i = partAt(parts, now);
+    let j = i + dir;
+    if (dir < 0 && now - (parts[i].startMs || 0) > 5000) j = i;
+    if (j < 0 || j >= parts.length) return false;
+    await seekAndPlay(parts[j].startMs || 0);
+    try { window.showToast?.((j + 1) + '/' + parts.length + '  ' + (parts[j].title || ''), 2200); } catch (_) {}
+    return true;
+  }
+
+  // Two tabs instead of one long page (2026-11-24, user: the parts were
+  // buried above a long subtitle list). Fixed above the scrolling area:
+  // Previous/Next part and a Parts | Subtitles switch. Opens on Parts,
+  // scrolled to the part playing; Subtitles shows the current part's lines,
+  // scrolled to the line playing.
+  async function renderCollection(t, parts, list) {
+    let thumbs = {};
+    try { thumbs = JSON.parse((await window.blobStore.get((window.ytCollection?.THUMBS || 'YTCOLL_THUMBS_V1_') + t.id)) || '{}') || {}; } catch (_) {}
+    let nowMs = 0;
+    try { nowMs = (await bg()?.getState?.())?.positionMs || 0; } catch (_) {}
+    const cur = partAt(parts, nowMs);
+    list.textContent = '';
+
+    const bar = document.createElement('div');
+    bar.style.cssText = 'flex-shrink:0;padding:10px 20px 8px;border-bottom:1px solid #222;display:flex;flex-direction:column;gap:10px;';
+    const nav = document.createElement('div');
+    nav.style.cssText = 'display:flex;gap:10px;';
+    const navBtn = (label, dir) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = label;
+      b.style.cssText = 'flex:1;padding:11px 8px;border-radius:10px;border:1px solid #333;background:rgba(255,255,255,.05);color:#eee;font-size:15px;';
+      b.addEventListener('click', async () => { if (await stepPart(dir)) closeBrowser(); });
+      return b;
+    };
+    nav.append(navBtn('‹  Previous part', -1), navBtn('Next part  ›', 1));
+    const seg = document.createElement('div');
+    seg.style.cssText = 'display:flex;padding:3px;border-radius:10px;background:rgba(255,255,255,.07);';
+    const tabs = {};
+    let tab = 'parts';
+    const mkTab = (key, label) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = label;
+      b.addEventListener('click', () => { if (tab !== key) { tab = key; paint(); } });
+      tabs[key] = b; seg.appendChild(b);
+    };
+    mkTab('parts', 'Parts (' + parts.length + ')');
+    mkTab('subs', 'Subtitles · part ' + (cur + 1));
+    bar.append(nav, seg);
+    list.parentNode.insertBefore(bar, list);
+
+    function paint() {
+      for (const [k, b] of Object.entries(tabs)) {
+        b.style.cssText = 'flex:1;padding:8px 6px;border:none;border-radius:8px;font-size:14px;font-weight:600;' +
+          (k === tab ? 'background:rgba(147,130,220,.45);color:#fff;' : 'background:transparent;color:#aaa;');
+      }
+      list.textContent = '';
+      list.scrollTop = 0;
+      if (tab === 'parts') renderParts(); else renderSubs();
+    }
+
+    function renderParts() {
+      let curRow = null;
+      parts.forEach((p, i) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        const isCur = i === cur;
+        row.style.cssText = 'display:flex;gap:12px;align-items:center;width:100%;text-align:left;padding:8px;border:none;border-radius:12px;margin:2px 0;color:#eee;' +
+          'background:' + (isCur ? 'rgba(147,130,220,.28)' : 'transparent') + ';';
+        const img = document.createElement('div');
+        img.style.cssText = 'flex-shrink:0;width:112px;height:63px;border-radius:8px;background:#222 center/cover no-repeat;';
+        if (thumbs[p.id]) img.style.backgroundImage = 'url("' + thumbs[p.id] + '")';
+        const txt = document.createElement('div');
+        txt.style.cssText = 'flex:1;min-width:0;';
+        const nm = document.createElement('div');
+        nm.textContent = (i + 1) + '. ' + (p.title || 'Part ' + (i + 1));
+        nm.style.cssText = 'font-size:15px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;';
+        const meta = document.createElement('div');
+        let m = fmtMs(p.startMs || 0) + ' · ' + fmtMs(p.durMs || 0);
+        if (isCur && p.durMs > 0) m += ' · ' + Math.min(100, Math.round(100 * (nowMs - (p.startMs || 0)) / p.durMs)) + '% played';
+        meta.textContent = m;
+        meta.style.cssText = 'color:#9b8fd8;font-size:13px;margin-top:3px;font-variant-numeric:tabular-nums;';
+        txt.append(nm, meta);
+        row.append(img, txt);
+        // The part you're in: carry on where you are. Another: its beginning.
+        row.addEventListener('click', async () => { if (!isCur) await seekAndPlay(p.startMs || 0); closeBrowser(); });
+        if (isCur) curRow = row;
+        list.appendChild(row);
+      });
+      if (curRow) { try { curRow.scrollIntoView({ block: 'center' }); } catch (_) {} }
+    }
+
+    function renderSubs() {
+      const cues = Array.isArray(window.__abCues) ? window.__abCues : [];
+      const p = parts[cur], from = p.startMs || 0, end = from + (p.durMs || Infinity);
+      let currentRow = null, n = 0;
+      for (const c of cues) {
+        if (c.startMs < from - 500 || c.startMs >= end) continue;
+        n++;
+        const row = document.createElement('button');
+        const isCurCue = nowMs >= c.startMs && nowMs < (c.endMs || c.startMs + 1);
+        row.style.cssText = 'display:flex;gap:18px;align-items:baseline;width:100%;text-align:left;padding:12px 16px;' +
+          'border:none;border-radius:12px;margin:2px 0;color:#eee;background:' + (isCurCue ? 'rgba(147,130,220,.28)' : 'transparent') + ';';
+        const tm = document.createElement('span');
+        tm.textContent = fmtMs(c.startMs - from);
+        tm.style.cssText = 'color:#9b8fd8;font-size:15px;font-variant-numeric:tabular-nums;flex-shrink:0;min-width:56px;';
+        const tx = document.createElement('span');
+        tx.textContent = c.text || '';
+        tx.style.cssText = 'font-size:19px;line-height:1.5;font-family:var(--reader-font,serif);';
+        row.append(tm, tx);
+        row.addEventListener('click', async () => { await seekAndPlay(c.startMs); closeBrowser(); });
+        if (isCurCue) currentRow = row;
+        list.appendChild(row);
+      }
+      if (!n) {
+        const empty = document.createElement('div');
+        empty.textContent = 'No subtitles for this part yet.';
+        empty.style.cssText = 'padding:40px;text-align:center;color:#999;font-size:17px;';
+        list.appendChild(empty);
+      }
+      if (currentRow) { try { currentRow.scrollIntoView({ block: 'center' }); } catch (_) {} }
+    }
+
+    paint();
+  }
+
 
   function closeBrowser() {
     const ov = document.getElementById('kvEpBrowser');
@@ -1414,6 +1574,8 @@
     advanceEpisode,
     advanceEpisodeTo,
     openBrowser,
+    stepPart,
+    isCollection: () => !!(_isVideoTitle && window.ytCollection?.isActive?.()),
     replayCurrent: replayCurrentCue,
     ankiSend,
     mediaTag,

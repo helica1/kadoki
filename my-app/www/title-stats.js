@@ -23,8 +23,10 @@
   const loading = {};        // tid → Promise (single-flight)
   const dirty = new Set();
 
+  // Same 3 AM day boundary as the daily totals (stats.js statsDay), so a
+  // title's day lines up with the day's totals in the copied report.
   function dayKey(ts) {
-    const d = new Date(ts || Date.now());
+    const d = new Date((ts || Date.now()) - 3 * 3600 * 1000);
     return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
   }
 
@@ -103,6 +105,21 @@
     }).catch(() => {});
   }
 
+  // Characters credited per mode (the same increments the daily totals get),
+  // per day: ch: { c, r, a } (card / read / audio).
+  function noteChars(tid, mode, n) {
+    if (!tid || !Number.isFinite(n) || n <= 0) return;
+    const f = mode === 'card' ? 'c' : mode === 'read' ? 'r' : (mode === 'audio' || mode === 'video') ? 'a' : null;
+    if (!f) return;
+    load(tid).then((o) => {
+      const d = o.days[dayKey()] || (o.days[dayKey()] = {});
+      const ch = d.ch || (d.ch = {});
+      ch[f] = (ch[f] || 0) + Math.round(n);
+      if (!o.firstTs) o.firstTs = Date.now();
+      dirty.add(tid);
+    }).catch(() => {});
+  }
+
   // Read forward progress (jp-char position + the book's jp total). The total
   // follows the book as it is now (not a high-water mark), so a total once
   // recorded from another book during a title switch corrects itself.
@@ -160,5 +177,94 @@
     };
   }
 
-  window.titleStats = { noteAudio, noteRead, noteTime, getStats, flush };
+  // ---- Copyable daily report (2026-11-24, user: "copy statistics for the
+  // day … to give to an agent to put in a spreadsheet") ----
+  // which: 'today' | 'yesterday'. Day totals come from stats.js (today live,
+  // yesterday from its rollover snapshot); the per-title rows from the
+  // per-title daily logs above. Plain text: a short summary, then CSV.
+  function _hm(sec) { sec = Math.round(sec || 0); const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60; return h + ':' + String(m).padStart(2, '0'); }
+  function _rate(chars, sec) { return sec >= 60 && chars > 0 ? Math.round(chars / (sec / 3600)) : ''; }
+  function _csv(v) { v = v == null ? '' : String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+  async function dayReport(which) {
+    flush();
+    const today = dayKey();
+    let day = today, totals = null;
+    const S = window.stats;
+    if (which === 'yesterday') {
+      const y = S && S.getYesterday && S.getYesterday();
+      day = (y && y.day) || dayKey(Date.now() - 86400000);
+      if (y && y.modes) totals = y.modes;
+    } else if (S) {
+      totals = {
+        card: { sec: S.getCardSec(), chars: S.getCardChars(), cards: S.getCardCount() },
+        read: { sec: S.getReadSec(), chars: S.getReadChars() },
+        audio: { sec: S.getAudioSec(), chars: S.getAudioChars() },
+        video: { sec: S.getVideoSec(), chars: S.getVideoChars() },
+        ai: { sec: S.getAiSec() }, srs: { sec: S.getSrsSec() },
+      };
+    }
+    const rows = [];
+    let list = [];
+    try { list = (await window.titleStore?.list()) || []; } catch (_) {}
+    for (const t of list) {
+      const o = await load(t.id);
+      const d = o.days && o.days[day];
+      if (!d) continue;
+      const tm = d.t || {}, ch = d.ch || {};
+      // Progress made that day: today's high-water minus the best before it.
+      let prevA = 0, prevR = 0;
+      for (const k of Object.keys(o.days)) {
+        if (k >= day) continue;
+        prevA = Math.max(prevA, Number(o.days[k].aMs) || 0);
+        prevR = Math.max(prevR, Number(o.days[k].rCh) || 0);
+      }
+      const aAdv = Math.max(0, (Number(d.aMs) || 0) - prevA), rAdv = Math.max(0, (Number(d.rCh) || 0) - prevR);
+      const pct = (o.durMs > 0 && d.aMs) ? Math.round(100 * d.aMs / o.durMs) : (o.tCh > 0 && d.rCh ? Math.round(100 * d.rCh / o.tCh) : '');
+      const kind = t.attachments?.audiobook?.isVideo ? 'video' : (t.attachments?.audiobook ? 'audiobook' : (t.attachments?.epub ? 'book' : (t.attachments?.deck ? 'deck' : '')));
+      const add = (mode, sec, chars) => {
+        if (!(sec >= 30) && !(chars > 0)) return;
+        rows.push([day, t.name || 'Untitled', t.author || '', kind, mode, Math.round(sec / 60), chars || 0, _rate(chars, sec),
+          mode === 'listen' ? Math.round(aAdv / 60000) : '', mode === 'read' ? rAdv : '', pct]);
+      };
+      add('read', tm.r || 0, ch.r || 0);
+      add('listen', (tm.a || 0) + (tm.v || 0) + (tm.w || 0), ch.a || 0);
+      add('card', tm.c || 0, ch.c || 0);
+    }
+    rows.sort((a, b) => (b[5] - a[5]));
+    const L = [];
+    L.push('Kadoki daily stats — ' + day + (which === 'yesterday' ? ' (yesterday)' : ' (today, so far)'));
+    if (totals) {
+      const line = (label, m) => {
+        if (!m || !(m.sec >= 1)) return;
+        const r = _rate(m.chars || 0, m.sec);
+        L.push(label + ': ' + _hm(m.sec) + (m.chars ? ' · ' + m.chars.toLocaleString() + ' chars' : '') + (r ? ' · ' + r.toLocaleString() + ' chars/h' : '') + (m.cards ? ' · ' + m.cards + ' cards' : ''));
+      };
+      line('Read', totals.read); line('Listen', totals.audio); line('Video', totals.video); line('Card', totals.card);
+      line('AI material', totals.ai); line('Vocab review', totals.srs);
+      const all = ['read', 'audio', 'video', 'card'].reduce((s, k) => s + ((totals[k] && totals[k].sec) || 0), 0);
+      L.push('Total immersion: ' + _hm(all));
+    }
+    L.push('');
+    L.push('CSV (one row per title and mode):');
+    L.push(['date', 'title', 'author', 'type', 'mode', 'minutes', 'chars', 'chars_per_hour', 'listened_ahead_min', 'read_ahead_chars', 'percent_through'].join(','));
+    for (const r of rows) L.push(r.map(_csv).join(','));
+    if (!rows.length) L.push('(no per-title activity recorded for this day)');
+    return L.join('\n');
+  }
+  async function copyDayReport(which) {
+    const text = await dayReport(which);
+    let ok = false;
+    try { await navigator.clipboard.writeText(text); ok = true; } catch (_) {}
+    if (!ok) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.cssText = 'position:fixed;top:-1000px;opacity:0;';
+        document.body.appendChild(ta); ta.select(); ok = document.execCommand('copy'); ta.remove();
+      } catch (_) {}
+    }
+    try { window.showToast?.(ok ? 'Stats copied' : 'Copy failed', 1800); } catch (_) {}
+    return ok;
+  }
+
+  window.titleStats = { noteAudio, noteRead, noteTime, noteChars, getStats, flush, dayReport, copyDayReport };
 })();

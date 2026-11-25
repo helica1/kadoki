@@ -270,13 +270,35 @@
   const AUD_PERSIST_MS = 15000;
   let _audAnchorTs = 0, _audAnchorPos = -1;
   let _audLastSampleTs = 0, _audLastPersistTs = 0, _audPollBusy = false;
-  let _audTitlePend = 0;
+  let _audTitlePend = 0, _audListenPend = 0;
 
   function audioResetAnchor() { _audAnchorTs = 0; _audAnchorPos = -1; }
 
   // One (position, time) observation. `tsIn` is the event's OWN timestamp when
   // native supplies one — a burst of events replayed after a suspension then
   // reconstructs the real listening span instead of collapsing into "now".
+  // A video playing with the screen off / locked is being LISTENED to
+  // (mostly podcasts — 2026-11-24, user): that span is credited to Listen,
+  // not Video. The video timer keeps running across the lock (its state is
+  // unchanged); only the credit is split by how much of each sample's span
+  // the page was hidden. Samples can be replayed late or cover a whole
+  // suspension in one go (truth poll), hence spans rather than "hidden now".
+  const _hidSpans = [];   // [startTs, endTs|0] — last few hidden periods
+  if (document.hidden) _hidSpans.push([Date.now(), 0]);
+  document.addEventListener('visibilitychange', () => {
+    const now = Date.now();
+    if (document.hidden) { _hidSpans.push([now, 0]); if (_hidSpans.length > 12) _hidSpans.shift(); }
+    else { const l = _hidSpans[_hidSpans.length - 1]; if (l && !l[1]) l[1] = now; }
+  });
+  function hiddenMsIn(a, b) {
+    let n = 0;
+    for (const [s0, e0] of _hidSpans) {
+      const e = e0 || Date.now();
+      const lo = Math.max(a, s0), hi = Math.min(b, e);
+      if (hi > lo) n += hi - lo;
+    }
+    return n;
+  }
   let _lastAudBucket = 'audio';
   function audioSample(posMs, tsIn) {
     if (!Number.isFinite(posMs) || posMs < 0) return;
@@ -298,6 +320,7 @@
     // same span replays afterwards: re-anchoring backwards would let the burst
     // credit the span a second time.
     if (ts <= _audAnchorTs) return;
+    const spanFrom = _audAnchorTs;
     const wallMs = ts - _audAnchorTs;
     let advMs = posMs - _audAnchorPos;
     _audAnchorTs = ts; _audAnchorPos = posMs;
@@ -308,22 +331,32 @@
     if (rate > 0.05 && rate !== 1) advMs = advMs / rate;
     const credit = Math.min(wallMs, advMs);
     if (!(credit > 0)) return;
-    timers[bucket].totalSec += credit / 1000;
+    let toListen = 0;
+    if (bucket === 'video' && wallMs > 0) {
+      const hid = hiddenMsIn(spanFrom, ts);
+      if (hid > 0) toListen = credit * Math.min(1, hid / wallMs);
+    }
+    timers[bucket].totalSec += (credit - toListen) / 1000;
+    if (toListen > 0) { timers.audio.totalSec += toListen / 1000; _audListenPend += toListen / 1000; }
     // Per-title time log — same seconds, batched to whole seconds so a 150 ms
     // event cadence doesn't spam blobStore.
-    _audTitlePend += credit / 1000;
+    _audTitlePend += (credit - toListen) / 1000;
+    const tid = window._activeTitleId;
     if (_audTitlePend >= 1) {
       const whole = Math.floor(_audTitlePend);
       _audTitlePend -= whole;
-      try {
-        const tid = window._activeTitleId;
-        if (tid) window.titleStats?.noteTime?.(tid, bucket, whole);
-      } catch (_) {}
+      try { if (tid) window.titleStats?.noteTime?.(tid, bucket, whole); } catch (_) {}
+    }
+    if (_audListenPend >= 1) {
+      const whole = Math.floor(_audListenPend);
+      _audListenPend -= whole;
+      try { if (tid) window.titleStats?.noteTime?.(tid, 'audio', whole); } catch (_) {}
     }
     const nowReal = Date.now();
     if (nowReal - _audLastPersistTs > AUD_PERSIST_MS) {
       _audLastPersistTs = nowReal;
       persist(bucket);
+      if (bucket === 'video') persist('audio');   // locked-screen listening credit
     }
   }
 
@@ -1049,6 +1082,7 @@
   function incrementCardChars(n) {
     if (!Number.isFinite(n) || n <= 0) return;
     timers.card.chars += n;
+    try { window.titleStats?.noteChars?.(window._activeTitleId, 'card', n); } catch (_) {}
     persist('card');
   }
 
@@ -1101,12 +1135,14 @@
     // A page of vertical-rl text is well under this cap; a seek is far above it.
     if (delta <= READ_DELTA_CAP) {
       t.chars += delta;
+      try { if (!window._positionSaveBlocked?.()) window.titleStats?.noteChars?.(window._activeTitleId, 'read', delta); } catch (_) {}
     }
     persist('read');
   }
   function incrementAudioChars(n) {
     if (!Number.isFinite(n) || n <= 0) return;
     timers.audio.chars += n;
+    try { window.titleStats?.noteChars?.(window._activeTitleId, 'audio', n); } catch (_) {}
     persist('audio');
   }
   // Credit an off-screen printed-reading session to the READ bucket: the user

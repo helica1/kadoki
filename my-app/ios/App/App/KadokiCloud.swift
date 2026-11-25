@@ -299,7 +299,13 @@ final class KadokiCloud: NSObject {
         throw CloudError("not found: \(rel(u))")
     }
 
-    private func isCurrent(_ u: URL) -> Bool {
+    private func isCurrent(_ u0: URL) -> Bool {
+        // URL caches resource values per instance: the download wait loop
+        // polls the SAME URLs, so without this it kept reading the status
+        // from before the download — "100%, then stuck" until the 10-minute
+        // timeout (2026-11-24).
+        var u = u0
+        u.removeAllCachedResourceValues()
         if !FileManager.default.fileExists(atPath: u.path) { return false }
         let s = (try? u.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]))?.ubiquitousItemDownloadingStatus
         return s == nil || s == .current

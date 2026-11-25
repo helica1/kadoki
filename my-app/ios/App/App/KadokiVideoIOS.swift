@@ -61,6 +61,12 @@ final class KadokiVideoIOSHost {
 
     func adopt(_ p: AVPlayer) {
         player = p
+        // Never re-attach while backgrounded (locked screen): an AVPlayer
+        // bound to a layer is paused by iOS in the background. JS keeps
+        // streaming surfaces for a moment after the lock, and re-attaching
+        // there stopped the "podcast" playback on lock (2026-11-24, user).
+        // willEnterForeground re-attaches.
+        if UIApplication.shared.applicationState == .background { return }
         if playerLayer.player !== p { playerLayer.player = p }
     }
 

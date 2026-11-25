@@ -274,7 +274,7 @@
 
   async function pullCollectionThumbs(titleId, base) {
     try {
-      const c = await kc().readJSON(`${base}/collection.json`);
+      const c = await kc().readJSON(`${base}/collection.json`, 120000);
       if (c && c.thumbs) await window.blobStore?.set(COLL_THUMBS + titleId, JSON.stringify(c.thumbs));
     } catch (_) {}
   }
@@ -357,6 +357,34 @@
         seen[sid] = e.mtime || Date.now();
       }
       jset(SEEN_KEY, seen);
+      // YouTube Collections made on the Mac download to the phone by
+      // themselves (2026-11-24, user: "download seamlessly on the phone") —
+      // iOS fetches in the background, even with the app closed. Only starts
+      // files not already here, so repeating it every scan costs nothing; a
+      // grown or re-encoded Collection is picked up the same way.
+      if (!window.KADOKI_MAC) {
+        try {
+          for (const t of (await ts().list()) || []) {
+            if (t.collection && t.syncId) await download(t.id);
+          }
+        } catch (_) {}
+      }
+      // Part thumbnails missing here (the first pull can fail while
+      // collection.json is still downloading, and that title.json is then
+      // marked seen): fetch them again until every part has one.
+      try {
+        for (const t of (await ts().list()) || []) {
+          const parts = t.collection && t.collection.parts;
+          if (!t.syncId || !Array.isArray(parts) || !parts.length) continue;
+          let have = {};
+          try { have = JSON.parse((await window.blobStore?.get(COLL_THUMBS + t.id)) || '{}') || {}; } catch (_) {}
+          if (parts.every(p => have[p.id])) continue;
+          await pullCollectionThumbs(t.id, `${LIB}/${t.syncId}`);
+          let now = {};
+          try { now = JSON.parse((await window.blobStore?.get(COLL_THUMBS + t.id)) || '{}') || {}; } catch (_) {}
+          if (Object.keys(now).length > Object.keys(have).length) { log('pulled part thumbnails for ' + t.name); changed++; }
+        }
+      } catch (_) {}
       if (changed) {
         log('scan (' + (reason || '') + '): ' + changed + ' title(s) changed');
         try { if (typeof window.populateLibrary === 'function') window.populateLibrary(); } catch (_) {}

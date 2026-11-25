@@ -50,6 +50,14 @@ final class KadokiVideoPlayer: NSObject, KadokiPlayback {
         item.audioTimePitchAlgorithm = .timeDomain
         avPlayer = AVPlayer(playerItem: item)
         avPlayer.actionAtItemEnd = .pause
+        // Keep playing with the screen locked / app in the background
+        // (2026-11-24, user: "the audio STILL stops when I lock the phone").
+        // The default (.automatic) lets iOS PAUSE any player carrying video
+        // when the app backgrounds — independent of the layer detach in
+        // KadokiVideoIOSHost, which alone wasn't enough.
+        #if os(iOS)
+        if #available(iOS 15.0, *) { avPlayer.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible }
+        #endif
         super.init()
 
         endObs = NotificationCenter.default.addObserver(

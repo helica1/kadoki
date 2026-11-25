@@ -176,6 +176,8 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'lib.icloud_uploading':   { en: 'Uploading to iCloud…', ja: 'iCloudにアップロード中…' },
   'lib.icloud_uploaded':    { en: 'Saved to iCloud. It uploads in the background.', ja: 'iCloudに保存しました。アップロードはバックグラウンドで続きます。' },
   'lib.icloud_downloading': { en: 'Downloading from iCloud…', ja: 'iCloudからダウンロード中…' },
+  'lib.icloud_bg_download': { en: 'Download in background', ja: 'バックグラウンドでダウンロード' },
+  'lib.icloud_bg_started': { en: 'Downloading in the background. Open it again when it’s done.', ja: 'バックグラウンドでダウンロード中です。完了したらもう一度開いてください。' },
   'lib.icloud_evicted':     { en: 'Download removed. The title stays in iCloud.', ja: 'ダウンロードを削除しました。タイトルはiCloudに残ります。' },
   'lib.move_to':            { en: 'Move to…', ja: '移動先…' },
   'lib.move_n':             { en: 'Move {n} titles', ja: '{n}件を移動' },

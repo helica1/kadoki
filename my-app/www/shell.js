@@ -1269,7 +1269,8 @@
     // Episode/subtitle browser (iPhone/iPad video Titles only — Vision has
     // its own ornament button; only shown when a video Title is loaded).
     if (window.kadokiVideoMode?.isVideoTitle?.()) {
-      out.push({ id: 'episodes', label: t('menu.episodes', 'Episodes…'), icon: 'film.stack',
+      const coll = !!window.kadokiVideoMode.isCollection?.();
+      out.push({ id: 'episodes', label: coll ? t('menu.parts', 'Parts…') : t('menu.episodes', 'Episodes…'), icon: coll ? 'list.number' : 'film.stack',
         fn: () => { try { window.kadokiVideoMode.openBrowser(); } catch (_) {} } });
     }
     div();
