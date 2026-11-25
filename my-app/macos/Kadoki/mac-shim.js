@@ -831,6 +831,7 @@
     Plugins: {
       FileAccess, BackgroundAudio, AudioSlicer, AutoTranscribe,
       AnkiBridge, Filesystem, App, Browser, Translator, KadokiCloud,
+      YouTube: { addListener: makeAddListener('YouTube') },   // YouTube Collection progress (YouTube builds)
     },
   };
 })();

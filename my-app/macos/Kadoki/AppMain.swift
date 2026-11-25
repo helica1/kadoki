@@ -78,9 +78,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
         let ucc = config.userContentController
         // Flag the platform before any app script runs.
-        let boot = """
+        var boot = """
         window.KADOKI_MAC = true;
         """
+        #if KADOKI_YT
+        // YouTube Collections (never in App Store builds).
+        if YouTubeHandler.ytdlp != nil { boot += "\nwindow.KADOKI_YT = true;" }
+        #endif
         ucc.addUserScript(WKUserScript(source: boot, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         // Capacitor compatibility shim (FileAccess / BackgroundAudio / AnkiBridge / AudioSlicer).
         if let shimURL = Bundle.main.url(forResource: "mac-shim", withExtension: "js"),
@@ -107,6 +111,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         ucc.addScriptMessageHandler(translator, contentWorld: .page, name: "kadokiTranslate")
         // iCloud Drive library (KadokiCloud, shared with the iOS plugin).
         ucc.addScriptMessageHandler(CloudHandler(), contentWorld: .page, name: "kadokiCloud")
+        #if KADOKI_YT
+        ucc.addScriptMessageHandler(YouTubeHandler(), contentWorld: .page, name: "kadokiYouTube")
+        #endif
         webView = WKWebView(frame: .zero, configuration: config)
         translator.hostView = webView
         webView.uiDelegate = self

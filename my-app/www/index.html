@@ -951,6 +951,7 @@ body.dimmed .card-image {
       <h2 data-i18n="lib.library">Library</h2>
       <div style="display:flex;gap:8px;">
         <button onclick="window.ttuImport && window.ttuImport.pickAndImport()" data-i18n="lib.import_ttu" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">Import ッツ backup</button>
+        <button id="ytCollBtn" onclick="window.ytCollection && window.ytCollection.openSheet()" data-i18n="yt.new_btn" style="display:none;background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">YouTube Collection</button>
         <button onclick="importFolder()" data-i18n="lib.import_folder" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">Import folder</button>
         <button onclick="createNewTitle()" data-i18n="lib.new_title" style="background:transparent;color:var(--text,#e8e8e8);border:1px solid var(--border,#2a2a2a);padding:8px 14px;border-radius:6px;font-weight:600;cursor:pointer;">+ New title</button>
         <button class="close-library" onclick="closeLibrary()" style="font-size:1.3rem;letter-spacing:0;padding:4px 14px;color:#ccc;">✕</button>
@@ -2076,6 +2077,7 @@ body.dimmed .card-image {
   <script src="icloud.js"></script>
   <script src="icloud-library.js"></script>
   <script src="icloud-positions.js"></script>
+  <script src="youtube-collection.js"></script>
   <script src="drive-api.js"></script>
   <script src="drive-index.js"></script>
   <script src="drive-sync.js"></script>
@@ -2477,7 +2479,7 @@ body.dimmed .card-image {
                 ${title.author ? `<div style="color:#9a9aa6;font-size:.8rem;margin-top:2px;">${escapeHtml(title.author)}</div>` : ''}
                 <div class="title-chips" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0;">
                   ${chipHtml('card',  'DECK',  !!a.deck)}
-                  ${chipHtml('read',  (a.epub && a.epub.auto) ? 'AUTO TEXT' : 'EPUB',  !!a.epub)}
+                  ${(a.epub && a.epub.auto && a.audiobook && (a.audiobook.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(a.audiobook.name || ''))) ? '' : chipHtml('read',  (a.epub && a.epub.auto) ? 'AUTO TEXT' : 'EPUB',  !!a.epub)}
                   ${(a.audiobook && (a.audiobook.isVideo || /\.(mp4|m4v|mov|3gp|mkv)$/i.test(a.audiobook.name || ''))) ? chipHtml('audio', Array.isArray(a.series) && a.series.length > 1 ? ('VIDEO ×' + a.series.length) : 'VIDEO', true) : chipHtml('audio', 'AUDIO', !!a.audiobook)}
                   ${chipHtml('srt',   'SRT',   !!a.srt)}
                 </div>
@@ -3011,6 +3013,15 @@ body.dimmed .card-image {
       top.appendChild(mk(LT('lib.stats', 'Stats'), () => openTitleStats(title.id)));
       top.appendChild(mk(LT('lib.edit', 'Edit'), () => openTitleEdit(title.id)));
       top.appendChild(mk(LT('lib.move', 'Move'), () => openMoveSheet([title.id])));
+      if (title.collection && window.ytCollection?.canBuild()) top.appendChild(mk(LT('yt.add_videos', 'Add videos'), () => window.ytCollection.openSheet(title.id)));
+      if (window.ytCollection?.canShrink?.(title)) {
+        const sb = mk(LT('yt.shrink', 'Shrink video'), async () => {
+          sb.disabled = true;
+          try { await window.ytCollection.shrink(title.id, (s) => { sb.textContent = s; }); }
+          catch (e) { alert(String(e && e.message || e)); sb.textContent = LT('yt.shrink', 'Shrink video'); sb.disabled = false; }
+        });
+        top.appendChild(sb);
+      }
       // iCloud (iPhone / iPad / Mac): Upload, or Download / Remove download.
       if (window.iCloudLib && !(Array.isArray(title.attachments?.series) && title.attachments.series.length > 1)) {
         const slot = document.createElement('span'); slot.style.display = 'contents';
@@ -4012,16 +4023,21 @@ body.dimmed .card-image {
         if (att.uri) {
           // NATIVE import: materialize from the security-scoped uri.
           // iCloud media (icloud://…) downloads first if it's only in iCloud.
+          let stopProgress = null;
           if (window.iCloudLib?.isICloudUri(att.uri)) {
             try {
-              const st = await window.kCloud.stat(window.iCloudLib._fromUri(att.uri));
-              if (st && st.status && st.status !== 'current') setTitleOpenStatus(LT('lib.icloud_downloading', 'Downloading from iCloud…'));
+              const rel = window.iCloudLib._fromUri(att.uri);
+              const st = await window.kCloud.stat(rel);
+              if (st && st.status && st.status !== 'current') {
+                stopProgress = _icloudOpenProgress(title, rel, st.size || att.size || 0);
+              }
             } catch (_) {}
           }
           try {
             const mat = await fa.materializeToCache({ uri: att.uri });
             if (mat?.path && mat.path !== att.cachePath) { att.cachePath = mat.path; touched = true; }
           } catch (e) { debugLog(`⚠️ rehydrate ${kind} failed: ${e.message}`); }
+          finally { if (stopProgress) stopProgress(); }
         } else if (att.driveFileId && window.driveSyncMedia?.ensureLocalPath) {
           // SYNCED (no uri): the stored absolute cachePath carries the OLD iOS
           // container UUID after a reinstall, and its file was wiped. Re-resolve to
@@ -4046,6 +4062,47 @@ body.dimmed .card-image {
     }
     window.rehydrateTitleCachePaths = rehydrateTitleCachePaths;
 
+    // iCloud media still downloading while a title opens (2026-11-24, user:
+    // "no meaningful way to see how far it is getting"). Shows the open
+    // overlay even on the boot-restore path (which otherwise sat on a blank
+    // screen), with percent from the iCloud change feed, the size, and an
+    // elapsed-time counter so a stall is visible as a stall.
+    function _icloudOpenProgress(title, rel, size) {
+      const overlay = document.getElementById('titleOpenOverlay');
+      const ownOverlay = !(overlay && overlay.style.display !== 'none');
+      if (ownOverlay) showTitleOpenOverlay(title && title.name);
+      const t0 = Date.now();
+      let pct = null;
+      const mb = size > 0 ? (size >= 1e9 ? (size / 1e9).toFixed(2) + ' GB' : Math.round(size / 1e6) + ' MB') : '';
+      const fmtT = (ms) => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+      const paint = () => {
+        const base = LT('lib.icloud_downloading', 'Downloading from iCloud…');
+        const parts = [];
+        if (pct != null) parts.push(Math.floor(pct) + '%');
+        if (mb) parts.push(pct != null && size > 0 ? Math.round(size * pct / 100 / 1e6) + ' MB of ' + mb : mb);
+        parts.push(fmtT(Date.now() - t0));
+        setTitleOpenStatus(base + '  ' + parts.join(' · '));
+        setTitleOpenProgress(pct != null ? pct / 100 : null);
+      };
+      paint();
+      const tick = setInterval(paint, 1000);
+      let sub = null;
+      try {
+        sub = window.kCloud.onChange((ev) => {
+          for (const c of (ev && ev.changed) || []) {
+            if (c && c.path === rel && Number.isFinite(c.percent)) { pct = Math.max(pct || 0, c.percent); paint(); }
+          }
+        });
+      } catch (_) {}
+      return () => {
+        clearInterval(tick);
+        try { sub && sub.remove && sub.remove(); } catch (_) {}
+        setTitleOpenProgress(null);
+        setTitleOpenStatus('Opening…');
+        if (ownOverlay && !window._titleSwitchInFlight) hideTitleOpenOverlay();
+      };
+    }
+
     // ── Title-open progress overlay ──
     // Opening a title can sit in native file work for a second or more
     // (rehydrateTitleCachePaths re-copies audio/SRT into the cache on first
@@ -4067,7 +4124,7 @@ body.dimmed .card-image {
               'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>' +
             '<div id="titleOpenLabel" style="font:12px/1.4 var(--font-sans,system-ui);color:#aaa;margin-bottom:6px;">Opening…</div>' +
             '<div style="height:6px;background:#222;border-radius:3px;overflow:hidden;position:relative;">' +
-              '<div style="position:absolute;top:0;left:0;height:100%;width:38%;border-radius:3px;' +
+              '<div id="titleOpenBar" style="position:absolute;top:0;left:0;height:100%;width:38%;border-radius:3px;' +
                 'background:var(--accent-read,#4caf50);animation:titleOpenSlide 1.1s ease-in-out infinite;"></div>' +
             '</div>' +
           '</div>';
@@ -4085,6 +4142,15 @@ body.dimmed .card-image {
       const n = document.getElementById('titleOpenName');
       if (n) n.textContent = name || 'Opening title';
       setTitleOpenStatus('Opening…');
+      setTitleOpenProgress(null);
+    }
+    // frac 0..1 → determinate bar; null → the sliding indeterminate one.
+    function setTitleOpenProgress(frac) {
+      const b = document.getElementById('titleOpenBar');
+      if (!b) return;
+      if (frac == null) { b.style.width = '38%'; b.style.animation = 'titleOpenSlide 1.1s ease-in-out infinite'; b.style.transform = ''; return; }
+      b.style.animation = 'none'; b.style.transform = 'none';
+      b.style.width = Math.max(2, Math.min(100, frac * 100)).toFixed(1) + '%';
     }
     function setTitleOpenStatus(text) {
       const l = document.getElementById('titleOpenLabel');

@@ -3150,6 +3150,15 @@
     for (let k = 0; k < idxs.length; k++) w.push(idxs[k], 1, Math.round(lead + k * per), Math.round(lead + (k + 1) * per));
     return Object.assign({}, cue, { w, _wSynth: true });
   }
+  function _abKaraokeCue(cue) {
+    if (!cue || (Array.isArray(cue.w) && cue.w.length)) return cue;
+    const synth = document.body.classList.contains('kadoki-video-title') ||
+      !!(window.ytCollection && window.ytCollection.isActive && window.ytCollection.isActive());
+    return synth ? _cueWithWordTimes(cue) : cue;
+  }
+  // Duo split transcript (video-mode.js) reads the live cue list.
+  window.abCueList = function () { return abCues; };
+  window.abCurrentCueIndex = function () { return abCurrentCueIdx; };
   window.abScrubPaintCue = function (idx, cue, t) {
     try {
       if (!abCues.length || !(idx >= 0) || !abCues[idx]) return;
@@ -3160,6 +3169,7 @@
         const cw = _cueWithWordTimes(abCues[idx]);
         try { window.wordHighlight?.setSpanCue(cueEl, cw); } catch (_) {}
         try { window._diag?.('[paged-diag] scrub paint cue#' + idx + ' w=' + (cw && cw.w ? cw.w.length / 4 : 0) + (cw && cw._wSynth ? ' synth' : (abCues[idx]._wAligned ? ' aligned' : ' native'))); } catch (_) {}
+        try { window.kvDuoSplitOnCue?.(idx); } catch (_) {}
       }
       // (2026-09-09, user) No previous-subtitle panel while scrubbing: the
       // finger already walks the cue list in the regular spot, so the line
@@ -3500,8 +3510,31 @@
       st.textContent = '#audiobookCueText .dict-frag, #audiobookPrevCueText .dict-frag { pointer-events: none; }';
       document.head.appendChild(st);
     }
+    // A tap while the dictionary popup is open only CLOSES it — it must not
+    // look up whatever word sat under the finger (2026-11-24, user: "the
+    // whole app works this way except the new video mode"). The capture-
+    // phase dismiss in enhanced-dictionary.js hides the popup at touchstart,
+    // so by click time it's already gone: remember, at the START of the
+    // gesture, whether it was open.
+    const _popupOpenNow = () => { const p = document.getElementById('dictPopup'); return !!(p && p.style.display !== 'none' && p.offsetParent !== null); };
+    let _popupOpenAtDownTs = 0;
+    const _noteDown = () => {
+      if (_popupOpenNow()) _popupOpenAtDownTs = Date.now();
+      else if (Date.now() - _popupOpenAtDownTs > 80) _popupOpenAtDownTs = 0;   // pointerdown + touchstart of ONE tap share a mark
+    };
+    document.addEventListener('touchstart', _noteDown, { capture: true, passive: true });
+    document.addEventListener('pointerdown', _noteDown, { capture: true, passive: true });
+    window.kadokiTapWasDictDismiss = () =>
+      (Date.now() - _popupOpenAtDownTs < 1200) ||
+      (window._dictPopupDismissedTs && Date.now() - window._dictPopupDismissedTs < 500);
     document.addEventListener('click', async (e) => {
       const t0 = e.target;
+      if (window.kadokiTapWasDictDismiss()) {
+        const p = document.getElementById('dictPopup');
+        if (p && p.contains(t0)) return;
+        try { if (_popupOpenNow()) window.hideDictPopup?.(); } catch (_) {}
+        return;
+      }
       // The PREVIOUS-cue panel (visionOS video Titles only) is dict-tappable
       // exactly like the current one — check it FIRST so a tap there resolves
       // against ITS OWN element (and therefore its own dataset.cueIdx), not
@@ -3760,11 +3793,13 @@
       if (idx >= 0) {
         renderAudiobookCueTokens(cueEl, abCues[idx].text, idx);
         // Karaoke: word-level sweep on the freshly rendered cue (no-op
-        // without word timings).
-        try { window.wordHighlight?.setSpanCue(cueEl, abCues[idx]); } catch (_) {}
+        // without word timings). Video titles / YouTube Collections without
+        // real timings get the synthesized per-character sweep (as scrub).
+        try { window.wordHighlight?.setSpanCue(cueEl, _abKaraokeCue(abCues[idx])); } catch (_) {}
       } else {
         cueEl.textContent = '…';
       }
+      try { window.kvDuoSplitOnCue?.(idx); } catch (_) {}
     }
     // PREVIOUS cue (visionOS video Titles — user request: "I often have to
     // pause, rewind etc. to catch something just said"). PAUSED 2026-08-30:
@@ -3933,6 +3968,8 @@
         }
       }
     } catch (e) {}
+    // YouTube Collection: the thumbnail of the video playing now.
+    try { const ys = window.ytCollection?.coverAt?.(); if (ys) src = ys; } catch (_) {}
     if (!src && abCueToChunk && idx >= 0) {
       const chunkIdx = abCueToChunk[idx];
       if (chunkIdx >= 0 && Array.isArray(window.allNotes)) {

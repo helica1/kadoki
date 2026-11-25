@@ -270,7 +270,7 @@
     const ov = document.createElement('div');
     ov.id = 'icloudPosOffer';
     ov.className = 'kai-modal';   // card/reader gestures bail under it (app.js inModal)
-    ov.style.cssText = 'position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.45);display:flex;align-items:flex-end;justify-content:center;padding:20px 16px calc(28px + env(safe-area-inset-bottom));';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:9800;background:rgba(0,0,0,.45);display:flex;align-items:flex-end;justify-content:center;padding:20px 16px calc(28px + env(safe-area-inset-bottom));';
     for (const ev of ['touchstart', 'touchmove', 'touchend']) ov.addEventListener(ev, (e) => e.stopPropagation(), { passive: true });
     const box = document.createElement('div');
     box.style.cssText = 'background:var(--panel-elev,#1e1e22);color:var(--text,#eee);border:1px solid var(--border,#333);border-radius:14px;padding:16px;width:min(420px,100%);font-family:var(--font-sans,system-ui);box-shadow:0 10px 30px rgba(0,0,0,.5);';

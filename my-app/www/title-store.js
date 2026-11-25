@@ -522,7 +522,11 @@
     return ['card', 'read', 'audio'];
   }
   function shownModes(title) {
-    const can = enabledModes(title);
+    const can = Object.assign({}, enabledModes(title));
+    // CARD mode is retired (user, 2026-11-24): no tab, never the opening
+    // mode — except for Anki deck titles, which only exist as cards. The
+    // card code stays (SRT cards, Anki send, screenshots live in it).
+    if (!(title && title.attachments && title.attachments.deck)) can.card = false;
     const order = ['card', 'read', 'audio'];
     let want = Array.isArray(title && title.modes) ? title.modes : null;
     if (!want || !want.some(m => can[m])) want = defaultModes(title);

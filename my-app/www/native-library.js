@@ -81,7 +81,8 @@
     const color = (v, d) => root.getPropertyValue(v).trim() || d;
     const kinds = [];
     if (a.deck) kinds.push({ l: 'DECK', c: color('--accent-card', '#ff9550') });
-    if (a.epub) kinds.push({ l: a.epub.auto ? 'AUTO TEXT' : 'EPUB', c: color('--accent-read', '#4caf50') });
+    // A video's generated transcript book is implied by VIDEO + SRT — no pill.
+    if (a.epub && !(a.epub.auto && video)) kinds.push({ l: a.epub.auto ? 'AUTO TEXT' : 'EPUB', c: color('--accent-read', '#4caf50') });
     if (a.audiobook) kinds.push({ l: video ? 'VIDEO' : 'AUDIO', c: color('--accent-audio', '#b794f6') });
     if (a.srt) kinds.push({ l: 'SRT', c: color('--accent-warn', '#ffd54a') });
     const d = libDifficulty(t, blurb);

@@ -166,6 +166,8 @@ window.I18N_STRINGS = Object.assign(window.I18N_STRINGS || {}, {
   'icloud.stay':            { en: 'Stay here', ja: 'このまま' },
   'icloud.not_transcribed': { en: 'This device hasn’t transcribed that far yet.', ja: 'この端末ではまだそこまで文字起こしされていません。' },
   'icloud.jump':            { en: 'Jump there', ja: 'そこへ移動' },
+  'yt.new_btn':             { en: 'YouTube Collection', ja: 'YouTubeコレクション' },
+  'yt.add_videos':          { en: 'Add videos', ja: '動画を追加' },
   'lib.icloud_upload':      { en: 'Upload to iCloud', ja: 'iCloudにアップロード' },
   'lib.icloud_download':    { en: 'Download from iCloud', ja: 'iCloudからダウンロード' },
   'lib.icloud_evict':       { en: 'Remove download', ja: 'ダウンロードを削除' },

@@ -23,6 +23,8 @@
   const MEDIA_KINDS = ['epub', 'srt', 'audiobook'];
   const DISMISSED_KEY = 'ICLOUD_DISMISSED_V1';   // syncIds deleted on this device
   const SEEN_KEY = 'ICLOUD_SEEN_V1';             // syncId → title.json mtime last applied
+  const DERIVED_KEY = 'ICLOUD_DERIVED_V1';       // syncId → {kind: size} of generated files last copied up
+  const COLL_THUMBS = 'YTCOLL_THUMBS_V1_';       // blobStore + titleId → {videoId: dataUri}
 
   const log = (m) => { try { window.debugLog ? window.debugLog('[iCloudLib] ' + m) : console.log('[iCloudLib] ' + m); } catch (_) {} };
   const kc = () => window.kCloud;
@@ -143,6 +145,20 @@
       let dest;
       if (isICloudUri(att.uri)) {
         dest = fromUri(att.uri);
+      } else if (att.auto) {
+        // Generated here (transcript SRT / generated book): it keeps changing
+        // on this device (transcription, 校正), so the local file stays the
+        // source and iCloud gets a copy, refreshed by syncDerived().
+        let fname = safeName(att.name);
+        if (used.has(fname)) fname = kind + '-' + fname;
+        dest = `${base}/media/${fname}`;
+        const src = await localSourcePath(att);
+        await kc().importFile(src, dest, { move: false, overwrite: true });
+        const st = await kc().stat(dest).catch(() => ({}));
+        derivedSeen(sid, kind, st.size || 0);
+        media[kind] = { file: dest.slice(base.length + 1), name: att.name, size: Number(st.size) || null, auto: att.auto };
+        used.add(dest.split('/').pop());
+        continue;
       } else {
         let fname = safeName(att.name);
         if (used.has(fname)) fname = kind + '-' + fname;
@@ -166,16 +182,68 @@
     }
     const cover = a.cover && a.cover.dataUri;
     if (cover) await kc().writeJSON(`${base}/cover.json`, { dataUri: cover });
+    // YouTube Collection: the parts list rides in title.json; the per-part
+    // thumbnails (big) in their own collection.json.
+    const coll = t.collection && Array.isArray(t.collection.parts) ? t.collection : null;
+    if (coll) {
+      let thumbs = {};
+      try { thumbs = JSON.parse((await window.blobStore?.get(COLL_THUMBS + titleId)) || '{}') || {}; } catch (_) {}
+      await kc().writeJSON(`${base}/collection.json`, { thumbs });
+    }
     // title.json last: another device that sees it finds the media folder in place.
     await kc().writeJSON(`${base}/title.json`, {
       v: 1, syncId: sid, name: t.name, author: t.author || '', folder: t.folder || '',
       createdAt: t.createdAt || Date.now(), updatedAt: Date.now(), media, hasCover: !!cover,
+      collection: coll || undefined,
     });
     t = await ts().update(titleId, Object.keys(patch).length ? { attachments: patch, icloudLinked: true } : { icloudLinked: true });
     const seen = jget(SEEN_KEY, {}); seen[sid] = Date.now(); jset(SEEN_KEY, seen);
     log('published ' + t.name + ' → ' + base + ' (' + kinds.join(',') + ')');
     try { window.iCloudPos?.push(titleId, 'published'); } catch (_) {}
     return t;
+  }
+
+  function derivedSeen(sid, kind, size) {
+    const m = jget(DERIVED_KEY, {}); (m[sid] = m[sid] || {})[kind] = size; jset(DERIVED_KEY, m);
+  }
+  async function localSize(att) {
+    try {
+      const FS = window.Capacitor?.Plugins?.Filesystem;
+      const p = att.cachePath || (att.uri && !isICloudUri(att.uri) ? att.uri : '');
+      if (!FS || !p) return 0;
+      const st = await FS.stat({ path: p.startsWith('file://') || p.includes('://') ? p : 'file://' + p });
+      return Number(st && st.size) || 0;
+    } catch (_) { return 0; }
+  }
+  /**
+   * Generated files (transcript SRT, generated book) of titles this device
+   * published keep changing here — transcription, 校正, furigana. Re-copy any
+   * that changed so other devices get the current version.
+   */
+  let _derivedBusy = false;
+  async function syncDerived() {
+    if (_derivedBusy || !(await available())) return 0;
+    _derivedBusy = true;
+    let n = 0;
+    try {
+      const m = jget(DERIVED_KEY, {});
+      for (const t of (await ts().list()) || []) {
+        if (!t.syncId || !isPublished(t) || isLoaded(t) && window._titleSwitchInFlight) continue;
+        const a = t.attachments || {};
+        const auto = MEDIA_KINDS.filter(k => a[k] && a[k].auto && !isICloudUri(a[k].uri));
+        if (!auto.length) continue;
+        let changed = false;
+        for (const k of auto) {
+          const sz = await localSize(a[k]);
+          if (sz && sz !== (m[t.syncId] || {})[k]) { changed = true; break; }
+        }
+        if (changed) {
+          try { await publish(t.id); n++; log('refreshed generated files of ' + t.name); }
+          catch (e) { log('refresh failed for ' + t.name + ': ' + (e?.message || e)); }
+        }
+      }
+    } finally { _derivedBusy = false; }
+    return n;
   }
 
   /** "Remove download": the files stay in iCloud; this device frees its copy. */
@@ -202,6 +270,13 @@
     if (m.size) att.size = m.size;
     if (m.auto) att.auto = m.auto;
     return att;
+  }
+
+  async function pullCollectionThumbs(titleId, base) {
+    try {
+      const c = await kc().readJSON(`${base}/collection.json`);
+      if (c && c.thumbs) await window.blobStore?.set(COLL_THUMBS + titleId, JSON.stringify(c.thumbs));
+    } catch (_) {}
   }
 
   let _scanning = null;
@@ -252,7 +327,11 @@
             try { const c = await kc().readJSON(`${base}/cover.json`); if (c && c.dataUri) attachments.cover = { dataUri: c.dataUri }; } catch (_) {}
           }
           const nt = await ts().create({ syncId: sid, name: info.name || 'Untitled', author: info.author || '', attachments });
-          if (info.folder) { try { await ts().update(nt.id, { folder: info.folder }); } catch (_) {} }
+          const extra = {};
+          if (info.folder) extra.folder = info.folder;
+          if (info.collection) extra.collection = info.collection;
+          if (Object.keys(extra).length) { try { await ts().update(nt.id, extra); } catch (_) {} }
+          if (info.collection) await pullCollectionThumbs(nt.id, base);
           log('added ' + nt.name + ' from iCloud');
           changed++;
         } else {
@@ -260,9 +339,20 @@
           // is never replaced, and the name never changes (positions key on it).
           const patch = {};
           for (const k of MEDIA_KINDS) {
-            if (info.media[k] && !local.attachments?.[k]) patch[k] = attFromMedia(base, info.media[k]);
+            const m = info.media[k], la = local.attachments?.[k];
+            if (m && !la) patch[k] = attFromMedia(base, m);
+            // Same iCloud file, new content (generated files refreshed, a
+            // Collection grown): the size change re-keys this device's caches.
+            else if (m && la && isICloudUri(la.uri) && fromUri(la.uri) === `${base}/${m.file}` && m.size && Number(la.size) !== m.size) {
+              patch[k] = Object.assign({}, la, { size: m.size });
+              if (k === 'epub') { try { window.pagedInvalidateLoadedTitle?.(local.id); } catch (_) {} }
+            }
           }
-          if (Object.keys(patch).length) { await ts().update(local.id, { attachments: patch }); changed++; log('filled ' + Object.keys(patch).join(',') + ' for ' + local.name); }
+          const upd = {};
+          if (Object.keys(patch).length) upd.attachments = patch;
+          if (info.collection && !local.icloudLinked) upd.collection = info.collection;
+          if (Object.keys(upd).length) { await ts().update(local.id, upd); changed++; log('updated ' + Object.keys(patch).join(',') + (upd.collection ? ' +collection' : '') + ' for ' + local.name); }
+          if (info.collection) await pullCollectionThumbs(local.id, base);
         }
         seen[sid] = e.mtime || Date.now();
       }
@@ -300,13 +390,17 @@
   let _scanTimer = null;
   function scanSoon(reason, ms) {
     clearTimeout(_scanTimer);
-    _scanTimer = setTimeout(() => { scan(reason).catch(() => {}); }, ms == null ? 1500 : ms);
+    _scanTimer = setTimeout(() => { scan(reason).catch(() => {}).then(() => syncDerived().catch(() => {})); }, ms == null ? 1500 : ms);
   }
 
   function boot() {
     if (!kc() || !kc().supported) return;   // Android / web: nothing to do
     hookRemove();
     scanSoon('boot', 4000);
+    // Generated files keep changing with nobody touching the app (overnight
+    // proofreading, furigana): re-copy changed ones every 2 minutes. Cheap —
+    // one file-size check per iCloud title with generated files.
+    setInterval(() => { if (!document.hidden || window.KADOKI_MAC) syncDerived().catch(() => {}); }, 120000);
     kc().onChange((ev) => {
       const paths = (ev && ev.changed || []).map(c => c.path || '');
       if (ev && ev.initial || paths.some(p => /\/title\.json$/.test(p))) scanSoon('change');
@@ -343,7 +437,8 @@
   window.iCloudAction = action;
 
   window.iCloudLib = {
-    available, publish, removeDownload, download, downloadState, isPublished, scan,
+    available, publish, removeDownload, download, downloadState, isPublished, scan, syncDerived,
+    COLL_THUMBS, toUri,
     isICloudUri, _fromUri: fromUri,
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

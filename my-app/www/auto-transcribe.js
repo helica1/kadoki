@@ -444,6 +444,12 @@
     const key = titleId || ('path:' + audioPath);
     if (key in chapterCache) return chapterCache[key];
     let out = [];
+    // YouTube Collection: each video is a chapter (its title, its start).
+    try {
+      const ct = titleId && window.ytCollection && await window.titleStore?.get?.(titleId);
+      const cc = ct && window.ytCollection.chaptersFor(ct);
+      if (cc && cc.length) return cc;   // not cached: the Collection can grow
+    } catch (_) {}
     try {
       const p = plugin();
       let src = audioPath || null;
@@ -1694,6 +1700,50 @@
     await buildSyntheticEpub(titleId, { force: true, minCues: 1 });
     return { ok: true };
   }
+  // YouTube Collections: use downloaded subtitles as the transcript
+  // (cues = [{startMs, endMs, text}] over the whole joined audio), exactly as
+  // if transcription had finished — SRT, generated book, and a complete cache
+  // so the proofreading queue goes straight to 校正.
+  // opts.keepBeforeMs: an append — cached cues before this time (possibly
+  // already proofread) are kept and only later ones replaced.
+  // opts.coverToMs: transcribe-mode append — keep the cache, re-sign it for
+  // the grown file and mark only [0, coverToMs] covered, so transcription
+  // continues at the new videos instead of starting over.
+  async function seedCues(titleId, cues, durMs, opts) {
+    opts = opts || {};
+    const title = (await window.titleStore.list()).find(x => x.id === titleId);
+    if (!title || !title.attachments?.audiobook) throw new Error('title not found');
+    const path = await audioPathFor(title);
+    if (!path) throw new Error('audio file unavailable');
+    const sig = await computeSig(path, title.attachments.audiobook.name || '');
+    const old = await loadCacheObj(titleId);
+    // opts.resign: the media was re-encoded (same length, new bytes) — keep
+    // the transcript exactly as it is, only re-key it to the new file.
+    if (opts.resign) {
+      if (!old) return { ok: false };
+      old.sig = sig;
+      if (durMs > 0) old.durMs = durMs;
+      await window.blobStore?.set(CACHE_PREFIX + titleId, JSON.stringify(old));
+      return { ok: true, resigned: true };
+    }
+    if (Number.isFinite(opts.coverToMs)) {
+      const kept = old && Array.isArray(old.cues) ? old.cues.filter(c => c.endMs <= opts.coverToMs + 500) : [];
+      headlessPersist(titleId, { sig, durMs, cov: opts.coverToMs > 0 ? [[0, opts.coverToMs]] : [], cues: normalizeCues(kept), cardAnchorMs: null });
+      return { ok: true, kept: kept.length };
+    }
+    let list = normalizeCues(cues || []);
+    if (Number.isFinite(opts.keepBeforeMs) && old && Array.isArray(old.cues)) {
+      const kept = normalizeCues(old.cues).filter(c => c.startMs < opts.keepBeforeMs);
+      list = kept.concat(list.filter(c => c.startMs >= opts.keepBeforeMs));
+    }
+    const st = { sig, durMs, cov: durMs > 0 ? [[0, durMs]] : [], cues: list, cardAnchorMs: null };
+    st.cues.forEach((c, i) => { c.index = i; });
+    headlessPersist(titleId, st);
+    await writeFinalSrt(titleId, st.cues);
+    try { window.aiChunks?.refreshCueMap?.(titleId); } catch (_) {}
+    await buildSyntheticEpub(titleId, { force: true, minCues: 1 });
+    return { ok: true, cues: st.cues.length };
+  }
   function stopHeadless() {
     const h = headless;
     if (h) { try { plugin()?.stop({ jobId: h.jobId }); } catch (_) {} }
@@ -2306,6 +2356,7 @@
     buildSyntheticEpub, // (titleId, {force?}) → package the transcription as an EPUB attachment
     cuesFor,            // (titleId) → {cues, complete, live} — live list or cache
     transcribeTitle,    // (titleId, {onProgress, shouldStop}) → whole book, headless; finishes SRT + book
+    seedCues,           // (titleId, cues, durMs, opts) → downloaded subtitles as the finished transcript
     stopHeadless,
     isHeadlessBusy: () => !!headless,
     applyCleanEdits,    // (titleId, [{startMs, orig, text, pb}]) → cues changed

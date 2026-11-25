@@ -62,7 +62,7 @@
     if (!a || !a.audiobook) return false;
     if (a.epub && !a.epub.auto) return false;
     if (a.srt && !a.srt.auto) return false;
-    if (a.audiobook.isVideo) return false;
+    if (a.audiobook.isVideo && !title.collection) return false;   // YouTube Collections proofread too
     return true;
   }
 

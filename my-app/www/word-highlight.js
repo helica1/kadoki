@@ -111,7 +111,11 @@
     if (kind === 'audio') {
       const a = accentRGB('--accent-audio', '#b794f6');
       return {
-        dim: [255, 255, 255, 0.42], fill: [255, 255, 255, 1],
+        // Video subtitles over the picture's light frosted glass (iPhone
+        // landscape): 0.42 white washed out against bright video — keep the
+        // not-yet-spoken text clearly readable (2026-11-24, user).
+        dim: [255, 255, 255, (document.body.classList.contains('kadoki-video-title') &&
+          document.body.classList.contains('kv-ios-landscape')) ? 0.72 : 0.42], fill: [255, 255, 255, 1],
         hot: mixRGB(a, WHITE, 0.45).concat(1),
         glow: 'rgba(' + rgbStr(a) + ',0.60)', glow2: 'rgba(' + rgbStr(a) + ',0.30)', glowPx: 16
       };

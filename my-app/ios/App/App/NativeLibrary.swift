@@ -476,6 +476,8 @@ struct KindPill: View {
         let c = k.color.isEmpty ? Color.secondary : Color(hex: k.color)
         Text(k.label)
             .font(.caption2.weight(.bold))
+            .lineLimit(1)
+            .fixedSize()          // never wrap a pill ("AUT / O / TEXT")
             .foregroundStyle(c)
             .padding(.horizontal, 7).padding(.vertical, 2)
             .background(c.opacity(0.14), in: Capsule())

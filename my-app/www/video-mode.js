@@ -373,7 +373,89 @@
       isLandscapeOrientation();
   }
 
+  // ---------- iPhone Duo, open + portrait: video top, transcript below ----------
+  // (2026-11-24, user) The open Duo held upright: the picture takes the top
+  // half; below it a transcript — earlier lines dimmed above, the current
+  // line (the real #audiobookCueText, reparented in, so karaoke and
+  // dictionary taps work exactly as everywhere else), then as many upcoming
+  // lines as fit. Tap a line to jump there. Open + landscape keeps the
+  // regular full-screen cinema layout (video with the subtitle over it).
+  function duoSplitActive() {
+    return _isVideoTitle && !window.KADOKI_VISION_NATIVE && isPhonePlatform() && !!window.KADOKI_DUO &&
+      document.body.classList.contains('mode-audio') && !isLandscapeOrientation() && window.innerWidth >= 560;
+  }
+  let _duoCueHome = null;   // where #audiobookCueText lives outside the split
+  function ensureDuoPanel(on) {
+    const cue = document.getElementById('audiobookCueText');
+    let panel = document.getElementById('kvDuoPanel');
+    if (on) {
+      if (!panel) {
+        panel = document.createElement('div');
+        panel.id = 'kvDuoPanel';
+        const before = document.createElement('div'); before.id = 'kvDuoBefore';
+        const after = document.createElement('div'); after.id = 'kvDuoAfter';
+        panel.append(before, after);
+        document.getElementById('audiobookModeView')?.appendChild(panel);
+      }
+      if (cue && cue.parentNode !== panel) {
+        _duoCueHome = { parent: cue.parentNode, next: cue.nextSibling };
+        cue.style.position = ''; cue.style.top = ''; cue.style.bottom = ''; cue.style.left = ''; cue.style.transform = '';
+        panel.insertBefore(cue, panel.querySelector('#kvDuoAfter'));
+        _duoLastIdx = -2;
+        try { window.kvDuoSplitOnCue(window.abCurrentCueIndex?.() ?? -1); } catch (_) {}
+      }
+    } else if (panel) {
+      if (cue && cue.parentNode === panel && _duoCueHome && _duoCueHome.parent) {
+        _duoCueHome.parent.insertBefore(cue, _duoCueHome.next && _duoCueHome.next.parentNode === _duoCueHome.parent ? _duoCueHome.next : null);
+      }
+      panel.remove();
+      _duoCueHome = null;
+    }
+  }
+  let _duoLastIdx = -2;
+  window.kvDuoSplitOnCue = function (idx) {
+    if (!document.body.classList.contains('kv-duo-split')) return;
+    if (idx === _duoLastIdx) return;
+    _duoLastIdx = idx;
+    const cues = (window.abCueList && window.abCueList()) || [];
+    const before = document.getElementById('kvDuoBefore');
+    const after = document.getElementById('kvDuoAfter');
+    if (!before || !after) return;
+    const row = (i) => {
+      const c = cues[i];
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'kv-duo-row';
+      b.textContent = c ? String(c.text || '') : '';
+      if (c) b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (window.kadokiTapWasDictDismiss?.()) return;   // that tap only closed the dictionary
+        try { window.jumpAudioToMs?.(c.startMs); } catch (_) {}
+      });
+      return b;
+    };
+    before.textContent = ''; after.textContent = '';
+    for (let i = Math.max(0, idx - 2); i < idx; i++) before.appendChild(row(i));
+    for (let i = idx + 1; i < Math.min(cues.length, idx + 25); i++) after.appendChild(row(i));
+  };
+  function positionDuoPanel() {
+    const panel = document.getElementById('kvDuoPanel');
+    if (!panel) return;
+    const f = _nativeFrame;
+    const a = document.getElementById('kadokiVideoAnchor');
+    let top = 0;
+    if (f && f.h > 1) top = f.y + f.h + 10;
+    else if (a) { const r = a.getBoundingClientRect(); top = r.bottom + 10; }
+    panel.style.top = Math.round(top) + 'px';
+  }
+
   function computeSurface() {
+    // Duo split first: it changes the anchor's height, which is measured below.
+    if (!window.KADOKI_VISION_NATIVE) {
+      const split = duoSplitActive();
+      document.body.classList.toggle('kv-duo-split', split);
+      ensureDuoPanel(split);
+    }
     // Apply BEFORE measuring the anchor's rect below — the class flip must
     // land before getBoundingClientRect() so the reduced-reserve CSS is
     // already in effect for this tick's measurement.
@@ -416,6 +498,7 @@
   function _prevCueOk() { return !!window.KADOKI_VISION_NATIVE; }
   function positionCuePanel(surf) {
     if (!document.body.classList.contains('mode-audio')) return;   // card-video has its own stack
+    if (document.body.classList.contains('kv-duo-split')) { positionDuoPanel(); return; }   // the cue lives in the transcript panel
     const cue = document.getElementById('audiobookCueText');
     if (!cue) return;
     if (!surf || !surf.visible) {
@@ -453,9 +536,17 @@
         // Height-independent — a taller cue grows UPWARD by construction, so
         // a new line never renders top-anchored-too-low for a tick before
         // being re-measured and moved up.
-        const bottom = Math.max(0, Math.round(window.innerHeight - (f.y + f.h) + 20));
+        // iPhone landscape (2026-11-24, user): "move down as much as
+        // possible" — sit at the screen's bottom edge (the picture is now
+        // top-aligned, so on a Duo that's the black strip under the film),
+        // clear of the home indicator only.
+        // (Round 3: clear of the home-indicator line too — on the open Duo
+        // the panel's bottom ran into it.)
+        const iosLand = !window.KADOKI_VISION_NATIVE && document.body.classList.contains('kv-ios-landscape');
         cue.style.top = '';
-        cue.style.bottom = bottom + 'px';
+        cue.style.bottom = iosLand
+          ? 'calc(env(safe-area-inset-bottom, 0px) + 6px)'
+          : Math.max(0, Math.round(window.innerHeight - (f.y + f.h) + 20)) + 'px';
       } else {
         const top = f.y + f.h + 10;
         cue.style.bottom = '';
@@ -536,11 +627,44 @@
     const w = anchor.getBoundingClientRect().width || anchor.parentElement?.getBoundingClientRect().width || 0;
     if (w > 1) anchor.style.height = Math.round(w / _cardAspect) + 'px';
   }
+  // iPhone audio-mode cinema (2026-11-24, user): the picture sits at the
+  // TOP of the screen instead of centred — "move the picture towards the
+  // top" in portrait, and in landscape on screens taller than the film (the
+  // Duo, closed or open) the spare height all goes BELOW the picture, where
+  // the subtitle floats. The anchor's flex-basis is the film's own
+  // aspect-fit height; flex-shrink lets it give way when the screen is
+  // shorter than that (an ordinary wide phone in landscape), so it never
+  // overflows. #audiobookContent is justify-content:flex-start, so a
+  // shortened anchor lands at the top by construction.
+  function sizeAudioAnchor() {
+    const a = document.getElementById('kadokiVideoAnchor');
+    if (!a) return;
+    const on = _isVideoTitle && !window.KADOKI_VISION_NATIVE && isPhonePlatform() &&
+      document.body.classList.contains('mode-audio') &&
+      !document.body.classList.contains('kv-duo-split');
+    if (!on) {
+      if (a.dataset.kvFit) { a.style.flex = '1 1 auto'; a.style.flexShrink = '0'; delete a.dataset.kvFit; }
+      return;
+    }
+    const f = _nativeFrame;
+    if (f && !f.predicted && f.w > 1 && f.h > 1) _videoAspect = f.w / f.h;
+    const w = a.getBoundingClientRect().width || a.parentElement?.getBoundingClientRect().width || 0;
+    if (!(w > 1)) return;
+    const want = Math.round(w / _videoAspect) + 'px';
+    if (a.dataset.kvFit !== want) {
+      a.style.flex = '0 1 ' + want;
+      a.style.flexShrink = '1';
+      a.dataset.kvFit = want;
+    }
+  }
   function sync(force) {
     if (!nativeVideoOk()) return;
     const p = bg();
     if (!p || typeof p.videoSurface !== 'function') return;
     sizeCardAnchor();
+    // computeSurface() flips kv-duo-split; sizing reads it, so run it after
+    // a first pass and re-check below.
+    sizeAudioAnchor();
     const s = computeSurface();
     const key = JSON.stringify(s);
     // Surface rect changed (title open, mode switch, rotation, overlay

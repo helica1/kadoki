@@ -1796,3 +1796,88 @@ body.kv-card-video.kv-ios-landscape .kv-cs-row.kv-cur { font-size: 23px; padding
   user-select: none !important;
   -webkit-touch-callout: none !important;
 }
+
+/* ---------- iPhone Duo open + portrait: video top half, transcript below
+   (video-mode.js duoSplitActive). #audiobookCueText is reparented into
+   #kvDuoPanel as the current line, so these rules undo its glass-panel look. */
+body.kv-duo-split.kadoki-video-title.mode-audio #audiobookContent {
+  padding-bottom: 0 !important;
+}
+body.kv-duo-split #kadokiVideoAnchor { flex: 0 0 46vh !important; }
+#kvDuoPanel {
+  position: fixed; left: 0; right: 0;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 64px);
+  padding: 0 26px;
+  overflow: hidden;
+  z-index: 80;
+  display: flex; flex-direction: column; gap: 2px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 82%, transparent);
+  mask-image: linear-gradient(to bottom, #000 82%, transparent);
+}
+body:not(.kv-duo-split) #kvDuoPanel { display: none; }
+#kvDuoBefore, #kvDuoAfter { display: flex; flex-direction: column; gap: 2px; flex: 0 0 auto; }
+.kv-duo-row {
+  display: block; width: 100%;
+  border: none; background: transparent; text-align: left;
+  font-family: var(--reader-font, 'Hiragino Mincho ProN', serif);
+  font-size: 1.15rem; line-height: 1.6;
+  color: rgba(255, 255, 255, 0.42);
+  padding: 3px 0;
+}
+#kvDuoBefore .kv-duo-row { color: rgba(255, 255, 255, 0.30); }
+body.kv-duo-split.kadoki-video-title.mode-audio #kvDuoPanel #audiobookCueText {
+  position: static !important; transform: none !important;
+  background: none !important; border: none !important;
+  -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
+  max-width: none !important; width: auto !important; margin: 4px 0 !important;
+  padding: 6px 0 !important; text-align: left !important;
+  font-size: 1.4rem; line-height: 1.6 !important; text-shadow: none;
+  border-left: 3px solid var(--accent-read, #4caf50) !important;
+  padding-left: 12px !important;
+}
+
+/* ---------- iPhone video subtitles, round 2 (2026-11-24, user) ----------
+   Picture is top-aligned (video-mode.js sizeAudioAnchor).
+   Portrait (Duo closed): the subtitle sits on the black under the film — no
+   glass box or border, smaller type, nearly full width.
+   Landscape (Duo closed or open): a slightly smaller font, docked at the
+   screen's bottom edge, wider, and a much lighter glass. */
+body.kadoki-video-title.mode-audio:not(.kadoki-vision-native):not(.kv-duo-split):not(.kv-ios-landscape) #audiobookCueText {
+  font-size: calc(var(--font-size-audio) * 0.72) !important;
+  background: none !important;
+  border: none !important;
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  max-width: 96% !important;
+  padding: 4px 10px !important;
+}
+body.kadoki-video-title.mode-audio.kv-ios-landscape:not(.kadoki-vision-native) #audiobookCueText {
+  font-size: calc(var(--font-size-audio) * 0.84) !important;
+  background: rgba(10, 10, 10, 0.16) !important;
+  -webkit-backdrop-filter: blur(6px) !important;
+  backdrop-filter: blur(6px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.06) !important;
+  max-width: 94% !important;
+  padding: 6px 22px !important;
+}
+/* Round 3 (2026-11-24, user: "side margins are way too wide"): the cue is
+   position:fixed at left:50% + translateX(-50%), so a shrink-to-fit width
+   only ever had HALF the screen to wrap in. max-content capped by a vw
+   max-width uses the real width. Portrait also drops the picture a little
+   below the top edge. */
+body.kadoki-video-title.mode-audio:not(.kadoki-vision-native):not(.kv-duo-split) #audiobookCueText {
+  width: max-content !important;
+  max-width: 96vw !important;
+  box-sizing: border-box !important;
+}
+body.kadoki-video-title.mode-audio.kv-ios-landscape:not(.kadoki-vision-native) #audiobookCueText {
+  max-width: 92vw !important;
+}
+body.kadoki-video-title.mode-audio:not(.kadoki-vision-native):not(.kv-duo-split):not(.kv-ios-landscape) #audiobookContent {
+  padding-top: calc(34px + env(safe-area-inset-top, 0px)) !important;
+}
+/* Round 4 (2026-11-24, user): closed Duo upright — picture below the
+   front camera hole (top-right), whatever safe-area the closed screen reports. */
+body.kadoki-video-title.mode-audio:not(.kadoki-vision-native):not(.kv-duo-split):not(.kv-ios-landscape) #audiobookContent {
+  padding-top: max(64px, calc(30px + env(safe-area-inset-top, 0px))) !important;
+}
