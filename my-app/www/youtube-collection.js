@@ -115,7 +115,7 @@
   /** Parts as chapters: [{startMs, title}] (audio-mode chapter list / next-chapter). */
   function chaptersFor(title) {
     const parts = title && title.collection && title.collection.parts;
-    return Array.isArray(parts) ? parts.map(p => ({ startMs: p.startMs, title: p.title })) : null;
+    return Array.isArray(parts) ? parts.map(p => ({ startMs: p.startMs, title: p.title, part: true })) : null;
   }
   window.addEventListener('kai:icloud-library', () => { _thumbCache.clear(); _titleCache = { id: null, t: null, at: 0 }; });
 

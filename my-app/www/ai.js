@@ -340,7 +340,9 @@
         }, body.fallbacks ? { 'anthropic-beta': FALLBACK_BETA } : {}),
         data: body,
         connectTimeout: 30000,
-        readTimeout: opts.timeoutMs || 180000,
+        // Non-streaming: nothing arrives until the WHOLE reply is done, and a
+        // long Opus chapter takes minutes — give it room.
+        readTimeout: Math.max(opts.timeoutMs || 0, 600000),
       });
     } catch (e) {
       throw new Error('Network error — check your connection');
@@ -604,7 +606,7 @@
       catch (e) {
         const overloaded = e && (e._status === 429 || e._status === 529 ||
           /overloaded/i.test(e.message || ''));
-        if (!opts.retryable || !overloaded || attempt >= 2) throw e;
+        if (!opts.retryable || !overloaded || attempt >= 2) { logError(opts, model, e); throw e; }
         const waitMs = (e._retryAfterMs > 0 && e._retryAfterMs <= 10 * 60 * 1000)
           ? e._retryAfterMs : 60 * 1000;
         await new Promise(r => setTimeout(r, waitMs));
@@ -620,10 +622,32 @@
     return { text: out.text, usage: out.usage, costUsd, model };
   }
 
+  // Last 40 AI request failures, exact text (localStorage AI_ERRLOG_V1) —
+  // the UI only shows a one-word reason; this is what diagnosis needs.
+  function logError(opts, model, e) {
+    try {
+      const k = 'AI_ERRLOG_V1';
+      const a = JSON.parse(localStorage.getItem(k) || '[]');
+      a.push({ ts: Date.now(), feature: opts.feature || 'misc', model, titleId: opts.titleId || window._activeTitleId || null,
+        status: (e && e._status) || null, msg: String((e && e.message) || e).slice(0, 300),
+        hidden: !!document.hidden });
+      localStorage.setItem(k, JSON.stringify(a.slice(-40)));
+    } catch (_) {}
+  }
+
   async function requestStream(opts, body) {
     const ctrl = new AbortController();
     let gotAny = false;
-    const timeout = setTimeout(() => ctrl.abort(), opts.timeoutMs || 120 * 1000);
+    // IDLE timeout, not a total one (2026-11-25): a long Opus chapter reply
+    // (~10k output tokens) streams for well over two minutes, and the old
+    // fixed 120 s total cut it off mid-reply — "Connection interrupted" →
+    // the Timeline's "Connection error". Every received chunk re-arms it, so
+    // only a stream that truly goes quiet is aborted. A hard ceiling stays as
+    // a backstop.
+    const idleMs = opts.timeoutMs || 120 * 1000;
+    let timeout = setTimeout(() => ctrl.abort(), idleMs);
+    const rearm = () => { clearTimeout(timeout); timeout = setTimeout(() => ctrl.abort(), idleMs); };
+    const ceiling = setTimeout(() => ctrl.abort(), Math.max(idleMs, 15 * 60 * 1000));
     // First-byte watchdog: a stalled stream (observed on iOS under VPN)
     // aborts after 15s so the native fallback can take over quickly.
     const firstByte = setTimeout(() => { if (!gotAny) ctrl.abort(); }, 15 * 1000);
@@ -643,6 +667,7 @@
     } catch (e) {
       clearTimeout(timeout);
       clearTimeout(firstByte);
+      clearTimeout(ceiling);
       const err = new Error('Network error — check your connection');
       err._noOutput = true;   // nothing reached the caller → native retry is safe
       throw err;
@@ -650,6 +675,7 @@
     if (!res.ok) {
       clearTimeout(timeout);
       clearTimeout(firstByte);
+      clearTimeout(ceiling);
       let msg = 'API error ' + res.status;
       try {
         const j = await res.json();
@@ -704,6 +730,7 @@
           const { done, value } = await reader.read();
           if (done) break;
           gotAny = true;
+          rearm();
           buf += dec.decode(value, { stream: true });
           let nl;
           while ((nl = buf.indexOf('\n')) >= 0) {
@@ -732,6 +759,7 @@
     } finally {
       clearTimeout(timeout);
       clearTimeout(firstByte);
+      clearTimeout(ceiling);
     }
 
     if (stopReason === 'refusal') throw new Error('The model declined this request');

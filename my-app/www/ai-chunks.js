@@ -471,6 +471,17 @@
       const fp = fpFromChunks(chunks);
 
       let map = await getMap(titleId);
+      // YouTube Collection: chapters are its videos (_partBounds). A map
+      // built before that (spoken "序章"/"第3章" read as chapter markers, long
+      // stretches split 1/18…) is rebuilt, and the summaries made against
+      // its boundaries are dropped — they describe the wrong spans.
+      const collParts = await _collectionParts(titleId);
+      if (collParts && map && map.fingerprint === fp && map.source !== 'parts') {
+        try {
+          for (const k of ['AICHAP_V1_', 'AISUM_V1_', 'AIDEEP_V1_', 'AICHAR_HOLD_V1_']) await window.blobStore?.remove?.(k + titleId);
+        } catch (_) {}
+        map = null;
+      }
       const mapFresh = !!(map && map.fingerprint === fp);
       const aiOn = !!(window.ai && window.ai.isEnabled && window.ai.isEnabled());
 
@@ -539,6 +550,11 @@
     const totalJp = last.jpLast;
 
     let bounds = null, labels = null, source = 'rule';
+    const collParts = await _collectionParts(titleId);
+    if (collParts) {
+      const pb = _partBounds(sections, info, collParts);
+      if (pb) return _assembleMap(titleId, fp, pb.bounds, pb.labels, 'parts', info, totalRaw, totalJp, 'raw');
+    }
     // The book's OWN chapter markers (standalone numbers / 第N章) are the most
     // reliable signal — captured by the loader, free, no Haiku. Try first.
     const markers = (_lastLoad && _lastLoad.titleId === titleId) ? (_lastLoad.markers || []) : [];
@@ -611,6 +627,42 @@
       }
       if (totalJp / bounds.length < 2500) return null;    // too many → not real chapters
       return { bounds, labels };
+    } catch (_) { return null; }
+  }
+
+  // YouTube Collection parts, or null for any other title.
+  async function _collectionParts(titleId) {
+    try {
+      const t = await window.titleStore?.get?.(titleId);
+      const p = t && t.collection && t.collection.parts;
+      return Array.isArray(p) && p.length ? p : null;
+    } catch (_) { return null; }
+  }
+  // One chapter per video, exactly: the generated book has one section per
+  // part, headed by the video's title. No merging of short videos, no
+  // splitting of long ones. Matches sections to parts by title, in order;
+  // a part whose section can't be found → null (fall back to the generic
+  // builder rather than mislabel).
+  function _partBounds(sections, info, parts) {
+    try {
+      const norm = (x) => String(x || '').replace(/\s+/g, '').trim();
+      const bounds = [], labels = [];
+      let from = 0;
+      for (const p of parts) {
+        const want = norm(p.title);
+        let hit = -1;
+        for (let i = from; i < sections.length; i++) {
+          const lab = norm(sections[i].label);
+          if (lab && want && (lab === want || lab.startsWith(want.slice(0, 40)) || want.startsWith(lab.slice(0, 40)))) { hit = i; break; }
+        }
+        if (hit < 0) return null;
+        let ci = sections[hit].chunkIdx;
+        if (!bounds.length) ci = 0;   // front matter belongs to the first video
+        if (bounds.length && ci <= bounds[bounds.length - 1]) return null;
+        bounds.push(ci); labels.push(p.title || null);
+        from = hit + 1;
+      }
+      return bounds.length ? { bounds, labels } : null;
     } catch (_) { return null; }
   }
 
@@ -824,7 +876,8 @@
     // Split oversized chapters in RAW/read space only. The cue path's caller derives
     // cueStart/cueEnd from its own (unsplit) bounds after this returns, so re-splitting
     // there would desync chunk↔cue; cue rule-bounds are already ~TARGET_JP anyway.
-    if (space !== 'cue') {
+    // A Collection's chapters are its videos, one each, never split.
+    if (space !== 'cue' && source !== 'parts') {
       const sp = _splitOversized(bounds, labels, info, totalJp);
       bounds = sp.bounds; labels = sp.labels;
     }
@@ -969,7 +1022,7 @@
           if (markers[0].startMs > 60000) { msBounds.push(0); labels.push(null); }
           for (const m of markers) {
             const last = msBounds.length ? msBounds[msBounds.length - 1] : -Infinity;
-            if (m.startMs - last < 60000) continue;   // micro-chapter guard
+            if (m.startMs - last < 60000 && !m.part) continue;   // micro-chapter guard (a Collection's videos are always kept)
             msBounds.push(m.startMs); labels.push(m.title || null);
           }
         } else if (durMs >= 40 * 60 * 1000) {
@@ -1487,6 +1540,7 @@
       const pristine = map.chunks.every(c => !c.state || c.state === 'none') &&
                        map.chunks.every(c => !c.label);
       if (!pristine) return map;
+      if (await _collectionParts(titleId)) return map;   // a Collection's chapters are its videos — never re-cut
       if (map.space === 'cue') {
         if (titleId !== window._activeTitleId) return map;
         const cues = window._srtCues;

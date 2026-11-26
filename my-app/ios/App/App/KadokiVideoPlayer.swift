@@ -50,6 +50,12 @@ final class KadokiVideoPlayer: NSObject, KadokiPlayback {
         item.audioTimePitchAlgorithm = .timeDomain
         avPlayer = AVPlayer(playerItem: item)
         avPlayer.actionAtItemEnd = .pause
+        // Instant audio after every seek (2026-11-25, user: skipping back a
+        // subtitle went silent for half the line). With the default (true)
+        // AVPlayer re-buffers after each seek until it predicts it can play
+        // through without stalling — pointless for a local file, and it
+        // shows up as a gap of silence. Play the moment the seek lands.
+        avPlayer.automaticallyWaitsToMinimizeStalling = false
         // Keep playing with the screen locked / app in the background
         // (2026-11-24, user: "the audio STILL stops when I lock the phone").
         // The default (.automatic) lets iOS PAUSE any player carrying video

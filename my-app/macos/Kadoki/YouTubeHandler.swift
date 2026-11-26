@@ -243,7 +243,7 @@ final class YouTubeHandler: NSObject, WKScriptMessageHandlerWithReply {
         } else {
             v = ["-c:v", "h264_videotoolbox", "-profile:v", "high"]
         }
-        v += ["-b:v", "\(f.kbps)k", "-maxrate", "\(f.kbps * 2)k", "-bufsize", "\(f.kbps * 4)k", "-g", "60"]
+        v += ["-b:v", "\(f.kbps)k", "-maxrate", "\(f.kbps * 2)k", "-bufsize", "\(f.kbps * 4)k", "-g", "30"]   // 1 s keyframes: an exact seek decodes ≤1 s of video, so skipping around stays instant
         try? FileManager.default.removeItem(at: out)
         try run(["-hide_banner", "-nostdin", "-y", "-i", src.path, "-map", "0:v:0", "-map", "0:a:0", "-vf", vf] + v +
                 ["-c:a", "copy", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", out.path],
